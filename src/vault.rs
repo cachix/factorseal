@@ -7,14 +7,11 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "password")]
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305, XNonce,
-    aead::{Aead, Payload},
-};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::crypto::{self, KEY_BYTES, NONCE_BYTES};
 #[cfg(feature = "hardware")]
 use crate::hardware::{HardwareBackend, KeyProtector, PlatformProtector};
 use crate::{Error, Result};
@@ -32,8 +29,6 @@ const PASSWORD_VAULT_VERSION: u32 = 1;
 const ENTRY_VERSION: u32 = 1;
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
 const SECRET_SERVICE_INDEX_VERSION: u32 = 1;
-const KEY_BYTES: usize = 32;
-const NONCE_BYTES: usize = 24;
 #[cfg(feature = "password")]
 const SALT_BYTES: usize = 16;
 const VAULT_ID_BYTES: usize = 16;
@@ -42,6 +37,8 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
 const MAX_SECRET_SERVICE_INDEX_BYTES: u64 = 16 * 1024 * 1024;
+#[cfg(feature = "yubikey")]
+const YUBIKEY_ALGORITHM: &str = "rsa2048-pkcs1v15-signature-kdf";
 #[cfg(feature = "password")]
 const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
 #[cfg(feature = "password")]
@@ -126,20 +123,93 @@ struct Argon2Config {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct EntryFile {
+struct EncryptedFile {
     format: String,
     version: u32,
     nonce: String,
     ciphertext: String,
 }
 
-#[cfg(all(target_os = "linux", feature = "secret-service"))]
-#[derive(Debug, Serialize, Deserialize)]
-struct SecretServiceIndexFile {
-    format: String,
-    version: u32,
-    nonce: String,
-    ciphertext: String,
+impl EncryptedFile {
+    fn encrypt(
+        format: &str,
+        version: u32,
+        key: &[u8; KEY_BYTES],
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Self> {
+        let encrypted = crypto::encrypt(key, aad, plaintext)?;
+        Ok(Self {
+            format: format.to_owned(),
+            version,
+            nonce: encode(&encrypted.nonce),
+            ciphertext: encode(&encrypted.ciphertext),
+        })
+    }
+
+    fn decrypt(
+        &self,
+        expected_format: &str,
+        expected_version: u32,
+        key: &[u8; KEY_BYTES],
+        aad: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        if self.format != expected_format || self.version != expected_version {
+            return Err(Error::InvalidEntry);
+        }
+        let nonce =
+            decode_array::<NONCE_BYTES>(&self.nonce, "nonce").map_err(|_| Error::InvalidEntry)?;
+        let ciphertext = decode(&self.ciphertext, "ciphertext").map_err(|_| Error::InvalidEntry)?;
+        crypto::decrypt(key, &nonce, aad, &ciphertext).map_err(|_| Error::Authentication)
+    }
+}
+
+impl VaultConfig {
+    #[cfg(feature = "hardware")]
+    fn hardware(
+        vault_id: String,
+        backend: HardwareBackend,
+        key_label: String,
+        wrapped_key: &[u8],
+    ) -> Self {
+        Self {
+            format: VAULT_FORMAT.to_owned(),
+            version: CURRENT_VAULT_VERSION,
+            vault_id,
+            unlock: UnlockConfig::Hardware {
+                backend: backend.as_str().to_owned(),
+                key_label,
+                wrapped_key: encode(wrapped_key),
+            },
+        }
+    }
+
+    #[cfg(all(feature = "hardware", feature = "yubikey"))]
+    fn hardware_yubikey(
+        vault_id: String,
+        backend: HardwareBackend,
+        key_label: String,
+        wrapped_share: &[u8],
+        enrolled: &crate::yubikey_factor::EnrolledYubiKey,
+    ) -> Self {
+        Self {
+            format: VAULT_FORMAT.to_owned(),
+            version: CURRENT_VAULT_VERSION,
+            vault_id,
+            unlock: UnlockConfig::HardwareYubiKey {
+                backend: backend.as_str().to_owned(),
+                key_label,
+                wrapped_share: encode(wrapped_share),
+                yubikey: YubiKeyUnlock {
+                    serial: enrolled.serial,
+                    slot: enrolled.slot.to_owned(),
+                    algorithm: YUBIKEY_ALGORITHM.to_owned(),
+                    nonce: encode(&enrolled.nonce),
+                    wrapped_share: encode(&enrolled.wrapped_share),
+                },
+            },
+        }
+    }
 }
 
 impl Vault {
@@ -241,18 +311,13 @@ impl Vault {
             let protector = PlatformProtector::open(path, key_label)?;
             verify_recorded_backend(&protector, backend)?;
             let wrapped_key = protector.wrap(&*session.key)?;
-            let updated = VaultConfig {
-                format: VAULT_FORMAT.to_owned(),
-                version: CURRENT_VAULT_VERSION,
-                vault_id: config.vault_id,
-                unlock: UnlockConfig::Hardware {
-                    backend: protector.backend().as_str().to_owned(),
-                    key_label: key_label.to_owned(),
-                    wrapped_key: encode(&wrapped_key),
-                },
-            };
-            let config_path = path.join(CONFIG_FILE);
-            atomic_write(&config_path, &serialize(&updated, &config_path)?)
+            let updated = VaultConfig::hardware(
+                config.vault_id,
+                protector.backend(),
+                key_label.to_owned(),
+                &wrapped_key,
+            );
+            write_config(path, &updated)
         }
         #[cfg(not(all(feature = "hardware", feature = "yubikey")))]
         {
@@ -299,11 +364,7 @@ impl Vault {
         let (vault_id, vault_key) = prepare_new_vault(path)?;
         let config = make_password_config(&vault_id, &vault_key, password)?;
         write_initial_config(path, &config)?;
-        Ok(UnlockedVault {
-            root: path.to_owned(),
-            vault_id,
-            key: vault_key,
-        })
+        Ok(UnlockedVault::new(path, vault_id, vault_key))
     }
 
     /// Unlock a legacy password vault.
@@ -316,11 +377,7 @@ impl Vault {
         let vault_id = decode_array::<VAULT_ID_BYTES>(&config.vault_id, "vault_id")
             .map_err(Error::InvalidMetadata)?;
         let key = unwrap_password_key(&config, &vault_id, password)?;
-        Ok(UnlockedVault {
-            root: path.to_owned(),
-            vault_id,
-            key,
-        })
+        Ok(UnlockedVault::new(path, vault_id, key))
     }
 
     /// Rewrap a legacy password vault under a new password.
@@ -334,8 +391,7 @@ impl Vault {
         let path = path.as_ref();
         let session = Self::unlock_with_password(path, current_password)?;
         let config = make_password_config(&session.vault_id, &session.key, new_password)?;
-        let config_path = path.join(CONFIG_FILE);
-        atomic_write(&config_path, &serialize(&config, &config_path)?)
+        write_config(path, &config)
     }
 
     /// Migrate a version 1 password vault to platform hardware without
@@ -347,8 +403,7 @@ impl Vault {
             let path = path.as_ref();
             let session = Self::unlock_with_password(path, password)?;
             let config = make_hardware_config(path, &session.vault_id, &session.key)?;
-            let config_path = path.join(CONFIG_FILE);
-            atomic_write(&config_path, &serialize(&config, &config_path)?)
+            write_config(path, &config)
         }
         #[cfg(not(feature = "hardware"))]
         {
@@ -365,48 +420,32 @@ impl Vault {
         let (vault_id, vault_key) = prepare_new_vault(path)?;
         let protector = TestProtector::new([0x5a; KEY_BYTES]);
         let wrapped_key = protector.wrap(&*vault_key)?;
-        let config = VaultConfig {
-            format: VAULT_FORMAT.to_owned(),
-            version: CURRENT_VAULT_VERSION,
-            vault_id: encode(&vault_id),
-            unlock: UnlockConfig::Hardware {
-                backend: protector.backend().as_str().to_owned(),
-                key_label: key_label(&vault_id),
-                wrapped_key: encode(&wrapped_key),
-            },
-        };
+        let config = VaultConfig::hardware(
+            encode(&vault_id),
+            protector.backend(),
+            key_label(&vault_id),
+            &wrapped_key,
+        );
         write_initial_config(path, &config)?;
-        Ok(UnlockedVault {
-            root: path.to_owned(),
-            vault_id,
-            key: vault_key,
-        })
+        Ok(UnlockedVault::new(path, vault_id, vault_key))
     }
 }
 
 impl UnlockedVault {
+    #[cfg(any(feature = "hardware", feature = "password"))]
+    fn new(root: &Path, vault_id: [u8; VAULT_ID_BYTES], key: Zeroizing<[u8; KEY_BYTES]>) -> Self {
+        Self {
+            root: root.to_owned(),
+            vault_id,
+            key,
+        }
+    }
+
     /// Store or replace one credential.
     pub fn set(&self, service: &str, account: &str, secret: &[u8]) -> Result<()> {
         validate_specifiers(service, account)?;
         let aad = entry_aad(&self.vault_id, service, account);
-        let mut nonce = [0_u8; NONCE_BYTES];
-        getrandom::fill(&mut nonce)?;
-        let cipher = XChaCha20Poly1305::new((&*self.key).into());
-        let ciphertext = cipher
-            .encrypt(
-                XNonce::from_slice(&nonce),
-                Payload {
-                    msg: secret,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| Error::Authentication)?;
-        let entry = EntryFile {
-            format: ENTRY_FORMAT.to_owned(),
-            version: ENTRY_VERSION,
-            nonce: encode(&nonce),
-            ciphertext: encode(&ciphertext),
-        };
+        let entry = EncryptedFile::encrypt(ENTRY_FORMAT, ENTRY_VERSION, &self.key, &aad, secret)?;
         let path = self.entry_path(service, account);
         atomic_write(&path, &serialize(&entry, &path)?)
     }
@@ -422,26 +461,9 @@ impl UnlockedVault {
             }
             Err(error) => return Err(error),
         };
-        let entry: EntryFile = deserialize(&encoded, &path).map_err(|_| Error::InvalidEntry)?;
-        if entry.format != ENTRY_FORMAT || entry.version != ENTRY_VERSION {
-            return Err(Error::InvalidEntry);
-        }
-        let nonce =
-            decode_array::<NONCE_BYTES>(&entry.nonce, "nonce").map_err(|_| Error::InvalidEntry)?;
-        let ciphertext =
-            decode(&entry.ciphertext, "ciphertext").map_err(|_| Error::InvalidEntry)?;
+        let entry: EncryptedFile = deserialize(&encoded, &path).map_err(|_| Error::InvalidEntry)?;
         let aad = entry_aad(&self.vault_id, service, account);
-        let cipher = XChaCha20Poly1305::new((&*self.key).into());
-        let plaintext = cipher
-            .decrypt(
-                XNonce::from_slice(&nonce),
-                Payload {
-                    msg: &ciphertext,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| Error::Authentication)?;
-        Ok(Zeroizing::new(plaintext))
+        entry.decrypt(ENTRY_FORMAT, ENTRY_VERSION, &self.key, &aad)
     }
 
     /// Delete one credential.
@@ -483,50 +505,25 @@ impl UnlockedVault {
             }
             Err(error) => return Err(error),
         };
-        let index: SecretServiceIndexFile =
-            deserialize(&encoded, &path).map_err(|_| Error::InvalidEntry)?;
-        if index.format != SECRET_SERVICE_INDEX_FORMAT
-            || index.version != SECRET_SERVICE_INDEX_VERSION
-        {
-            return Err(Error::InvalidEntry);
-        }
-        let nonce =
-            decode_array::<NONCE_BYTES>(&index.nonce, "nonce").map_err(|_| Error::InvalidEntry)?;
-        let ciphertext =
-            decode(&index.ciphertext, "ciphertext").map_err(|_| Error::InvalidEntry)?;
-        let cipher = XChaCha20Poly1305::new((&*self.key).into());
-        let plaintext = cipher
-            .decrypt(
-                XNonce::from_slice(&nonce),
-                Payload {
-                    msg: &ciphertext,
-                    aad: &secret_service_index_aad(&self.vault_id),
-                },
-            )
-            .map_err(|_| Error::Authentication)?;
-        Ok(Some(Zeroizing::new(plaintext)))
+        let index: EncryptedFile = deserialize(&encoded, &path).map_err(|_| Error::InvalidEntry)?;
+        let plaintext = index.decrypt(
+            SECRET_SERVICE_INDEX_FORMAT,
+            SECRET_SERVICE_INDEX_VERSION,
+            &self.key,
+            &secret_service_index_aad(&self.vault_id),
+        )?;
+        Ok(Some(plaintext))
     }
 
     #[cfg(all(target_os = "linux", feature = "secret-service"))]
     pub(crate) fn write_secret_service_index(&self, plaintext: &[u8]) -> Result<()> {
-        let mut nonce = [0_u8; NONCE_BYTES];
-        getrandom::fill(&mut nonce)?;
-        let cipher = XChaCha20Poly1305::new((&*self.key).into());
-        let ciphertext = cipher
-            .encrypt(
-                XNonce::from_slice(&nonce),
-                Payload {
-                    msg: plaintext,
-                    aad: &secret_service_index_aad(&self.vault_id),
-                },
-            )
-            .map_err(|_| Error::Authentication)?;
-        let index = SecretServiceIndexFile {
-            format: SECRET_SERVICE_INDEX_FORMAT.to_owned(),
-            version: SECRET_SERVICE_INDEX_VERSION,
-            nonce: encode(&nonce),
-            ciphertext: encode(&ciphertext),
-        };
+        let index = EncryptedFile::encrypt(
+            SECRET_SERVICE_INDEX_FORMAT,
+            SECRET_SERVICE_INDEX_VERSION,
+            &self.key,
+            &secret_service_index_aad(&self.vault_id),
+            plaintext,
+        )?;
         let path = self.root.join(SECRET_SERVICE_INDEX_FILE);
         atomic_write(&path, &serialize(&index, &path)?)
     }
@@ -555,11 +552,7 @@ fn create_hardware_vault(path: &Path) -> Result<UnlockedVault> {
     let (vault_id, vault_key) = prepare_new_vault(path)?;
     let config = make_hardware_config(path, &vault_id, &vault_key)?;
     write_initial_config(path, &config)?;
-    Ok(UnlockedVault {
-        root: path.to_owned(),
-        vault_id,
-        key: vault_key,
-    })
+    Ok(UnlockedVault::new(path, vault_id, vault_key))
 }
 
 #[cfg(all(feature = "hardware", feature = "yubikey"))]
@@ -570,33 +563,19 @@ fn create_hardware_yubikey_vault(path: &Path, pin: &[u8]) -> Result<UnlockedVaul
 
     let mut yubikey_share = Zeroizing::new([0_u8; KEY_BYTES]);
     getrandom::fill(&mut *yubikey_share)?;
-    let platform_share = xor_keys(&vault_key, &yubikey_share);
+    let platform_share = crypto::xor_keys(&vault_key, &yubikey_share);
     let enrolled = crate::yubikey_factor::enroll(&vault_id, pin, &yubikey_share)?;
     let wrapped_platform_share = protector.wrap(&*platform_share)?;
 
-    let config = VaultConfig {
-        format: VAULT_FORMAT.to_owned(),
-        version: CURRENT_VAULT_VERSION,
-        vault_id: encode(&vault_id),
-        unlock: UnlockConfig::HardwareYubiKey {
-            backend: protector.backend().as_str().to_owned(),
-            key_label: label,
-            wrapped_share: encode(&wrapped_platform_share),
-            yubikey: YubiKeyUnlock {
-                serial: enrolled.serial,
-                slot: enrolled.slot.to_owned(),
-                algorithm: "rsa2048-pkcs1v15-signature-kdf".to_owned(),
-                nonce: encode(&enrolled.nonce),
-                wrapped_share: encode(&enrolled.wrapped_share),
-            },
-        },
-    };
+    let config = VaultConfig::hardware_yubikey(
+        encode(&vault_id),
+        protector.backend(),
+        label,
+        &wrapped_platform_share,
+        &enrolled,
+    );
     write_initial_config(path, &config)?;
-    Ok(UnlockedVault {
-        root: path.to_owned(),
-        vault_id,
-        key: vault_key,
-    })
+    Ok(UnlockedVault::new(path, vault_id, vault_key))
 }
 
 #[cfg(feature = "hardware")]
@@ -608,16 +587,12 @@ fn make_hardware_config(
     let label = key_label(vault_id);
     let protector = PlatformProtector::open(path, &label)?;
     let wrapped_key = protector.wrap(vault_key)?;
-    Ok(VaultConfig {
-        format: VAULT_FORMAT.to_owned(),
-        version: CURRENT_VAULT_VERSION,
-        vault_id: encode(vault_id),
-        unlock: UnlockConfig::Hardware {
-            backend: protector.backend().as_str().to_owned(),
-            key_label: label,
-            wrapped_key: encode(&wrapped_key),
-        },
-    })
+    Ok(VaultConfig::hardware(
+        encode(vault_id),
+        protector.backend(),
+        label,
+        &wrapped_key,
+    ))
 }
 
 #[cfg(feature = "hardware")]
@@ -656,7 +631,7 @@ fn unlock_hardware_vault(path: &Path, yubikey_pin: Option<&[u8]>) -> Result<Unlo
             )?;
             #[cfg(feature = "yubikey")]
             {
-                if yubikey.algorithm != "rsa2048-pkcs1v15-signature-kdf" {
+                if yubikey.algorithm != YUBIKEY_ALGORITHM {
                     return Err(Error::InvalidMetadata(format!(
                         "unsupported YubiKey algorithm `{}`",
                         yubikey.algorithm
@@ -674,7 +649,7 @@ fn unlock_hardware_vault(path: &Path, yubikey_pin: Option<&[u8]>) -> Result<Unlo
                     &wrapped,
                     pin,
                 )?;
-                xor_keys(&platform_share, &yubikey_share)
+                crypto::xor_keys(&platform_share, &yubikey_share)
             }
             #[cfg(not(feature = "yubikey"))]
             {
@@ -684,11 +659,7 @@ fn unlock_hardware_vault(path: &Path, yubikey_pin: Option<&[u8]>) -> Result<Unlo
         }
     };
 
-    Ok(UnlockedVault {
-        root: path.to_owned(),
-        vault_id,
-        key,
-    })
+    Ok(UnlockedVault::new(path, vault_id, key))
 }
 
 #[cfg(feature = "hardware")]
@@ -734,29 +705,18 @@ fn add_yubikey_factor(path: &Path, session: &UnlockedVault, pin: &[u8]) -> Resul
 
     let mut yubikey_share = Zeroizing::new([0_u8; KEY_BYTES]);
     getrandom::fill(&mut *yubikey_share)?;
-    let platform_share = xor_keys(&session.key, &yubikey_share);
+    let platform_share = crypto::xor_keys(&session.key, &yubikey_share);
     let enrolled = crate::yubikey_factor::enroll(&session.vault_id, pin, &yubikey_share)?;
     let wrapped_platform_share = protector.wrap(&*platform_share)?;
 
-    let updated = VaultConfig {
-        format: VAULT_FORMAT.to_owned(),
-        version: CURRENT_VAULT_VERSION,
-        vault_id: config.vault_id,
-        unlock: UnlockConfig::HardwareYubiKey {
-            backend: protector.backend().as_str().to_owned(),
-            key_label: key_label.clone(),
-            wrapped_share: encode(&wrapped_platform_share),
-            yubikey: YubiKeyUnlock {
-                serial: enrolled.serial,
-                slot: enrolled.slot.to_owned(),
-                algorithm: "rsa2048-pkcs1v15-signature-kdf".to_owned(),
-                nonce: encode(&enrolled.nonce),
-                wrapped_share: encode(&enrolled.wrapped_share),
-            },
-        },
-    };
-    let config_path = path.join(CONFIG_FILE);
-    atomic_write(&config_path, &serialize(&updated, &config_path)?)
+    let updated = VaultConfig::hardware_yubikey(
+        config.vault_id,
+        protector.backend(),
+        key_label.clone(),
+        &wrapped_platform_share,
+        &enrolled,
+    );
+    write_config(path, &updated)
 }
 
 #[cfg(all(feature = "hardware", feature = "yubikey"))]
@@ -799,6 +759,12 @@ fn write_initial_config(path: &Path, config: &VaultConfig) -> Result<()> {
     write_new_private_file(&config_path, &serialize(config, &config_path)?)
 }
 
+#[cfg(any(feature = "password", feature = "yubikey"))]
+fn write_config(path: &Path, config: &VaultConfig) -> Result<()> {
+    let config_path = path.join(CONFIG_FILE);
+    atomic_write(&config_path, &serialize(config, &config_path)?)
+}
+
 #[cfg(any(feature = "hardware", feature = "password"))]
 fn decode_key(plaintext: &Zeroizing<Vec<u8>>, field: &str) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
     let actual = plaintext.len();
@@ -807,15 +773,6 @@ fn decode_key(plaintext: &Zeroizing<Vec<u8>>, field: &str) -> Result<Zeroizing<[
         .try_into()
         .map_err(|_| Error::InvalidMetadata(format!("{field} has {actual} bytes")))?;
     Ok(Zeroizing::new(key))
-}
-
-#[cfg(any(feature = "yubikey", all(test, feature = "hardware")))]
-fn xor_keys(left: &[u8; KEY_BYTES], right: &[u8; KEY_BYTES]) -> Zeroizing<[u8; KEY_BYTES]> {
-    let mut output = Zeroizing::new([0_u8; KEY_BYTES]);
-    for (target, (left, right)) in output.iter_mut().zip(left.iter().zip(right)) {
-        *target = left ^ right;
-    }
-    output
 }
 
 #[cfg(feature = "hardware")]
@@ -830,21 +787,10 @@ fn make_password_config(
     password: &[u8],
 ) -> Result<VaultConfig> {
     let mut salt = [0_u8; SALT_BYTES];
-    let mut nonce = [0_u8; NONCE_BYTES];
     getrandom::fill(&mut salt)?;
-    getrandom::fill(&mut nonce)?;
     let kdf = default_argon2_config();
     let password_key = derive_password_key(password, &salt, &kdf)?;
-    let cipher = XChaCha20Poly1305::new((&*password_key).into());
-    let wrapped_key = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: vault_key,
-                aad: &vault_key_aad(vault_id),
-            },
-        )
-        .map_err(|_| Error::Authentication)?;
+    let encrypted = crypto::encrypt(&password_key, &vault_key_aad(vault_id), vault_key)?;
     Ok(VaultConfig {
         format: VAULT_FORMAT.to_owned(),
         version: PASSWORD_VAULT_VERSION,
@@ -852,8 +798,8 @@ fn make_password_config(
         unlock: UnlockConfig::Password {
             kdf,
             salt: encode(&salt),
-            nonce: encode(&nonce),
-            wrapped_key: encode(&wrapped_key),
+            nonce: encode(&encrypted.nonce),
+            wrapped_key: encode(&encrypted.ciphertext),
         },
     })
 }
@@ -879,18 +825,13 @@ fn unwrap_password_key(
     let nonce = decode_array::<NONCE_BYTES>(nonce, "nonce").map_err(Error::InvalidMetadata)?;
     let wrapped_key = decode(wrapped_key, "wrapped_key").map_err(Error::InvalidMetadata)?;
     let password_key = derive_password_key(password, &salt, kdf)?;
-    let cipher = XChaCha20Poly1305::new((&*password_key).into());
-    let key = Zeroizing::new(
-        cipher
-            .decrypt(
-                XNonce::from_slice(&nonce),
-                Payload {
-                    msg: &wrapped_key,
-                    aad: &vault_key_aad(vault_id),
-                },
-            )
-            .map_err(|_| Error::UnlockFailed)?,
-    );
+    let key = crypto::decrypt(
+        &password_key,
+        &nonce,
+        &vault_key_aad(vault_id),
+        &wrapped_key,
+    )
+    .map_err(|_| Error::UnlockFailed)?;
     decode_key(&key, "vault key")
 }
 
@@ -967,7 +908,7 @@ fn validate_password(password: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn validate_specifiers(service: &str, account: &str) -> Result<()> {
+pub(crate) fn validate_specifiers(service: &str, account: &str) -> Result<()> {
     if service.is_empty() {
         return Err(Error::EmptyService);
     }
@@ -1245,11 +1186,7 @@ mod tests {
             "test key",
         )
         .unwrap();
-        UnlockedVault {
-            root: path.to_owned(),
-            vault_id,
-            key,
-        }
+        UnlockedVault::new(path, vault_id, key)
     }
 
     #[test]
@@ -1278,6 +1215,21 @@ mod tests {
         assert!(matches!(
             vault.get("service", "second"),
             Err(Error::Authentication)
+        ));
+    }
+
+    #[test]
+    fn encrypted_entry_envelope_is_validated() {
+        let (_directory, _path, vault) = vault();
+        vault.set("service", "account", b"secret").unwrap();
+        let path = vault.entry_path("service", "account");
+        let mut entry: EncryptedFile = deserialize(&fs::read(&path).unwrap(), &path).unwrap();
+        entry.version += 1;
+        fs::write(&path, serialize(&entry, &path).unwrap()).unwrap();
+
+        assert!(matches!(
+            vault.get("service", "account"),
+            Err(Error::InvalidEntry)
         ));
     }
 
@@ -1328,15 +1280,6 @@ mod tests {
         assert_eq!(info.vault_id, expected_id);
         assert_eq!(info.unlock_method, "hardware");
         assert_eq!(info.hardware_backend.as_deref(), Some("tpm"));
-    }
-
-    #[test]
-    fn xor_shares_reconstruct_key() {
-        let key = [0x42; KEY_BYTES];
-        let share = [0xa5; KEY_BYTES];
-        let other = xor_keys(&key, &share);
-        assert_eq!(*xor_keys(&other, &share), key);
-        assert_ne!(*other, key);
     }
 
     #[cfg(feature = "password")]

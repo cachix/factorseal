@@ -4,6 +4,7 @@
 //! zeroizing vault key, never a cache of decrypted credentials. Each `get`
 //! decrypts only the requested value.
 
+mod crypto;
 mod error;
 mod vault;
 

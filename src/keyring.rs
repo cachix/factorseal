@@ -5,6 +5,7 @@ use std::sync::Arc;
 use keyring_core::api::{CredentialApi, CredentialPersistence, CredentialStoreApi};
 use keyring_core::{Credential, Entry, Error, Result};
 
+use crate::vault::validate_specifiers;
 use crate::{Error as VaultError, UnlockedVault};
 
 /// A `keyring-core` credential store backed by one unlocked FactorSeal vault.
@@ -16,15 +17,7 @@ pub struct FactorSealStore {
 impl FactorSealStore {
     #[must_use]
     pub fn new(vault: UnlockedVault) -> Arc<Self> {
-        let id = format!(
-            "factorseal-keyring-{}-{}",
-            env!("CARGO_PKG_VERSION"),
-            vault.vault_id()
-        );
-        Arc::new(Self {
-            vault: Arc::new(vault),
-            id,
-        })
+        Self::from_shared_vault(Arc::new(vault))
     }
 
     #[must_use]
@@ -68,8 +61,7 @@ impl CredentialStoreApi for FactorSealStore {
         user: &str,
         modifiers: Option<&HashMap<&str, &str>>,
     ) -> Result<Entry> {
-        validate_specifier("service", service)?;
-        validate_specifier("user", user)?;
+        validate_specifiers(service, user).map_err(map_vault_error)?;
         if modifiers.is_some_and(|values| !values.is_empty()) {
             return Err(Error::NotSupportedByStore(
                 "FactorSeal does not use per-entry keyring modifiers".to_owned(),
@@ -165,16 +157,6 @@ impl CredentialApi for FactorSealCredential {
     }
 }
 
-fn validate_specifier(name: &str, value: &str) -> Result<()> {
-    if value.is_empty() {
-        return Err(Error::Invalid(
-            name.to_owned(),
-            "must not be empty".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 fn map_vault_error(error: VaultError) -> Error {
     match error {
         VaultError::NoEntry => Error::NoEntry,
@@ -184,6 +166,10 @@ fn map_vault_error(error: VaultError) -> Error {
         VaultError::EmptyAccount => {
             Error::Invalid("user".to_owned(), "must not be empty".to_owned())
         }
+        VaultError::CredentialNameTooLong { field, maximum } => Error::Invalid(
+            if field == "account" { "user" } else { field }.to_owned(),
+            format!("must not be longer than {maximum} bytes"),
+        ),
         other => Error::PlatformFailure(Box::new(other)),
     }
 }
@@ -221,6 +207,26 @@ mod tests {
         assert!(matches!(
             store.build("service", "user", Some(&modifiers)),
             Err(Error::NotSupportedByStore(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_specifiers_when_building_an_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::create_for_test(directory.path().join("vault")).unwrap();
+        let store = FactorSealStore::new(vault);
+
+        assert!(matches!(
+            store.build("", "user", None),
+            Err(Error::Invalid(field, _)) if field == "service"
+        ));
+        assert!(matches!(
+            store.build("service", "", None),
+            Err(Error::Invalid(field, _)) if field == "user"
+        ));
+        assert!(matches!(
+            store.build("service", &"x".repeat(1025), None),
+            Err(Error::Invalid(field, _)) if field == "user"
         ));
     }
 }

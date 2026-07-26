@@ -111,6 +111,41 @@ enum Command {
     MigratePassword,
 }
 
+impl Cli {
+    fn unlock_vault(&self, path: &Path) -> Result<UnlockedVault, CliError> {
+        let info = Vault::info(path)?;
+        match info.unlock_method.as_str() {
+            "hardware" => Ok(Vault::unlock(path)?),
+            "hardware+yubikey" => {
+                #[cfg(feature = "yubikey")]
+                {
+                    let pin = read_yubikey_pin(self.yubikey_pin_file.as_deref())?;
+                    Ok(Vault::unlock_with_yubikey(path, &pin)?)
+                }
+                #[cfg(not(feature = "yubikey"))]
+                {
+                    Err(VaultError::YubiKeyFeatureDisabled.into())
+                }
+            }
+            "password" => {
+                #[cfg(feature = "password")]
+                {
+                    let password = read_current_password(self.password_file.as_deref())?;
+                    Ok(Vault::unlock_with_password(path, &password)?)
+                }
+                #[cfg(not(feature = "password"))]
+                {
+                    Err(VaultError::PasswordFeatureDisabled.into())
+                }
+            }
+            method => Err(VaultError::InvalidMetadata(format!(
+                "unsupported unlock method `{method}`"
+            ))
+            .into()),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error("{0}")]
@@ -154,8 +189,8 @@ fn main() {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run(cli: Cli) -> Result<(), CliError> {
-    let vault_path = resolve_vault_path(cli.vault)?;
-    match cli.command {
+    let vault_path = resolve_vault_path(cli.vault.as_deref())?;
+    match &cli.command {
         Command::Init {
             #[cfg(feature = "yubikey")]
             yubikey,
@@ -164,9 +199,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
         } => init_vault(
             &vault_path,
             #[cfg(feature = "yubikey")]
-            yubikey,
+            *yubikey,
             #[cfg(feature = "password")]
-            password,
+            *password,
             #[cfg(feature = "yubikey")]
             cli.yubikey_pin_file.as_deref(),
             #[cfg(feature = "password")]
@@ -177,15 +212,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
             account,
             input,
         } => {
-            let vault = unlock_vault(
-                &vault_path,
-                #[cfg(feature = "password")]
-                cli.password_file.as_deref(),
-                #[cfg(feature = "yubikey")]
-                cli.yubikey_pin_file.as_deref(),
-            )?;
+            let vault = cli.unlock_vault(&vault_path)?;
             let secret = Zeroizing::new(read_input(input.as_deref(), MAX_SECRET_BYTES)?);
-            vault.set(&service, &account, &secret)?;
+            vault.set(service, account, &secret)?;
             Ok(())
         }
         Command::Get {
@@ -193,37 +222,20 @@ fn run(cli: Cli) -> Result<(), CliError> {
             account,
             output,
         } => {
-            let vault = unlock_vault(
-                &vault_path,
-                #[cfg(feature = "password")]
-                cli.password_file.as_deref(),
-                #[cfg(feature = "yubikey")]
-                cli.yubikey_pin_file.as_deref(),
-            )?;
-            let secret = vault.get(&service, &account)?;
+            let vault = cli.unlock_vault(&vault_path)?;
+            let secret = vault.get(service, account)?;
             write_output(output.as_deref(), &secret)
         }
         Command::Delete { service, account } => {
-            let vault = unlock_vault(
-                &vault_path,
-                #[cfg(feature = "password")]
-                cli.password_file.as_deref(),
-                #[cfg(feature = "yubikey")]
-                cli.yubikey_pin_file.as_deref(),
-            )?;
-            vault.delete(&service, &account)?;
+            let vault = cli.unlock_vault(&vault_path)?;
+            vault.delete(service, account)?;
             Ok(())
         }
         Command::Status => show_status(&vault_path),
         #[cfg(all(target_os = "linux", feature = "secret-service"))]
-        Command::Serve { approval_seconds } => serve_vault(
-            &vault_path,
-            approval_seconds,
-            #[cfg(feature = "password")]
-            cli.password_file.as_deref(),
-            #[cfg(feature = "yubikey")]
-            cli.yubikey_pin_file.as_deref(),
-        ),
+        Command::Serve { approval_seconds } => {
+            serve_vault(cli.unlock_vault(&vault_path)?, *approval_seconds)
+        }
         #[cfg(feature = "yubikey")]
         Command::AddYubikey => {
             let pin = read_yubikey_pin(cli.yubikey_pin_file.as_deref())?;
@@ -268,19 +280,7 @@ fn show_status(path: &Path) -> Result<(), CliError> {
 }
 
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
-fn serve_vault(
-    path: &Path,
-    approval_seconds: u64,
-    #[cfg(feature = "password")] password_file: Option<&Path>,
-    #[cfg(feature = "yubikey")] yubikey_pin_file: Option<&Path>,
-) -> Result<(), CliError> {
-    let vault = unlock_vault(
-        path,
-        #[cfg(feature = "password")]
-        password_file,
-        #[cfg(feature = "yubikey")]
-        yubikey_pin_file,
-    )?;
+fn serve_vault(vault: UnlockedVault, approval_seconds: u64) -> Result<(), CliError> {
     eprintln!("FactorSeal is providing org.freedesktop.secrets; approvals will appear here.");
     serve_secret_service(
         vault,
@@ -291,9 +291,9 @@ fn serve_vault(
     Ok(())
 }
 
-fn resolve_vault_path(explicit: Option<PathBuf>) -> Result<PathBuf, CliError> {
+fn resolve_vault_path(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
     if let Some(path) = explicit {
-        return Ok(path);
+        return Ok(path.to_owned());
     }
     let directories =
         ProjectDirs::from("dev", "FactorSeal", "FactorSeal").ok_or(CliError::NoDefaultVault)?;
@@ -337,42 +337,6 @@ fn init_vault(
         path.display()
     );
     Ok(())
-}
-
-fn unlock_vault(
-    path: &Path,
-    #[cfg(feature = "password")] password_file: Option<&Path>,
-    #[cfg(feature = "yubikey")] yubikey_pin_file: Option<&Path>,
-) -> Result<UnlockedVault, CliError> {
-    let info = Vault::info(path)?;
-    match info.unlock_method.as_str() {
-        "hardware" => Ok(Vault::unlock(path)?),
-        "hardware+yubikey" => {
-            #[cfg(feature = "yubikey")]
-            {
-                let pin = read_yubikey_pin(yubikey_pin_file)?;
-                Ok(Vault::unlock_with_yubikey(path, &pin)?)
-            }
-            #[cfg(not(feature = "yubikey"))]
-            {
-                Err(VaultError::YubiKeyFeatureDisabled.into())
-            }
-        }
-        "password" => {
-            #[cfg(feature = "password")]
-            {
-                let password = read_current_password(password_file)?;
-                Ok(Vault::unlock_with_password(path, &password)?)
-            }
-            #[cfg(not(feature = "password"))]
-            {
-                Err(VaultError::PasswordFeatureDisabled.into())
-            }
-        }
-        method => {
-            Err(VaultError::InvalidMetadata(format!("unsupported unlock method `{method}`")).into())
-        }
-    }
 }
 
 #[cfg(feature = "yubikey")]
@@ -486,4 +450,31 @@ struct Status {
     hardware_backend: Option<String>,
     yubikey_serial: Option<u32>,
     state: &'static str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limited_reads_accept_the_boundary_and_reject_more() {
+        assert_eq!(read_limited(&b"four"[..], "memory", 4).unwrap(), b"four");
+        assert!(matches!(
+            read_limited(&b"five!"[..], "memory", 4),
+            Err(CliError::InputTooLarge { maximum: 4, .. })
+        ));
+    }
+
+    #[cfg(any(feature = "password", feature = "yubikey"))]
+    #[test]
+    fn auth_files_strip_one_line_ending() {
+        let directory = tempfile::tempdir().unwrap();
+        let crlf = directory.path().join("crlf");
+        let repeated = directory.path().join("repeated");
+        fs::write(&crlf, b"secret\r\n").unwrap();
+        fs::write(&repeated, b"secret\n\n").unwrap();
+
+        assert_eq!(read_auth_file(&crlf).unwrap().as_slice(), b"secret");
+        assert_eq!(read_auth_file(&repeated).unwrap().as_slice(), b"secret\n");
+    }
 }

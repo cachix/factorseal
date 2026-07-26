@@ -1,7 +1,3 @@
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305, XNonce,
-    aead::{Aead, Payload},
-};
 use sha2::{Digest, Sha256};
 use signature::{SignatureEncoding as _, Signer as _};
 use yubikey::{
@@ -11,10 +7,9 @@ use yubikey::{
 };
 use zeroize::Zeroizing;
 
+use crate::crypto::{self, KEY_BYTES, NONCE_BYTES};
 use crate::{Error, Result};
 
-const KEY_BYTES: usize = 32;
-const NONCE_BYTES: usize = 24;
 const RSA_2048_BYTES: usize = 256;
 const SLOT: SlotId = SlotId::KeyManagement;
 const SLOT_NAME: &str = "9d";
@@ -36,24 +31,13 @@ pub(crate) fn enroll(
     let serial = u32::from(yubikey.serial());
     let factor_key = derive_factor_key(&mut yubikey, vault_id)?;
 
-    let mut nonce = [0_u8; NONCE_BYTES];
-    getrandom::fill(&mut nonce)?;
-    let cipher = XChaCha20Poly1305::new((&*factor_key).into());
-    let wrapped_share = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: share,
-                aad: &factor_aad(vault_id, serial),
-            },
-        )
-        .map_err(|_| Error::Authentication)?;
+    let encrypted = crypto::encrypt(&factor_key, &factor_aad(vault_id, serial), share)?;
 
     Ok(EnrolledYubiKey {
         serial,
         slot: SLOT_NAME,
-        nonce,
-        wrapped_share,
+        nonce: encrypted.nonce,
+        wrapped_share: encrypted.ciphertext,
     })
 }
 
@@ -73,18 +57,13 @@ pub(crate) fn unlock_share(
     let mut yubikey = YubiKey::open_by_serial(Serial::from(serial)).map_err(map_yubikey_error)?;
     validate_and_authorize(&mut yubikey, pin)?;
     let factor_key = derive_factor_key(&mut yubikey, vault_id)?;
-    let cipher = XChaCha20Poly1305::new((&*factor_key).into());
-    let plaintext = Zeroizing::new(
-        cipher
-            .decrypt(
-                XNonce::from_slice(nonce),
-                Payload {
-                    msg: wrapped_share,
-                    aad: &factor_aad(vault_id, serial),
-                },
-            )
-            .map_err(|_| Error::UnlockFailed)?,
-    );
+    let plaintext = crypto::decrypt(
+        &factor_key,
+        nonce,
+        &factor_aad(vault_id, serial),
+        wrapped_share,
+    )
+    .map_err(|_| Error::UnlockFailed)?;
     let actual = plaintext.len();
     let share = plaintext
         .as_slice()
