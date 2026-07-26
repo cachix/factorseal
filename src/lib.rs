@@ -9,7 +9,10 @@ mod error;
 mod vault;
 
 pub use error::{Error, Result};
-pub use vault::{CredentialMetadata, CredentialOptions, UnlockedVault, Vault, VaultInfo};
+pub use vault::{
+    CredentialMetadata, CredentialOptions, ReferenceOptions, SecretReference, UnlockedVault, Vault,
+    VaultInfo,
+};
 
 #[cfg(feature = "hardware")]
 mod hardware;

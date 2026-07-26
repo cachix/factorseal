@@ -23,19 +23,24 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::{CredentialMetadata, CredentialOptions, Error as VaultError, UnlockedVault};
+use crate::{
+    CredentialMetadata, Error as VaultError, ReferenceOptions, SecretReference, UnlockedVault,
+};
 
 const BUS_NAME: &str = "org.freedesktop.secrets";
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
 const COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/factorseal";
+const SESSION_COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/session";
 const DEFAULT_ALIAS_PATH: &str = "/org/freedesktop/secrets/aliases/default";
+const SESSION_ALIAS_PATH: &str = "/org/freedesktop/secrets/aliases/session";
 const SESSION_PREFIX: &str = "/org/freedesktop/secrets/session/s";
 const PROMPT_PREFIX: &str = "/org/freedesktop/secrets/prompt/p";
 const ITEM_PREFIX: &str = "/org/freedesktop/secrets/collection/factorseal/";
+const SESSION_ITEM_PREFIX: &str = "/org/freedesktop/secrets/collection/session/";
 const ROOT_PATH: &str = "/";
-const COLLECTION_RESOURCE: &str = "*";
 const INDEX_FORMAT: &str = "factorseal-secret-service-metadata";
-const INDEX_VERSION: u32 = 1;
+const LEGACY_INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 const ITEM_LABEL: &str = "org.freedesktop.Secret.Item.Label";
 const ITEM_ATTRIBUTES: &str = "org.freedesktop.Secret.Item.Attributes";
 const COLLECTION_LABEL: &str = "org.freedesktop.Secret.Collection.Label";
@@ -103,6 +108,7 @@ pub enum SecretServiceError {
 /// The caller must unlock the vault before starting the provider. Secret
 /// Service sessions and grants are still scoped to each application's unique
 /// D-Bus connection.
+#[allow(clippy::too_many_lines)]
 pub fn serve_secret_service(
     vault: UnlockedVault,
     options: SecretServiceOptions,
@@ -131,19 +137,42 @@ pub fn serve_secret_service(
     crossroads.insert(
         COLLECTION_PATH,
         &[interfaces.collection],
-        CollectionObject(Arc::clone(&agent)),
+        CollectionObject {
+            agent: Arc::clone(&agent),
+            collection: CollectionKind::Persistent,
+        },
     );
     crossroads.insert(
         DEFAULT_ALIAS_PATH,
         &[interfaces.collection],
-        CollectionObject(Arc::clone(&agent)),
+        CollectionObject {
+            agent: Arc::clone(&agent),
+            collection: CollectionKind::Persistent,
+        },
+    );
+    crossroads.insert(
+        SESSION_COLLECTION_PATH,
+        &[interfaces.collection],
+        CollectionObject {
+            agent: Arc::clone(&agent),
+            collection: CollectionKind::Session,
+        },
+    );
+    crossroads.insert(
+        SESSION_ALIAS_PATH,
+        &[interfaces.collection],
+        CollectionObject {
+            agent: Arc::clone(&agent),
+            collection: CollectionKind::Session,
+        },
     );
     for id in agent.item_ids()? {
         crossroads.insert(
-            item_path(&id),
+            item_path(CollectionKind::Persistent, &id),
             &[interfaces.item],
             ItemObject {
                 agent: Arc::clone(&agent),
+                collection: CollectionKind::Persistent,
                 id,
             },
         );
@@ -188,23 +217,32 @@ pub fn serve_secret_service(
                     PromptCompletion::dismissed(event.prompt_id)
                 }
             };
-            if let Some(item) = &completion.created {
+            if let Some((collection, item)) = &completion.created {
                 lock(&crossroads)?.insert(
-                    item_path(&item.id),
+                    item_path(*collection, &item.id),
                     &[interfaces.item],
                     ItemObject {
                         agent: Arc::clone(&agent),
+                        collection: *collection,
                         id: item.id.clone(),
                     },
                 );
                 connection
-                    .send(collection_signal("ItemCreated", item_path(&item.id)))
+                    .send(collection_signal(
+                        *collection,
+                        "ItemCreated",
+                        item_path(*collection, &item.id),
+                    ))
                     .map_err(|()| dbus::Error::new_failed("failed to send ItemCreated"))?;
             }
-            if let Some(id) = &completion.deleted {
-                let _ = lock(&crossroads)?.remove::<ItemObject>(&item_path(id));
+            if let Some((collection, id)) = &completion.deleted {
+                let _ = lock(&crossroads)?.remove::<ItemObject>(&item_path(*collection, id));
                 connection
-                    .send(collection_signal("ItemDeleted", item_path(id)))
+                    .send(collection_signal(
+                        *collection,
+                        "ItemDeleted",
+                        item_path(*collection, id),
+                    ))
                     .map_err(|()| dbus::Error::new_failed("failed to send ItemDeleted"))?;
             }
             connection
@@ -218,10 +256,14 @@ pub fn serve_secret_service(
 struct ServiceObject(Arc<Agent>);
 
 #[derive(Clone)]
-struct CollectionObject(Arc<Agent>);
+struct CollectionObject {
+    agent: Arc<Agent>,
+    collection: CollectionKind,
+}
 
 struct ItemObject {
     agent: Arc<Agent>,
+    collection: CollectionKind,
     id: String,
 }
 
@@ -234,6 +276,23 @@ struct PromptObject {
     agent: Arc<Agent>,
     id: u64,
     owner: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CollectionKind {
+    Persistent,
+    Session,
+}
+
+impl CollectionKind {
+    const ALL: [Self; 2] = [Self::Persistent, Self::Session];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Persistent => "FactorSeal",
+            Self::Session => "Session",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -256,6 +315,35 @@ impl Default for Index {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct IndexItem {
     id: String,
+    reference: SecretReference,
+    label: String,
+    attributes: HashMap<String, String>,
+    content_type: String,
+    item_type: String,
+    created: u64,
+    modified: u64,
+}
+
+#[derive(Default)]
+struct SessionStore {
+    items: HashMap<String, SessionItem>,
+}
+
+struct SessionItem {
+    metadata: IndexItem,
+    secret: Zeroizing<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyIndex {
+    format: String,
+    version: u32,
+    items: Vec<LegacyIndexItem>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyIndexItem {
+    id: String,
     service: String,
     account: String,
     label: String,
@@ -266,11 +354,73 @@ struct IndexItem {
     modified: u64,
 }
 
+fn load_index(vault: &UnlockedVault) -> Result<(Index, bool), SecretServiceError> {
+    let Some(bytes) = vault.read_secret_service_index()? else {
+        return Ok((Index::default(), false));
+    };
+    let header: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
+    let format = header.get("format").and_then(serde_json::Value::as_str);
+    let version = header.get("version").and_then(serde_json::Value::as_u64);
+    if format != Some(INDEX_FORMAT) {
+        return Err(SecretServiceError::InvalidIndex(
+            "unsupported format".to_owned(),
+        ));
+    }
+
+    match version {
+        Some(version) if version == u64::from(INDEX_VERSION) => {
+            let index: Index = serde_json::from_slice(&bytes)
+                .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
+            Ok((index, false))
+        }
+        Some(version) if version == u64::from(LEGACY_INDEX_VERSION) => {
+            let legacy: LegacyIndex = serde_json::from_slice(&bytes)
+                .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
+            if legacy.format != INDEX_FORMAT || legacy.version != LEGACY_INDEX_VERSION {
+                return Err(SecretServiceError::InvalidIndex(
+                    "unsupported format or version".to_owned(),
+                ));
+            }
+            let mut items = Vec::with_capacity(legacy.items.len());
+            for item in legacy.items {
+                let reference = match vault.resolve_reference(&item.service, &item.account) {
+                    Ok(reference) => reference,
+                    Err(VaultError::NoEntry) => SecretReference::new(item.id.clone())?,
+                    Err(error) => return Err(error.into()),
+                };
+                items.push(IndexItem {
+                    id: item.id,
+                    reference,
+                    label: item.label,
+                    attributes: item.attributes,
+                    content_type: item.content_type,
+                    item_type: item.item_type,
+                    created: item.created,
+                    modified: item.modified,
+                });
+            }
+            Ok((
+                Index {
+                    format: INDEX_FORMAT.to_owned(),
+                    version: INDEX_VERSION,
+                    items,
+                },
+                true,
+            ))
+        }
+        _ => Err(SecretServiceError::InvalidIndex(
+            "unsupported version".to_owned(),
+        )),
+    }
+}
+
 struct Agent {
     vault: Arc<UnlockedVault>,
     index: Mutex<Index>,
+    session_store: Mutex<SessionStore>,
     sessions: Mutex<HashMap<String, Session>>,
-    grants: Mutex<HashMap<(String, String), Instant>>,
+    grants: Mutex<HashMap<(String, GrantResource), Instant>>,
     prompts: Mutex<HashMap<u64, PendingPrompt>>,
     identities: Mutex<HashMap<String, CallerIdentity>>,
     next_id: AtomicU64,
@@ -292,6 +442,12 @@ enum SessionCipher {
     Dh(Zeroizing<[u8; AES_KEY_BYTES]>),
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum GrantResource {
+    Collection(CollectionKind),
+    Item(CollectionKind, String),
+}
+
 #[derive(Clone, Debug)]
 struct CallerIdentity {
     bus_name: String,
@@ -311,17 +467,35 @@ enum PromptAction {
         objects: Vec<PromptObjectRef>,
     },
     Create {
+        collection: CollectionKind,
         item: Box<IndexItem>,
         secret: Zeroizing<Vec<u8>>,
     },
     Delete {
+        collection: CollectionKind,
         id: String,
     },
 }
 
 enum PromptObjectRef {
-    Collection,
-    Item(String),
+    Collection(CollectionKind),
+    Item(CollectionKind, String),
+}
+
+impl PromptObjectRef {
+    fn resource(&self) -> GrantResource {
+        match self {
+            Self::Collection(collection) => GrantResource::Collection(*collection),
+            Self::Item(collection, id) => GrantResource::Item(*collection, id.clone()),
+        }
+    }
+
+    fn path(&self) -> Path<'static> {
+        match self {
+            Self::Collection(collection) => collection_path(*collection),
+            Self::Item(collection, id) => item_path(*collection, id),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -340,8 +514,8 @@ struct PromptCompletion {
     prompt_id: u64,
     dismissed: bool,
     result: CompletionResult,
-    created: Option<IndexItem>,
-    deleted: Option<String>,
+    created: Option<(CollectionKind, IndexItem)>,
+    deleted: Option<(CollectionKind, String)>,
 }
 
 impl PromptCompletion {
@@ -378,22 +552,16 @@ impl Agent {
         approval_sender: mpsc::Sender<ApprovalEvent>,
     ) -> Result<Self, SecretServiceError> {
         let vault = Arc::new(vault);
-        let index = match vault.read_secret_service_index()? {
-            Some(bytes) => {
-                let parsed: Index = serde_json::from_slice(&bytes)
-                    .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
-                if parsed.format != INDEX_FORMAT || parsed.version != INDEX_VERSION {
-                    return Err(SecretServiceError::InvalidIndex(
-                        "unsupported format or version".to_owned(),
-                    ));
-                }
-                parsed
-            }
-            None => Index::default(),
-        };
+        let (index, migrated) = load_index(&vault)?;
+        if migrated {
+            let bytes = serde_json::to_vec(&index)
+                .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
+            vault.write_secret_service_index(&bytes)?;
+        }
         Ok(Self {
             vault,
             index: Mutex::new(index),
+            session_store: Mutex::new(SessionStore::default()),
             sessions: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
@@ -415,50 +583,75 @@ impl Agent {
     fn expire_idle_vault(&self) -> Result<bool, SecretServiceError> {
         let expired = lock(&self.last_vault_activity)?.elapsed() >= self.options.vault_idle_timeout;
         if expired {
+            self.clear_session_store()?;
             self.vault.lock()?;
         }
         Ok(expired)
     }
 
-    fn vault_get(&self, service: &str, account: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    fn clear_session_store(&self) -> Result<(), SecretServiceError> {
+        lock(&self.session_store)?.items.clear();
+        lock(&self.grants)?.retain(|(_, resource), _| match resource {
+            GrantResource::Collection(collection) | GrantResource::Item(collection, _) => {
+                *collection != CollectionKind::Session
+            }
+        });
+        Ok(())
+    }
+
+    fn vault_get(&self, reference: &SecretReference) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         self.record_vault_activity();
-        self.vault.get(service, account)
+        self.vault.get_by_reference(reference)
     }
 
     fn vault_get_with_metadata(
         &self,
-        service: &str,
-        account: &str,
+        reference: &SecretReference,
     ) -> Result<(Zeroizing<Vec<u8>>, CredentialMetadata), VaultError> {
         self.record_vault_activity();
-        self.vault.get_with_metadata(service, account)
+        self.vault.get_by_reference_with_metadata(reference)
     }
 
-    fn vault_set(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), VaultError> {
+    fn vault_set(&self, reference: &SecretReference, secret: &[u8]) -> Result<(), VaultError> {
         self.record_vault_activity();
-        self.vault.set(service, account, secret)
+        self.vault.set_by_reference(reference, secret)
     }
 
     fn vault_set_with_options(
         &self,
-        service: &str,
-        account: &str,
+        reference: &SecretReference,
         secret: &[u8],
-        options: CredentialOptions,
+        options: ReferenceOptions,
     ) -> Result<(), VaultError> {
         self.record_vault_activity();
         self.vault
-            .set_with_options(service, account, secret, options)
+            .set_by_reference_with_options(reference, secret, options)
     }
 
-    fn vault_delete(&self, service: &str, account: &str) -> Result<(), VaultError> {
+    fn vault_delete(&self, reference: &SecretReference) -> Result<(), VaultError> {
         self.record_vault_activity();
-        self.vault.delete(service, account)
+        self.vault.delete_by_reference(reference)
     }
 
-    fn vault_contains(&self, service: &str, account: &str) -> Result<bool, VaultError> {
+    fn vault_contains(&self, reference: &SecretReference) -> Result<bool, VaultError> {
         self.record_vault_activity();
-        self.vault.contains(service, account)
+        self.vault.contains_reference(reference)
+    }
+
+    fn vault_resolve(&self, service: &str, account: &str) -> Result<SecretReference, VaultError> {
+        self.record_vault_activity();
+        self.vault.resolve_reference(service, account)
+    }
+
+    fn vault_update_keyring_metadata(
+        &self,
+        reference: &SecretReference,
+        service: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<(), VaultError> {
+        self.record_vault_activity();
+        self.vault
+            .update_reference_keyring_metadata(reference, service, account)
     }
 
     fn vault_write_index(&self, plaintext: &[u8]) -> Result<(), VaultError> {
@@ -509,35 +702,37 @@ impl Agent {
 
     fn decrypt_secret(
         &self,
-        secret: &Secret,
+        secret: Secret,
         owner: &str,
-    ) -> Result<Zeroizing<Vec<u8>>, MethodErr> {
+    ) -> Result<(Zeroizing<Vec<u8>>, String), MethodErr> {
+        let (session_path, parameters, value, content_type) = secret;
         let sessions = lock_method(&self.sessions)?;
-        let path_key = secret.0.to_string();
+        let path_key = session_path.to_string();
         let session = sessions
             .get(&path_key)
-            .ok_or_else(|| no_session(&secret.0))?;
+            .ok_or_else(|| no_session(&session_path))?;
         ensure_owner(&session.owner, owner)?;
-        match &session.cipher {
+        let plaintext = match &session.cipher {
             SessionCipher::Plain => {
-                if !secret.1.is_empty() {
+                if !parameters.is_empty() {
                     return Err(MethodErr::invalid_arg(&"plain session parameters"));
                 }
-                Ok(Zeroizing::new(secret.2.clone()))
+                Zeroizing::new(value)
             }
             SessionCipher::Dh(key) => {
-                if secret.1.len() != AES_BLOCK_BYTES {
+                if parameters.len() != AES_BLOCK_BYTES {
                     return Err(MethodErr::invalid_arg(&"AES initialization vector"));
                 }
                 let plaintext = cbc::Decryptor::<aes::Aes128>::new(
                     key.as_ref().into(),
-                    secret.1.as_slice().into(),
+                    parameters.as_slice().into(),
                 )
-                .decrypt_padded_vec_mut::<Pkcs7>(&secret.2)
+                .decrypt_padded_vec_mut::<Pkcs7>(&value)
                 .map_err(|_| MethodErr::invalid_arg(&"encrypted Secret payload"))?;
-                Ok(Zeroizing::new(plaintext))
+                Zeroizing::new(plaintext)
             }
-        }
+        };
+        Ok((plaintext, content_type))
     }
 
     fn encrypt_secret(
@@ -571,7 +766,29 @@ impl Agent {
         }
     }
 
-    fn search(&self, attributes: &HashMap<String, String>) -> Result<Vec<IndexItem>, MethodErr> {
+    fn search(
+        &self,
+        collection: CollectionKind,
+        attributes: &HashMap<String, String>,
+    ) -> Result<Vec<IndexItem>, MethodErr> {
+        match collection {
+            CollectionKind::Persistent => self.search_persistent(attributes),
+            CollectionKind::Session => {
+                let store = lock_method(&self.session_store)?;
+                Ok(store
+                    .items
+                    .values()
+                    .filter(|item| attributes_match(&item.metadata.attributes, attributes))
+                    .map(|item| item.metadata.clone())
+                    .collect())
+            }
+        }
+    }
+
+    fn search_persistent(
+        &self,
+        attributes: &HashMap<String, String>,
+    ) -> Result<Vec<IndexItem>, MethodErr> {
         let mut index = lock_method(&self.index)?;
         self.prune_missing_items_method(&mut index)?;
         let mut matches: Vec<_> = index
@@ -587,52 +804,70 @@ impl Agent {
                     .get("username")
                     .or_else(|| attributes.get("account")),
             ) {
-                if self
-                    .vault_contains(service, account)
-                    .map_err(vault_method)?
-                {
-                    let now = unix_time();
-                    let item = IndexItem {
-                        id: random_id().map_err(vault_method)?,
-                        service: service.clone(),
-                        account: account.clone(),
-                        label: format!("{service}: {account}"),
-                        attributes: attributes.clone(),
-                        content_type: "application/octet-stream".to_owned(),
-                        item_type: "org.freedesktop.Secret.Generic".to_owned(),
-                        created: now,
-                        modified: now,
-                    };
-                    index.items.push(item.clone());
-                    self.save_index(&index)?;
-                    matches.push(item);
+                match self.vault_resolve(service, account) {
+                    Ok(reference) => {
+                        let now = unix_time();
+                        let item = IndexItem {
+                            id: random_id().map_err(vault_method)?,
+                            reference,
+                            label: format!("{service}: {account}"),
+                            attributes: attributes.clone(),
+                            content_type: "application/octet-stream".to_owned(),
+                            item_type: "org.freedesktop.Secret.Generic".to_owned(),
+                            created: now,
+                            modified: now,
+                        };
+                        index.items.push(item.clone());
+                        self.save_index(&index)?;
+                        matches.push(item);
+                    }
+                    Err(VaultError::NoEntry) => {}
+                    Err(error) => return Err(vault_method(error)),
                 }
             }
         }
         Ok(matches)
     }
 
-    fn item(&self, id: &str) -> Result<IndexItem, MethodErr> {
-        let mut index = lock_method(&self.index)?;
-        self.prune_missing_items_method(&mut index)?;
-        index
-            .items
-            .iter()
-            .find(|item| item.id == id)
-            .cloned()
-            .ok_or_else(|| no_item(id))
+    fn item(&self, collection: CollectionKind, id: &str) -> Result<IndexItem, MethodErr> {
+        match collection {
+            CollectionKind::Persistent => {
+                let mut index = lock_method(&self.index)?;
+                self.prune_missing_items_method(&mut index)?;
+                index
+                    .items
+                    .iter()
+                    .find(|item| item.id == id)
+                    .cloned()
+                    .ok_or_else(|| no_item(id))
+            }
+            CollectionKind::Session => lock_method(&self.session_store)?
+                .items
+                .get(id)
+                .map(|item| item.metadata.clone())
+                .ok_or_else(|| no_item(id)),
+        }
     }
 
-    fn all_items(&self) -> Result<Vec<IndexItem>, MethodErr> {
-        let mut index = lock_method(&self.index)?;
-        self.prune_missing_items_method(&mut index)?;
-        Ok(index.items.clone())
+    fn all_items(&self, collection: CollectionKind) -> Result<Vec<IndexItem>, MethodErr> {
+        match collection {
+            CollectionKind::Persistent => {
+                let mut index = lock_method(&self.index)?;
+                self.prune_missing_items_method(&mut index)?;
+                Ok(index.items.clone())
+            }
+            CollectionKind::Session => Ok(lock_method(&self.session_store)?
+                .items
+                .values()
+                .map(|item| item.metadata.clone())
+                .collect()),
+        }
     }
 
     fn prune_missing_items(&self, index: &mut Index) -> Result<bool, VaultError> {
         let mut live = Vec::with_capacity(index.items.len());
         for item in &index.items {
-            if self.vault_contains(&item.service, &item.account)? {
+            if self.vault_contains(&item.reference)? {
                 live.push(item.clone());
             }
         }
@@ -657,10 +892,20 @@ impl Agent {
 
     fn set_item_secret(
         &self,
+        collection: CollectionKind,
         id: &str,
         plaintext: &[u8],
         content_type: String,
     ) -> Result<(), MethodErr> {
+        if collection == CollectionKind::Session {
+            let mut store = lock_method(&self.session_store)?;
+            let item = store.items.get_mut(id).ok_or_else(|| no_item(id))?;
+            item.secret = Zeroizing::new(plaintext.to_vec());
+            item.metadata.content_type = content_type;
+            item.metadata.modified = unix_time();
+            return Ok(());
+        }
+
         let mut index = lock_method(&self.index)?;
         let mut updated = index.clone();
         let item = updated
@@ -668,41 +913,156 @@ impl Agent {
             .iter_mut()
             .find(|item| item.id == id)
             .ok_or_else(|| no_item(id))?;
-        let previous = self
-            .vault_get(&item.service, &item.account)
-            .map_err(vault_method)?;
-        let service = item.service.clone();
-        let account = item.account.clone();
+        let previous = self.vault_get(&item.reference).map_err(vault_method)?;
+        let reference = item.reference.clone();
         item.content_type = content_type;
         item.modified = unix_time();
         let bytes = serde_json::to_vec(&updated).map_err(|error| MethodErr::failed(&error))?;
 
-        self.vault_set(&service, &account, plaintext)
+        self.vault_set(&reference, plaintext)
             .map_err(vault_method)?;
         if let Err(error) = self.vault_write_index(&bytes) {
-            let rollback = self.vault_set(&service, &account, &previous);
+            let rollback = self.vault_set(&reference, &previous);
             return Err(transaction_error(&error, rollback.as_ref().err()));
         }
         *index = updated;
         Ok(())
     }
 
-    fn has_grant(&self, owner: &str, resource: &str) -> Result<bool, MethodErr> {
+    fn item_secret(
+        &self,
+        collection: CollectionKind,
+        id: &str,
+    ) -> Result<(Zeroizing<Vec<u8>>, String), MethodErr> {
+        match collection {
+            CollectionKind::Persistent => {
+                let item = self.item(collection, id)?;
+                let secret = self.vault_get(&item.reference).map_err(vault_method)?;
+                Ok((secret, item.content_type))
+            }
+            CollectionKind::Session => {
+                let store = lock_method(&self.session_store)?;
+                let item = store.items.get(id).ok_or_else(|| no_item(id))?;
+                Ok((
+                    Zeroizing::new(item.secret.to_vec()),
+                    item.metadata.content_type.clone(),
+                ))
+            }
+        }
+    }
+
+    fn set_item_attributes(
+        &self,
+        collection: CollectionKind,
+        id: &str,
+        attributes: &HashMap<String, String>,
+    ) -> Result<(), MethodErr> {
+        if collection == CollectionKind::Session {
+            let mut store = lock_method(&self.session_store)?;
+            let item = store.items.get_mut(id).ok_or_else(|| no_item(id))?;
+            item.metadata.attributes.clone_from(attributes);
+            item.metadata.modified = unix_time();
+            return Ok(());
+        }
+
+        let mut index = lock_method(&self.index)?;
+        let mut updated = index.clone();
+        let item = updated
+            .items
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| no_item(id))?;
+        let previous_attributes = item.attributes.clone();
+        let reference = item.reference.clone();
+        item.attributes.clone_from(attributes);
+        item.modified = unix_time();
+        let (service, account) = keyring_metadata(attributes);
+        self.vault_update_keyring_metadata(&reference, service, account)
+            .map_err(vault_method)?;
+        if let Err(error) = self.save_index(&updated) {
+            let (previous_service, previous_account) = keyring_metadata(&previous_attributes);
+            let rollback =
+                self.vault_update_keyring_metadata(&reference, previous_service, previous_account);
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(MethodErr::failed(&format!(
+                    "{error}; keyring metadata rollback also failed: {rollback}"
+                ))),
+            };
+        }
+        *index = updated;
+        Ok(())
+    }
+
+    fn set_item_label(
+        &self,
+        collection: CollectionKind,
+        id: &str,
+        label: &str,
+    ) -> Result<(), MethodErr> {
+        self.update_item_metadata(collection, id, |item| label.clone_into(&mut item.label))
+    }
+
+    fn set_item_type(
+        &self,
+        collection: CollectionKind,
+        id: &str,
+        item_type: &str,
+    ) -> Result<(), MethodErr> {
+        self.update_item_metadata(collection, id, |item| {
+            item_type.clone_into(&mut item.item_type);
+        })
+    }
+
+    fn update_item_metadata(
+        &self,
+        collection: CollectionKind,
+        id: &str,
+        update: impl FnOnce(&mut IndexItem),
+    ) -> Result<(), MethodErr> {
+        match collection {
+            CollectionKind::Persistent => {
+                let mut index = lock_method(&self.index)?;
+                let item = index
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == id)
+                    .ok_or_else(|| no_item(id))?;
+                update(item);
+                item.modified = unix_time();
+                self.save_index(&index)
+            }
+            CollectionKind::Session => {
+                let mut store = lock_method(&self.session_store)?;
+                let item = store.items.get_mut(id).ok_or_else(|| no_item(id))?;
+                update(&mut item.metadata);
+                item.metadata.modified = unix_time();
+                Ok(())
+            }
+        }
+    }
+
+    fn has_grant(&self, owner: &str, resource: &GrantResource) -> Result<bool, MethodErr> {
         let now = Instant::now();
         let subject = self.grant_subject(owner)?;
         let mut grants = lock_method(&self.grants)?;
         grants.retain(|_, expires| *expires > now);
-        Ok(grants.contains_key(&(subject.clone(), resource.to_owned()))
-            || grants.contains_key(&(subject, COLLECTION_RESOURCE.to_owned())))
+        let collection = match resource {
+            GrantResource::Collection(collection) | GrantResource::Item(collection, _) => {
+                *collection
+            }
+        };
+        Ok(grants.contains_key(&(subject.clone(), resource.clone()))
+            || grants.contains_key(&(subject, GrantResource::Collection(collection))))
     }
 
-    fn grant(&self, owner: &str, resource: &str) -> Result<(), MethodErr> {
+    fn grant(&self, owner: &str, resource: GrantResource) -> Result<(), MethodErr> {
         let now = Instant::now();
         let subject = self.grant_subject(owner)?;
         let expires = now
             .checked_add(self.options.grant_ttl)
             .ok_or_else(|| MethodErr::failed(&"grant duration is too large"))?;
-        lock_method(&self.grants)?.insert((subject, resource.to_owned()), expires);
+        lock_method(&self.grants)?.insert((subject, resource), expires);
         Ok(())
     }
 
@@ -734,12 +1094,20 @@ impl Agent {
         let mut locked = Vec::new();
         for object in objects {
             match parse_object_path(object)? {
-                PromptObjectRef::Collection => {
-                    grants.retain(|(grant_subject, _), _| grant_subject != &subject);
+                PromptObjectRef::Collection(collection) => {
+                    grants.retain(|(grant_subject, resource), _| {
+                        grant_subject != &subject
+                            || match resource {
+                                GrantResource::Collection(grant_collection)
+                                | GrantResource::Item(grant_collection, _) => {
+                                    *grant_collection != collection
+                                }
+                            }
+                    });
                     locked.push(object.clone());
                 }
-                PromptObjectRef::Item(id) => {
-                    grants.remove(&(subject.clone(), id));
+                PromptObjectRef::Item(collection, id) => {
+                    grants.remove(&(subject.clone(), GrantResource::Item(collection, id)));
                     locked.push(object.clone());
                 }
             }
@@ -887,84 +1255,53 @@ impl Agent {
             PromptAction::Unlock { objects } => {
                 let mut paths = Vec::new();
                 for object in objects {
-                    match object {
-                        PromptObjectRef::Collection => {
-                            self.grant(&prompt.owner, COLLECTION_RESOURCE)
-                                .map_err(method_service)?;
-                            paths.push(collection_path());
-                        }
-                        PromptObjectRef::Item(id) => {
-                            self.grant(&prompt.owner, &id).map_err(method_service)?;
-                            paths.push(item_path(&id));
-                        }
-                    }
+                    self.grant(&prompt.owner, object.resource())
+                        .map_err(method_service)?;
+                    paths.push(object.path());
                 }
                 CompletionResult::Paths(paths)
             }
-            PromptAction::Create { item, secret } => {
-                let previous = match self.vault_get_with_metadata(&item.service, &item.account) {
-                    Ok(value) => Some(value),
-                    Err(VaultError::NoEntry) => None,
-                    Err(error) => return Err(error.into()),
-                };
-                let mut index = lock(&self.index)?;
-                let mut updated = index.clone();
-                if let Some(existing) = updated.items.iter_mut().find(|value| value.id == item.id) {
-                    existing.clone_from(&item);
-                } else {
-                    updated.items.push((*item).clone());
+            PromptAction::Create {
+                collection,
+                item,
+                secret,
+            } => {
+                match collection {
+                    CollectionKind::Persistent => {
+                        self.complete_persistent_create(&item, &secret)?;
+                    }
+                    CollectionKind::Session => {
+                        lock(&self.session_store)?.items.insert(
+                            item.id.clone(),
+                            SessionItem {
+                                metadata: (*item).clone(),
+                                secret,
+                            },
+                        );
+                    }
                 }
-                let bytes = serde_json::to_vec(&updated)
-                    .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
-
-                self.vault_set(&item.service, &item.account, &secret)?;
-                if let Err(error) = self.vault_write_index(&bytes) {
-                    let rollback = restore_entry(
-                        self,
-                        &item.service,
-                        &item.account,
-                        previous
-                            .as_ref()
-                            .map(|(secret, metadata)| (secret.as_slice(), *metadata)),
-                    );
-                    return Err(service_transaction_error(&error, rollback.as_ref().err()));
-                }
-                *index = updated;
-                self.grant(&prompt.owner, &item.id)
-                    .map_err(method_service)?;
-                created = Some((*item).clone());
-                CompletionResult::Path(item_path(&item.id))
+                self.grant(
+                    &prompt.owner,
+                    GrantResource::Item(collection, item.id.clone()),
+                )
+                .map_err(method_service)?;
+                created = Some((collection, (*item).clone()));
+                CompletionResult::Path(item_path(collection, &item.id))
             }
-            PromptAction::Delete { id } => {
-                let mut index = lock(&self.index)?;
-                let item = index
-                    .items
-                    .iter()
-                    .find(|item| item.id == id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        SecretServiceError::InvalidIndex(format!("unknown item {id}"))
-                    })?;
-                let previous = self.vault_get_with_metadata(&item.service, &item.account)?;
-                let mut updated = index.clone();
-                updated.items.retain(|item| item.id != id);
-                let bytes = serde_json::to_vec(&updated)
-                    .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
-
-                self.vault_delete(&item.service, &item.account)?;
-                if let Err(error) = self.vault_write_index(&bytes) {
-                    let rollback = self.vault_set_with_options(
-                        &item.service,
-                        &item.account,
-                        &previous.0,
-                        CredentialOptions {
-                            evict_at: previous.1.evict_at,
-                        },
-                    );
-                    return Err(service_transaction_error(&error, rollback.as_ref().err()));
+            PromptAction::Delete { collection, id } => {
+                match collection {
+                    CollectionKind::Persistent => self.complete_persistent_delete(&id)?,
+                    CollectionKind::Session => {
+                        if lock(&self.session_store)?.items.remove(&id).is_none() {
+                            return Err(SecretServiceError::InvalidIndex(format!(
+                                "unknown session item {id}"
+                            )));
+                        }
+                    }
                 }
-                *index = updated;
-                deleted = Some(id);
+                let deleted_resource = GrantResource::Item(collection, id.clone());
+                lock(&self.grants)?.retain(|(_, resource), _| resource != &deleted_resource);
+                deleted = Some((collection, id));
                 CompletionResult::Empty
             }
         };
@@ -977,41 +1314,102 @@ impl Agent {
         }))
     }
 
+    fn complete_persistent_create(
+        &self,
+        item: &IndexItem,
+        secret: &[u8],
+    ) -> Result<(), SecretServiceError> {
+        let previous = match self.vault_get_with_metadata(&item.reference) {
+            Ok(value) => Some(value),
+            Err(VaultError::NoEntry) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let mut index = lock(&self.index)?;
+        let mut updated = index.clone();
+        if let Some(existing) = updated.items.iter_mut().find(|value| value.id == item.id) {
+            existing.clone_from(item);
+        } else {
+            updated.items.push(item.clone());
+        }
+        let bytes = serde_json::to_vec(&updated)
+            .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
+
+        self.vault_set_with_options(
+            &item.reference,
+            secret,
+            reference_options(
+                &item.attributes,
+                previous
+                    .as_ref()
+                    .and_then(|(_, metadata)| metadata.evict_at),
+            ),
+        )?;
+        if let Err(error) = self.vault_write_index(&bytes) {
+            let rollback = restore_entry(
+                self,
+                &item.reference,
+                previous
+                    .as_ref()
+                    .map(|(secret, metadata)| (secret.as_slice(), metadata.clone())),
+            );
+            return Err(service_transaction_error(&error, rollback.as_ref().err()));
+        }
+        *index = updated;
+        Ok(())
+    }
+
+    fn complete_persistent_delete(&self, id: &str) -> Result<(), SecretServiceError> {
+        let mut index = lock(&self.index)?;
+        let item = index
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+            .ok_or_else(|| SecretServiceError::InvalidIndex(format!("unknown item {id}")))?;
+        let previous = self.vault_get_with_metadata(&item.reference)?;
+        let mut updated = index.clone();
+        updated.items.retain(|item| item.id != id);
+        let bytes = serde_json::to_vec(&updated)
+            .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
+
+        self.vault_delete(&item.reference)?;
+        if let Err(error) = self.vault_write_index(&bytes) {
+            let rollback = self.vault_set_with_options(
+                &item.reference,
+                &previous.0,
+                ReferenceOptions {
+                    evict_at: previous.1.evict_at,
+                    service: previous.1.service,
+                    account: previous.1.account,
+                },
+            );
+            return Err(service_transaction_error(&error, rollback.as_ref().err()));
+        }
+        *index = updated;
+        Ok(())
+    }
+
     fn action_summary(&self, action: &PromptAction) -> String {
         match action {
             PromptAction::Unlock { objects } => {
                 if objects
                     .iter()
-                    .any(|object| matches!(object, PromptObjectRef::Collection))
+                    .any(|object| matches!(object, PromptObjectRef::Collection(_)))
                 {
-                    return "access all secrets in the FactorSeal collection".to_owned();
+                    return "access all secrets in a requested collection".to_owned();
                 }
-                let labels = self
-                    .index
-                    .lock()
-                    .ok()
-                    .map(|index| {
-                        objects
-                            .iter()
-                            .filter_map(|object| {
-                                let PromptObjectRef::Item(id) = object else {
-                                    return None;
-                                };
-                                index
-                                    .items
-                                    .iter()
-                                    .find(|item| item.id == *id)
-                                    .map(|item| {
-                                        format!(
-                                            "'{}' ({} / {})",
-                                            item.label, item.service, item.account
-                                        )
-                                    })
-                                    .or_else(|| Some(id.clone()))
-                            })
-                            .collect::<Vec<_>>()
+                let labels = objects
+                    .iter()
+                    .filter_map(|object| {
+                        let PromptObjectRef::Item(collection, id) = object else {
+                            return None;
+                        };
+                        self.item(*collection, id)
+                            .ok()
+                            .map(|item| item_summary(&item))
+                            .or_else(|| Some(id.clone()))
                     })
-                    .unwrap_or_default();
+                    .collect::<Vec<_>>();
                 format!(
                     "read or update {} requested secret(s): {}",
                     labels.len(),
@@ -1019,24 +1417,12 @@ impl Agent {
                 )
             }
             PromptAction::Create { item, .. } => {
-                format!(
-                    "store secret '{}' for {} / {}",
-                    item.label, item.service, item.account
-                )
+                format!("store secret {}", item_summary(item))
             }
-            PromptAction::Delete { id } => self
-                .index
-                .lock()
-                .ok()
-                .and_then(|index| {
-                    index.items.iter().find(|item| item.id == *id).map(|item| {
-                        format!(
-                            "delete secret '{}' for {} / {}",
-                            item.label, item.service, item.account
-                        )
-                    })
-                })
-                .unwrap_or_else(|| format!("delete secret {id}")),
+            PromptAction::Delete { collection, id } => self.item(*collection, id).ok().map_or_else(
+                || format!("delete secret {id}"),
+                |item| format!("delete secret {}", item_summary(&item)),
+            ),
         }
     }
 }
@@ -1097,8 +1483,10 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                 .data_mut::<ItemObject>(context.path())
                 .ok_or_else(|| MethodErr::no_path(context.path()))?;
             let agent = Arc::clone(&object.agent);
+            let collection = object.collection;
             let id = object.id.clone();
-            let (prompt_id, path) = agent.create_prompt(&owner, PromptAction::Delete { id })?;
+            let (prompt_id, path) =
+                agent.create_prompt(&owner, PromptAction::Delete { collection, id })?;
             crossroads.insert(
                 path.clone(),
                 &[prompt_for_item],
@@ -1116,17 +1504,15 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
             ("secret",),
             |context, object: &mut ItemObject, (session,): (Path<'static>,)| {
                 let owner = sender(context)?;
-                if !object.agent.has_grant(&owner, &object.id)? {
+                let resource = GrantResource::Item(object.collection, object.id.clone());
+                if !object.agent.has_grant(&owner, &resource)? {
                     return Err(is_locked());
                 }
-                let item = object.agent.item(&object.id)?;
-                let secret = object
-                    .agent
-                    .vault_get(&item.service, &item.account)
-                    .map_err(vault_method)?;
+                let (secret, content_type) =
+                    object.agent.item_secret(object.collection, &object.id)?;
                 Ok((object
                     .agent
-                    .encrypt_secret(&session, &owner, &secret, item.content_type)?,))
+                    .encrypt_secret(&session, &owner, &secret, content_type)?,))
             },
         );
         builder.method(
@@ -1135,90 +1521,74 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
             (),
             |context, object: &mut ItemObject, (secret,): (Secret,)| {
                 let owner = sender(context)?;
-                if !object.agent.has_grant(&owner, &object.id)? {
+                let resource = GrantResource::Item(object.collection, object.id.clone());
+                if !object.agent.has_grant(&owner, &resource)? {
                     return Err(is_locked());
                 }
-                let plaintext = object.agent.decrypt_secret(&secret, &owner)?;
-                object
-                    .agent
-                    .set_item_secret(&object.id, &plaintext, secret.3)
+                let (plaintext, content_type) = object.agent.decrypt_secret(secret, &owner)?;
+                object.agent.set_item_secret(
+                    object.collection,
+                    &object.id,
+                    &plaintext,
+                    content_type,
+                )
             },
         );
         builder
             .property::<bool, _>("Locked")
             .get(|context, object| {
                 let owner = property_sender(context)?;
-                Ok(!object.agent.has_grant(&owner, &object.id)?)
+                let resource = GrantResource::Item(object.collection, object.id.clone());
+                Ok(!object.agent.has_grant(&owner, &resource)?)
             });
         builder
             .property::<HashMap<String, String>, _>("Attributes")
-            .get(|_, object| Ok(object.agent.item(&object.id)?.attributes))
+            .get(|_, object| Ok(object.agent.item(object.collection, &object.id)?.attributes))
             .set(|context, object, attributes| {
                 let owner = property_sender(context)?;
-                if !object.agent.has_grant(&owner, &object.id)? {
+                let resource = GrantResource::Item(object.collection, object.id.clone());
+                if !object.agent.has_grant(&owner, &resource)? {
                     return Err(is_locked());
                 }
-                let mut index = lock_method(&object.agent.index)?;
-                let item = index
-                    .items
-                    .iter_mut()
-                    .find(|item| item.id == object.id)
-                    .ok_or_else(|| no_item(&object.id))?;
-                let (service, account) = storage_names(&attributes, &item.id)?;
-                if service != item.service || account != item.account {
-                    return Err(MethodErr::failed(
-                        &"changing service or username is not supported",
-                    ));
-                }
-                item.attributes.clone_from(&attributes);
-                item.modified = unix_time();
-                object.agent.save_index(&index)?;
+                object
+                    .agent
+                    .set_item_attributes(object.collection, &object.id, &attributes)?;
                 Ok(Some(attributes))
             });
         builder
             .property::<String, _>("Label")
-            .get(|_, object| Ok(object.agent.item(&object.id)?.label))
+            .get(|_, object| Ok(object.agent.item(object.collection, &object.id)?.label))
             .set(|context, object, label| {
                 let owner = property_sender(context)?;
-                if !object.agent.has_grant(&owner, &object.id)? {
+                let resource = GrantResource::Item(object.collection, object.id.clone());
+                if !object.agent.has_grant(&owner, &resource)? {
                     return Err(is_locked());
                 }
-                let mut index = lock_method(&object.agent.index)?;
-                let item = index
-                    .items
-                    .iter_mut()
-                    .find(|item| item.id == object.id)
-                    .ok_or_else(|| no_item(&object.id))?;
-                item.label.clone_from(&label);
-                item.modified = unix_time();
-                object.agent.save_index(&index)?;
+                object
+                    .agent
+                    .set_item_label(object.collection, &object.id, &label)?;
                 Ok(Some(label))
             });
         builder
             .property::<String, _>("Type")
-            .get(|_, object| Ok(object.agent.item(&object.id)?.item_type))
+            .get(|_, object| Ok(object.agent.item(object.collection, &object.id)?.item_type))
             .set(|context, object, item_type| {
                 let owner = property_sender(context)?;
-                if !object.agent.has_grant(&owner, &object.id)? {
+                let resource = GrantResource::Item(object.collection, object.id.clone());
+                if !object.agent.has_grant(&owner, &resource)? {
                     return Err(is_locked());
                 }
-                let mut index = lock_method(&object.agent.index)?;
-                let item = index
-                    .items
-                    .iter_mut()
-                    .find(|item| item.id == object.id)
-                    .ok_or_else(|| no_item(&object.id))?;
-                item.item_type.clone_from(&item_type);
-                item.modified = unix_time();
-                object.agent.save_index(&index)?;
+                object
+                    .agent
+                    .set_item_type(object.collection, &object.id, &item_type)?;
                 Ok(Some(item_type))
             });
         builder
             .property::<u64, _>("Created")
-            .get(|_, object| Ok(object.agent.item(&object.id)?.created));
+            .get(|_, object| Ok(object.agent.item(object.collection, &object.id)?.created));
         builder
             .property::<u64, _>("Modified")
-            .get(|_, object| Ok(object.agent.item(&object.id)?.modified));
+            .get(|_, object| Ok(object.agent.item(object.collection, &object.id)?.modified));
     });
 
     let prompt_for_collection = prompt;
@@ -1230,10 +1600,11 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
             "Delete",
             (),
             ("prompt",),
-            |_, _: &mut CollectionObject, ()| -> Result<(Path<'static>,), MethodErr> {
-                Err(MethodErr::failed(
-                    &"the FactorSeal collection cannot be deleted",
-                ))
+            |_, object: &mut CollectionObject, ()| -> Result<(Path<'static>,), MethodErr> {
+                Err(MethodErr::failed(&format!(
+                    "the {} collection cannot be deleted",
+                    object.collection.label()
+                )))
             },
         );
         builder.method(
@@ -1242,10 +1613,10 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
             ("results",),
             |_, object: &mut CollectionObject, (attributes,): (HashMap<String, String>,)| {
                 let paths: Vec<Path<'static>> = object
-                    .0
-                    .search(&attributes)?
+                    .agent
+                    .search(object.collection, &attributes)?
                     .iter()
-                    .map(|item| item_path(&item.id))
+                    .map(|item| item_path(object.collection, &item.id))
                     .collect();
                 Ok((paths,))
             },
@@ -1259,14 +1630,15 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                 let object = crossroads
                     .data_mut::<CollectionObject>(context.path())
                     .ok_or_else(|| MethodErr::no_path(context.path()))?;
-                let agent = Arc::clone(&object.0);
-                let plaintext = agent.decrypt_secret(&secret, &owner)?;
+                let agent = Arc::clone(&object.agent);
+                let collection = object.collection;
+                let (plaintext, content_type) = agent.decrypt_secret(secret, &owner)?;
                 let label = prop_cast::<String>(&properties, ITEM_LABEL)
                     .cloned()
                     .ok_or_else(|| MethodErr::invalid_arg(&ITEM_LABEL))?;
                 let attributes = property_string_map(&properties, ITEM_ATTRIBUTES)?;
                 let existing = if replace {
-                    agent.search(&attributes)?.into_iter().next()
+                    agent.search(collection, &attributes)?.into_iter().next()
                 } else {
                     None
                 };
@@ -1274,43 +1646,20 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                     .as_ref()
                     .map_or_else(random_id, |item| Ok(item.id.clone()))
                     .map_err(vault_method)?;
-                let (service, account) = storage_names(&attributes, &id)?;
-                if let Some(same_entry) = agent
-                    .all_items()?
-                    .into_iter()
-                    .find(|item| item.service == service && item.account == account)
-                {
-                    if replace {
-                        if existing
-                            .as_ref()
-                            .is_none_or(|item| item.id != same_entry.id)
-                        {
-                            return Err(MethodErr::failed(
-                                &"replace attributes resolve to a different existing item",
-                            ));
-                        }
-                    } else {
-                        return Err(MethodErr::failed(
-                            &"FactorSeal already contains this service and account",
-                        ));
-                    }
-                } else if !replace
-                    && agent
-                        .vault_contains(&service, &account)
-                        .map_err(vault_method)?
-                {
-                    return Err(MethodErr::failed(
-                        &"FactorSeal already contains this service and account",
-                    ));
-                }
+                let reference = existing
+                    .as_ref()
+                    .map_or_else(
+                        || SecretReference::new(id.clone()),
+                        |item| Ok(item.reference.clone()),
+                    )
+                    .map_err(vault_method)?;
                 let now = unix_time();
                 let item = IndexItem {
                     id,
-                    service,
-                    account,
+                    reference,
                     label,
                     attributes,
-                    content_type: secret.3,
+                    content_type,
                     item_type: existing.as_ref().map_or_else(
                         || "org.freedesktop.Secret.Generic".to_owned(),
                         |item| item.item_type.clone(),
@@ -1321,6 +1670,7 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                 let (prompt_id, path) = agent.create_prompt(
                     &owner,
                     PromptAction::Create {
+                        collection,
                         item: Box::new(item),
                         secret: plaintext,
                     },
@@ -1341,21 +1691,22 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
             .property::<Vec<Path<'static>>, _>("Items")
             .get(|_, object| {
                 Ok(object
-                    .0
-                    .all_items()?
+                    .agent
+                    .all_items(object.collection)?
                     .iter()
-                    .map(|item| item_path(&item.id))
+                    .map(|item| item_path(object.collection, &item.id))
                     .collect())
             });
         builder
             .property::<String, _>("Label")
-            .get(|_, _| Ok("FactorSeal".to_owned()))
+            .get(|_, object| Ok(object.collection.label().to_owned()))
             .set(|_, _, _| Err(MethodErr::ro_property(&"Label")));
         builder
             .property::<bool, _>("Locked")
             .get(|context, object| {
                 let owner = property_sender(context)?;
-                Ok(!object.0.has_grant(&owner, COLLECTION_RESOURCE)?)
+                let resource = GrantResource::Collection(object.collection);
+                Ok(!object.agent.has_grant(&owner, &resource)?)
             });
         builder.property::<u64, _>("Created").get(|_, _| Ok(0));
         builder.property::<u64, _>("Modified").get(|_, _| Ok(0));
@@ -1391,9 +1742,18 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
             "CreateCollection",
             ("properties", "alias"),
             ("collection", "prompt"),
-            |_, _: &mut ServiceObject, (properties, _alias): (PropMap, String)| {
+            |_, _: &mut ServiceObject, (properties, alias): (PropMap, String)| {
                 let _ = prop_cast::<String>(&properties, COLLECTION_LABEL);
-                Ok((collection_path(), root_path()))
+                let collection = match alias.as_str() {
+                    "default" => CollectionKind::Persistent,
+                    "session" => CollectionKind::Session,
+                    _ => {
+                        return Err(MethodErr::failed(
+                            &"FactorSeal only provides the default and session collections",
+                        ));
+                    }
+                };
+                Ok((collection_path(collection), root_path()))
             },
         );
         builder.method(
@@ -1404,11 +1764,14 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                 let owner = sender(context)?;
                 let mut unlocked = Vec::new();
                 let mut locked_items = Vec::new();
-                for item in object.0.search(&attributes)? {
-                    if object.0.has_grant(&owner, &item.id)? {
-                        unlocked.push(item_path(&item.id));
-                    } else {
-                        locked_items.push(item_path(&item.id));
+                for collection in CollectionKind::ALL {
+                    for item in object.0.search(collection, &attributes)? {
+                        let resource = GrantResource::Item(collection, item.id.clone());
+                        if object.0.has_grant(&owner, &resource)? {
+                            unlocked.push(item_path(collection, &item.id));
+                        } else {
+                            locked_items.push(item_path(collection, &item.id));
+                        }
                     }
                 }
                 Ok((unlocked, locked_items))
@@ -1428,11 +1791,7 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                 let mut pending = Vec::new();
                 for path in paths {
                     let object = parse_object_path(&path)?;
-                    let resource = match &object {
-                        PromptObjectRef::Collection => COLLECTION_RESOURCE,
-                        PromptObjectRef::Item(id) => id,
-                    };
-                    if agent.has_grant(&owner, resource)? {
+                    if agent.has_grant(&owner, &object.resource())? {
                         immediate.push(path);
                     } else {
                         pending.push(object);
@@ -1475,22 +1834,19 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                 let owner = sender(context)?;
                 let mut secrets = HashMap::new();
                 for path in paths {
-                    let PromptObjectRef::Item(id) = parse_object_path(&path)? else {
+                    let PromptObjectRef::Item(collection, id) = parse_object_path(&path)? else {
                         return Err(MethodErr::invalid_arg(&path));
                     };
-                    if !object.0.has_grant(&owner, &id)? {
+                    let resource = GrantResource::Item(collection, id.clone());
+                    if !object.0.has_grant(&owner, &resource)? {
                         continue;
                     }
-                    let item = object.0.item(&id)?;
-                    let secret = object
-                        .0
-                        .vault_get(&item.service, &item.account)
-                        .map_err(vault_method)?;
+                    let (secret, content_type) = object.0.item_secret(collection, &id)?;
                     secrets.insert(
                         path,
                         object
                             .0
-                            .encrypt_secret(&session, &owner, &secret, item.content_type)?,
+                            .encrypt_secret(&session, &owner, &secret, content_type)?,
                     );
                 }
                 Ok((secrets,))
@@ -1500,22 +1856,21 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
             "ReadAlias",
             ("name",),
             ("collection",),
-            |_, _: &mut ServiceObject, (name,): (String,)| {
-                if name.is_empty() {
-                    Ok((root_path(),))
-                } else if name == "default" {
-                    Ok((default_alias_path(),))
-                } else {
-                    Ok((collection_path(),))
-                }
-            },
+            |_, _: &mut ServiceObject, (name,): (String,)| Ok((alias_path(&name),)),
         );
         builder.method(
             "SetAlias",
             ("name", "collection"),
             (),
-            |_, _: &mut ServiceObject, (_name, collection): (String, Path<'static>)| {
-                if collection != collection_path() && collection != default_alias_path() {
+            |_, _: &mut ServiceObject, (name, collection): (String, Path<'static>)| {
+                let expected = match name.as_str() {
+                    "default" => CollectionKind::Persistent,
+                    "session" => CollectionKind::Session,
+                    _ => return Err(MethodErr::invalid_arg(&name)),
+                };
+                if collection != collection_path(expected)
+                    && collection != collection_alias_path(expected)
+                {
                     return Err(MethodErr::invalid_arg(&collection));
                 }
                 Ok(())
@@ -1523,7 +1878,12 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
         );
         builder
             .property::<Vec<Path<'static>>, _>("Collections")
-            .get(|_, _| Ok(vec![collection_path()]));
+            .get(|_, _| {
+                Ok(CollectionKind::ALL
+                    .into_iter()
+                    .map(collection_path)
+                    .collect())
+            });
     });
 
     Interfaces {
@@ -1565,23 +1925,42 @@ fn attributes_match(item: &HashMap<String, String>, query: &HashMap<String, Stri
         .all(|(key, value)| item.get(key) == Some(value))
 }
 
-fn storage_names(
-    attributes: &HashMap<String, String>,
-    id: &str,
-) -> Result<(String, String), MethodErr> {
+fn keyring_metadata(attributes: &HashMap<String, String>) -> (Option<&str>, Option<&str>) {
     let service = attributes
         .get("service")
-        .cloned()
-        .unwrap_or_else(|| "secret-service".to_owned());
+        .map(String::as_str)
+        .filter(|value| !value.is_empty());
     let account = attributes
         .get("username")
         .or_else(|| attributes.get("account"))
-        .cloned()
-        .unwrap_or_else(|| id.to_owned());
-    if service.is_empty() || account.is_empty() {
-        return Err(MethodErr::invalid_arg(&"empty service or account"));
+        .map(String::as_str)
+        .filter(|value| !value.is_empty());
+    match (service, account) {
+        (Some(service), Some(account)) => (Some(service), Some(account)),
+        _ => (None, None),
     }
-    Ok((service, account))
+}
+
+fn reference_options(
+    attributes: &HashMap<String, String>,
+    evict_at: Option<u64>,
+) -> ReferenceOptions {
+    let (service, account) = keyring_metadata(attributes);
+    ReferenceOptions {
+        evict_at,
+        service: service.map(str::to_owned),
+        account: account.map(str::to_owned),
+    }
+}
+
+fn item_summary(item: &IndexItem) -> String {
+    let (service, account) = keyring_metadata(&item.attributes);
+    match (service, account) {
+        (Some(service), Some(account)) => {
+            format!("'{}' ({service} / {account})", item.label)
+        }
+        _ => format!("'{}' (item {})", item.label, item.reference.item()),
+    }
 }
 
 fn property_string_map(
@@ -1613,11 +1992,25 @@ fn property_string_map(
 fn parse_object_path(path: &Path<'_>) -> Result<PromptObjectRef, MethodErr> {
     let value: &str = path.as_ref();
     if matches!(value, COLLECTION_PATH | DEFAULT_ALIAS_PATH) {
-        return Ok(PromptObjectRef::Collection);
+        return Ok(PromptObjectRef::Collection(CollectionKind::Persistent));
+    }
+    if matches!(value, SESSION_COLLECTION_PATH | SESSION_ALIAS_PATH) {
+        return Ok(PromptObjectRef::Collection(CollectionKind::Session));
     }
     if let Some(id) = value.strip_prefix(ITEM_PREFIX) {
         if !id.is_empty() {
-            return Ok(PromptObjectRef::Item(id.to_owned()));
+            return Ok(PromptObjectRef::Item(
+                CollectionKind::Persistent,
+                id.to_owned(),
+            ));
+        }
+    }
+    if let Some(id) = value.strip_prefix(SESSION_ITEM_PREFIX) {
+        if !id.is_empty() {
+            return Ok(PromptObjectRef::Item(
+                CollectionKind::Session,
+                id.to_owned(),
+            ));
         }
     }
     Err(MethodErr::no_path(path))
@@ -1686,9 +2079,9 @@ fn negotiate_session(
             let private = BigUint::from_bytes_be(&*private_bytes);
             let server_public = two.modpow(&private, &prime);
             let shared = client_public.modpow(&private, &prime);
-            let shared = pad_dh_value(&shared)?;
+            let shared = Zeroizing::new(pad_dh_value(&shared)?);
             let mut key = Zeroizing::new([0_u8; AES_KEY_BYTES]);
-            Hkdf::<Sha256>::new(None, &shared)
+            Hkdf::<Sha256>::new(None, shared.as_slice())
                 .expand(&[], &mut *key)
                 .map_err(|_| MethodErr::failed(&"could not derive Secret Service session key"))?;
             let output = pad_dh_value(&server_public)?;
@@ -1726,12 +2119,16 @@ fn unix_time() -> u64 {
         .as_secs()
 }
 
-fn item_path(id: &str) -> Path<'static> {
-    Path::new(format!("{ITEM_PREFIX}{id}")).expect("hex item id is a valid D-Bus path")
+fn item_path(collection: CollectionKind, id: &str) -> Path<'static> {
+    let prefix = match collection {
+        CollectionKind::Persistent => ITEM_PREFIX,
+        CollectionKind::Session => SESSION_ITEM_PREFIX,
+    };
+    Path::new(format!("{prefix}{id}")).expect("hex item id is a valid D-Bus path")
 }
 
-fn collection_signal(member: &str, item: Path<'static>) -> Message {
-    let path = collection_path();
+fn collection_signal(collection: CollectionKind, member: &str, item: Path<'static>) -> Message {
+    let path = collection_path(collection);
     let interface =
         Interface::new("org.freedesktop.Secret.Collection").expect("valid collection interface");
     let member = Member::new(member.to_owned()).expect("valid collection signal");
@@ -1742,12 +2139,28 @@ fn prompt_path(id: u64) -> Path<'static> {
     Path::new(format!("{PROMPT_PREFIX}{id}")).expect("numeric prompt id is a valid D-Bus path")
 }
 
-fn collection_path() -> Path<'static> {
-    Path::new(COLLECTION_PATH).expect("valid collection path")
+fn collection_path(collection: CollectionKind) -> Path<'static> {
+    let path = match collection {
+        CollectionKind::Persistent => COLLECTION_PATH,
+        CollectionKind::Session => SESSION_COLLECTION_PATH,
+    };
+    Path::new(path).expect("valid collection path")
 }
 
-fn default_alias_path() -> Path<'static> {
-    Path::new(DEFAULT_ALIAS_PATH).expect("valid alias path")
+fn collection_alias_path(collection: CollectionKind) -> Path<'static> {
+    let path = match collection {
+        CollectionKind::Persistent => DEFAULT_ALIAS_PATH,
+        CollectionKind::Session => SESSION_ALIAS_PATH,
+    };
+    Path::new(path).expect("valid alias path")
+}
+
+fn alias_path(name: &str) -> Path<'static> {
+    match name {
+        "default" => collection_alias_path(CollectionKind::Persistent),
+        "session" => collection_alias_path(CollectionKind::Session),
+        _ => root_path(),
+    }
 }
 
 fn root_path() -> Path<'static> {
@@ -1770,21 +2183,21 @@ fn method_service(error: MethodErr) -> SecretServiceError {
 
 fn restore_entry(
     agent: &Agent,
-    service: &str,
-    account: &str,
+    reference: &SecretReference,
     previous: Option<(&[u8], CredentialMetadata)>,
 ) -> Result<(), VaultError> {
     if let Some((previous, metadata)) = previous {
         agent.vault_set_with_options(
-            service,
-            account,
+            reference,
             previous,
-            CredentialOptions {
+            ReferenceOptions {
                 evict_at: metadata.evict_at,
+                service: metadata.service,
+                account: metadata.account,
             },
         )
     } else {
-        match agent.vault_delete(service, account) {
+        match agent.vault_delete(reference) {
             Ok(()) | Err(VaultError::NoEntry) => Ok(()),
             Err(error) => Err(error),
         }
@@ -1860,6 +2273,44 @@ mod tests {
         (directory, Arc::new(agent))
     }
 
+    fn create_item(
+        agent: &Agent,
+        collection: CollectionKind,
+        id: &str,
+        attributes: HashMap<String, String>,
+        secret: &[u8],
+    ) {
+        let now = unix_time();
+        let item = IndexItem {
+            id: id.to_owned(),
+            reference: SecretReference::new(id).unwrap(),
+            label: format!("Test {id}"),
+            attributes,
+            content_type: "text/plain".to_owned(),
+            item_type: "org.freedesktop.Secret.Generic".to_owned(),
+            created: now,
+            modified: now,
+        };
+        let (prompt_id, _) = agent
+            .create_prompt(
+                ":1.10",
+                PromptAction::Create {
+                    collection,
+                    item: Box::new(item),
+                    secret: Zeroizing::new(secret.to_vec()),
+                },
+            )
+            .unwrap();
+        let completion = agent
+            .complete_prompt(ApprovalEvent {
+                prompt_id,
+                approved: true,
+            })
+            .unwrap()
+            .unwrap();
+        assert!(completion.created.is_some());
+    }
+
     #[test]
     fn subset_attribute_matching() {
         let attributes = HashMap::from([
@@ -1878,20 +2329,221 @@ mod tests {
     }
 
     #[test]
-    fn generic_items_get_stable_internal_names() {
-        let (service, account) = storage_names(&HashMap::new(), "abc").unwrap();
-        assert_eq!(service, "secret-service");
-        assert_eq!(account, "abc");
+    fn generic_items_do_not_invent_keyring_metadata() {
+        assert_eq!(keyring_metadata(&HashMap::new()), (None, None));
+    }
+
+    #[test]
+    fn aliases_expose_only_default_and_session_collections() {
+        assert_eq!(
+            alias_path("default"),
+            collection_alias_path(CollectionKind::Persistent)
+        );
+        assert_eq!(
+            alias_path("session"),
+            collection_alias_path(CollectionKind::Session)
+        );
+        assert_eq!(alias_path("unknown"), root_path());
+        assert_eq!(alias_path(""), root_path());
+    }
+
+    #[test]
+    fn item_paths_are_scoped_to_their_collection() {
+        let persistent = item_path(CollectionKind::Persistent, "abc");
+        let session = item_path(CollectionKind::Session, "abc");
+
+        assert_ne!(persistent, session);
+        assert!(matches!(
+            parse_object_path(&persistent).unwrap(),
+            PromptObjectRef::Item(CollectionKind::Persistent, id) if id == "abc"
+        ));
+        assert!(matches!(
+            parse_object_path(&session).unwrap(),
+            PromptObjectRef::Item(CollectionKind::Session, id) if id == "abc"
+        ));
+    }
+
+    #[test]
+    fn session_items_never_touch_the_persistent_vault() {
+        let (_directory, agent) = agent();
+        let attributes = HashMap::from([
+            ("service".to_owned(), "example".to_owned()),
+            ("username".to_owned(), "alice".to_owned()),
+        ]);
+
+        create_item(
+            &agent,
+            CollectionKind::Session,
+            "sessionitem",
+            attributes.clone(),
+            b"temporary",
+        );
+
+        assert_eq!(
+            agent
+                .item_secret(CollectionKind::Session, "sessionitem")
+                .unwrap()
+                .0
+                .as_slice(),
+            b"temporary"
+        );
+        assert_eq!(
+            agent
+                .search(CollectionKind::Session, &attributes)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            !agent
+                .vault
+                .contains_reference(&SecretReference::new("sessionitem").unwrap())
+                .unwrap()
+        );
+        assert!(agent.vault.read_secret_service_index().unwrap().is_none());
+    }
+
+    #[test]
+    fn persistent_and_session_items_are_independent() {
+        let (_directory, agent) = agent();
+        let attributes = HashMap::from([
+            ("service".to_owned(), "example".to_owned()),
+            ("username".to_owned(), "alice".to_owned()),
+        ]);
+
+        create_item(
+            &agent,
+            CollectionKind::Persistent,
+            "sameid",
+            attributes.clone(),
+            b"persistent",
+        );
+        create_item(
+            &agent,
+            CollectionKind::Session,
+            "sameid",
+            attributes.clone(),
+            b"temporary",
+        );
+
+        assert_eq!(
+            agent
+                .item_secret(CollectionKind::Persistent, "sameid")
+                .unwrap()
+                .0
+                .as_slice(),
+            b"persistent"
+        );
+        assert_eq!(
+            agent
+                .item_secret(CollectionKind::Session, "sameid")
+                .unwrap()
+                .0
+                .as_slice(),
+            b"temporary"
+        );
+        assert_eq!(
+            agent
+                .search(CollectionKind::Persistent, &attributes)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            agent
+                .search(CollectionKind::Session, &attributes)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn clearing_session_store_preserves_persistent_items() {
+        let (_directory, agent) = agent();
+        create_item(
+            &agent,
+            CollectionKind::Persistent,
+            "persistentitem",
+            HashMap::new(),
+            b"persistent",
+        );
+        create_item(
+            &agent,
+            CollectionKind::Session,
+            "sessionitem",
+            HashMap::new(),
+            b"temporary",
+        );
+
+        agent.clear_session_store().unwrap();
+
+        assert!(agent.all_items(CollectionKind::Session).unwrap().is_empty());
+        assert_eq!(
+            agent
+                .item_secret(CollectionKind::Persistent, "persistentitem")
+                .unwrap()
+                .0
+                .as_slice(),
+            b"persistent"
+        );
+    }
+
+    #[test]
+    fn replacing_session_item_drops_the_previous_zeroizing_value() {
+        let (_directory, agent) = agent();
+        create_item(
+            &agent,
+            CollectionKind::Session,
+            "sessionitem",
+            HashMap::new(),
+            b"first",
+        );
+        create_item(
+            &agent,
+            CollectionKind::Session,
+            "sessionitem",
+            HashMap::new(),
+            b"second",
+        );
+
+        assert_eq!(agent.all_items(CollectionKind::Session).unwrap().len(), 1);
+        assert_eq!(
+            agent
+                .item_secret(CollectionKind::Session, "sessionitem")
+                .unwrap()
+                .0
+                .as_slice(),
+            b"second"
+        );
     }
 
     #[test]
     fn grants_are_bound_to_the_callers_bus_connection() {
         let (_directory, agent) = agent();
-        agent.grant(":1.10", "item").unwrap();
+        let item = GrantResource::Item(CollectionKind::Persistent, "item".to_owned());
+        let other = GrantResource::Item(CollectionKind::Persistent, "other".to_owned());
+        agent.grant(":1.10", item.clone()).unwrap();
 
-        assert!(agent.has_grant(":1.10", "item").unwrap());
-        assert!(!agent.has_grant(":1.11", "item").unwrap());
-        assert!(!agent.has_grant(":1.10", "other").unwrap());
+        assert!(agent.has_grant(":1.10", &item).unwrap());
+        assert!(!agent.has_grant(":1.11", &item).unwrap());
+        assert!(!agent.has_grant(":1.10", &other).unwrap());
+    }
+
+    #[test]
+    fn collection_grants_do_not_cross_store_boundaries() {
+        let (_directory, agent) = agent();
+        let session_collection = GrantResource::Collection(CollectionKind::Session);
+        let session_item = GrantResource::Item(CollectionKind::Session, "item".to_owned());
+        let persistent_item = GrantResource::Item(CollectionKind::Persistent, "item".to_owned());
+
+        agent.grant(":1.10", session_collection).unwrap();
+
+        assert!(agent.has_grant(":1.10", &session_item).unwrap());
+        assert!(!agent.has_grant(":1.10", &persistent_item).unwrap());
+
+        agent.clear_session_store().unwrap();
+        assert!(!agent.has_grant(":1.10", &session_item).unwrap());
     }
 
     #[test]
@@ -1909,9 +2561,10 @@ mod tests {
         )
         .unwrap();
 
-        agent.grant(":1.10", "item").unwrap();
+        let item = GrantResource::Item(CollectionKind::Persistent, "item".to_owned());
+        agent.grant(":1.10", item.clone()).unwrap();
 
-        assert!(!agent.has_grant(":1.10", "item").unwrap());
+        assert!(!agent.has_grant(":1.10", &item).unwrap());
     }
 
     #[test]
@@ -1928,12 +2581,21 @@ mod tests {
             sender,
         )
         .unwrap();
-        agent.vault_set("service", "account", b"secret").unwrap();
+        let reference = SecretReference::new("item").unwrap();
+        agent.vault_set(&reference, b"secret").unwrap();
+        create_item(
+            &agent,
+            CollectionKind::Session,
+            "sessionitem",
+            HashMap::new(),
+            b"temporary",
+        );
 
         assert!(agent.expire_idle_vault().unwrap());
         assert!(agent.vault.is_locked().unwrap());
+        assert!(agent.all_items(CollectionKind::Session).unwrap().is_empty());
         assert!(matches!(
-            agent.vault_get("service", "account"),
+            agent.vault_get(&reference),
             Err(VaultError::VaultLocked)
         ));
     }
@@ -1956,8 +2618,9 @@ mod tests {
         }
         drop(identities);
 
-        agent.grant(":1.10", "item").unwrap();
-        assert!(agent.has_grant(":1.11", "item").unwrap());
+        let item = GrantResource::Item(CollectionKind::Persistent, "item".to_owned());
+        agent.grant(":1.10", item.clone()).unwrap();
+        assert!(agent.has_grant(":1.11", &item).unwrap());
     }
 
     #[test]
@@ -1970,11 +2633,61 @@ mod tests {
             ("username".to_owned(), "alice".to_owned()),
         ]);
 
-        let found = agent.search(&attributes).unwrap();
+        let found = agent
+            .search(CollectionKind::Persistent, &attributes)
+            .unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].service, "example");
-        assert_eq!(found[0].account, "alice");
+        assert_eq!(
+            agent
+                .vault
+                .get_by_reference(&found[0].reference)
+                .unwrap()
+                .as_slice(),
+            b"secret"
+        );
         assert!(agent.vault.read_secret_service_index().unwrap().is_some());
+    }
+
+    #[test]
+    fn legacy_secret_service_index_migrates_to_references() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::create_for_test(directory.path().join("vault")).unwrap();
+        vault.set("example", "alice", b"secret").unwrap();
+        let legacy = LegacyIndex {
+            format: INDEX_FORMAT.to_owned(),
+            version: LEGACY_INDEX_VERSION,
+            items: vec![LegacyIndexItem {
+                id: "abc123".to_owned(),
+                service: "example".to_owned(),
+                account: "alice".to_owned(),
+                label: "Example".to_owned(),
+                attributes: HashMap::from([
+                    ("service".to_owned(), "example".to_owned()),
+                    ("username".to_owned(), "alice".to_owned()),
+                ]),
+                content_type: "text/plain".to_owned(),
+                item_type: "org.freedesktop.Secret.Generic".to_owned(),
+                created: 1,
+                modified: 2,
+            }],
+        };
+        vault
+            .write_secret_service_index(&serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+        let (sender, _receiver) = mpsc::channel();
+
+        let agent = Agent::new(vault, SecretServiceOptions::default(), sender).unwrap();
+        let item = agent.index.lock().unwrap().items[0].clone();
+
+        assert_eq!(agent.index.lock().unwrap().version, INDEX_VERSION);
+        assert_eq!(
+            agent.vault_get(&item.reference).unwrap().as_slice(),
+            b"secret"
+        );
+        let stored = agent.vault.read_secret_service_index().unwrap().unwrap();
+        let migrated: Index = serde_json::from_slice(&stored).unwrap();
+        assert_eq!(migrated.version, INDEX_VERSION);
+        assert_eq!(migrated.items[0].reference, item.reference);
     }
 
     #[test]
@@ -1985,18 +2698,35 @@ mod tests {
             ("service".to_owned(), "example".to_owned()),
             ("username".to_owned(), "alice".to_owned()),
         ]);
-        assert_eq!(agent.search(&attributes).unwrap().len(), 1);
+        let reference = agent
+            .search(CollectionKind::Persistent, &attributes)
+            .unwrap()[0]
+            .reference
+            .clone();
         agent
             .vault_set_with_options(
-                "example",
-                "alice",
+                &reference,
                 b"secret",
-                CredentialOptions { evict_at: Some(0) },
+                ReferenceOptions {
+                    evict_at: Some(0),
+                    service: Some("example".to_owned()),
+                    account: Some("alice".to_owned()),
+                },
             )
             .unwrap();
 
-        assert!(agent.all_items().unwrap().is_empty());
-        assert!(agent.search(&attributes).unwrap().is_empty());
+        assert!(
+            agent
+                .all_items(CollectionKind::Persistent)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            agent
+                .search(CollectionKind::Persistent, &attributes)
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             agent
                 .vault

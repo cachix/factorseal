@@ -6,7 +6,9 @@ encryption recipients.
 ```text
 application
     |
-keyring-core: service + account
+item + optional field
+    |
+keyring metadata: service + account
     |
 unlocked FactorSeal session
     |               \
@@ -50,12 +52,19 @@ can additionally require physical presence.
 
 ## Credential storage
 
-Each `(service, account)` pair maps to one file beneath `entries/`. The filename
-is a SHA-256 digest, so user-controlled names cannot escape the vault.
+Each reference, consisting of a required `item` and optional `field`, maps to
+one file beneath `entries/`. The filename is a SHA-256 digest, so
+user-controlled names cannot escape the vault.
 
 XChaCha20-Poly1305 encrypts every value with a fresh 192-bit nonce. The vault
-ID, service, and account are authenticated as associated data. Moving an entry
-to a different name or vault therefore fails authentication.
+ID, item, and optional field are authenticated as associated data. Moving an
+entry to a different reference or vault therefore fails authentication.
+
+Keyring service/account pairs are additional metadata in a separately
+authenticated, encrypted reference index. They can be changed without moving
+the entry or changing its cryptographic identity. Legacy entries whose paths
+were derived from service/account remain readable and migrate to opaque
+references when rewritten or explicitly resolved.
 
 On Unix, FactorSeal creates vault directories with mode `0700`, creates the
 initial configuration with mode `0600`, and refuses to open a vault directory
@@ -66,6 +75,12 @@ that is accessible to group or other users.
 With the `keyring` feature, the keyring adapter owns an unlocked vault. It
 holds one vault key but no decrypted credential cache. Every `get` performs a
 fresh authenticated decryption and returns only the requested value.
+
+The Linux Secret Service provider keeps its `default` and `session`
+collections in separate stores. Default items use the persistent encrypted
+vault. Session item values use zeroizing in-memory buffers and are never added
+to the vault or its encrypted metadata index. Clearing the session store drops
+and zeroizes every value without modifying persistent items.
 
 The CLI currently starts a new session for each invocation. A desktop unlock
 agent is planned to provide an “authorize once” experience across processes.
