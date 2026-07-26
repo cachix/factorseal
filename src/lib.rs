@@ -1,5 +1,9 @@
 //! Local encrypted credential vault for FactorSeal.
 //!
+//! Two-factor authentication (2FA) is required by design for supported
+//! persistent vaults. The current 2FA provider combines platform hardware with
+//! a PIN-protected YubiKey.
+//!
 //! A vault is unlocked once into an [`UnlockedVault`]. The session retains a
 //! zeroizing vault key, never a cache of decrypted credentials. Each `get`
 //! decrypts only the requested value.

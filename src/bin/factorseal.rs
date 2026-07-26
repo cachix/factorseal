@@ -21,7 +21,7 @@ const MAX_AUTH_INPUT_BYTES: u64 = 64 * 1024;
 #[command(
     name = "factorseal",
     version,
-    about = "A hardware-bound local keyring with optional YubiKey two-factor unlock"
+    about = "A hardware-bound local keyring designed to require two-factor authentication"
 )]
 struct Cli {
     /// Vault directory. Defaults to the platform user-data directory.
@@ -44,14 +44,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new hardware-bound local vault.
+    /// Create a vault. Supported deployments require --yubikey for 2FA.
     Init {
-        /// Require a YubiKey PIV key in slot 9d as a second factor.
+        /// Use the required YubiKey PIV second factor in slot 9d.
         #[cfg(feature = "yubikey")]
         #[arg(long)]
         yubikey: bool,
 
-        /// Create a legacy password vault for development.
+        /// Create a legacy non-2FA password vault for development.
         #[cfg(feature = "password")]
         #[arg(long)]
         password: bool,
@@ -116,7 +116,7 @@ enum Command {
     #[cfg(feature = "yubikey")]
     AddYubikey,
 
-    /// Remove the YubiKey requirement after using both factors.
+    /// Downgrade to transitional, non-2FA hardware-only compatibility.
     #[cfg(feature = "yubikey")]
     RemoveYubikey,
 
@@ -128,7 +128,7 @@ enum Command {
         new_password_file: Option<PathBuf>,
     },
 
-    /// Replace legacy password wrapping with platform hardware binding.
+    /// Replace a legacy password with transitional, non-2FA hardware binding.
     #[cfg(feature = "password")]
     MigratePassword,
 }
@@ -294,6 +294,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::RemoveYubikey => {
             let pin = read_yubikey_pin(cli.yubikey_pin_file.as_deref())?;
             Vault::remove_yubikey(&vault_path, &pin)?;
+            eprintln!(
+                "Warning: this hardware-only vault does not meet FactorSeal's 2FA design requirement."
+            );
             Ok(())
         }
         #[cfg(feature = "password")]
@@ -307,6 +310,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::MigratePassword => {
             let password = read_current_password(cli.password_file.as_deref())?;
             Vault::migrate_password_to_hardware(&vault_path, &password)?;
+            eprintln!(
+                "Warning: this hardware-only vault does not meet FactorSeal's 2FA design requirement."
+            );
             Ok(())
         }
     }
@@ -388,7 +394,7 @@ fn init_vault(
         let password = read_new_password(password_file)?;
         Vault::create_with_password(path, &password)?;
         println!(
-            "Initialized legacy password FactorSeal vault at {}",
+            "Initialized legacy, non-2FA FactorSeal vault at {}",
             path.display()
         );
         return Ok(());
@@ -405,7 +411,7 @@ fn init_vault(
     }
     Vault::create(path)?;
     println!(
-        "Initialized hardware-bound FactorSeal vault at {}",
+        "Initialized transitional hardware-only FactorSeal vault at {} (not design-compliant 2FA)",
         path.display()
     );
     Ok(())

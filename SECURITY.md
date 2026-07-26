@@ -6,6 +6,17 @@ audit. Do not use it to protect production secrets yet.
 Please report suspected vulnerabilities privately to the maintainers. Do not
 open a public issue until a fix is available.
 
+## Design requirement
+
+Two-factor authentication (2FA) is required by design for every supported
+persistent vault. The current compliant configuration reconstructs the vault
+key from independently protected platform-hardware and YubiKey shares, both of
+which are required.
+
+Hardware-only version 2 vaults and legacy password vaults remain accessible as
+prototype compatibility paths. They do not meet this design requirement and
+must not be treated as supported deployment profiles.
+
 ## Current guarantees
 
 - The vault key is random and 256 bits.
@@ -25,6 +36,9 @@ open a public issue until a fix is available.
 
 ## Current limitations
 
+- The CLI and public API still permit creating and unlocking hardware-only
+  version 2 vaults. Removing that transitional path is required before the
+  implementation enforces the 2FA design invariant universally.
 - Hardware integrations have not been exercised in this repository's automated
   tests on every supported platform or TPM model.
 - `hardware-enclave` 0.2.10 reports native Linux encryption handles as

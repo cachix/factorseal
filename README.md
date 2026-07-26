@@ -5,10 +5,16 @@
 > until its vault format and platform integrations have received independent
 > review.
 
-FactorSeal is a hardware-bound local secret store. It requires the machine's
-TPM or Secure Enclave to unlock persistent secrets, supports an optional
-YubiKey second factor, and can serve Linux applications through the standard
-Secret Service API.
+FactorSeal is a hardware-bound local secret store. **Two-factor authentication
+(2FA) is required by design** for every supported persistent vault unlock. The
+current 2FA implementation combines the machine's TPM or Secure Enclave with a
+PIN-protected YubiKey; neither factor can unlock the vault alone. FactorSeal can
+serve Linux applications through the standard Secret Service API and supports
+expiring secrets through per-credential eviction deadlines.
+
+The prototype still exposes hardware-only and legacy-password compatibility
+paths. They do not satisfy FactorSeal's 2FA design requirement and are not
+supported deployment profiles.
 
 It is built around three controls that are often conflated:
 
@@ -39,7 +45,7 @@ credential cache, or an encrypted directory:
 
 | Option | Storage and application interface | Unlock model | Lifetime and eviction |
 | --- | --- | --- | --- |
-| **FactorSeal** | Independently encrypted entry files; CLI, Rust `keyring-core`, and Secret Service | TPM or Secure Enclave is required; one YubiKey can be required in the current prototype | Separate item-grant TTL, vault idle timeout, RAM-only session collection, and optional per-secret eviction deadline |
+| **FactorSeal** | Independently encrypted entry files; CLI, Rust `keyring-core`, and Secret Service | Two independent factors are required by design; the current 2FA path combines a TPM or Secure Enclave with one YubiKey | Separate item-grant TTL, vault idle timeout, RAM-only session collection, and optional per-secret eviction deadline |
 | **GNOME Keyring** | Desktop keyring plus a memory-only session collection; Secret Service/libsecret | Commonly unlocks the login keyring through PAM with the login password | Can lock collections; the session collection is cleared at logout. Secret Service defines no per-item TTL |
 | **KWallet** | Encrypted wallet files; native KWallet D-Bus/C++ APIs, with desktop compatibility depending on the deployment | Password or GPG-backed wallet; `kdewallet` can open at login when its password matches the login password | Can close the whole wallet after inactivity, on screen lock, or after the last client exits; no documented per-entry eviction |
 | **KeePassXC** | Encrypted KDBX database; GUI/CLI and optional Secret Service provider | Database password with optional key file or YubiKey challenge-response | Locks the whole database. Entry expiry is metadata and notification, not automatic secret deletion |
@@ -84,6 +90,12 @@ and [`pass` documentation](https://www.passwordstore.org/).
 
 ### Hardware-bound storage
 
+Two-factor authentication is a design invariant, not an opt-in hardening
+setting. The currently implemented 2-of-2 configuration requires both:
+
+- the machine's supported TPM or Secure Enclave; and
+- a PIN-protected YubiKey.
+
 Every version 2 vault requires a supported platform backend through
 [`hardware-enclave`](https://docs.rs/hardware-enclave):
 
@@ -95,8 +107,8 @@ Every version 2 vault requires a supported platform backend through
 FactorSeal rejects Windows DPAPI and the Linux software-keyring fallback. A
 vault records its hardware backend and cannot silently switch to another one.
 
-The optional `yubikey` feature uses a PIN-protected RSA-2048 PIV key in slot
-`9d` as a required second factor:
+The current second-factor provider, enabled by the `yubikey` Cargo feature,
+uses a PIN-protected RSA-2048 PIV key in slot `9d`:
 
 ```text
 vault key = platform share XOR YubiKey share
@@ -105,6 +117,10 @@ vault key = platform share XOR YubiKey share
 The current prototype supports one YubiKey. Backup authenticators, phones,
 fingerprints, atomic authenticator replacement, and recovery are target
 features rather than implemented guarantees.
+
+Hardware-only version 2 APIs remain temporarily available for prototype
+development and migration. They do not meet the project's 2FA design
+requirement.
 
 ### Three independent lifetimes
 
@@ -157,7 +173,7 @@ compatibility view.
 The current version 2 prototype implements:
 
 - platform-hardware-bound vault creation and unlock;
-- optional single-YubiKey two-factor unlock;
+- single-YubiKey 2-of-2 unlock with platform hardware;
 - independently authenticated and encrypted credential entries;
 - SecretSpec `item` and optional `field` references;
 - optional per-credential eviction;
@@ -170,6 +186,10 @@ It does not yet implement independent backup authenticators, phone or
 fingerprint providers, recovery, atomic factor replacement, audit events, or
 rollback protection.
 
+The prototype also retains hardware-only and legacy-password compatibility
+paths. Those paths are implementation gaps relative to the required 2FA design,
+not alternative security modes.
+
 ## Quick start
 
 Native Linux requires the `tpm2-tss` runtime and access to `/dev/tpmrm0`, or a
@@ -177,11 +197,11 @@ reachable `tpm2-abrmd` resource manager.
 
 ```console
 devenv shell
-cargo run -- init
+cargo run --features yubikey -- init --yubikey
 printf 'postgres://localhost/mydb' |
-  cargo run -- set my-project DATABASE_URL
-cargo run -- get my-project DATABASE_URL
-cargo run -- status
+  cargo run --features yubikey -- set my-project DATABASE_URL
+cargo run --features yubikey -- get my-project DATABASE_URL
+cargo run --features yubikey -- status
 ```
 
 The default vault location is the platform-specific user-data directory.
@@ -207,7 +227,7 @@ DH/AES sessions, item search and mutation, collection and item locking, and
 prompts. Stop any other Secret Service provider, then run:
 
 ```console
-cargo run -- serve
+cargo run --features yubikey -- serve
 ```
 
 The fixed `default` collection stores encrypted, hardware-bound entries in the
@@ -221,7 +241,7 @@ instance and one item. The defaults are a 15-minute grant and a separate
 30-minute vault idle timeout:
 
 ```console
-cargo run -- serve --grant-seconds 300 --vault-idle-seconds 1800
+cargo run --features yubikey -- serve --grant-seconds 300 --vault-idle-seconds 1800
 ```
 
 The prototype prompts through `/dev/tty`, so it must run in the foreground. A
@@ -235,8 +255,10 @@ FactorSeal implements the `keyring-core` store and credential APIs:
 ```rust
 use factorseal::{FactorSealStore, Vault};
 use keyring_core::{Entry, set_default_store};
+use zeroize::Zeroizing;
 
-let vault = Vault::unlock("/path/to/vault")?;
+let yubikey_pin = Zeroizing::new(rpassword::prompt_password("YubiKey PIN: ")?);
+let vault = Vault::unlock_with_yubikey("/path/to/vault", yubikey_pin.as_bytes())?;
 set_default_store(FactorSealStore::new(vault));
 
 let entry = Entry::new("my-project", "DATABASE_URL")?;
@@ -267,7 +289,8 @@ through `FactorSealStoreOptions`.
 - `cli` (default): builds the `factorseal` command.
 - `keyring` (default): implements `keyring-core`.
 - `secret-service` (Linux default): provides `org.freedesktop.secrets`.
-- `yubikey`: enables the current single-YubiKey PIV provider.
+- `yubikey`: enables the current required second-factor provider. The feature is
+  not in the default build while hardware-only prototype compatibility remains.
 - `password`: enables legacy version 1 password vaults and migration only.
 
 Minimal consumers can build the credential-vault types without a provider:

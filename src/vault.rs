@@ -330,7 +330,11 @@ impl VaultConfig {
 }
 
 impl Vault {
-    /// Create a vault whose key is bound to the platform hardware backend.
+    /// Create a transitional hardware-only vault.
+    ///
+    /// This compatibility API does not meet FactorSeal's 2FA design
+    /// requirement. Use [`Self::create_with_yubikey`] for the current
+    /// design-compliant configuration.
     pub fn create(path: impl AsRef<Path>) -> Result<UnlockedVault> {
         #[cfg(feature = "hardware")]
         {
@@ -345,6 +349,7 @@ impl Vault {
 
     /// Unlock a hardware-only vault.
     ///
+    /// Hardware-only vaults do not meet FactorSeal's 2FA design requirement.
     /// Vaults configured with a YubiKey require [`Self::unlock_with_yubikey`].
     pub fn unlock(path: impl AsRef<Path>) -> Result<UnlockedVault> {
         #[cfg(feature = "hardware")]
@@ -358,7 +363,7 @@ impl Vault {
         }
     }
 
-    /// Create a hardware-bound vault that additionally requires a YubiKey.
+    /// Create a 2FA vault requiring both platform hardware and a YubiKey.
     pub fn create_with_yubikey(
         path: impl AsRef<Path>,
         yubikey_pin: &[u8],
@@ -378,7 +383,7 @@ impl Vault {
         }
     }
 
-    /// Unlock a vault using platform hardware and its configured YubiKey.
+    /// Unlock a 2FA vault using platform hardware and its configured YubiKey.
     pub fn unlock_with_yubikey(
         path: impl AsRef<Path>,
         yubikey_pin: &[u8],
@@ -417,7 +422,9 @@ impl Vault {
         }
     }
 
-    /// Remove the YubiKey requirement after successfully using both factors.
+    /// Downgrade a 2FA vault to transitional hardware-only compatibility.
+    ///
+    /// The resulting vault does not meet FactorSeal's 2FA design requirement.
     pub fn remove_yubikey(path: impl AsRef<Path>, yubikey_pin: &[u8]) -> Result<()> {
         #[cfg(all(feature = "hardware", feature = "yubikey"))]
         {
@@ -512,8 +519,10 @@ impl Vault {
         write_config(path, &config)
     }
 
-    /// Migrate a version 1 password vault to platform hardware without
-    /// rewriting credential entries.
+    /// Migrate a version 1 password vault to transitional hardware-only
+    /// compatibility without rewriting credential entries.
+    ///
+    /// The resulting vault does not meet FactorSeal's 2FA design requirement.
     #[cfg(feature = "password")]
     pub fn migrate_password_to_hardware(path: impl AsRef<Path>, password: &[u8]) -> Result<()> {
         #[cfg(feature = "hardware")]

@@ -1,6 +1,6 @@
 [package]
 name = "factorseal"
-description = "A hardware-bound local keyring with optional YubiKey two-factor unlock"
+description = "A hardware-bound local keyring designed to require two-factor authentication"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"

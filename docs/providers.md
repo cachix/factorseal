@@ -4,9 +4,20 @@ An unlock provider releases or reconstructs the vault key after local
 authorization. It is not an encryption recipient and never handles credential
 plaintext.
 
+## Factor policy
+
+Two-factor authentication (2FA) is required by design for every supported
+persistent vault. The current policy is 2-of-2: platform hardware protects one
+random share and a PIN-protected YubiKey protects the other. Neither factor
+independently protects the complete vault key.
+
+The prototype retains hardware-only and legacy-password compatibility paths
+for development and migration. They do not satisfy the factor policy and are
+not supported deployment profiles.
+
 ## Platform hardware
 
-Platform hardware is the default and is required for every version 2 vault.
+Platform hardware is the first required factor for every version 2 vault.
 FactorSeal uses `hardware-enclave` and accepts only these backends:
 
 | Platform | Accepted backend |
@@ -24,8 +35,8 @@ reachable `tpm2-abrmd` resource manager.
 
 ## YubiKey
 
-The optional `yubikey` feature adds a required second factor. It uses the PIV
-key-management slot (`9d`) and requires:
+The current required second-factor provider is enabled by the `yubikey` Cargo
+feature. It uses the PIV key-management slot (`9d`) and requires:
 
 1. An existing RSA-2048 private key and matching certificate.
 2. Firmware 5.2.3+ with PIV slot metadata support.
@@ -54,11 +65,12 @@ a copied vault and password to bypass its machine binding.
 
 Unlock providers must:
 
-1. Bind their vault-key share to the expected device.
-2. Perform configured authorization for a new unlock session.
-3. Avoid persistent plaintext vault-key caches.
-4. Return only a vault-key share, never stored credential values.
-5. Zeroize transient private material where the platform permits.
-6. Distinguish missing hardware, denied authorization, and backend failures.
-7. Refuse a silent downgrade to a weaker provider.
-8. Support explicit lock and bounded session expiry when the agent is added.
+1. Enforce an `all` policy with at least two independently protected factors.
+2. Bind their vault-key share to the expected device.
+3. Perform configured authorization for a new unlock session.
+4. Avoid persistent plaintext vault-key caches.
+5. Return only a vault-key share, never stored credential values.
+6. Zeroize transient private material where the platform permits.
+7. Distinguish missing hardware, denied authorization, and backend failures.
+8. Refuse a silent downgrade to a weaker provider.
+9. Support explicit lock and bounded session expiry when the agent is added.

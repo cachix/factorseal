@@ -32,6 +32,11 @@ useless without the TPM that created it.
 
 ## Two-factor composition
 
+Two-factor authentication (2FA) is required by design for every supported
+persistent vault. FactorSeal's current design requires two independently
+protected shares under an `all` policy; no factor may wrap or recover the
+complete vault key by itself.
+
 A `hardware+yubikey` vault uses a 2-of-2 XOR construction:
 
 ```text
@@ -49,6 +54,11 @@ The signature is not stored. Vault metadata records the device serial, PIV
 slot, algorithm, nonce, and encrypted share. Unlock therefore requires the
 same platform hardware, the selected YubiKey, and its PIN. A PIV touch policy
 can additionally require physical presence.
+
+The version 2 format and public API still contain a hardware-only path for
+prototype development and migration. That transitional path does not meet the
+2FA design requirement and is not a supported deployment profile. Version 1
+password vaults are legacy compatibility only.
 
 ## Credential storage
 
