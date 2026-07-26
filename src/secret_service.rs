@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::{Error as VaultError, UnlockedVault};
+use crate::{CredentialMetadata, CredentialOptions, Error as VaultError, UnlockedVault};
 
 const BUS_NAME: &str = "org.freedesktop.secrets";
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
@@ -61,14 +61,17 @@ type DynVariant = Variant<Box<dyn RefArg + 'static>>;
 /// Runtime settings for the Linux Secret Service provider.
 #[derive(Clone, Debug)]
 pub struct SecretServiceOptions {
-    /// How long an approved application may reuse an item-specific grant.
-    pub approval_ttl: Duration,
+    /// How long an approved application may reuse an item-specific access grant.
+    pub grant_ttl: Duration,
+    /// How long the provider may remain idle before wiping the unlocked vault key.
+    pub vault_idle_timeout: Duration,
 }
 
 impl Default for SecretServiceOptions {
     fn default() -> Self {
         Self {
-            approval_ttl: Duration::from_secs(15 * 60),
+            grant_ttl: Duration::from_secs(15 * 60),
+            vault_idle_timeout: Duration::from_secs(30 * 60),
         }
     }
 }
@@ -90,6 +93,9 @@ pub enum SecretServiceError {
 
     #[error("Secret Service index is malformed: {0}")]
     InvalidIndex(String),
+
+    #[error("vault idle timeout elapsed; the unlocked vault key was wiped")]
+    VaultIdleTimeout,
 }
 
 /// Serve the standard Linux Secret Service API until the process is stopped.
@@ -166,6 +172,9 @@ pub fn serve_secret_service(
     );
 
     loop {
+        if agent.expire_idle_vault()? {
+            return Err(SecretServiceError::VaultIdleTimeout);
+        }
         connection.process(Duration::from_millis(100))?;
         while let Ok(event) = approval_receiver.try_recv() {
             let completion = match agent.complete_prompt(event) {
@@ -268,6 +277,7 @@ struct Agent {
     options: SecretServiceOptions,
     approval_sender: mpsc::Sender<ApprovalEvent>,
     approval_gate: Mutex<()>,
+    last_vault_activity: Mutex<Instant>,
 }
 
 #[derive(Clone)]
@@ -392,15 +402,78 @@ impl Agent {
             options,
             approval_sender,
             approval_gate: Mutex::new(()),
+            last_vault_activity: Mutex::new(Instant::now()),
         })
     }
 
+    fn record_vault_activity(&self) {
+        if let Ok(mut last_activity) = self.last_vault_activity.lock() {
+            *last_activity = Instant::now();
+        }
+    }
+
+    fn expire_idle_vault(&self) -> Result<bool, SecretServiceError> {
+        let expired = lock(&self.last_vault_activity)?.elapsed() >= self.options.vault_idle_timeout;
+        if expired {
+            self.vault.lock()?;
+        }
+        Ok(expired)
+    }
+
+    fn vault_get(&self, service: &str, account: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        self.record_vault_activity();
+        self.vault.get(service, account)
+    }
+
+    fn vault_get_with_metadata(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<(Zeroizing<Vec<u8>>, CredentialMetadata), VaultError> {
+        self.record_vault_activity();
+        self.vault.get_with_metadata(service, account)
+    }
+
+    fn vault_set(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), VaultError> {
+        self.record_vault_activity();
+        self.vault.set(service, account, secret)
+    }
+
+    fn vault_set_with_options(
+        &self,
+        service: &str,
+        account: &str,
+        secret: &[u8],
+        options: CredentialOptions,
+    ) -> Result<(), VaultError> {
+        self.record_vault_activity();
+        self.vault
+            .set_with_options(service, account, secret, options)
+    }
+
+    fn vault_delete(&self, service: &str, account: &str) -> Result<(), VaultError> {
+        self.record_vault_activity();
+        self.vault.delete(service, account)
+    }
+
+    fn vault_contains(&self, service: &str, account: &str) -> Result<bool, VaultError> {
+        self.record_vault_activity();
+        self.vault.contains(service, account)
+    }
+
+    fn vault_write_index(&self, plaintext: &[u8]) -> Result<(), VaultError> {
+        self.record_vault_activity();
+        self.vault.write_secret_service_index(plaintext)
+    }
+
     fn item_ids(&self) -> Result<Vec<String>, SecretServiceError> {
-        Ok(lock(&self.index)?
-            .items
-            .iter()
-            .map(|item| item.id.clone())
-            .collect())
+        let mut index = lock(&self.index)?;
+        if self.prune_missing_items(&mut index)? {
+            let bytes = serde_json::to_vec(&*index)
+                .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
+            self.vault_write_index(&bytes)?;
+        }
+        Ok(index.items.iter().map(|item| item.id.clone()).collect())
     }
 
     fn remember_identity(&self, owner: &str) {
@@ -500,6 +573,7 @@ impl Agent {
 
     fn search(&self, attributes: &HashMap<String, String>) -> Result<Vec<IndexItem>, MethodErr> {
         let mut index = lock_method(&self.index)?;
+        self.prune_missing_items_method(&mut index)?;
         let mut matches: Vec<_> = index
             .items
             .iter()
@@ -514,8 +588,7 @@ impl Agent {
                     .or_else(|| attributes.get("account")),
             ) {
                 if self
-                    .vault
-                    .contains(service, account)
+                    .vault_contains(service, account)
                     .map_err(vault_method)?
                 {
                     let now = unix_time();
@@ -540,7 +613,9 @@ impl Agent {
     }
 
     fn item(&self, id: &str) -> Result<IndexItem, MethodErr> {
-        lock_method(&self.index)?
+        let mut index = lock_method(&self.index)?;
+        self.prune_missing_items_method(&mut index)?;
+        index
             .items
             .iter()
             .find(|item| item.id == id)
@@ -549,14 +624,35 @@ impl Agent {
     }
 
     fn all_items(&self) -> Result<Vec<IndexItem>, MethodErr> {
-        Ok(lock_method(&self.index)?.items.clone())
+        let mut index = lock_method(&self.index)?;
+        self.prune_missing_items_method(&mut index)?;
+        Ok(index.items.clone())
+    }
+
+    fn prune_missing_items(&self, index: &mut Index) -> Result<bool, VaultError> {
+        let mut live = Vec::with_capacity(index.items.len());
+        for item in &index.items {
+            if self.vault_contains(&item.service, &item.account)? {
+                live.push(item.clone());
+            }
+        }
+        if live.len() == index.items.len() {
+            return Ok(false);
+        }
+        index.items = live;
+        Ok(true)
+    }
+
+    fn prune_missing_items_method(&self, index: &mut Index) -> Result<(), MethodErr> {
+        if self.prune_missing_items(index).map_err(vault_method)? {
+            self.save_index(index)?;
+        }
+        Ok(())
     }
 
     fn save_index(&self, index: &Index) -> Result<(), MethodErr> {
         let bytes = serde_json::to_vec(index).map_err(|error| MethodErr::failed(&error))?;
-        self.vault
-            .write_secret_service_index(&bytes)
-            .map_err(vault_method)
+        self.vault_write_index(&bytes).map_err(vault_method)
     }
 
     fn set_item_secret(
@@ -573,8 +669,7 @@ impl Agent {
             .find(|item| item.id == id)
             .ok_or_else(|| no_item(id))?;
         let previous = self
-            .vault
-            .get(&item.service, &item.account)
+            .vault_get(&item.service, &item.account)
             .map_err(vault_method)?;
         let service = item.service.clone();
         let account = item.account.clone();
@@ -582,11 +677,10 @@ impl Agent {
         item.modified = unix_time();
         let bytes = serde_json::to_vec(&updated).map_err(|error| MethodErr::failed(&error))?;
 
-        self.vault
-            .set(&service, &account, plaintext)
+        self.vault_set(&service, &account, plaintext)
             .map_err(vault_method)?;
-        if let Err(error) = self.vault.write_secret_service_index(&bytes) {
-            let rollback = self.vault.set(&service, &account, &previous);
+        if let Err(error) = self.vault_write_index(&bytes) {
+            let rollback = self.vault_set(&service, &account, &previous);
             return Err(transaction_error(&error, rollback.as_ref().err()));
         }
         *index = updated;
@@ -606,8 +700,8 @@ impl Agent {
         let now = Instant::now();
         let subject = self.grant_subject(owner)?;
         let expires = now
-            .checked_add(self.options.approval_ttl)
-            .ok_or_else(|| MethodErr::failed(&"approval duration is too large"))?;
+            .checked_add(self.options.grant_ttl)
+            .ok_or_else(|| MethodErr::failed(&"grant duration is too large"))?;
         lock_method(&self.grants)?.insert((subject, resource.to_owned()), expires);
         Ok(())
     }
@@ -761,7 +855,7 @@ impl Agent {
         let pid = identity
             .process_id
             .map_or_else(String::new, |pid| format!(" (pid {pid})"));
-        let seconds = self.options.approval_ttl.as_secs();
+        let seconds = self.options.grant_ttl.as_secs();
         if writeln!(
             tty,
             "\nFactorSeal request\n  application: {process}{pid}\n  action: {summary}\nAllow for {seconds} seconds? [y/N] "
@@ -808,8 +902,8 @@ impl Agent {
                 CompletionResult::Paths(paths)
             }
             PromptAction::Create { item, secret } => {
-                let previous = match self.vault.get(&item.service, &item.account) {
-                    Ok(secret) => Some(secret),
+                let previous = match self.vault_get_with_metadata(&item.service, &item.account) {
+                    Ok(value) => Some(value),
                     Err(VaultError::NoEntry) => None,
                     Err(error) => return Err(error.into()),
                 };
@@ -823,13 +917,15 @@ impl Agent {
                 let bytes = serde_json::to_vec(&updated)
                     .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
 
-                self.vault.set(&item.service, &item.account, &secret)?;
-                if let Err(error) = self.vault.write_secret_service_index(&bytes) {
+                self.vault_set(&item.service, &item.account, &secret)?;
+                if let Err(error) = self.vault_write_index(&bytes) {
                     let rollback = restore_entry(
-                        &self.vault,
+                        self,
                         &item.service,
                         &item.account,
-                        previous.as_ref().map(|value| value.as_slice()),
+                        previous
+                            .as_ref()
+                            .map(|(secret, metadata)| (secret.as_slice(), *metadata)),
                     );
                     return Err(service_transaction_error(&error, rollback.as_ref().err()));
                 }
@@ -849,15 +945,22 @@ impl Agent {
                     .ok_or_else(|| {
                         SecretServiceError::InvalidIndex(format!("unknown item {id}"))
                     })?;
-                let previous = self.vault.get(&item.service, &item.account)?;
+                let previous = self.vault_get_with_metadata(&item.service, &item.account)?;
                 let mut updated = index.clone();
                 updated.items.retain(|item| item.id != id);
                 let bytes = serde_json::to_vec(&updated)
                     .map_err(|error| SecretServiceError::InvalidIndex(error.to_string()))?;
 
-                self.vault.delete(&item.service, &item.account)?;
-                if let Err(error) = self.vault.write_secret_service_index(&bytes) {
-                    let rollback = self.vault.set(&item.service, &item.account, &previous);
+                self.vault_delete(&item.service, &item.account)?;
+                if let Err(error) = self.vault_write_index(&bytes) {
+                    let rollback = self.vault_set_with_options(
+                        &item.service,
+                        &item.account,
+                        &previous.0,
+                        CredentialOptions {
+                            evict_at: previous.1.evict_at,
+                        },
+                    );
                     return Err(service_transaction_error(&error, rollback.as_ref().err()));
                 }
                 *index = updated;
@@ -1019,8 +1122,7 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                 let item = object.agent.item(&object.id)?;
                 let secret = object
                     .agent
-                    .vault
-                    .get(&item.service, &item.account)
+                    .vault_get(&item.service, &item.account)
                     .map_err(vault_method)?;
                 Ok((object
                     .agent
@@ -1194,8 +1296,7 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                     }
                 } else if !replace
                     && agent
-                        .vault
-                        .contains(&service, &account)
+                        .vault_contains(&service, &account)
                         .map_err(vault_method)?
                 {
                     return Err(MethodErr::failed(
@@ -1383,8 +1484,7 @@ fn register_interfaces(crossroads: &mut Crossroads) -> Interfaces {
                     let item = object.0.item(&id)?;
                     let secret = object
                         .0
-                        .vault
-                        .get(&item.service, &item.account)
+                        .vault_get(&item.service, &item.account)
                         .map_err(vault_method)?;
                     secrets.insert(
                         path,
@@ -1669,15 +1769,22 @@ fn method_service(error: MethodErr) -> SecretServiceError {
 }
 
 fn restore_entry(
-    vault: &UnlockedVault,
+    agent: &Agent,
     service: &str,
     account: &str,
-    previous: Option<&[u8]>,
+    previous: Option<(&[u8], CredentialMetadata)>,
 ) -> Result<(), VaultError> {
-    if let Some(previous) = previous {
-        vault.set(service, account, previous)
+    if let Some((previous, metadata)) = previous {
+        agent.vault_set_with_options(
+            service,
+            account,
+            previous,
+            CredentialOptions {
+                evict_at: metadata.evict_at,
+            },
+        )
     } else {
-        match vault.delete(service, account) {
+        match agent.vault_delete(service, account) {
             Ok(()) | Err(VaultError::NoEntry) => Ok(()),
             Err(error) => Err(error),
         }
@@ -1788,6 +1895,50 @@ mod tests {
     }
 
     #[test]
+    fn zero_length_grants_expire_immediately() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::create_for_test(directory.path().join("vault")).unwrap();
+        let (sender, _receiver) = mpsc::channel();
+        let agent = Agent::new(
+            vault,
+            SecretServiceOptions {
+                grant_ttl: Duration::ZERO,
+                ..SecretServiceOptions::default()
+            },
+            sender,
+        )
+        .unwrap();
+
+        agent.grant(":1.10", "item").unwrap();
+
+        assert!(!agent.has_grant(":1.10", "item").unwrap());
+    }
+
+    #[test]
+    fn idle_timeout_wipes_the_vault_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::create_for_test(directory.path().join("vault")).unwrap();
+        let (sender, _receiver) = mpsc::channel();
+        let agent = Agent::new(
+            vault,
+            SecretServiceOptions {
+                vault_idle_timeout: Duration::ZERO,
+                ..SecretServiceOptions::default()
+            },
+            sender,
+        )
+        .unwrap();
+        agent.vault_set("service", "account", b"secret").unwrap();
+
+        assert!(agent.expire_idle_vault().unwrap());
+        assert!(agent.vault.is_locked().unwrap());
+        assert!(matches!(
+            agent.vault_get("service", "account"),
+            Err(VaultError::VaultLocked)
+        ));
+    }
+
+    #[test]
     fn reconnects_from_the_same_process_reuse_the_grant() {
         let (_directory, agent) = agent();
         let subject = "process:42:start:100".to_owned();
@@ -1824,6 +1975,35 @@ mod tests {
         assert_eq!(found[0].service, "example");
         assert_eq!(found[0].account, "alice");
         assert!(agent.vault.read_secret_service_index().unwrap().is_some());
+    }
+
+    #[test]
+    fn credential_eviction_removes_secret_service_metadata() {
+        let (_directory, agent) = agent();
+        agent.vault.set("example", "alice", b"secret").unwrap();
+        let attributes = HashMap::from([
+            ("service".to_owned(), "example".to_owned()),
+            ("username".to_owned(), "alice".to_owned()),
+        ]);
+        assert_eq!(agent.search(&attributes).unwrap().len(), 1);
+        agent
+            .vault_set_with_options(
+                "example",
+                "alice",
+                b"secret",
+                CredentialOptions { evict_at: Some(0) },
+            )
+            .unwrap();
+
+        assert!(agent.all_items().unwrap().is_empty());
+        assert!(agent.search(&attributes).unwrap().is_empty());
+        assert!(
+            agent
+                .vault
+                .read_secret_service_index()
+                .unwrap()
+                .is_some_and(|index| !String::from_utf8_lossy(&index).contains("alice"))
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ mod error;
 mod vault;
 
 pub use error::{Error, Result};
-pub use vault::{UnlockedVault, Vault, VaultInfo};
+pub use vault::{CredentialMetadata, CredentialOptions, UnlockedVault, Vault, VaultInfo};
 
 #[cfg(feature = "hardware")]
 mod hardware;
@@ -18,7 +18,9 @@ mod hardware;
 mod keyring;
 
 #[cfg(feature = "keyring")]
-pub use keyring::FactorSealStore;
+pub use keyring::{
+    EVICT_AT_ATTRIBUTE, FactorSealStore, FactorSealStoreOptions, RETENTION_SECONDS_MODIFIER,
+};
 
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
 mod secret_service;

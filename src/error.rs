@@ -72,6 +72,15 @@ pub enum Error {
     #[error("credential authentication failed")]
     Authentication,
 
+    #[error("the unlocked vault session is locked")]
+    VaultLocked,
+
+    #[error("unlocked vault session state lock was poisoned")]
+    VaultStatePoisoned,
+
+    #[error("credential eviction deadline is outside the supported range")]
+    InvalidEvictionTime,
+
     #[error("refusing to read `{path}` because it is larger than {maximum} bytes")]
     FileTooLarge { path: PathBuf, maximum: u64 },
 

@@ -2,7 +2,10 @@
 use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "password")]
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -26,7 +29,8 @@ const ENTRY_FORMAT: &str = "factorseal-entry";
 const SECRET_SERVICE_INDEX_FORMAT: &str = "factorseal-secret-service-index";
 const CURRENT_VAULT_VERSION: u32 = 2;
 const PASSWORD_VAULT_VERSION: u32 = 1;
-const ENTRY_VERSION: u32 = 1;
+const LEGACY_ENTRY_VERSION: u32 = 1;
+const ENTRY_VERSION: u32 = 2;
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
 const SECRET_SERVICE_INDEX_VERSION: u32 = 1;
 #[cfg(feature = "password")]
@@ -34,7 +38,10 @@ const SALT_BYTES: usize = 16;
 const VAULT_ID_BYTES: usize = 16;
 const MAX_NAME_BYTES: usize = 1024;
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
-const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ENTRY_BYTES: u64 = 96 * 1024 * 1024;
+const ENTRY_PAYLOAD_NO_EVICTION: u8 = 0;
+const ENTRY_PAYLOAD_EVICT_AT: u8 = 1;
+const ENTRY_PAYLOAD_EVICT_AT_BYTES: usize = 1 + size_of::<u64>();
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
 const MAX_SECRET_SERVICE_INDEX_BYTES: u64 = 16 * 1024 * 1024;
 #[cfg(feature = "yubikey")]
@@ -60,6 +67,20 @@ pub struct VaultInfo {
     pub yubikey_serial: Option<u32>,
 }
 
+/// Options applied when storing one credential.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CredentialOptions {
+    /// Unix timestamp after which the credential is evicted.
+    pub evict_at: Option<u64>,
+}
+
+/// Authenticated metadata stored with one credential.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CredentialMetadata {
+    /// Unix timestamp after which the credential is evicted.
+    pub evict_at: Option<u64>,
+}
+
 /// An unlocked vault session.
 ///
 /// The vault key remains in zeroizing process memory for this object's
@@ -68,7 +89,7 @@ pub struct VaultInfo {
 pub struct UnlockedVault {
     root: PathBuf,
     vault_id: [u8; VAULT_ID_BYTES],
-    key: Zeroizing<[u8; KEY_BYTES]>,
+    key: RwLock<Option<Zeroizing<[u8; KEY_BYTES]>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -310,7 +331,7 @@ impl Vault {
             let (backend, key_label) = hardware_fields(&config.unlock)?;
             let protector = PlatformProtector::open(path, key_label)?;
             verify_recorded_backend(&protector, backend)?;
-            let wrapped_key = protector.wrap(&*session.key)?;
+            let wrapped_key = session.with_key(|key| protector.wrap(key))?;
             let updated = VaultConfig::hardware(
                 config.vault_id,
                 protector.backend(),
@@ -390,7 +411,8 @@ impl Vault {
         validate_password(new_password)?;
         let path = path.as_ref();
         let session = Self::unlock_with_password(path, current_password)?;
-        let config = make_password_config(&session.vault_id, &session.key, new_password)?;
+        let config =
+            session.with_key(|key| make_password_config(&session.vault_id, key, new_password))?;
         write_config(path, &config)
     }
 
@@ -402,7 +424,8 @@ impl Vault {
         {
             let path = path.as_ref();
             let session = Self::unlock_with_password(path, password)?;
-            let config = make_hardware_config(path, &session.vault_id, &session.key)?;
+            let config =
+                session.with_key(|key| make_hardware_config(path, &session.vault_id, key))?;
             write_config(path, &config)
         }
         #[cfg(not(feature = "hardware"))]
@@ -437,21 +460,102 @@ impl UnlockedVault {
         Self {
             root: root.to_owned(),
             vault_id,
-            key,
+            key: RwLock::new(Some(key)),
         }
     }
 
-    /// Store or replace one credential.
+    fn with_key<T>(&self, operation: impl FnOnce(&[u8; KEY_BYTES]) -> Result<T>) -> Result<T> {
+        let state = self.key.read().map_err(|_| Error::VaultStatePoisoned)?;
+        let key = state.as_deref().ok_or(Error::VaultLocked)?;
+        operation(key)
+    }
+
+    /// Zeroize the vault key and prevent further operations on this session.
+    pub fn lock(&self) -> Result<()> {
+        let mut state = self.key.write().map_err(|_| Error::VaultStatePoisoned)?;
+        state.take();
+        Ok(())
+    }
+
+    /// Report whether this unlocked session has been locked.
+    pub fn is_locked(&self) -> Result<bool> {
+        let state = self.key.read().map_err(|_| Error::VaultStatePoisoned)?;
+        Ok(state.is_none())
+    }
+
+    /// Store or replace one credential, preserving its existing eviction deadline.
     pub fn set(&self, service: &str, account: &str, secret: &[u8]) -> Result<()> {
+        let evict_at = match self.metadata(service, account) {
+            Ok(metadata) => metadata.evict_at,
+            Err(Error::NoEntry) => None,
+            Err(error) => return Err(error),
+        };
+        self.set_with_options(service, account, secret, CredentialOptions { evict_at })
+    }
+
+    /// Store or replace one credential and its eviction policy.
+    pub fn set_with_options(
+        &self,
+        service: &str,
+        account: &str,
+        secret: &[u8],
+        options: CredentialOptions,
+    ) -> Result<()> {
         validate_specifiers(service, account)?;
-        let aad = entry_aad(&self.vault_id, service, account);
-        let entry = EncryptedFile::encrypt(ENTRY_FORMAT, ENTRY_VERSION, &self.key, &aad, secret)?;
         let path = self.entry_path(service, account);
+        let plaintext = encode_entry_payload(secret, options.evict_at);
+        let aad = entry_encryption_aad(&self.vault_id, service, account, ENTRY_VERSION);
+        let entry = self.with_key(|key| {
+            EncryptedFile::encrypt(ENTRY_FORMAT, ENTRY_VERSION, key, &aad, &plaintext)
+        })?;
         atomic_write(&path, &serialize(&entry, &path)?)
     }
 
     /// Retrieve one credential in a zeroizing buffer.
     pub fn get(&self, service: &str, account: &str) -> Result<Zeroizing<Vec<u8>>> {
+        self.get_with_metadata(service, account)
+            .map(|(secret, _)| secret)
+    }
+
+    /// Retrieve one credential together with its authenticated metadata.
+    pub fn get_with_metadata(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<(Zeroizing<Vec<u8>>, CredentialMetadata)> {
+        let (secret, metadata, path) = self.read_credential(service, account)?;
+        if let Some(deadline) = metadata.evict_at {
+            if deadline <= unix_time()? {
+                drop(secret);
+                remove_expired_entry(&path)?;
+                return Err(Error::NoEntry);
+            }
+        }
+        Ok((secret, metadata))
+    }
+
+    /// Retrieve authenticated credential metadata without returning its secret.
+    pub fn metadata(&self, service: &str, account: &str) -> Result<CredentialMetadata> {
+        self.get_with_metadata(service, account)
+            .map(|(_, metadata)| metadata)
+    }
+
+    /// Replace a credential's eviction deadline without changing its secret.
+    pub fn update_eviction(
+        &self,
+        service: &str,
+        account: &str,
+        evict_at: Option<u64>,
+    ) -> Result<()> {
+        let secret = self.get(service, account)?;
+        self.set_with_options(service, account, &secret, CredentialOptions { evict_at })
+    }
+
+    fn read_credential(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<(Zeroizing<Vec<u8>>, CredentialMetadata, PathBuf)> {
         validate_specifiers(service, account)?;
         let path = self.entry_path(service, account);
         let encoded = match read_limited(&path, MAX_ENTRY_BYTES) {
@@ -462,8 +566,26 @@ impl UnlockedVault {
             Err(error) => return Err(error),
         };
         let entry: EncryptedFile = deserialize(&encoded, &path).map_err(|_| Error::InvalidEntry)?;
-        let aad = entry_aad(&self.vault_id, service, account);
-        entry.decrypt(ENTRY_FORMAT, ENTRY_VERSION, &self.key, &aad)
+        let plaintext = self.with_key(|key| match entry.version {
+            LEGACY_ENTRY_VERSION => entry.decrypt(
+                ENTRY_FORMAT,
+                LEGACY_ENTRY_VERSION,
+                key,
+                &entry_aad(&self.vault_id, service, account),
+            ),
+            ENTRY_VERSION => entry.decrypt(
+                ENTRY_FORMAT,
+                ENTRY_VERSION,
+                key,
+                &entry_encryption_aad(&self.vault_id, service, account, ENTRY_VERSION),
+            ),
+            _ => Err(Error::InvalidEntry),
+        })?;
+        if entry.version == LEGACY_ENTRY_VERSION {
+            return Ok((plaintext, CredentialMetadata::default(), path));
+        }
+        let (secret, metadata) = decode_entry_payload(plaintext)?;
+        Ok((secret, metadata, path))
     }
 
     /// Delete one credential.
@@ -477,12 +599,13 @@ impl UnlockedVault {
         }
     }
 
-    /// Test whether a credential exists without decrypting it.
+    /// Test whether a non-expired credential exists.
     pub fn contains(&self, service: &str, account: &str) -> Result<bool> {
-        validate_specifiers(service, account)?;
-        let path = self.entry_path(service, account);
-        path.try_exists()
-            .map_err(|source| Error::Io { path, source })
+        match self.metadata(service, account) {
+            Ok(_) => Ok(true),
+            Err(Error::NoEntry) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     #[must_use]
@@ -506,24 +629,28 @@ impl UnlockedVault {
             Err(error) => return Err(error),
         };
         let index: EncryptedFile = deserialize(&encoded, &path).map_err(|_| Error::InvalidEntry)?;
-        let plaintext = index.decrypt(
-            SECRET_SERVICE_INDEX_FORMAT,
-            SECRET_SERVICE_INDEX_VERSION,
-            &self.key,
-            &secret_service_index_aad(&self.vault_id),
-        )?;
+        let plaintext = self.with_key(|key| {
+            index.decrypt(
+                SECRET_SERVICE_INDEX_FORMAT,
+                SECRET_SERVICE_INDEX_VERSION,
+                key,
+                &secret_service_index_aad(&self.vault_id),
+            )
+        })?;
         Ok(Some(plaintext))
     }
 
     #[cfg(all(target_os = "linux", feature = "secret-service"))]
     pub(crate) fn write_secret_service_index(&self, plaintext: &[u8]) -> Result<()> {
-        let index = EncryptedFile::encrypt(
-            SECRET_SERVICE_INDEX_FORMAT,
-            SECRET_SERVICE_INDEX_VERSION,
-            &self.key,
-            &secret_service_index_aad(&self.vault_id),
-            plaintext,
-        )?;
+        let index = self.with_key(|key| {
+            EncryptedFile::encrypt(
+                SECRET_SERVICE_INDEX_FORMAT,
+                SECRET_SERVICE_INDEX_VERSION,
+                key,
+                &secret_service_index_aad(&self.vault_id),
+                plaintext,
+            )
+        })?;
         let path = self.root.join(SECRET_SERVICE_INDEX_FILE);
         atomic_write(&path, &serialize(&index, &path)?)
     }
@@ -699,15 +826,17 @@ fn add_yubikey_factor(path: &Path, session: &UnlockedVault, pin: &[u8]) -> Resul
     // before replacing the policy metadata.
     let current_wrapped = decode(wrapped_key, "wrapped_key").map_err(Error::InvalidMetadata)?;
     let current_key = decode_key(&protector.unwrap(&current_wrapped)?, "hardware vault key")?;
-    if *current_key != *session.key {
-        return Err(Error::Authentication);
-    }
-
-    let mut yubikey_share = Zeroizing::new([0_u8; KEY_BYTES]);
-    getrandom::fill(&mut *yubikey_share)?;
-    let platform_share = crypto::xor_keys(&session.key, &yubikey_share);
-    let enrolled = crate::yubikey_factor::enroll(&session.vault_id, pin, &yubikey_share)?;
-    let wrapped_platform_share = protector.wrap(&*platform_share)?;
+    let (wrapped_platform_share, enrolled) = session.with_key(|key| {
+        if *current_key != *key {
+            return Err(Error::Authentication);
+        }
+        let mut yubikey_share = Zeroizing::new([0_u8; KEY_BYTES]);
+        getrandom::fill(&mut *yubikey_share)?;
+        let platform_share = crypto::xor_keys(key, &yubikey_share);
+        let enrolled = crate::yubikey_factor::enroll(&session.vault_id, pin, &yubikey_share)?;
+        let wrapped_platform_share = protector.wrap(&*platform_share)?;
+        Ok((wrapped_platform_share, enrolled))
+    })?;
 
     let updated = VaultConfig::hardware_yubikey(
         config.vault_id,
@@ -965,6 +1094,17 @@ fn entry_aad(vault_id: &[u8; VAULT_ID_BYTES], service: &str, account: &str) -> V
     aad
 }
 
+fn entry_encryption_aad(
+    vault_id: &[u8; VAULT_ID_BYTES],
+    service: &str,
+    account: &str,
+    version: u32,
+) -> Vec<u8> {
+    let mut aad = entry_aad(vault_id, service, account);
+    aad.extend_from_slice(&version.to_be_bytes());
+    aad
+}
+
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
 fn secret_service_index_aad(vault_id: &[u8; VAULT_ID_BYTES]) -> Vec<u8> {
     let mut aad = b"factorseal/secret-service-index/v1\0".to_vec();
@@ -1035,6 +1175,61 @@ fn read_limited(path: &Path, maximum: u64) -> Result<Vec<u8>> {
         });
     }
     Ok(bytes)
+}
+
+fn unix_time() -> Result<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| Error::InvalidEvictionTime)
+}
+
+fn encode_entry_payload(secret: &[u8], evict_at: Option<u64>) -> Zeroizing<Vec<u8>> {
+    let metadata_bytes = if evict_at.is_some() {
+        ENTRY_PAYLOAD_EVICT_AT_BYTES
+    } else {
+        1
+    };
+    let mut payload = Zeroizing::new(Vec::with_capacity(metadata_bytes + secret.len()));
+    if let Some(evict_at) = evict_at {
+        payload.push(ENTRY_PAYLOAD_EVICT_AT);
+        payload.extend_from_slice(&evict_at.to_be_bytes());
+    } else {
+        payload.push(ENTRY_PAYLOAD_NO_EVICTION);
+    }
+    payload.extend_from_slice(secret);
+    payload
+}
+
+fn decode_entry_payload(
+    mut payload: Zeroizing<Vec<u8>>,
+) -> Result<(Zeroizing<Vec<u8>>, CredentialMetadata)> {
+    let (metadata_bytes, evict_at) = match payload.first() {
+        Some(&ENTRY_PAYLOAD_NO_EVICTION) => (1, None),
+        Some(&ENTRY_PAYLOAD_EVICT_AT) if payload.len() >= ENTRY_PAYLOAD_EVICT_AT_BYTES => {
+            let deadline: [u8; size_of::<u64>()] = payload[1..ENTRY_PAYLOAD_EVICT_AT_BYTES]
+                .try_into()
+                .map_err(|_| Error::InvalidEntry)?;
+            (
+                ENTRY_PAYLOAD_EVICT_AT_BYTES,
+                Some(u64::from_be_bytes(deadline)),
+            )
+        }
+        _ => return Err(Error::InvalidEntry),
+    };
+    payload.drain(..metadata_bytes);
+    Ok((payload, CredentialMetadata { evict_at }))
+}
+
+fn remove_expired_entry(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::Io {
+            path: path.to_owned(),
+            source,
+        }),
+    }
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1230,6 +1425,101 @@ mod tests {
         assert!(matches!(
             vault.get("service", "account"),
             Err(Error::InvalidEntry)
+        ));
+    }
+
+    #[test]
+    fn legacy_entries_remain_readable() {
+        let (_directory, _vault_path, vault) = vault();
+        let service = "legacy";
+        let account = "entry";
+        let path = vault.entry_path(service, account);
+        let aad = entry_aad(&vault.vault_id, service, account);
+        let entry = vault
+            .with_key(|key| {
+                EncryptedFile::encrypt(
+                    ENTRY_FORMAT,
+                    LEGACY_ENTRY_VERSION,
+                    key,
+                    &aad,
+                    b"legacy secret",
+                )
+            })
+            .unwrap();
+        atomic_write(&path, &serialize(&entry, &path).unwrap()).unwrap();
+
+        assert_eq!(
+            vault.get(service, account).unwrap().as_slice(),
+            b"legacy secret"
+        );
+        assert_eq!(
+            vault.metadata(service, account).unwrap(),
+            CredentialMetadata::default()
+        );
+    }
+
+    #[test]
+    fn expired_credentials_are_evicted() {
+        let (_directory, _vault_path, vault) = vault();
+        vault
+            .set_with_options(
+                "service",
+                "account",
+                b"secret",
+                CredentialOptions { evict_at: Some(0) },
+            )
+            .unwrap();
+        let path = vault.entry_path("service", "account");
+
+        assert!(matches!(
+            vault.get("service", "account"),
+            Err(Error::NoEntry)
+        ));
+        assert!(!path.exists());
+        assert!(!vault.contains("service", "account").unwrap());
+    }
+
+    #[test]
+    fn replacing_a_credential_preserves_its_eviction_deadline() {
+        let (_directory, _vault_path, vault) = vault();
+        vault
+            .set_with_options(
+                "service",
+                "account",
+                b"first",
+                CredentialOptions {
+                    evict_at: Some(u64::MAX),
+                },
+            )
+            .unwrap();
+
+        vault.set("service", "account", b"second").unwrap();
+
+        assert_eq!(
+            vault.metadata("service", "account").unwrap().evict_at,
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            vault.get("service", "account").unwrap().as_slice(),
+            b"second"
+        );
+    }
+
+    #[test]
+    fn locking_a_session_revokes_all_further_access() {
+        let (_directory, _vault_path, vault) = vault();
+        vault.set("service", "account", b"secret").unwrap();
+
+        vault.lock().unwrap();
+
+        assert!(vault.is_locked().unwrap());
+        assert!(matches!(
+            vault.get("service", "account"),
+            Err(Error::VaultLocked)
+        ));
+        assert!(matches!(
+            vault.set("service", "account", b"replacement"),
+            Err(Error::VaultLocked)
         ));
     }
 

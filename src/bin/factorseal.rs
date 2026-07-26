@@ -3,10 +3,11 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
-use factorseal::{Error as VaultError, UnlockedVault, Vault};
+use factorseal::{CredentialOptions, Error as VaultError, UnlockedVault, Vault};
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
 use factorseal::{SecretServiceError, SecretServiceOptions, serve_secret_service};
 use serde::Serialize;
@@ -64,6 +65,18 @@ enum Command {
         /// Secret input file. Standard input is used when omitted.
         #[arg(short, long)]
         input: Option<PathBuf>,
+
+        /// Unix timestamp after which the credential is evicted.
+        #[arg(long, conflicts_with_all = ["retention_seconds", "no_eviction"])]
+        evict_at: Option<u64>,
+
+        /// Seconds to retain the credential after this write.
+        #[arg(long, conflicts_with_all = ["evict_at", "no_eviction"])]
+        retention_seconds: Option<u64>,
+
+        /// Clear any existing credential eviction deadline.
+        #[arg(long, conflicts_with_all = ["evict_at", "retention_seconds"])]
+        no_eviction: bool,
     },
 
     /// Retrieve a credential.
@@ -85,9 +98,18 @@ enum Command {
     /// Provide FactorSeal through the Linux Secret Service D-Bus API.
     #[cfg(all(target_os = "linux", feature = "secret-service"))]
     Serve {
-        /// Seconds an application may reuse an approved, item-specific grant.
-        #[arg(long, default_value_t = 900, env = "FACTORSEAL_APPROVAL_SECONDS")]
-        approval_seconds: u64,
+        /// Seconds an application may reuse an item-specific access grant.
+        #[arg(
+            long,
+            visible_alias = "approval-seconds",
+            default_value_t = 900,
+            env = "FACTORSEAL_GRANT_SECONDS"
+        )]
+        grant_seconds: u64,
+
+        /// Idle seconds before the provider wipes the unlocked vault key and exits.
+        #[arg(long, default_value_t = 1800, env = "FACTORSEAL_VAULT_IDLE_SECONDS")]
+        vault_idle_seconds: u64,
     },
 
     /// Add a YubiKey as a required second factor.
@@ -178,6 +200,9 @@ enum CliError {
 
     #[error("refusing to read more than {maximum} bytes from `{path}`")]
     InputTooLarge { path: String, maximum: u64 },
+
+    #[error("credential retention deadline is outside the supported range")]
+    EvictionOverflow,
 }
 
 fn main() {
@@ -211,10 +236,28 @@ fn run(cli: Cli) -> Result<(), CliError> {
             service,
             account,
             input,
+            evict_at,
+            retention_seconds,
+            no_eviction,
         } => {
             let vault = cli.unlock_vault(&vault_path)?;
             let secret = Zeroizing::new(read_input(input.as_deref(), MAX_SECRET_BYTES)?);
-            vault.set(service, account, &secret)?;
+            if evict_at.is_some() || retention_seconds.is_some() || *no_eviction {
+                vault.set_with_options(
+                    service,
+                    account,
+                    &secret,
+                    CredentialOptions {
+                        evict_at: if *no_eviction {
+                            None
+                        } else {
+                            eviction_deadline(*evict_at, *retention_seconds)?
+                        },
+                    },
+                )?;
+            } else {
+                vault.set(service, account, &secret)?;
+            }
             Ok(())
         }
         Command::Get {
@@ -233,9 +276,14 @@ fn run(cli: Cli) -> Result<(), CliError> {
         }
         Command::Status => show_status(&vault_path),
         #[cfg(all(target_os = "linux", feature = "secret-service"))]
-        Command::Serve { approval_seconds } => {
-            serve_vault(cli.unlock_vault(&vault_path)?, *approval_seconds)
-        }
+        Command::Serve {
+            grant_seconds,
+            vault_idle_seconds,
+        } => serve_vault(
+            cli.unlock_vault(&vault_path)?,
+            *grant_seconds,
+            *vault_idle_seconds,
+        ),
         #[cfg(feature = "yubikey")]
         Command::AddYubikey => {
             let pin = read_yubikey_pin(cli.yubikey_pin_file.as_deref())?;
@@ -280,15 +328,39 @@ fn show_status(path: &Path) -> Result<(), CliError> {
 }
 
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
-fn serve_vault(vault: UnlockedVault, approval_seconds: u64) -> Result<(), CliError> {
+fn serve_vault(
+    vault: UnlockedVault,
+    grant_seconds: u64,
+    vault_idle_seconds: u64,
+) -> Result<(), CliError> {
     eprintln!("FactorSeal is providing org.freedesktop.secrets; approvals will appear here.");
     serve_secret_service(
         vault,
         SecretServiceOptions {
-            approval_ttl: Duration::from_secs(approval_seconds),
+            grant_ttl: Duration::from_secs(grant_seconds),
+            vault_idle_timeout: Duration::from_secs(vault_idle_seconds),
         },
     )?;
     Ok(())
+}
+
+fn eviction_deadline(
+    evict_at: Option<u64>,
+    retention_seconds: Option<u64>,
+) -> Result<Option<u64>, CliError> {
+    if let Some(evict_at) = evict_at {
+        return Ok(Some(evict_at));
+    }
+    let Some(retention_seconds) = retention_seconds else {
+        return Ok(None);
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CliError::EvictionOverflow)?
+        .as_secs();
+    now.checked_add(retention_seconds)
+        .map(Some)
+        .ok_or(CliError::EvictionOverflow)
 }
 
 fn resolve_vault_path(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
@@ -463,6 +535,24 @@ mod tests {
             read_limited(&b"five!"[..], "memory", 4),
             Err(CliError::InputTooLarge { maximum: 4, .. })
         ));
+    }
+
+    #[test]
+    fn eviction_deadlines_accept_absolute_and_relative_values() {
+        assert_eq!(eviction_deadline(Some(42), None).unwrap(), Some(42));
+        assert_eq!(eviction_deadline(None, None).unwrap(), None);
+
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let deadline = eviction_deadline(None, Some(60)).unwrap().unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(deadline >= before + 60);
+        assert!(deadline <= after + 60);
     }
 
     #[cfg(any(feature = "password", feature = "yubikey"))]

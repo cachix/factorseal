@@ -270,15 +270,59 @@ let value = entry.get_password()?;
 The example reflects the current API and will evolve to accept a generic
 authenticator session.
 
-The target unlocked session holds one zeroizing vault key for a bounded
-lifetime. Every `get` decrypts only the requested credential into a zeroizing
-buffer. The planned desktop unlock agent will provide authorize-once behavior
-across processes without caching plaintext credential values.
+An unlocked session holds one zeroizing vault key and never caches plaintext
+credential values. Every `get` decrypts only the requested credential. The
+session can be explicitly locked, after which all access through that shared
+session fails.
 
-The agent must also provide:
+Three independent lifetimes apply:
 
-- explicit locking and session expiry;
-- application authorization;
+- **Access-grant TTL** controls how long an approved Secret Service client may
+  access one item without another prompt. It does not delete the credential or
+  extend the unlocked vault-key lifetime.
+- **Vault idle timeout** controls how long the Secret Service provider retains
+  the unlocked vault key without a vault operation. At the deadline the key is
+  zeroized and the provider exits. It does not delete credentials.
+- **Credential eviction** is an optional deadline stored as authenticated,
+  encrypted metadata inside each credential entry. At or after the deadline,
+  the next read, metadata lookup, or existence check deletes the entry and
+  reports it as missing.
+
+The current CLI accepts either an absolute Unix timestamp or a retention
+duration for credential eviction. Replacing a value without an eviction flag
+preserves its existing deadline:
+
+```console
+printf 'temporary token' |
+  factorseal set my-service API_TOKEN --retention-seconds 3600
+printf 'replacement token' |
+  factorseal set my-service API_TOKEN --evict-at 1800000000
+printf 'permanent token' |
+  factorseal set my-service API_TOKEN --no-eviction
+```
+
+The `keyring-core` adapter exposes the same policy generically through entry
+modifiers. `retention_seconds` computes a fresh deadline on every successful
+write; `evict_at` accepts a Unix timestamp or `never`. The resolved deadline
+is returned by `get_attributes` as `evict_at` and can be changed with
+`update_attributes`:
+
+```rust
+use std::collections::HashMap;
+use keyring_core::Entry;
+
+let modifiers = HashMap::from([("retention_seconds", "3600")]);
+let entry = Entry::new_with_modifiers("my-service", "API_TOKEN", &modifiers)?;
+entry.set_password("temporary token")?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A store-wide default can be applied to otherwise ordinary `Entry::new`
+credentials with
+`FactorSealStoreOptions { default_retention: Some(duration) }`.
+
+The agent still needs:
+
 - audit events;
 - authenticator enrollment and replacement;
 - policy integrity and rollback detection.
@@ -307,14 +351,15 @@ cached for 15 minutes by default. A keyring library may reconnect during that
 period without prompting the same running application again:
 
 ```console
-factorseal serve --approval-seconds 300
+factorseal serve --grant-seconds 300 --vault-idle-seconds 1800
 ```
 
 The first provider uses `/dev/tty` for approval, so it must run in the
 foreground. A desktop approval UI and fingerprint-backed confirmation are
 still required before installing it as a headless D-Bus-activated service.
 Closing a Secret Service session or calling `Lock` removes its grants; grants
-also expire automatically.
+also expire automatically. The default grant TTL is 15 minutes, while the
+separate default vault idle timeout is 30 minutes.
 
 Secret values remain in the existing FactorSeal entry files. Secret Service
 labels and searchable attributes are kept in a separately authenticated,
