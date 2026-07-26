@@ -41,16 +41,24 @@ credential cache, or an encrypted directory:
   reach it through `add_key`, `request_key`, and `keyctl`; the `keyctl` command
   is a userspace front end to those kernel facilities.
 
-### Comparison
+### Comparison matrix
 
-| Option | Storage and application interface | Unlock model | Lifetime and eviction |
-| --- | --- | --- | --- |
-| **FactorSeal** | Independently encrypted entry files; CLI, Rust `keyring-core`, and Secret Service | Two independent factors are required by design; the current 2FA path combines a TPM or Secure Enclave with one YubiKey | Separate item-grant TTL, vault idle timeout, RAM-only session collection, and optional per-secret eviction deadline |
-| **GNOME Keyring** | Desktop keyring plus a memory-only session collection; Secret Service/libsecret | Commonly unlocks the login keyring through PAM with the login password | Can lock collections; the session collection is cleared at logout. Secret Service defines no per-item TTL |
-| **KWallet** | Encrypted wallet files; native KWallet D-Bus/C++ APIs, with desktop compatibility depending on the deployment | Password or GPG-backed wallet; `kdewallet` can open at login when its password matches the login password | Can close the whole wallet after inactivity, on screen lock, or after the last client exits; no documented per-entry eviction |
-| **KeePassXC** | Encrypted KDBX database; GUI/CLI and optional Secret Service provider | Database password with optional key file or YubiKey challenge-response | Locks the whole database. Entry expiry is metadata and notification, not automatic secret deletion |
-| **Linux kernel keyrings** | Payloads retained by the kernel; syscalls and the `keyctl` utility | No vault-wide unlock; access uses possession, permissions, and optional LSM policy. Specialized trusted keys can use a TPM | Thread, process, session, and user scopes; individual keys can receive a timeout and become inaccessible before later garbage collection |
-| **`pass`** | One GPG-encrypted file per entry under `~/.password-store`; CLI and ordinary file/Git tools | The configured GPG recipient keys control decryption | Files remain until explicitly removed; no built-in item TTL or session collection |
+These systems make different choices along several independent axes. In
+particular, application authorization, locking an unlocked store, and expiring
+one stored credential are not the same control.
+
+| Option | Storage model | Application interfaces | Unlock and hardware binding | Application authorization | Unlocked-state lifetime | Credential expiry |
+| --- | --- | --- | --- | --- | --- | --- |
+| **FactorSeal** | Independently encrypted entry files plus encrypted indexes; separate RAM-only session collection | CLI, Rust `keyring-core`, and Secret Service | Two factors required by design: TPM or Secure Enclave plus YubiKey in the current 2FA path | Caller-bound, item-specific prompts and grants with independent TTLs | Configurable vault idle timeout zeroizes the key and stops the provider; explicit collection/item locking | Optional authenticated deadline per persistent credential; the first read, metadata lookup, or existence check at or after expiry deletes it |
+| **GNOME Keyring** | Encrypted desktop keyrings plus a memory-only session keyring | Secret Service/libsecret and desktop tooling | Master password; the login keyring is commonly auto-unlocked through PAM. No default machine binding | Any process running as the same user can access secrets in an unlocked keyring; no caller-bound per-item grant model | Keyrings can be locked; the session keyring disappears at logout | No standard expiry property or behavior in Secret Service; an item remains until a client deletes it |
+| **KWallet** | Encrypted wallet files containing folders and entries | Native KWallet D-Bus/C++ APIs; desktop compatibility depends on the deployment | Password or GPG-backed wallet; `kdewallet` can open at login when its password matches the login password | Per-application access policy at wallet scope; connected applications can use entries in that wallet | Can close the wallet after inactivity, on screen lock, or after the last client disconnects | No documented built-in per-entry expiry; entries remain until explicitly deleted |
+| **KeePassXC** | Encrypted KDBX database | GUI, CLI, browser integration, and optional Secret Service provider | Database password with optional key file or YubiKey challenge-response; supported platforms also offer quick unlock | Browser/site rules and optional Secret Service access confirmation for an exposed database group | Database-wide lock controls rather than independent item-lock lifetimes | Per-entry expiry timestamp with warnings and expired-entry search; expiry does not automatically delete the entry |
+| **Linux kernel keyrings** | Key payloads retained in kernel memory | `add_key`/`request_key`/`keyctl` syscalls and the `keyctl` utility | No vault-wide unlock; access uses possession, permissions, and optional LSM policy. Specialized trusted keys can use a TPM | Per-key and per-keyring possession/permissions, with UID/GID and optional LSM checks | Thread, process, session, user, and persistent keyring scopes | Native per-key timeout; an expired key becomes inaccessible and is later garbage-collected |
+| **`pass`** | One GPG-encrypted file per entry under `~/.password-store` | CLI plus ordinary file and optional Git workflows | Configured GPG recipient keys control decryption; hardware binding depends on the GPG key setup | Filesystem permissions and access to the GPG private key; no per-application policy | No store-wide unlocked session; any GPG agent cache is external to `pass` | No built-in credential expiry; encrypted files remain until explicitly removed |
+
+“Credential expiry” here means provider-enforced behavior for one stored
+credential. It does not include clipboard clearing, merely locking the whole
+store, or displaying an expiry warning while retaining the value.
 
 The comparison is about behavior, not a single security ranking. These tools
 solve different problems:
@@ -80,7 +88,10 @@ eviction through its native API, CLI, and `keyring-core` modifiers.
 
 Useful primary references for the other rows are the
 [GNOME Keyring overview](https://wiki.gnome.org/Projects/GnomeKeyring),
+[GNOME Keyring security FAQ](https://wiki.gnome.org/Projects/GnomeKeyring/SecurityFAQ),
 [KWallet handbook](https://docs.kde.org/stable_kf6/en/kwalletmanager/kwalletmanager/kwallet-kcontrol-module.html),
+[KWallet access control](https://docs.kde.org/trunk_kf6/en/kwalletmanager/kwalletmanager/wallet-access-control.html),
+[KeePassXC entry handling](https://keepassxc.org/docs/KeePassXC_UserGuide#_entry_handling),
 [KeePassXC Secret Service guide](https://keepassxc.org/docs/KeePassXC_UserGuide#_secret_service_integration),
 [kernel key retention documentation](https://docs.kernel.org/security/keys/core.html),
 [TPM-backed trusted keys](https://docs.kernel.org/security/keys/trusted-encrypted.html),
