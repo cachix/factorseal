@@ -15,7 +15,7 @@ any one enrolled authenticator
        |
 reconstruct one vault key
        |
-get(service, account) -> secret
+get(item, field?) -> secret
 ```
 
 Every completed vault must have at least two independent authenticators
@@ -43,6 +43,35 @@ or fingerprints, or implement atomic authenticator replacement.
 Until the new format is implemented, the commands and APIs in the repository
 retain their version 2 behavior. The target CLI examples below are a design
 contract, not yet available commands.
+
+## Secret references
+
+FactorSeal implements the `item` and optional `field` coordinates from
+[SecretSpec references](https://secretspec.dev/concepts/references/). They are
+the stable identity of a stored secret:
+
+```rust
+use factorseal::{ReferenceOptions, SecretReference};
+
+let reference = SecretReference::with_field("production/database", "password")?;
+vault.set_by_reference_with_options(
+    &reference,
+    b"secret",
+    ReferenceOptions {
+        evict_at: None,
+        service: Some("postgres".into()),
+        account: Some("app".into()),
+    },
+)?;
+let secret = vault.get_by_reference(&reference)?;
+```
+
+`service` and `account` are optional, additional keyring metadata. They are
+kept in a separate encrypted index and can change without changing the
+reference, entry path, or authenticated storage identity. The existing
+`set(service, account, ...)` and `get(service, account)` APIs remain as a
+compatibility view over that metadata. Existing version 1/2 entries are
+migrated to opaque references when rewritten or explicitly resolved.
 
 ## One identity, multiple authenticators
 
@@ -173,9 +202,10 @@ so credential entries do not need to be rewritten and an old authenticator
 envelope cannot participate in the current unlock policy.
 
 XChaCha20-Poly1305 encrypts every credential independently with the reconstructed
-256-bit vault key. Credential service and account names are authenticated and
-hashed for their storage paths. An unlocked session retains only the zeroizing
-vault key, not a plaintext credential cache.
+256-bit vault key. Secret `item` and optional `field` coordinates are
+authenticated and hashed for their storage paths. Keyring service/account
+metadata is stored in a separate authenticated, encrypted index. An unlocked
+session retains only the zeroizing vault key, not a plaintext credential cache.
 
 ## Authenticator providers
 
@@ -251,8 +281,8 @@ explicitly designed policy.
 
 ## Credential storage and sessions
 
-Applications address credentials by the familiar `service + account`
-identity:
+Keyring applications can continue to address credentials through the familiar
+`service + account` compatibility view:
 
 ```rust
 use factorseal::{FactorSealStore, Vault};
@@ -334,6 +364,13 @@ plain and standard DH/AES sessions, the default collection, item search,
 creation, updates, deletion, locking, and prompts. This lets applications that
 already use libsecret, the Secret Service API, or a compatible language
 keyring use FactorSeal without application-specific integration.
+
+The provider exposes two fixed collections. `default` stores encrypted,
+hardware-bound entries in the persistent FactorSeal vault. `session` stores
+secret values only in zeroizing process memory; it never writes them to the
+vault or its Secret Service index. Session items are wiped when the agent locks
+or exits, including at the vault idle deadline. Unrecognized collection aliases
+resolve to `/` as required by the Secret Service API.
 
 Run it in a terminal after stopping any other process that owns
 `org.freedesktop.secrets`:

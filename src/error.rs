@@ -60,6 +60,12 @@ pub enum Error {
     #[error("credential account must not be empty")]
     EmptyAccount,
 
+    #[error("secret reference item must not be empty")]
+    EmptyReferenceItem,
+
+    #[error("secret reference field must not be empty")]
+    EmptyReferenceField,
+
     #[error("credential {field} is longer than {maximum} bytes")]
     CredentialNameTooLong { field: &'static str, maximum: usize },
 
