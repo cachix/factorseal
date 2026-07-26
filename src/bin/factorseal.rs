@@ -1,10 +1,14 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use factorseal::{Error as VaultError, UnlockedVault, Vault};
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+use factorseal::{SecretServiceError, SecretServiceOptions, serve_secret_service};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
@@ -78,6 +82,14 @@ enum Command {
     /// Show non-secret vault metadata without unlocking.
     Status,
 
+    /// Provide FactorSeal through the Linux Secret Service D-Bus API.
+    #[cfg(all(target_os = "linux", feature = "secret-service"))]
+    Serve {
+        /// Seconds an application may reuse an approved, item-specific grant.
+        #[arg(long, default_value_t = 900, env = "FACTORSEAL_APPROVAL_SECONDS")]
+        approval_seconds: u64,
+    },
+
     /// Add a YubiKey as a required second factor.
     #[cfg(feature = "yubikey")]
     AddYubikey,
@@ -124,6 +136,10 @@ enum CliError {
 
     #[error("JSON serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[cfg(all(target_os = "linux", feature = "secret-service"))]
+    #[error(transparent)]
+    SecretService(#[from] SecretServiceError),
 
     #[error("refusing to read more than {maximum} bytes from `{path}`")]
     InputTooLarge { path: String, maximum: u64 },
@@ -198,20 +214,16 @@ fn run(cli: Cli) -> Result<(), CliError> {
             vault.delete(&service, &account)?;
             Ok(())
         }
-        Command::Status => {
-            let info = Vault::info(&vault_path)?;
-            let status = Status {
-                path: info.path.display().to_string(),
-                version: info.version,
-                vault_id: info.vault_id,
-                unlock_method: info.unlock_method,
-                hardware_backend: info.hardware_backend,
-                yubikey_serial: info.yubikey_serial,
-                state: "locked",
-            };
-            println!("{}", serde_json::to_string_pretty(&status)?);
-            Ok(())
-        }
+        Command::Status => show_status(&vault_path),
+        #[cfg(all(target_os = "linux", feature = "secret-service"))]
+        Command::Serve { approval_seconds } => serve_vault(
+            &vault_path,
+            approval_seconds,
+            #[cfg(feature = "password")]
+            cli.password_file.as_deref(),
+            #[cfg(feature = "yubikey")]
+            cli.yubikey_pin_file.as_deref(),
+        ),
         #[cfg(feature = "yubikey")]
         Command::AddYubikey => {
             let pin = read_yubikey_pin(cli.yubikey_pin_file.as_deref())?;
@@ -238,6 +250,45 @@ fn run(cli: Cli) -> Result<(), CliError> {
             Ok(())
         }
     }
+}
+
+fn show_status(path: &Path) -> Result<(), CliError> {
+    let info = Vault::info(path)?;
+    let status = Status {
+        path: info.path.display().to_string(),
+        version: info.version,
+        vault_id: info.vault_id,
+        unlock_method: info.unlock_method,
+        hardware_backend: info.hardware_backend,
+        yubikey_serial: info.yubikey_serial,
+        state: "locked",
+    };
+    println!("{}", serde_json::to_string_pretty(&status)?);
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+fn serve_vault(
+    path: &Path,
+    approval_seconds: u64,
+    #[cfg(feature = "password")] password_file: Option<&Path>,
+    #[cfg(feature = "yubikey")] yubikey_pin_file: Option<&Path>,
+) -> Result<(), CliError> {
+    let vault = unlock_vault(
+        path,
+        #[cfg(feature = "password")]
+        password_file,
+        #[cfg(feature = "yubikey")]
+        yubikey_pin_file,
+    )?;
+    eprintln!("FactorSeal is providing org.freedesktop.secrets; approvals will appear here.");
+    serve_secret_service(
+        vault,
+        SecretServiceOptions {
+            approval_ttl: Duration::from_secs(approval_seconds),
+        },
+    )?;
+    Ok(())
 }
 
 fn resolve_vault_path(explicit: Option<PathBuf>) -> Result<PathBuf, CliError> {

@@ -19,5 +19,11 @@ mod keyring;
 #[cfg(feature = "keyring")]
 pub use keyring::FactorSealStore;
 
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+mod secret_service;
+
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+pub use secret_service::{SecretServiceError, SecretServiceOptions, serve_secret_service};
+
 #[cfg(feature = "yubikey")]
 mod yubikey_factor;

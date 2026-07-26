@@ -21,11 +21,17 @@ use crate::{Error, Result};
 
 const CONFIG_FILE: &str = "vault.json";
 const ENTRIES_DIRECTORY: &str = "entries";
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+const SECRET_SERVICE_INDEX_FILE: &str = "secret-service-index.fseal";
 const VAULT_FORMAT: &str = "factorseal-vault";
 const ENTRY_FORMAT: &str = "factorseal-entry";
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+const SECRET_SERVICE_INDEX_FORMAT: &str = "factorseal-secret-service-index";
 const CURRENT_VAULT_VERSION: u32 = 2;
 const PASSWORD_VAULT_VERSION: u32 = 1;
 const ENTRY_VERSION: u32 = 1;
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+const SECRET_SERVICE_INDEX_VERSION: u32 = 1;
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 24;
 #[cfg(feature = "password")]
@@ -34,6 +40,8 @@ const VAULT_ID_BYTES: usize = 16;
 const MAX_NAME_BYTES: usize = 1024;
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+const MAX_SECRET_SERVICE_INDEX_BYTES: u64 = 16 * 1024 * 1024;
 #[cfg(feature = "password")]
 const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
 #[cfg(feature = "password")]
@@ -119,6 +127,15 @@ struct Argon2Config {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EntryFile {
+    format: String,
+    version: u32,
+    nonce: String,
+    ciphertext: String,
+}
+
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+#[derive(Debug, Serialize, Deserialize)]
+struct SecretServiceIndexFile {
     format: String,
     version: u32,
     nonce: String,
@@ -454,6 +471,64 @@ impl UnlockedVault {
     #[must_use]
     pub fn vault_id(&self) -> String {
         encode(&self.vault_id)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "secret-service"))]
+    pub(crate) fn read_secret_service_index(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        let path = self.root.join(SECRET_SERVICE_INDEX_FILE);
+        let encoded = match read_limited(&path, MAX_SECRET_SERVICE_INDEX_BYTES) {
+            Ok(value) => value,
+            Err(Error::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let index: SecretServiceIndexFile =
+            deserialize(&encoded, &path).map_err(|_| Error::InvalidEntry)?;
+        if index.format != SECRET_SERVICE_INDEX_FORMAT
+            || index.version != SECRET_SERVICE_INDEX_VERSION
+        {
+            return Err(Error::InvalidEntry);
+        }
+        let nonce =
+            decode_array::<NONCE_BYTES>(&index.nonce, "nonce").map_err(|_| Error::InvalidEntry)?;
+        let ciphertext =
+            decode(&index.ciphertext, "ciphertext").map_err(|_| Error::InvalidEntry)?;
+        let cipher = XChaCha20Poly1305::new((&*self.key).into());
+        let plaintext = cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: &secret_service_index_aad(&self.vault_id),
+                },
+            )
+            .map_err(|_| Error::Authentication)?;
+        Ok(Some(Zeroizing::new(plaintext)))
+    }
+
+    #[cfg(all(target_os = "linux", feature = "secret-service"))]
+    pub(crate) fn write_secret_service_index(&self, plaintext: &[u8]) -> Result<()> {
+        let mut nonce = [0_u8; NONCE_BYTES];
+        getrandom::fill(&mut nonce)?;
+        let cipher = XChaCha20Poly1305::new((&*self.key).into());
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &secret_service_index_aad(&self.vault_id),
+                },
+            )
+            .map_err(|_| Error::Authentication)?;
+        let index = SecretServiceIndexFile {
+            format: SECRET_SERVICE_INDEX_FORMAT.to_owned(),
+            version: SECRET_SERVICE_INDEX_VERSION,
+            nonce: encode(&nonce),
+            ciphertext: encode(&ciphertext),
+        };
+        let path = self.root.join(SECRET_SERVICE_INDEX_FILE);
+        atomic_write(&path, &serialize(&index, &path)?)
     }
 
     fn entry_path(&self, service: &str, account: &str) -> PathBuf {
@@ -949,6 +1024,13 @@ fn entry_aad(vault_id: &[u8; VAULT_ID_BYTES], service: &str, account: &str) -> V
     aad
 }
 
+#[cfg(all(target_os = "linux", feature = "secret-service"))]
+fn secret_service_index_aad(vault_id: &[u8; VAULT_ID_BYTES]) -> Vec<u8> {
+    let mut aad = b"factorseal/secret-service-index/v1\0".to_vec();
+    aad.extend_from_slice(vault_id);
+    aad
+}
+
 #[cfg(feature = "password")]
 fn vault_key_aad(vault_id: &[u8; VAULT_ID_BYTES]) -> Vec<u8> {
     let mut aad = b"factorseal/vault-key/v1\0".to_vec();
@@ -1197,6 +1279,29 @@ mod tests {
             vault.get("service", "second"),
             Err(Error::Authentication)
         ));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "secret-service"))]
+    #[test]
+    fn secret_service_index_is_encrypted() {
+        let (_directory, _path, vault) = vault();
+        let metadata = b"metadata marker that must not appear on disk";
+        vault.write_secret_service_index(metadata).unwrap();
+
+        let stored = fs::read(vault.path().join(SECRET_SERVICE_INDEX_FILE)).unwrap();
+        assert!(
+            !stored
+                .windows(metadata.len())
+                .any(|window| window == metadata)
+        );
+        assert_eq!(
+            vault
+                .read_secret_service_index()
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            metadata
+        );
     }
 
     #[test]

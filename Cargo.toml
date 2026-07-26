@@ -8,11 +8,21 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/factorseal/factorseal"
 
 [features]
-default = ["cli", "hardware", "keyring"]
+default = ["cli", "hardware", "keyring", "secret-service"]
 cli = ["dep:clap", "dep:directories", "dep:rpassword"]
 hardware = ["dep:hardware-enclave"]
 keyring = ["dep:keyring-core"]
 password = ["dep:argon2"]
+secret-service = [
+    "cli",
+    "hardware",
+    "dep:aes",
+    "dep:cbc",
+    "dep:dbus",
+    "dep:dbus-crossroads",
+    "dep:hkdf",
+    "dep:num-bigint",
+]
 yubikey = ["hardware", "dep:signature", "dep:yubikey"]
 
 [[bin]]
@@ -22,14 +32,18 @@ required-features = ["cli"]
 
 [dependencies]
 argon2 = { version = "0.5.3", optional = true }
+aes = { version = "0.8.4", optional = true }
 base64 = "0.22.1"
+cbc = { version = "0.1.2", features = ["alloc", "block-padding"], optional = true }
 chacha20poly1305 = "0.10.1"
 clap = { version = "4.5.41", features = ["derive", "env"], optional = true }
 directories = { version = "6.0.0", optional = true }
 getrandom = "0.3.3"
 hardware-enclave = { version = "0.2.10", default-features = false, features = ["encryption", "linux-tpm"], optional = true }
 hex = "0.4.3"
+hkdf = { version = "0.12.4", optional = true }
 keyring-core = { version = "1.0.0", optional = true }
+num-bigint = { version = "0.4.6", optional = true }
 rpassword = { version = "7.4.0", optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"
@@ -39,6 +53,13 @@ tempfile = "3.20.0"
 thiserror = "2.0.12"
 yubikey = { version = "0.8.0", optional = true }
 zeroize = "1.8.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = { version = "0.9.12", optional = true }
+dbus-crossroads = { version = "0.5.3", optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+dbus-secret-service = { version = "4.1.0", features = ["crypto-rust"] }
 
 [lints.rust]
 unsafe_code = "forbid"
