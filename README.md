@@ -5,55 +5,135 @@
 > until its vault format and platform integrations have received independent
 > review.
 
-FactorSeal is a hardware-bound local keyring designed around mandatory,
-backup-ready multifactor unlock.
+FactorSeal is a hardware-bound local secret store. It requires the machine's
+TPM or Secure Enclave to unlock persistent secrets, supports an optional
+YubiKey second factor, and can serve Linux applications through the standard
+Secret Service API.
+
+It is built around three controls that are often conflated:
+
+- how long an application may access one secret;
+- how long the unlocked vault key remains in memory;
+- how long the stored secret itself exists.
+
+FactorSeal gives each control its own deadline.
+
+## Linux keyrings are not all the same thing
+
+On Linux, “keyring” can refer to an API, a desktop vault, an in-kernel
+credential cache, or an encrypted directory:
+
+- [Secret Service](https://specifications.freedesktop.org/secret-service/latest/)
+  is a D-Bus protocol for collections and items. It is not a storage format.
+- [libsecret](https://gnome.pages.gitlab.gnome.org/libsecret/) is a client
+  library and backend abstraction for password storage. Applications use it to
+  talk to a Secret Service provider.
+- GNOME Keyring, KWallet, KeePassXC, and FactorSeal can provide secret storage
+  to desktop applications. Only one process can own
+  `org.freedesktop.secrets` in a D-Bus session at a time.
+- The Linux kernel key retention service is a different system. Applications
+  reach it through `add_key`, `request_key`, and `keyctl`; the `keyctl` command
+  is a userspace front end to those kernel facilities.
+
+### Comparison
+
+| Option | Storage and application interface | Unlock model | Lifetime and eviction |
+| --- | --- | --- | --- |
+| **FactorSeal** | Independently encrypted entry files; CLI, Rust `keyring-core`, and Secret Service | TPM or Secure Enclave is required; one YubiKey can be required in the current prototype | Separate item-grant TTL, vault idle timeout, RAM-only session collection, and optional per-secret eviction deadline |
+| **GNOME Keyring** | Desktop keyring plus a memory-only session collection; Secret Service/libsecret | Commonly unlocks the login keyring through PAM with the login password | Can lock collections; the session collection is cleared at logout. Secret Service defines no per-item TTL |
+| **KWallet** | Encrypted wallet files; native KWallet D-Bus/C++ APIs, with desktop compatibility depending on the deployment | Password or GPG-backed wallet; `kdewallet` can open at login when its password matches the login password | Can close the whole wallet after inactivity, on screen lock, or after the last client exits; no documented per-entry eviction |
+| **KeePassXC** | Encrypted KDBX database; GUI/CLI and optional Secret Service provider | Database password with optional key file or YubiKey challenge-response | Locks the whole database. Entry expiry is metadata and notification, not automatic secret deletion |
+| **Linux kernel keyrings** | Payloads retained by the kernel; syscalls and the `keyctl` utility | No vault-wide unlock; access uses possession, permissions, and optional LSM policy. Specialized trusted keys can use a TPM | Thread, process, session, and user scopes; individual keys can receive a timeout and become inaccessible before later garbage collection |
+| **`pass`** | One GPG-encrypted file per entry under `~/.password-store`; CLI and ordinary file/Git tools | The configured GPG recipient keys control decryption | Files remain until explicitly removed; no built-in item TTL or session collection |
+
+The comparison is about behavior, not a single security ranking. These tools
+solve different problems:
+
+- Use GNOME Keyring or KWallet for the desktop's native, login-integrated
+  credential store.
+- Use KeePassXC for a portable, user-managed password database that can also
+  serve desktop applications.
+- Use kernel keyrings for short-lived credentials consumed by processes or
+  kernel services, not as a general desktop password manager.
+- Use `pass` for a small, inspectable GPG-and-files workflow.
+- Use FactorSeal when persistent local secrets must remain bound to this
+  machine's security hardware and need explicit application grants or
+  deletion deadlines.
+
+The comparison motivates FactorSeal's current shape: Secret Service
+compatibility and default/session collections from the desktop ecosystem,
+whole-vault idle locking as a separate lifecycle control, per-object deadlines
+like kernel keys, and explicit per-client approval. FactorSeal applies those
+ideas to persistent, hardware-bound application secrets.
+
+The [Secret Service Item interface](https://specifications.freedesktop.org/secret-service/latest-single/#org.freedesktop.Secret.Item)
+defines labels, lookup attributes, lock state, and creation/modification
+timestamps, but no expiry property. A provider can add its own convention,
+but generic libsecret clients cannot assume per-item expiry. FactorSeal exposes
+eviction through its native API, CLI, and `keyring-core` modifiers.
+
+Useful primary references for the other rows are the
+[GNOME Keyring overview](https://wiki.gnome.org/Projects/GnomeKeyring),
+[KWallet handbook](https://docs.kde.org/stable_kf6/en/kwalletmanager/kwalletmanager/kwallet-kcontrol-module.html),
+[KeePassXC Secret Service guide](https://keepassxc.org/docs/KeePassXC_UserGuide#_secret_service_integration),
+[kernel key retention documentation](https://docs.kernel.org/security/keys/core.html),
+[TPM-backed trusted keys](https://docs.kernel.org/security/keys/trusted-encrypted.html),
+and [`pass` documentation](https://www.passwordstore.org/).
+
+## What FactorSeal does differently
+
+### Hardware-bound storage
+
+Every version 2 vault requires a supported platform backend through
+[`hardware-enclave`](https://docs.rs/hardware-enclave):
+
+- macOS Secure Enclave;
+- Windows TPM 2.0;
+- native Linux TPM 2.0;
+- Windows TPM through its WSL bridge.
+
+FactorSeal rejects Windows DPAPI and the Linux software-keyring fallback. A
+vault records its hardware backend and cannot silently switch to another one.
+
+The optional `yubikey` feature uses a PIN-protected RSA-2048 PIV key in slot
+`9d` as a required second factor:
 
 ```text
-platform hardware
-       AND
-any one enrolled authenticator
-       |
-reconstruct one vault key
-       |
-get(item, field?) -> secret
+vault key = platform share XOR YubiKey share
 ```
 
-Every completed vault must have at least two independent authenticators
-enrolled. Only one is required for an ordinary unlock; the other exists so
-that losing a phone or security key does not permanently lock the user out.
+The current prototype supports one YubiKey. Backup authenticators, phones,
+fingerprints, atomic authenticator replacement, and recovery are target
+features rather than implemented guarantees.
 
-Examples of a valid enrollment are:
+### Three independent lifetimes
 
-- a primary YubiKey and a backup YubiKey;
-- a YubiKey and a phone;
-- two independently enrolled phones.
+FactorSeal treats access, unlock, and storage lifetime separately:
 
-The TPM or Secure Enclave is always required in addition to one enrolled
-authenticator. Two enrolled authenticators are alternatives, not two devices
-that must be presented together.
+1. **Access-grant TTL** controls how long an approved Secret Service client
+   may access one item without another prompt. Expiry does not lock the vault
+   or delete the secret.
+2. **Vault idle timeout** controls how long the Secret Service provider retains
+   the unlocked vault key without a vault operation. Expiry zeroizes the key
+   and stops the provider, but does not delete persistent entries.
+3. **Credential eviction** is an optional authenticated deadline on one
+   persistent secret. At or after the deadline, the next read, metadata lookup,
+   or existence check deletes the entry and reports it as missing.
 
-## Implementation status
+This differs from KWallet's inactivity setting, which closes a whole wallet,
+and from `KEYCTL_SET_TIMEOUT`, which expires an in-kernel key rather than a
+persistent desktop-vault entry.
 
-This README describes the target design for FactorSeal's next vault format.
-The current version 2 prototype implements platform hardware with one optional
-YubiKey and can provide an unlocked vault through the Linux Secret Service
-D-Bus API. It does not yet enforce two enrolled authenticators, support phones
-or fingerprints, or implement atomic authenticator replacement.
-
-Until the new format is implemented, the commands and APIs in the repository
-retain their version 2 behavior. The target CLI examples below are a design
-contract, not yet available commands.
-
-## Secret references
+### Stable secret references
 
 FactorSeal implements the `item` and optional `field` coordinates from
-[SecretSpec references](https://secretspec.dev/concepts/references/). They are
-the stable identity of a stored secret:
+[SecretSpec references](https://secretspec.dev/concepts/references/):
 
 ```rust
 use factorseal::{ReferenceOptions, SecretReference};
 
-let reference = SecretReference::with_field("production/database", "password")?;
+let reference =
+    SecretReference::with_field("production/database", "password")?;
 vault.set_by_reference_with_options(
     &reference,
     b"secret",
@@ -66,346 +146,34 @@ vault.set_by_reference_with_options(
 let secret = vault.get_by_reference(&reference)?;
 ```
 
-`service` and `account` are optional, additional keyring metadata. They are
-kept in a separate encrypted index and can change without changing the
-reference, entry path, or authenticated storage identity. The existing
-`set(service, account, ...)` and `get(service, account)` APIs remain as a
-compatibility view over that metadata. Existing version 1/2 entries are
-migrated to opaque references when rewritten or explicitly resolved.
-
-## One identity, multiple authenticators
-
-A FactorSeal vault has one stable, random identity. Each phone or security key
-is a separate credential enrolled under that identity.
-
-```text
-vault 7c9e...
-  |
-  +-- YubiKey "primary"       factor 01
-  +-- iPhone "personal"       factor 02
-  +-- Android phone "backup"  factor 03
-```
-
-Authenticators never share or clone a private key. Each device has its own
-credential, label, provider metadata, and stable factor ID. A public-key
-fingerprint identifies the credential; a device serial number is only a hint
-for locating it.
-
-The unlock policy is:
-
-```text
-platform_required       = true
-authenticator_threshold = 1
-minimum_enrolled        = 2
-```
-
-These are separate rules. The threshold says that one authenticator can
-unlock. The minimum says that FactorSeal must maintain a backup.
-
-## Authenticator lifecycle
-
-### Initialize
-
-Initialization generates a random 256-bit vault key and enrolls two distinct
-authenticators in one uninterrupted ceremony. FactorSeal verifies that each
-authenticator can independently complete an unlock before activating the
-vault.
-
-The vault key must remain only in zeroizing process memory while enrollment is
-incomplete. FactorSeal must not write a temporary hardware-only wrapping that
-could later be restored to bypass multifactor unlock.
-
-The target flow is:
-
-```console
-factorseal init
-# Enroll primary authenticator
-# Enroll backup authenticator
-# Verify both, then activate the vault
-```
-
-### Unlock
-
-FactorSeal discovers the available enrolled authenticators and uses one
-selected device. It must not try PINs or biometric operations indiscriminately
-across devices.
-
-```text
-TPM / Secure Enclave + primary YubiKey  -> unlock
-TPM / Secure Enclave + backup phone     -> unlock
-TPM / Secure Enclave alone              -> reject
-YubiKey or phone alone                   -> reject
-```
-
-### Add
-
-An already unlocked vault may enroll additional authenticators:
-
-```console
-factorseal factor add yubikey --label "office key"
-factorseal factor add phone --label "personal phone"
-factorseal factor list
-```
-
-Enrollment requires proof of control of the new authenticator. FactorSeal
-rejects duplicate credential fingerprints.
-
-### Lose or replace
-
-If an authenticator is lost, the user unlocks with a remaining authenticator
-and performs an atomic replacement:
-
-```console
-factorseal factor replace <lost-factor-id>
-```
-
-Replacement must:
-
-1. Enroll and verify a new authenticator.
-2. Generate a new authenticator share and the corresponding platform share
-   for the unchanged vault key.
-3. Rewrap the platform share and protect the authenticator share for every
-   remaining authenticator.
-4. Remove the lost authenticator.
-5. Commit the new policy atomically.
-
-FactorSeal refuses an ordinary removal that would leave fewer than two
-enrolled authenticators. It never offers a command that downgrades a current
-vault to platform-hardware-only unlock.
-
-Restoring old policy metadata must not silently reactivate a revoked
-authenticator. The final format therefore needs authenticated policy metadata
-and rollback protection in addition to atomic filesystem updates.
-
-## Cryptographic composition
-
-FactorSeal extends its existing split-key construction to an authenticator
-group:
-
-```text
-vault key = platform share XOR authenticator share
-
-platform hardware wraps platform share
-
-authenticator A wraps authenticator share
-authenticator B wraps authenticator share
-authenticator C wraps authenticator share
-```
-
-Each independently protected envelope contains the same uniformly random
-authenticator share. Recovering any one envelope is sufficient, but it reveals
-nothing useful without the platform share.
-
-Adding an authenticator creates another envelope and does not rewrite stored
-credentials. Revoking one rotates both shares while preserving the vault key,
-so credential entries do not need to be rewritten and an old authenticator
-envelope cannot participate in the current unlock policy.
-
-XChaCha20-Poly1305 encrypts every credential independently with the reconstructed
-256-bit vault key. Secret `item` and optional `field` coordinates are
-authenticated and hashed for their storage paths. Keyring service/account
-metadata is stored in a separate authenticated, encrypted index. An unlocked
-session retains only the zeroizing vault key, not a plaintext credential cache.
-
-## Authenticator providers
-
-All providers must preserve the split-key property. A provider must decrypt a
-wrapped share, perform key agreement, or produce a stable high-entropy secret.
-A simple yes/no approval is not sufficient.
-
-### YubiKey
-
-The current prototype uses a PIN-protected RSA-2048 PIV key in slot `9d`.
-The next format will treat each YubiKey as one member of the authenticator
-group rather than as a special single-device unlock method.
-
-Each YubiKey must have its own key and certificate. FactorSeal must not clone a
-PIV private key across backup devices.
-
-### Phones
-
-The planned phone provider uses a small companion application:
-
-- iOS generates a device-bound key in the Secure Enclave;
-- Android generates a non-exportable, preferably hardware-backed key in
-  Android Keystore;
-- Face ID, Touch ID, a strong biometric, or the device credential authorizes
-  each key use;
-- the desktop and phone pair through an authenticated QR ceremony;
-- the phone decrypts the authenticator share and returns it over a fresh,
-  transcript-bound encrypted session.
-
-The initial transport should work locally with a one-time QR code. Paired
-local-network or Bluetooth discovery can improve routine unlocks later. An
-optional end-to-end encrypted push relay may be added for remote approval, but
-the relay must never receive a vault key or factor share in plaintext.
-
-Phone credentials are device-bound by default. Restoring an application backup
-does not restore the private key; the user recovers through another enrolled
-authenticator.
-
-WebAuthn hybrid transport with the PRF extension is a possible future provider,
-subject to reliable cross-platform capability detection. Ordinary WebAuthn
-signatures alone are authorization assertions and cannot reconstruct a vault
-key share.
-
-### Recovery keys
-
-A high-entropy offline recovery key may be offered as an additional escape
-hatch. It does not count toward the two-authenticator enrollment minimum by
-default and must not be replaced with a password or short numeric code.
-
-TOTP is not an appropriate offline vault-key provider. Its short code cannot
-safely wrap a cryptographic share, and storing its verifier beside a local
-vault would not provide the intended hardware separation.
-
-## Platform hardware
-
-Every version 2 hardware vault, and every vault in the target format, requires
-a supported platform backend through
-[`hardware-enclave`](https://docs.rs/hardware-enclave):
-
-- macOS Secure Enclave;
-- Windows TPM 2.0;
-- native Linux TPM 2.0;
-- Windows TPM through its WSL bridge.
-
-FactorSeal fails closed when the package selects Windows DPAPI or the Linux
-software keyring fallback. A vault that records one hardware backend cannot be
-opened after silently switching to another.
-
-Multiple authenticators protect against losing an enrolled phone or security
-key. They do not recover a vault after losing or resetting its required TPM or
-Secure Enclave. Cross-machine access and platform recovery require a separate,
-explicitly designed policy.
-
-## Credential storage and sessions
-
-Keyring applications can continue to address credentials through the familiar
-`service + account` compatibility view:
-
-```rust
-use factorseal::{FactorSealStore, Vault};
-use keyring_core::{Entry, set_default_store};
-
-let vault = Vault::unlock("/path/to/vault")?;
-set_default_store(FactorSealStore::new(vault));
-
-let entry = Entry::new("my-project", "DATABASE_URL")?;
-entry.set_password("postgres://localhost/mydb")?;
-let value = entry.get_password()?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-The example reflects the current API and will evolve to accept a generic
-authenticator session.
-
-An unlocked session holds one zeroizing vault key and never caches plaintext
-credential values. Every `get` decrypts only the requested credential. The
-session can be explicitly locked, after which all access through that shared
-session fails.
-
-Three independent lifetimes apply:
-
-- **Access-grant TTL** controls how long an approved Secret Service client may
-  access one item without another prompt. It does not delete the credential or
-  extend the unlocked vault-key lifetime.
-- **Vault idle timeout** controls how long the Secret Service provider retains
-  the unlocked vault key without a vault operation. At the deadline the key is
-  zeroized and the provider exits. It does not delete credentials.
-- **Credential eviction** is an optional deadline stored as authenticated,
-  encrypted metadata inside each credential entry. At or after the deadline,
-  the next read, metadata lookup, or existence check deletes the entry and
-  reports it as missing.
-
-The current CLI accepts either an absolute Unix timestamp or a retention
-duration for credential eviction. Replacing a value without an eviction flag
-preserves its existing deadline:
-
-```console
-printf 'temporary token' |
-  factorseal set my-service API_TOKEN --retention-seconds 3600
-printf 'replacement token' |
-  factorseal set my-service API_TOKEN --evict-at 1800000000
-printf 'permanent token' |
-  factorseal set my-service API_TOKEN --no-eviction
-```
-
-The `keyring-core` adapter exposes the same policy generically through entry
-modifiers. `retention_seconds` computes a fresh deadline on every successful
-write; `evict_at` accepts a Unix timestamp or `never`. The resolved deadline
-is returned by `get_attributes` as `evict_at` and can be changed with
-`update_attributes`:
-
-```rust
-use std::collections::HashMap;
-use keyring_core::Entry;
-
-let modifiers = HashMap::from([("retention_seconds", "3600")]);
-let entry = Entry::new_with_modifiers("my-service", "API_TOKEN", &modifiers)?;
-entry.set_password("temporary token")?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-A store-wide default can be applied to otherwise ordinary `Entry::new`
-credentials with
-`FactorSealStoreOptions { default_retention: Some(duration) }`.
-
-The agent still needs:
-
-- audit events;
-- authenticator enrollment and replacement;
-- policy integrity and rollback detection.
-
-### Linux Secret Service provider
-
-On Linux, the current agent implements `org.freedesktop.secrets`, including
-plain and standard DH/AES sessions, the default collection, item search,
-creation, updates, deletion, locking, and prompts. This lets applications that
-already use libsecret, the Secret Service API, or a compatible language
-keyring use FactorSeal without application-specific integration.
-
-The provider exposes two fixed collections. `default` stores encrypted,
-hardware-bound entries in the persistent FactorSeal vault. `session` stores
-secret values only in zeroizing process memory; it never writes them to the
-vault or its Secret Service index. Session items are wiped when the agent locks
-or exits, including at the vault idle deadline. Unrecognized collection aliases
-resolve to `/` as required by the Secret Service API.
-
-Run it in a terminal after stopping any other process that owns
-`org.freedesktop.secrets`:
-
-```console
-factorseal serve
-```
-
-The vault is fully unlocked once when the agent starts. That does not give
-every application vault-wide access. FactorSeal binds each cryptographic
-session to the caller's unique D-Bus connection and reports matching items as
-locked until the user approves them. Approval creates a grant for only that
-Linux process instance and item, keyed by PID plus process start time and
-cached for 15 minutes by default. A keyring library may reconnect during that
-period without prompting the same running application again:
-
-```console
-factorseal serve --grant-seconds 300 --vault-idle-seconds 1800
-```
-
-The first provider uses `/dev/tty` for approval, so it must run in the
-foreground. A desktop approval UI and fingerprint-backed confirmation are
-still required before installing it as a headless D-Bus-activated service.
-Closing a Secret Service session or calling `Lock` removes its grants; grants
-also expire automatically. The default grant TTL is 15 minutes, while the
-separate default vault idle timeout is 30 minutes.
-
-Secret values remain in the existing FactorSeal entry files. Secret Service
-labels and searchable attributes are kept in a separately authenticated,
-encrypted index inside the vault. An existing CLI entry is imported into that
-index when an application searches for its exact `service + username`.
-
-## Current prototype quick start
-
-The existing version 2 CLI can still be exercised as follows:
+`service` and `account` are optional, additional keyring metadata. They live in
+a separate encrypted index and can change without changing the reference,
+entry path, or authenticated storage identity. The familiar
+`get(service, account)` and `set(service, account, ...)` APIs remain as a
+compatibility view.
+
+## Implementation status
+
+The current version 2 prototype implements:
+
+- platform-hardware-bound vault creation and unlock;
+- optional single-YubiKey two-factor unlock;
+- independently authenticated and encrypted credential entries;
+- SecretSpec `item` and optional `field` references;
+- optional per-credential eviction;
+- a `keyring-core` store;
+- a Linux Secret Service provider with persistent `default` and RAM-only
+  `session` collections;
+- caller-bound, item-specific approval grants.
+
+It does not yet implement independent backup authenticators, phone or
+fingerprint providers, recovery, atomic factor replacement, audit events, or
+rollback protection.
+
+## Quick start
+
+Native Linux requires the `tpm2-tss` runtime and access to `/dev/tpmrm0`, or a
+reachable `tpm2-abrmd` resource manager.
 
 ```console
 devenv shell
@@ -419,35 +187,88 @@ cargo run -- status
 The default vault location is the platform-specific user-data directory.
 Override it with `--vault` or `FACTORSEAL_VAULT`.
 
-Current single-YubiKey support is behind the non-default `yubikey` feature:
+Set or clear a persistent credential's eviction policy:
 
 ```console
-cargo run --features yubikey -- init --yubikey
-cargo run --features yubikey -- add-yubikey
-cargo run --features yubikey -- remove-yubikey
+printf 'temporary token' |
+  cargo run -- set my-service API_TOKEN --retention-seconds 3600
+printf 'replacement token' |
+  cargo run -- set my-service API_TOKEN --evict-at 1800000000
+printf 'permanent token' |
+  cargo run -- set my-service API_TOKEN --no-eviction
 ```
 
-These commands are transitional and do not satisfy the target invariant that
-requires two enrolled authenticators.
+Replacing a value without an eviction option preserves its existing deadline.
 
-Password support is deliberately non-default and exists only for version 1
-migration and development:
+## Linux Secret Service
+
+FactorSeal implements `org.freedesktop.secrets`, including plain and standard
+DH/AES sessions, item search and mutation, collection and item locking, and
+prompts. Stop any other Secret Service provider, then run:
 
 ```console
-cargo run --features password -- migrate-password
+cargo run -- serve
 ```
 
-A password is not an acceptable fallback for a current hardware-bound vault.
+The fixed `default` collection stores encrypted, hardware-bound entries in the
+persistent vault. The fixed `session` collection keeps values only in
+zeroizing process memory and wipes them when the provider locks or exits.
 
-## Features
+Unlocking the vault does not grant every application access. FactorSeal binds
+each D-Bus cryptographic session to its caller and reports matching items as
+locked until the user approves access. A grant applies to one Linux process
+instance and one item. The defaults are a 15-minute grant and a separate
+30-minute vault idle timeout:
+
+```console
+cargo run -- serve --grant-seconds 300 --vault-idle-seconds 1800
+```
+
+The prototype prompts through `/dev/tty`, so it must run in the foreground. A
+desktop approval UI is still needed before it can be installed as a headless
+D-Bus-activated service.
+
+## Rust keyring integration
+
+FactorSeal implements the `keyring-core` store and credential APIs:
+
+```rust
+use factorseal::{FactorSealStore, Vault};
+use keyring_core::{Entry, set_default_store};
+
+let vault = Vault::unlock("/path/to/vault")?;
+set_default_store(FactorSealStore::new(vault));
+
+let entry = Entry::new("my-project", "DATABASE_URL")?;
+entry.set_password("postgres://localhost/mydb")?;
+let value = entry.get_password()?;
+```
+
+Use `retention_seconds` to compute a new eviction deadline on every successful
+write, or `evict_at` with a Unix timestamp or `never`:
+
+```rust
+use std::collections::HashMap;
+use keyring_core::Entry;
+
+let modifiers = HashMap::from([("retention_seconds", "3600")]);
+let entry =
+    Entry::new_with_modifiers("my-service", "API_TOKEN", &modifiers)?;
+entry.set_password("temporary token")?;
+```
+
+`get_attributes` reports the resolved `evict_at` timestamp, and
+`update_attributes` can replace or clear it. A store-wide default is available
+through `FactorSealStoreOptions`.
+
+## Feature flags
 
 - `hardware` (default): hardware-backed wrapping through `hardware-enclave`.
-- `cli` (default): builds the current `factorseal` command.
-- `keyring` (default): implements the `keyring-core` store and credential APIs.
-- `secret-service` (Linux default): provides `org.freedesktop.secrets` with
-  caller-bound, item-specific approval grants.
-- `yubikey`: current version 2 single-YubiKey PIV support.
-- `password`: legacy version 1 password vaults and hardware migration.
+- `cli` (default): builds the `factorseal` command.
+- `keyring` (default): implements `keyring-core`.
+- `secret-service` (Linux default): provides `org.freedesktop.secrets`.
+- `yubikey`: enables the current single-YubiKey PIV provider.
+- `password`: enables legacy version 1 password vaults and migration only.
 
 Minimal consumers can build the credential-vault types without a provider:
 
@@ -455,23 +276,17 @@ Minimal consumers can build the credential-vault types without a provider:
 cargo build --no-default-features
 ```
 
-See [Architecture](docs/architecture.md),
-[Unlock providers](docs/providers.md), and [Security](SECURITY.md). Those
-documents currently describe the implemented version 2 format and must be
-updated alongside the new format.
-
-## Security scope
+## Security boundary
 
 Hardware binding protects a copied vault from offline decryption. It cannot
-prevent an already-authorized application from reading and exfiltrating a
-credential returned to it.
+prevent an approved or compromised application from reading and exfiltrating
+a secret returned to it. Per-item grants reduce ambient access; they do not
+make a malicious authorized client safe.
 
-The strength of an `any` authenticator group is bounded by its weakest enrolled
-provider. FactorSeal must communicate provider strength clearly and must not
-silently add passwords, short recovery codes, or approval-only mechanisms as
-equivalent alternatives to hardware-backed authenticators.
+Losing or resetting the required TPM, Secure Enclave, or current YubiKey can
+permanently lose access. The platform EC and YubiKey RSA operations are not
+post-quantum.
 
-Credential encryption has a post-quantum symmetric security margin, but the
-current platform EC and YubiKey RSA wrapping operations are not post-quantum.
-FactorSeal cannot offer end-to-end post-quantum hardware binding until the
-relevant hardware interfaces expose suitable primitives.
+See [Architecture](docs/architecture.md),
+[Unlock providers](docs/providers.md), and [Security](SECURITY.md) for the
+implemented format, provider requirements, and current limitations.
