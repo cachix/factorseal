@@ -13,12 +13,14 @@
 > until its vault format and platform integrations have received independent
 > review.
 
-FactorSeal is a hardware-bound local secret store. **Two-factor authentication
-(2FA) is required by design** for every supported persistent vault unlock. The
-current 2FA implementation combines the machine's TPM or Secure Enclave with a
-PIN-protected YubiKey; neither factor can unlock the vault alone. FactorSeal can
-serve Linux applications through the standard Secret Service API and supports
-expiring secrets through per-credential eviction deadlines.
+FactorSeal is a local secret store built around the machine's hardware
+enclave: Apple Secure Enclave on macOS or TPM 2.0 on Windows and Linux. The
+enclave protects one share of the vault key, while a PIN-protected YubiKey
+protects the other. **Two-factor authentication (2FA) is required by design**
+for every supported persistent vault unlock; neither factor can unlock the
+vault alone. FactorSeal can serve Linux applications through the standard
+Secret Service API and supports expiring secrets through per-credential
+eviction deadlines.
 
 The prototype still exposes hardware-only and legacy-password compatibility
 paths. They do not satisfy FactorSeal's 2FA design requirement and are not
@@ -73,15 +75,15 @@ solve different problems:
 - Use kernel keyrings for short-lived credentials consumed by processes or
   kernel services, not as a general desktop password manager.
 - Use `pass` for a small, inspectable GPG-and-files workflow.
-- Use FactorSeal when persistent local secrets must remain bound to this
-  machine's security hardware and need explicit application grants or
+- Use FactorSeal when persistent local secrets must be decryptable only with
+  this machine's security hardware and need explicit application grants or
   deletion deadlines.
 
 The comparison motivates FactorSeal's current shape: Secret Service
 compatibility and default/session collections from the desktop ecosystem,
 whole-vault idle locking as a separate lifecycle control, per-object deadlines
 like kernel keys, and explicit per-client approval. FactorSeal applies those
-ideas to persistent, hardware-bound application secrets.
+ideas to persistent, hardware-protected application secrets.
 
 The [Secret Service Item interface](https://specifications.freedesktop.org/secret-service/latest-single/#org.freedesktop.Secret.Item)
 defines labels, lookup attributes, lock state, and creation/modification
@@ -102,7 +104,7 @@ and [`pass` documentation](https://www.passwordstore.org/).
 
 ## What FactorSeal does differently
 
-### Hardware-bound storage
+### Hardware enclave protection
 
 Two-factor authentication is a design invariant, not an opt-in hardening
 setting. The currently implemented 2-of-2 configuration requires both:
@@ -186,7 +188,7 @@ compatibility view.
 
 The current version 2 prototype implements:
 
-- platform-hardware-bound vault creation and unlock;
+- vault creation and unlock through the platform hardware enclave;
 - single-YubiKey 2-of-2 unlock with platform hardware;
 - independently authenticated and encrypted credential entries;
 - SecretSpec `item` and optional `field` references;
@@ -194,7 +196,7 @@ The current version 2 prototype implements:
 - a `keyring-core` store;
 - a Linux Secret Service provider with persistent `default` and RAM-only
   `session` collections;
-- caller-bound, item-specific approval grants.
+- approval grants scoped to one caller and one item.
 
 It does not yet implement independent backup authenticators, phone or
 fingerprint providers, recovery, atomic factor replacement, audit events, or
@@ -244,15 +246,15 @@ prompts. Stop any other Secret Service provider, then run:
 cargo run --features yubikey -- serve
 ```
 
-The fixed `default` collection stores encrypted, hardware-bound entries in the
-persistent vault. The fixed `session` collection keeps values only in
+The fixed `default` collection stores encrypted, hardware-protected entries in
+the persistent vault. The fixed `session` collection keeps values only in
 zeroizing process memory and wipes them when the provider locks or exits.
 
-Unlocking the vault does not grant every application access. FactorSeal binds
-each D-Bus cryptographic session to its caller and reports matching items as
-locked until the user approves access. A grant applies to one Linux process
-instance and one item. The defaults are a 15-minute grant and a separate
-30-minute vault idle timeout:
+Unlocking the vault does not grant every application access. FactorSeal
+associates each D-Bus cryptographic session with its caller and reports
+matching items as locked until the user approves access. A grant applies to
+one Linux process instance and one item. The defaults are a 15-minute grant
+and a separate 30-minute vault idle timeout:
 
 ```console
 cargo run --features yubikey -- serve --grant-seconds 300 --vault-idle-seconds 1800
@@ -315,10 +317,10 @@ cargo build --no-default-features
 
 ## Security boundary
 
-Hardware binding protects a copied vault from offline decryption. It cannot
-prevent an approved or compromised application from reading and exfiltrating
-a secret returned to it. Per-item grants reduce ambient access; they do not
-make a malicious authorized client safe.
+Hardware-backed key protection prevents a copied vault from being decrypted
+offline. It cannot prevent an approved or compromised application from reading
+and exfiltrating a secret returned to it. Per-item grants reduce ambient
+access; they do not make a malicious authorized client safe.
 
 Losing or resetting the required TPM, Secure Enclave, or current YubiKey can
 permanently lose access. The platform EC and YubiKey RSA operations are not
