@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/factorseal/factorseal/actions/workflows/ci.yml"><img src="https://github.com/factorseal/factorseal/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/domenkozar/factorseal/actions/workflows/ci.yml"><img src="https://github.com/domenkozar/factorseal/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-16697A.svg" alt="License: MIT OR Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.85%2B-16697A.svg" alt="Rust 1.85+">
 </p>
