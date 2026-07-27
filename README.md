@@ -18,9 +18,10 @@ enclave: Apple Secure Enclave on macOS or TPM 2.0 on Windows and Linux. The
 enclave protects one share of the vault key, while a PIN-protected YubiKey
 protects the other. **Two-factor authentication (2FA) is required by design**
 for every supported persistent vault unlock; neither factor can unlock the
-vault alone. FactorSeal can serve Linux applications through the standard
-Secret Service API and supports expiring secrets through per-credential
-eviction deadlines.
+vault alone. On supported platforms, the hardware operation can additionally
+require biometric verification. FactorSeal can serve Linux applications
+through the standard Secret Service API and supports expiring secrets through
+per-credential eviction deadlines.
 
 The prototype still exposes hardware-only and legacy-password compatibility
 paths. They do not satisfy FactorSeal's 2FA design requirement and are not
@@ -55,7 +56,7 @@ credential cache, or an encrypted directory:
 
 | Option | Storage | Interfaces | Unlock | App access | Lock scope | Credential expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| **FactorSeal** | Encrypted file per entry | CLI, Rust, Secret Service | **2FA:** TPM/Secure Enclave + YubiKey | Per-caller, per-item grants | Vault timer; item/collection locks | **Deletes secret** |
+| **FactorSeal** | Encrypted file per entry | CLI, Rust, Secret Service | **2FA:** TPM/Secure Enclave + YubiKey; optional biometric gate | Per-caller, per-item grants | Vault timer; item/collection locks | **Deletes secret** |
 | **GNOME Keyring** | Encrypted keyring + RAM session | Secret Service/libsecret | Password, often via PAM | Shared by same-user apps | Keyring; logout clears session | None |
 | **KWallet** | Encrypted wallet file | D-Bus/C++ | Password or GPG | Per-app, wallet-wide | Inactivity, screen lock, last app | None |
 | **KeePassXC** | KDBX database | GUI, CLI, browser, Secret Service | Password + optional key/YubiKey | Site rules; optional prompts | Whole database | Marks expired; retains |
@@ -130,9 +131,34 @@ uses a PIN-protected RSA-2048 PIV key in slot `9d`:
 vault key = platform share XOR YubiKey share
 ```
 
-The current prototype supports one YubiKey. Backup authenticators, phones,
-fingerprints, atomic authenticator replacement, and recovery are target
-features rather than implemented guarantees.
+Factor support is capability-based. A factor may protect key material or gate
+another factor's key operation; those are different security properties.
+
+| Factor | Role | Status |
+| --- | --- | --- |
+| Platform hardware | Protects a vault-key share | Implemented; required by version 2 |
+| Biometric | Gates the platform hardware operation | Implemented with `--biometric` where `hardware-enclave` can enforce `BiometricOnly` |
+| YubiKey | Protects an independent share through PIV | Implemented behind `yubikey` |
+| Passkey | Must protect a share with stable WebAuthn PRF/CTAP `hmac-secret` output | Provider planned |
+| Authenticator app | Must release a share through cryptographic challenge-response | Provider planned; ordinary TOTP is not sufficient |
+
+Biometric verification does not create another independently protected share,
+so `hardware + biometric` remains a transitional profile. Combining
+`--biometric` with `--yubikey` retains the 2-of-2 share construction and adds
+biometric verification before the platform share is released. The current
+`hardware-enclave` integration enforces this on macOS and Windows; unsupported
+platforms fail instead of silently dropping the policy.
+
+A conventional six-digit TOTP app cannot independently protect an offline
+vault share: a local verifier would have to retain the TOTP seed, and a copied
+verifier could then calculate the same codes. A future phone provider must
+hold its own key material and answer a vault-bound challenge. Likewise, a
+passkey provider must use stable PRF or `hmac-secret` output; an ordinary
+authentication signature is not treated as a wrapping key.
+
+The current prototype supports one YubiKey. Backup authenticators, passkeys,
+phone challenge-response providers, atomic authenticator replacement, and
+recovery remain target features.
 
 Hardware-only version 2 APIs remain temporarily available for prototype
 development and migration. They do not meet the project's 2FA design
@@ -189,7 +215,9 @@ compatibility view.
 The current version 2 prototype implements:
 
 - vault creation and unlock through the platform hardware enclave;
+- optional platform-biometric gating of hardware unlock on supported systems;
 - single-YubiKey 2-of-2 unlock with platform hardware;
+- provider-neutral factor reporting through the Rust API and CLI status;
 - independently authenticated and encrypted credential entries;
 - SecretSpec `item` and optional `field` references;
 - optional per-credential eviction;
@@ -198,9 +226,9 @@ The current version 2 prototype implements:
   `session` collections;
 - approval grants scoped to one caller and one item.
 
-It does not yet implement independent backup authenticators, phone or
-fingerprint providers, recovery, atomic factor replacement, audit events, or
-rollback protection.
+It does not yet implement independent backup authenticators, passkey or phone
+challenge-response providers, recovery, atomic factor replacement, audit
+events, or rollback protection.
 
 The prototype also retains hardware-only and legacy-password compatibility
 paths. Those paths are implementation gaps relative to the required 2FA design,
@@ -218,6 +246,13 @@ printf 'postgres://localhost/mydb' |
   cargo run --features yubikey -- set my-project DATABASE_URL
 cargo run --features yubikey -- get my-project DATABASE_URL
 cargo run --features yubikey -- status
+```
+
+On macOS or Windows, require platform biometrics in addition to the two
+independently protected shares:
+
+```console
+cargo run --features yubikey -- init --biometric --yubikey
 ```
 
 The default vault location is the platform-specific user-data directory.
@@ -301,7 +336,8 @@ through `FactorSealStoreOptions`.
 
 ## Feature flags
 
-- `hardware` (default): hardware-backed wrapping through `hardware-enclave`.
+- `hardware` (default): hardware-backed wrapping and optional biometric access
+  policy through `hardware-enclave`.
 - `cli` (default): builds the `factorseal` command.
 - `keyring` (default): implements `keyring-core`.
 - `secret-service` (Linux default): provides `org.freedesktop.secrets`.
