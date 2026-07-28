@@ -11,6 +11,9 @@ All notable changes to FactorSeal will be documented in this file.
   refusing DPAPI and Linux keyring fallback.
 - Add PIN-protected YubiKey PIV 2-of-2 unlock using independent vault-key
   shares.
+- Add optional platform-biometric gating for hardware operations, including
+  biometric + YubiKey composition, and report configured factors through the
+  Rust API and CLI.
 - Make password vault support non-default and add migration from version 1
   password wrapping to version 2 hardware wrapping.
 - Add encrypted credential storage, CLI, and optional `keyring-core` API in a

@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{self, KEY_BYTES, NONCE_BYTES};
 #[cfg(feature = "hardware")]
 use crate::hardware::{HardwareBackend, KeyProtector, PlatformProtector};
-use crate::{Error, Result};
+use crate::{Error, FactorKind, Result};
 
 const CONFIG_FILE: &str = "vault.json";
 const ENTRIES_DIRECTORY: &str = "entries";
@@ -68,6 +68,8 @@ pub struct VaultInfo {
     pub version: u32,
     pub vault_id: String,
     pub unlock_method: String,
+    /// Factors configured under an `all` policy, in evaluation order.
+    pub factors: Vec<FactorKind>,
     pub hardware_backend: Option<String>,
     pub yubikey_serial: Option<u32>,
 }
@@ -167,6 +169,37 @@ struct VaultConfig {
     unlock: UnlockConfig,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum PlatformAccessPolicy {
+    #[default]
+    None,
+    Biometric,
+}
+
+impl PlatformAccessPolicy {
+    #[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip predicate takes `&T`.
+    const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    const fn requires_biometric(self) -> bool {
+        matches!(self, Self::Biometric)
+    }
+}
+
+fn hardware_factors(access_policy: PlatformAccessPolicy, yubikey: bool) -> Vec<FactorKind> {
+    let mut factors = Vec::with_capacity(2 + usize::from(yubikey));
+    factors.push(FactorKind::PlatformHardware);
+    if access_policy.requires_biometric() {
+        factors.push(FactorKind::Biometric);
+    }
+    if yubikey {
+        factors.push(FactorKind::YubiKey);
+    }
+    factors
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "method")]
 enum UnlockConfig {
@@ -182,12 +215,16 @@ enum UnlockConfig {
         backend: String,
         key_label: String,
         wrapped_key: String,
+        #[serde(default, skip_serializing_if = "PlatformAccessPolicy::is_none")]
+        access_policy: PlatformAccessPolicy,
     },
     #[serde(rename = "hardware+yubikey")]
     HardwareYubiKey {
         backend: String,
         key_label: String,
         wrapped_share: String,
+        #[serde(default, skip_serializing_if = "PlatformAccessPolicy::is_none")]
+        access_policy: PlatformAccessPolicy,
         yubikey: YubiKeyUnlock,
     },
 }
@@ -288,6 +325,7 @@ impl VaultConfig {
         backend: HardwareBackend,
         key_label: String,
         wrapped_key: &[u8],
+        access_policy: PlatformAccessPolicy,
     ) -> Self {
         Self {
             format: VAULT_FORMAT.to_owned(),
@@ -297,6 +335,7 @@ impl VaultConfig {
                 backend: backend.as_str().to_owned(),
                 key_label,
                 wrapped_key: encode(wrapped_key),
+                access_policy,
             },
         }
     }
@@ -307,6 +346,7 @@ impl VaultConfig {
         backend: HardwareBackend,
         key_label: String,
         wrapped_share: &[u8],
+        access_policy: PlatformAccessPolicy,
         enrolled: &crate::yubikey_factor::EnrolledYubiKey,
     ) -> Self {
         Self {
@@ -317,6 +357,7 @@ impl VaultConfig {
                 backend: backend.as_str().to_owned(),
                 key_label,
                 wrapped_share: encode(wrapped_share),
+                access_policy,
                 yubikey: YubiKeyUnlock {
                     serial: enrolled.serial,
                     slot: enrolled.slot.to_owned(),
@@ -338,7 +379,24 @@ impl Vault {
     pub fn create(path: impl AsRef<Path>) -> Result<UnlockedVault> {
         #[cfg(feature = "hardware")]
         {
-            create_hardware_vault(path.as_ref())
+            create_hardware_vault(path.as_ref(), PlatformAccessPolicy::None)
+        }
+        #[cfg(not(feature = "hardware"))]
+        {
+            let _ = path;
+            Err(Error::HardwareFeatureDisabled)
+        }
+    }
+
+    /// Create a transitional hardware vault gated by platform biometrics.
+    ///
+    /// Biometric verification gates the platform hardware operation but does
+    /// not protect an independent vault-key share. Combine it with a
+    /// share-protecting factor such as a YubiKey for FactorSeal's 2FA policy.
+    pub fn create_with_biometric(path: impl AsRef<Path>) -> Result<UnlockedVault> {
+        #[cfg(feature = "hardware")]
+        {
+            create_hardware_vault(path.as_ref(), PlatformAccessPolicy::Biometric)
         }
         #[cfg(not(feature = "hardware"))]
         {
@@ -370,7 +428,34 @@ impl Vault {
     ) -> Result<UnlockedVault> {
         #[cfg(all(feature = "hardware", feature = "yubikey"))]
         {
-            create_hardware_yubikey_vault(path.as_ref(), yubikey_pin)
+            create_hardware_yubikey_vault(path.as_ref(), yubikey_pin, PlatformAccessPolicy::None)
+        }
+        #[cfg(not(all(feature = "hardware", feature = "yubikey")))]
+        {
+            let _ = (path, yubikey_pin);
+            if cfg!(not(feature = "hardware")) {
+                Err(Error::HardwareFeatureDisabled)
+            } else {
+                Err(Error::YubiKeyFeatureDisabled)
+            }
+        }
+    }
+
+    /// Create a 2FA vault requiring platform biometrics and a YubiKey.
+    ///
+    /// The YubiKey and platform hardware protect independent vault-key shares;
+    /// biometric verification additionally gates access to the platform share.
+    pub fn create_with_biometric_and_yubikey(
+        path: impl AsRef<Path>,
+        yubikey_pin: &[u8],
+    ) -> Result<UnlockedVault> {
+        #[cfg(all(feature = "hardware", feature = "yubikey"))]
+        {
+            create_hardware_yubikey_vault(
+                path.as_ref(),
+                yubikey_pin,
+                PlatformAccessPolicy::Biometric,
+            )
         }
         #[cfg(not(all(feature = "hardware", feature = "yubikey")))]
         {
@@ -431,8 +516,9 @@ impl Vault {
             let path = path.as_ref();
             let session = unlock_hardware_vault(path, Some(yubikey_pin))?;
             let config = read_config(path)?;
-            let (backend, key_label) = hardware_fields(&config.unlock)?;
-            let protector = PlatformProtector::open(path, key_label)?;
+            let (backend, key_label, access_policy) = hardware_fields(&config.unlock)?;
+            let protector =
+                PlatformProtector::open(path, key_label, access_policy.requires_biometric())?;
             verify_recorded_backend(&protector, backend)?;
             let wrapped_key = session.with_key(|key| protector.wrap(key))?;
             let updated = VaultConfig::hardware(
@@ -440,6 +526,7 @@ impl Vault {
                 protector.backend(),
                 key_label.to_owned(),
                 &wrapped_key,
+                access_policy,
             );
             write_config(path, &updated)
         }
@@ -459,13 +546,34 @@ impl Vault {
         let path = path.as_ref();
         validate_vault_directory(path)?;
         let config = read_config(path)?;
-        let (unlock_method, hardware_backend, yubikey_serial) = match &config.unlock {
-            UnlockConfig::Password { .. } => ("password", None, None),
-            UnlockConfig::Hardware { backend, .. } => ("hardware", Some(backend.clone()), None),
-            UnlockConfig::HardwareYubiKey {
-                backend, yubikey, ..
+        let (unlock_method, factors, hardware_backend, yubikey_serial) = match &config.unlock {
+            UnlockConfig::Password { .. } => ("password", vec![FactorKind::Password], None, None),
+            UnlockConfig::Hardware {
+                backend,
+                access_policy,
+                ..
             } => (
-                "hardware+yubikey",
+                if access_policy.requires_biometric() {
+                    "hardware+biometric"
+                } else {
+                    "hardware"
+                },
+                hardware_factors(*access_policy, false),
+                Some(backend.clone()),
+                None,
+            ),
+            UnlockConfig::HardwareYubiKey {
+                backend,
+                access_policy,
+                yubikey,
+                ..
+            } => (
+                if access_policy.requires_biometric() {
+                    "hardware+biometric+yubikey"
+                } else {
+                    "hardware+yubikey"
+                },
+                hardware_factors(*access_policy, true),
                 Some(backend.clone()),
                 Some(yubikey.serial),
             ),
@@ -475,6 +583,7 @@ impl Vault {
             version: config.version,
             vault_id: config.vault_id,
             unlock_method: unlock_method.to_owned(),
+            factors,
             hardware_backend,
             yubikey_serial,
         })
@@ -529,8 +638,9 @@ impl Vault {
         {
             let path = path.as_ref();
             let session = Self::unlock_with_password(path, password)?;
-            let config =
-                session.with_key(|key| make_hardware_config(path, &session.vault_id, key))?;
+            let config = session.with_key(|key| {
+                make_hardware_config(path, &session.vault_id, key, PlatformAccessPolicy::None)
+            })?;
             write_config(path, &config)
         }
         #[cfg(not(feature = "hardware"))]
@@ -553,6 +663,7 @@ impl Vault {
             protector.backend(),
             key_label(&vault_id),
             &wrapped_key,
+            PlatformAccessPolicy::None,
         );
         write_initial_config(path, &config)?;
         Ok(UnlockedVault::new(path, vault_id, vault_key))
@@ -1199,18 +1310,25 @@ impl std::fmt::Debug for UnlockedVault {
 }
 
 #[cfg(feature = "hardware")]
-fn create_hardware_vault(path: &Path) -> Result<UnlockedVault> {
+fn create_hardware_vault(
+    path: &Path,
+    access_policy: PlatformAccessPolicy,
+) -> Result<UnlockedVault> {
     let (vault_id, vault_key) = prepare_new_vault(path)?;
-    let config = make_hardware_config(path, &vault_id, &vault_key)?;
+    let config = make_hardware_config(path, &vault_id, &vault_key, access_policy)?;
     write_initial_config(path, &config)?;
     Ok(UnlockedVault::new(path, vault_id, vault_key))
 }
 
 #[cfg(all(feature = "hardware", feature = "yubikey"))]
-fn create_hardware_yubikey_vault(path: &Path, pin: &[u8]) -> Result<UnlockedVault> {
+fn create_hardware_yubikey_vault(
+    path: &Path,
+    pin: &[u8],
+    access_policy: PlatformAccessPolicy,
+) -> Result<UnlockedVault> {
     let (vault_id, vault_key) = prepare_new_vault(path)?;
     let label = key_label(&vault_id);
-    let protector = PlatformProtector::open(path, &label)?;
+    let protector = PlatformProtector::open(path, &label, access_policy.requires_biometric())?;
 
     let mut yubikey_share = Zeroizing::new([0_u8; KEY_BYTES]);
     getrandom::fill(&mut *yubikey_share)?;
@@ -1223,6 +1341,7 @@ fn create_hardware_yubikey_vault(path: &Path, pin: &[u8]) -> Result<UnlockedVaul
         protector.backend(),
         label,
         &wrapped_platform_share,
+        access_policy,
         &enrolled,
     );
     write_initial_config(path, &config)?;
@@ -1234,15 +1353,17 @@ fn make_hardware_config(
     path: &Path,
     vault_id: &[u8; VAULT_ID_BYTES],
     vault_key: &[u8; KEY_BYTES],
+    access_policy: PlatformAccessPolicy,
 ) -> Result<VaultConfig> {
     let label = key_label(vault_id);
-    let protector = PlatformProtector::open(path, &label)?;
+    let protector = PlatformProtector::open(path, &label, access_policy.requires_biometric())?;
     let wrapped_key = protector.wrap(vault_key)?;
     Ok(VaultConfig::hardware(
         encode(vault_id),
         protector.backend(),
         label,
         &wrapped_key,
+        access_policy,
     ))
 }
 
@@ -1259,8 +1380,10 @@ fn unlock_hardware_vault(path: &Path, yubikey_pin: Option<&[u8]>) -> Result<Unlo
             backend,
             key_label,
             wrapped_key,
+            access_policy,
         } => {
-            let protector = PlatformProtector::open(path, key_label)?;
+            let protector =
+                PlatformProtector::open(path, key_label, access_policy.requires_biometric())?;
             verify_recorded_backend(&protector, backend)?;
             let wrapped_key = decode(wrapped_key, "wrapped_key").map_err(Error::InvalidMetadata)?;
             decode_key(&protector.unwrap(&wrapped_key)?, "hardware vault key")?
@@ -1269,10 +1392,12 @@ fn unlock_hardware_vault(path: &Path, yubikey_pin: Option<&[u8]>) -> Result<Unlo
             backend,
             key_label,
             wrapped_share,
+            access_policy,
             yubikey,
         } => {
             let pin = yubikey_pin.ok_or(Error::YubiKeyRequired)?;
-            let protector = PlatformProtector::open(path, key_label)?;
+            let protector =
+                PlatformProtector::open(path, key_label, access_policy.requires_biometric())?;
             verify_recorded_backend(&protector, backend)?;
             let wrapped_share =
                 decode(wrapped_share, "wrapped_share").map_err(Error::InvalidMetadata)?;
@@ -1330,12 +1455,13 @@ fn verify_recorded_backend(protector: &impl KeyProtector, recorded_backend: &str
 #[cfg(all(feature = "hardware", feature = "yubikey"))]
 fn add_yubikey_factor(path: &Path, session: &UnlockedVault, pin: &[u8]) -> Result<()> {
     let config = read_config(path)?;
-    let (backend, key_label, wrapped_key) = match &config.unlock {
+    let (backend, key_label, wrapped_key, access_policy) = match &config.unlock {
         UnlockConfig::Hardware {
             backend,
             key_label,
             wrapped_key,
-        } => (backend, key_label, wrapped_key),
+            access_policy,
+        } => (backend, key_label, wrapped_key, *access_policy),
         UnlockConfig::HardwareYubiKey { .. } => {
             return Err(Error::InvalidMetadata(
                 "vault already requires a YubiKey".to_owned(),
@@ -1344,7 +1470,7 @@ fn add_yubikey_factor(path: &Path, session: &UnlockedVault, pin: &[u8]) -> Resul
         UnlockConfig::Password { .. } => return Err(Error::PasswordFeatureDisabled),
     };
 
-    let protector = PlatformProtector::open(path, key_label)?;
+    let protector = PlatformProtector::open(path, key_label, access_policy.requires_biometric())?;
     verify_recorded_backend(&protector, backend)?;
     // Confirm that the current hardware wrapping still opens the same key
     // before replacing the policy metadata.
@@ -1367,17 +1493,21 @@ fn add_yubikey_factor(path: &Path, session: &UnlockedVault, pin: &[u8]) -> Resul
         protector.backend(),
         key_label.clone(),
         &wrapped_platform_share,
+        access_policy,
         &enrolled,
     );
     write_config(path, &updated)
 }
 
 #[cfg(all(feature = "hardware", feature = "yubikey"))]
-fn hardware_fields(unlock: &UnlockConfig) -> Result<(&str, &str)> {
+fn hardware_fields(unlock: &UnlockConfig) -> Result<(&str, &str, PlatformAccessPolicy)> {
     match unlock {
         UnlockConfig::HardwareYubiKey {
-            backend, key_label, ..
-        } => Ok((backend, key_label)),
+            backend,
+            key_label,
+            access_policy,
+            ..
+        } => Ok((backend, key_label, *access_policy)),
         UnlockConfig::Hardware { .. } => Err(Error::InvalidMetadata(
             "vault does not require a YubiKey".to_owned(),
         )),
@@ -2406,7 +2536,50 @@ mod tests {
         assert_eq!(info.version, 2);
         assert_eq!(info.vault_id, expected_id);
         assert_eq!(info.unlock_method, "hardware");
+        assert_eq!(info.factors, vec![FactorKind::PlatformHardware]);
         assert_eq!(info.hardware_backend.as_deref(), Some("tpm"));
+    }
+
+    #[test]
+    fn factor_inventory_includes_verification_and_key_share_factors() {
+        assert_eq!(
+            hardware_factors(PlatformAccessPolicy::Biometric, true),
+            vec![
+                FactorKind::PlatformHardware,
+                FactorKind::Biometric,
+                FactorKind::YubiKey
+            ]
+        );
+    }
+
+    #[test]
+    fn biometric_policy_is_reported_as_a_factor() {
+        let (_directory, path, vault) = vault();
+        drop(vault);
+
+        let mut config = read_config(&path).unwrap();
+        let UnlockConfig::Hardware { access_policy, .. } = &mut config.unlock else {
+            panic!("expected hardware config");
+        };
+        *access_policy = PlatformAccessPolicy::Biometric;
+        let config_path = path.join(CONFIG_FILE);
+        atomic_write(&config_path, &serialize(&config, &config_path).unwrap()).unwrap();
+
+        let info = Vault::info(path).unwrap();
+        assert_eq!(info.unlock_method, "hardware+biometric");
+        assert_eq!(
+            info.factors,
+            vec![FactorKind::PlatformHardware, FactorKind::Biometric]
+        );
+    }
+
+    #[test]
+    fn default_hardware_policy_keeps_the_existing_wire_format() {
+        let (_directory, path, vault) = vault();
+        drop(vault);
+
+        let stored = fs::read_to_string(path.join(CONFIG_FILE)).unwrap();
+        assert!(!stored.contains("access_policy"));
     }
 
     #[cfg(feature = "password")]
@@ -2415,6 +2588,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("vault");
         let vault = Vault::create_with_password(&path, b"old password").unwrap();
+        assert_eq!(
+            Vault::info(&path).unwrap().factors,
+            vec![FactorKind::Password]
+        );
         vault.set("service", "account", b"survives").unwrap();
         drop(vault);
 

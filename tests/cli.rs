@@ -71,6 +71,7 @@ fn keyring_cli_round_trip_and_password_change() {
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status["state"], "locked");
     assert_eq!(status["unlock_method"], "password");
+    assert_eq!(status["factors"], serde_json::json!(["password"]));
 
     let changed = command(&vault, &password)
         .args([

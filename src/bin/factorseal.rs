@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
-use factorseal::{CredentialOptions, Error as VaultError, UnlockedVault, Vault};
+use factorseal::{CredentialOptions, Error as VaultError, FactorKind, UnlockedVault, Vault};
 #[cfg(all(target_os = "linux", feature = "secret-service"))]
 use factorseal::{SecretServiceError, SecretServiceOptions, serve_secret_service};
 use serde::Serialize;
@@ -44,8 +44,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a vault. Supported deployments require --yubikey for 2FA.
+    /// Create a vault with platform hardware and selected factors.
     Init {
+        /// Require platform biometric verification for hardware-key use.
+        #[arg(long)]
+        biometric: bool,
+
         /// Use the required YubiKey PIV second factor in slot 9d.
         #[cfg(feature = "yubikey")]
         #[arg(long)]
@@ -137,8 +141,8 @@ impl Cli {
     fn unlock_vault(&self, path: &Path) -> Result<UnlockedVault, CliError> {
         let info = Vault::info(path)?;
         match info.unlock_method.as_str() {
-            "hardware" => Ok(Vault::unlock(path)?),
-            "hardware+yubikey" => {
+            "hardware" | "hardware+biometric" => Ok(Vault::unlock(path)?),
+            "hardware+yubikey" | "hardware+biometric+yubikey" => {
                 #[cfg(feature = "yubikey")]
                 {
                     let pin = read_yubikey_pin(self.yubikey_pin_file.as_deref())?;
@@ -180,8 +184,8 @@ enum CliError {
     #[error("passwords do not match")]
     PasswordMismatch,
 
-    #[cfg(all(feature = "password", feature = "yubikey"))]
-    #[error("--password and --yubikey cannot be used together")]
+    #[cfg(feature = "password")]
+    #[error("legacy --password cannot be combined with another factor")]
     ConflictingInitFactors,
 
     #[error("I/O error for `{path}`: {source}")]
@@ -216,22 +220,7 @@ fn main() {
 fn run(cli: Cli) -> Result<(), CliError> {
     let vault_path = resolve_vault_path(cli.vault.as_deref())?;
     match &cli.command {
-        Command::Init {
-            #[cfg(feature = "yubikey")]
-            yubikey,
-            #[cfg(feature = "password")]
-            password,
-        } => init_vault(
-            &vault_path,
-            #[cfg(feature = "yubikey")]
-            *yubikey,
-            #[cfg(feature = "password")]
-            *password,
-            #[cfg(feature = "yubikey")]
-            cli.yubikey_pin_file.as_deref(),
-            #[cfg(feature = "password")]
-            cli.password_file.as_deref(),
-        ),
+        Command::Init { .. } => init_vault_from_cli(&cli, &vault_path),
         Command::Set {
             service,
             account,
@@ -318,6 +307,31 @@ fn run(cli: Cli) -> Result<(), CliError> {
     }
 }
 
+fn init_vault_from_cli(cli: &Cli, path: &Path) -> Result<(), CliError> {
+    let Command::Init {
+        biometric,
+        #[cfg(feature = "yubikey")]
+        yubikey,
+        #[cfg(feature = "password")]
+        password,
+    } = &cli.command
+    else {
+        unreachable!("init_vault_from_cli is only called for Command::Init");
+    };
+    init_vault(
+        path,
+        *biometric,
+        #[cfg(feature = "yubikey")]
+        *yubikey,
+        #[cfg(feature = "password")]
+        *password,
+        #[cfg(feature = "yubikey")]
+        cli.yubikey_pin_file.as_deref(),
+        #[cfg(feature = "password")]
+        cli.password_file.as_deref(),
+    )
+}
+
 fn show_status(path: &Path) -> Result<(), CliError> {
     let info = Vault::info(path)?;
     let status = Status {
@@ -325,6 +339,7 @@ fn show_status(path: &Path) -> Result<(), CliError> {
         version: info.version,
         vault_id: info.vault_id,
         unlock_method: info.unlock_method,
+        factors: info.factors,
         hardware_backend: info.hardware_backend,
         yubikey_serial: info.yubikey_serial,
         state: "locked",
@@ -380,11 +395,16 @@ fn resolve_vault_path(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
 
 fn init_vault(
     path: &Path,
+    biometric: bool,
     #[cfg(feature = "yubikey")] yubikey: bool,
     #[cfg(feature = "password")] password: bool,
     #[cfg(feature = "yubikey")] yubikey_pin_file: Option<&Path>,
     #[cfg(feature = "password")] password_file: Option<&Path>,
 ) -> Result<(), CliError> {
+    #[cfg(feature = "password")]
+    if password && biometric {
+        return Err(CliError::ConflictingInitFactors);
+    }
     #[cfg(all(feature = "password", feature = "yubikey"))]
     if password && yubikey {
         return Err(CliError::ConflictingInitFactors);
@@ -402,18 +422,34 @@ fn init_vault(
     #[cfg(feature = "yubikey")]
     if yubikey {
         let pin = read_yubikey_pin(yubikey_pin_file)?;
-        Vault::create_with_yubikey(path, &pin)?;
-        println!(
-            "Initialized hardware + YubiKey FactorSeal vault at {}",
-            path.display()
-        );
+        if biometric {
+            Vault::create_with_biometric_and_yubikey(path, &pin)?;
+            println!(
+                "Initialized biometric-gated hardware + YubiKey FactorSeal vault at {}",
+                path.display()
+            );
+        } else {
+            Vault::create_with_yubikey(path, &pin)?;
+            println!(
+                "Initialized hardware + YubiKey FactorSeal vault at {}",
+                path.display()
+            );
+        }
         return Ok(());
     }
-    Vault::create(path)?;
-    println!(
-        "Initialized transitional hardware-only FactorSeal vault at {} (not design-compliant 2FA)",
-        path.display()
-    );
+    if biometric {
+        Vault::create_with_biometric(path)?;
+        println!(
+            "Initialized biometric-gated hardware FactorSeal vault at {} (no independent second key share)",
+            path.display()
+        );
+    } else {
+        Vault::create(path)?;
+        println!(
+            "Initialized transitional hardware-only FactorSeal vault at {} (not design-compliant 2FA)",
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -525,6 +561,7 @@ struct Status {
     version: u32,
     vault_id: String,
     unlock_method: String,
+    factors: Vec<FactorKind>,
     hardware_backend: Option<String>,
     yubikey_serial: Option<u32>,
     state: &'static str,
@@ -533,6 +570,18 @@ struct Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_accepts_biometric_factor_selection() {
+        let cli = Cli::try_parse_from(["factorseal", "init", "--biometric"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Init {
+                biometric: true,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn limited_reads_accept_the_boundary_and_reject_more() {

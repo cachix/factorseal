@@ -19,7 +19,10 @@ encrypted entry      zeroizing vault key
 
 Version 2 is the current format. Initialization creates a random 256-bit vault
 key and a vault-specific platform key through `hardware-enclave`. The platform
-key encrypts either the complete vault key or one share of it.
+key encrypts either the complete vault key or one share of it. Vault metadata
+records the platform access policy. Existing vaults default to `none`;
+biometric-gated vaults record `biometric` and must reopen the hardware key with
+the same policy.
 
 Version 1 derives a wrapping key from a password with Argon2id. It remains
 readable only when the non-default `password` feature is enabled. Migrating
@@ -55,10 +58,24 @@ slot, algorithm, nonce, and encrypted share. Unlock therefore requires the
 same platform hardware, the selected YubiKey, and its PIN. A PIV touch policy
 can additionally require physical presence.
 
-The version 2 format and public API still contain a hardware-only path for
-prototype development and migration. That transitional path does not meet the
-2FA design requirement and is not a supported deployment profile. Version 1
-password vaults are legacy compatibility only.
+Platform biometric verification is an access policy on the platform hardware
+operation. It gates release of the platform share but does not produce an
+independent share of its own. A `hardware+biometric+yubikey` vault therefore
+keeps the same two independently protected shares and adds a biometric check
+to the platform side. A `hardware+biometric` vault has only one protected key
+share and remains a transitional profile.
+
+Future passkey providers must derive a wrapping key from stable WebAuthn PRF
+or CTAP `hmac-secret` output. Authentication signatures are not assumed to be
+stable key material. Future authenticator-app providers must hold independent
+key material and use vault-bound challenge-response. TOTP verification alone
+cannot protect an offline share because the local verifier would need the
+same TOTP seed.
+
+The version 2 format and public API still contain hardware-only paths, with or
+without a biometric gate, for prototype development and migration. Those
+transitional paths do not meet the 2FA design requirement and are not supported
+deployment profiles. Version 1 password vaults are legacy compatibility only.
 
 ## Credential storage
 

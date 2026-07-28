@@ -2,7 +2,8 @@
 //!
 //! Two-factor authentication (2FA) is required by design for supported
 //! persistent vaults. The current 2FA provider combines platform hardware with
-//! a PIN-protected YubiKey.
+//! a PIN-protected YubiKey. Supported platform hardware can additionally
+//! require biometric user verification.
 //!
 //! A vault is unlocked once into an [`UnlockedVault`]. The session retains a
 //! zeroizing vault key, never a cache of decrypted credentials. Each `get`
@@ -10,9 +11,11 @@
 
 mod crypto;
 mod error;
+mod factor;
 mod vault;
 
 pub use error::{Error, Result};
+pub use factor::FactorKind;
 pub use vault::{
     CredentialMetadata, CredentialOptions, ReferenceOptions, SecretReference, UnlockedVault, Vault,
     VaultInfo,

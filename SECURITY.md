@@ -23,6 +23,8 @@ must not be treated as supported deployment profiles.
 - Version 2 requires a Secure Enclave or TPM backend and rejects Linux keyring
   and Windows DPAPI fallback.
 - The selected platform backend is recorded and must match at unlock.
+- A configured biometric access policy is recorded and must be enforced again
+  when the platform key is opened; unsupported platforms fail closed.
 - YubiKey two-factor vaults split the key into independently protected random
   shares; both shares are required.
 - Vault-key and credential encryption use XChaCha20-Poly1305.
@@ -37,8 +39,10 @@ must not be treated as supported deployment profiles.
 ## Current limitations
 
 - The CLI and public API still permit creating and unlocking hardware-only
-  version 2 vaults. Removing that transitional path is required before the
-  implementation enforces the 2FA design invariant universally.
+  version 2 vaults, with or without a biometric gate. Biometrics authorize use
+  of the platform key but do not create an independent second key share.
+  Removing those transitional paths is required before the implementation
+  enforces the 2FA design invariant universally.
 - Hardware integrations have not been exercised in this repository's automated
   tests on every supported platform or TPM model.
 - `hardware-enclave` 0.2.10 reports native Linux encryption handles as
@@ -48,6 +52,10 @@ must not be treated as supported deployment profiles.
 - The YubiKey provider supports one pre-provisioned RSA-2048 PIV key in slot
   `9d` on firmware 5.2.3+. It does not provision keys, support backup
   YubiKeys, or provide recovery.
+- Passkey and authenticator-app providers are not implemented. A passkey
+  provider must use stable PRF/`hmac-secret` output, and a phone provider must
+  hold independent key material. TOTP-only verification is not accepted as an
+  offline share-protection mechanism.
 - Losing or resetting the platform hardware or required YubiKey permanently
   loses access unless secrets were separately backed up. A recovery-key export
   is not implemented.

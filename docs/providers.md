@@ -11,9 +11,11 @@ persistent vault. The current policy is 2-of-2: platform hardware protects one
 random share and a PIN-protected YubiKey protects the other. Neither factor
 independently protects the complete vault key.
 
-The prototype retains hardware-only and legacy-password compatibility paths
-for development and migration. They do not satisfy the factor policy and are
-not supported deployment profiles.
+Biometrics are a user-verification gate on a platform key operation, not a
+separate key-share provider. The prototype retains hardware-only, biometric-
+gated hardware-only, and legacy-password compatibility paths for development
+and migration. They do not satisfy the independent-share policy and are not
+supported deployment profiles.
 
 ## Platform hardware
 
@@ -32,6 +34,22 @@ backend is recorded in `vault.json`, and later unlocks must match it.
 
 Native Linux requires the `tpm2-tss` runtime and access to `/dev/tpmrm0`, or a
 reachable `tpm2-abrmd` resource manager.
+
+## Biometric
+
+`init --biometric` configures the platform hardware key with the
+`BiometricOnly` access policy exposed by `hardware-enclave`. The policy is
+stored in `vault.json` and supplied again on every open; a platform that cannot
+enforce it returns an error instead of downgrading to an interaction-free key.
+
+The current dependency supports platform biometric enforcement on macOS and
+Windows. Native Linux does not expose a corresponding hardware-enforced
+biometric policy.
+
+Biometric verification gates the platform share. It does not add an
+independently protected share, so it is an additional check in a compliant
+`hardware+biometric+yubikey` vault and not a replacement for the YubiKey in the
+current 2-of-2 construction.
 
 ## YubiKey
 
@@ -61,6 +79,29 @@ Password support is behind the non-default `password` feature. It exists for:
 It is not added to version 2 as an `any` fallback. Such a fallback would allow
 a copied vault and password to bypass its machine binding.
 
+## Passkeys
+
+Passkeys are a target provider, not an implemented provider. A FactorSeal
+passkey must return stable, credential-bound secret material through WebAuthn
+PRF or CTAP `hmac-secret`, with user presence or verification enforced by the
+authenticator. That output can derive a key that wraps one random vault share.
+
+An ordinary passkey authentication signature is not sufficient. Signatures
+are authentication evidence, may be randomized, and are not a stable secret
+from which the same wrapping key can safely be reconstructed.
+
+## Authenticator apps
+
+A phone authenticator is also a target provider. To meet the provider
+contract, the phone must retain independent key material and release or help
+derive a share only after answering a vault-bound challenge.
+
+Conventional TOTP is deliberately not treated as a share-protecting factor in
+an offline vault. The local verifier would need the TOTP seed in order to
+verify codes; anyone who recovered that verifier state could calculate the
+same codes. TOTP could gate an online, rate-limited service, but that would be
+a different trust and availability model.
+
 ## Provider contract
 
 Unlock providers must:
@@ -74,3 +115,5 @@ Unlock providers must:
 7. Distinguish missing hardware, denied authorization, and backend failures.
 8. Refuse a silent downgrade to a weaker provider.
 9. Support explicit lock and bounded session expiry when the agent is added.
+10. Record whether the factor protects key material or only gates another
+    factor, so the policy cannot count one protected share twice.

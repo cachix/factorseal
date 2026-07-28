@@ -3,6 +3,8 @@ use std::path::Path;
 use hardware_enclave::{
     AccessPolicy, BackendKind, EnclaveConfig, EncryptorHandle, create_encryptor,
 };
+#[cfg(target_os = "windows")]
+use hardware_enclave::{PlatformConfig, WindowsConfig};
 use zeroize::Zeroizing;
 
 use crate::{Error, Result};
@@ -51,11 +53,22 @@ pub(crate) struct PlatformProtector {
 }
 
 impl PlatformProtector {
-    pub(crate) fn open(root: &Path, label: &str) -> Result<Self> {
+    pub(crate) fn open(root: &Path, label: &str, biometric: bool) -> Result<Self> {
         let keys_dir = root.join(KEYS_DIRECTORY);
         let mut config = EnclaveConfig::new(APP_NAME, label);
         config.keys_dir = Some(keys_dir.clone());
-        config.access_policy = Some(AccessPolicy::None);
+        config.access_policy = Some(if biometric {
+            AccessPolicy::BiometricOnly
+        } else {
+            AccessPolicy::None
+        });
+        #[cfg(target_os = "windows")]
+        if biometric {
+            config.platform = PlatformConfig::Windows(WindowsConfig {
+                prefer_windows_hello_ux: true,
+                ..WindowsConfig::default()
+            });
+        }
 
         let handle = create_encryptor(&config).map_err(map_hardware_error)?;
         let backend = verify_hardware_backend(&handle, &keys_dir, label)?;
