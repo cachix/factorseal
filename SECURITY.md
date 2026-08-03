@@ -52,10 +52,11 @@ must not be treated as supported deployment profiles.
 - The YubiKey provider supports one pre-provisioned RSA-2048 PIV key in slot
   `9d` on firmware 5.2.3+. It does not provision keys, support backup
   YubiKeys, or provide recovery.
-- Passkey and authenticator-app providers are not implemented. A passkey
-  provider must use stable PRF/`hmac-secret` output, and a phone provider must
-  hold independent key material. TOTP-only verification is not accepted as an
-  offline share-protection mechanism.
+- Passkey and phone vault providers are not implemented. A passkey provider
+  must use stable PRF/`hmac-secret` output, and a phone provider must retain
+  independent key material rather than return an authorization boolean. The
+  protocol-neutral phone request/response boundary is implemented, but there
+  is no enrollment, transport adapter, or vault-key wrapping stanza yet.
 - Losing or resetting the platform hardware or required YubiKey permanently
   loses access unless secrets were separately backed up. A recovery-key export
   is not implemented.

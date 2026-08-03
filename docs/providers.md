@@ -90,11 +90,24 @@ An ordinary passkey authentication signature is not sufficient. Signatures
 are authentication evidence, may be randomized, and are not a stable secret
 from which the same wrapping key can safely be reconstructed.
 
-## Authenticator apps
+## Phone companions
 
-A phone authenticator is also a target provider. To meet the provider
-contract, the phone must retain independent key material and release or help
-derive a share only after answering a vault-bound challenge.
+A phone companion is a target vault provider. It must retain independent key
+material and release a share only through a vault-bound, user-authorized,
+mutually authenticated session. FactorSeal exposes protocol-neutral
+`PhoneFactor`, `PhoneUnlockRequest`, and `PhoneUnlockResponse` types for this
+integration.
+
+Requests are one-shot and expire after at most 60 seconds. Before exposing the
+share, FactorSeal validates the protocol version, vault ID, request ID,
+challenge, action, expiration, and enrolled credential ID. The adapter remains
+responsible for transport security, phone and laptop mutual authentication,
+user authorization, and ensuring the response came from the same live session.
+Aliro support should implement this adapter in an independent crate rather
+than adding Aliro codecs or state machines to FactorSeal.
+
+This boundary does not yet enroll phones, add phone wrapping stanzas to the
+vault format, or connect a returned share to vault unlock.
 
 Conventional TOTP is deliberately not treated as a share-protecting factor in
 an offline vault. The local verifier would need the TOTP seed in order to

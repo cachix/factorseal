@@ -140,7 +140,7 @@ another factor's key operation; those are different security properties.
 | Biometric | Gates the platform hardware operation | Implemented with `--biometric` where `hardware-enclave` can enforce `BiometricOnly` |
 | YubiKey | Protects an independent share through PIV | Implemented behind `yubikey` |
 | Passkey | Must protect a share with stable WebAuthn PRF/CTAP `hmac-secret` output | Provider planned |
-| Authenticator app | Must release a share through cryptographic challenge-response | Provider planned; ordinary TOTP is not sufficient |
+| Phone | Holds an independently protected share and releases it through an authenticated, user-authorized session | Protocol-neutral boundary implemented; transport and vault enrollment planned |
 
 Biometric verification does not create another independently protected share,
 so `hardware + biometric` remains a transitional profile. Combining
@@ -151,13 +151,15 @@ platforms fail instead of silently dropping the policy.
 
 A conventional six-digit TOTP app cannot independently protect an offline
 vault share: a local verifier would have to retain the TOTP seed, and a copied
-verifier could then calculate the same codes. A future phone provider must
-hold its own key material and answer a vault-bound challenge. Likewise, a
-passkey provider must use stable PRF or `hmac-secret` output; an ordinary
-authentication signature is not treated as a wrapping key.
+verifier could then calculate the same codes. A phone provider must hold its
+own key material and answer a vault-bound challenge. FactorSeal now exposes a
+protocol-neutral, one-shot phone-factor request/response boundary; Aliro,
+Bluetooth, Android, enrollment, and vault wrapping remain separate work.
+Likewise, a passkey provider must use stable PRF or `hmac-secret` output; an
+ordinary authentication signature is not treated as a wrapping key.
 
 The current prototype supports one YubiKey. Backup authenticators, passkeys,
-phone challenge-response providers, atomic authenticator replacement, and
+phone enrollment and transport adapters, atomic authenticator replacement, and
 recovery remain target features.
 
 Hardware-only version 2 APIs remain temporarily available for prototype
@@ -226,9 +228,11 @@ The current version 2 prototype implements:
   `session` collections;
 - approval grants scoped to one caller and one item.
 
-It does not yet implement independent backup authenticators, passkey or phone
-challenge-response providers, recovery, atomic factor replacement, audit
-events, or rollback protection.
+It does not yet implement independent backup authenticators, passkey providers,
+or a phone-backed vault provider. The phone-factor boundary validates
+short-lived, vault-bound responses and zeroizes returned shares; enrollment,
+transport, vault wrapping, recovery, atomic factor replacement, audit events,
+and rollback protection remain future work.
 
 The prototype also retains hardware-only and legacy-password compatibility
 paths. Those paths are implementation gaps relative to the required 2FA design,
