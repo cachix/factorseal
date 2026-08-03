@@ -12,10 +12,17 @@
 mod crypto;
 mod error;
 mod factor;
+mod phone_factor;
 mod vault;
 
 pub use error::{Error, Result};
 pub use factor::FactorKind;
+pub use phone_factor::{
+    MAX_PHONE_UNLOCK_LIFETIME, PHONE_CHALLENGE_BYTES, PHONE_CREDENTIAL_ID_BYTES,
+    PHONE_REQUEST_ID_BYTES, PHONE_SHARE_BYTES, PHONE_UNLOCK_VERSION, PHONE_VAULT_ID_BYTES,
+    PhoneCredentialId, PhoneFactor, PhoneFactorError, PhoneFactorFuture, PhoneFactorResult,
+    PhoneShare, PhoneUnlockAction, PhoneUnlockRequest, PhoneUnlockResponse, ValidatedPhoneShare,
+};
 pub use vault::{
     CredentialMetadata, CredentialOptions, ReferenceOptions, SecretReference, UnlockedVault, Vault,
     VaultInfo,

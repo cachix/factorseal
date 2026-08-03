@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Add a protocol-neutral phone-factor boundary with short-lived vault-bound
+  requests, enrolled-credential response validation, distinct transport and
+  authorization errors, and zeroizing phone-share handling. Aliro remains an
+  external protocol implementation.
 - Establish two-factor authentication as a design requirement for every
   supported persistent vault; hardware-only and legacy-password paths are
   prototype compatibility gaps, not deployment profiles.

@@ -67,10 +67,30 @@ share and remains a transitional profile.
 
 Future passkey providers must derive a wrapping key from stable WebAuthn PRF
 or CTAP `hmac-secret` output. Authentication signatures are not assumed to be
-stable key material. Future authenticator-app providers must hold independent
-key material and use vault-bound challenge-response. TOTP verification alone
-cannot protect an offline share because the local verifier would need the
-same TOTP seed.
+stable key material. Phone providers must hold independent key material and
+use vault-bound challenge-response. TOTP verification alone cannot protect an
+offline share because the local verifier would need the same TOTP seed.
+
+## Phone-factor boundary
+
+FactorSeal owns vault policy and the FactorSeal phone-share exchange, but it
+does not own the protocol used to authenticate a phone. The `PhoneFactor`
+boundary allows an external adapter to run that protocol and return a response
+from the active, mutually authenticated, user-authorized session.
+
+Each `PhoneUnlockRequest` contains the protocol version, vault ID, fresh
+request ID, fresh challenge, requested action, expiration time, and laptop
+name. FactorSeal accepts a response only when it echoes the version, vault,
+request, challenge, and action; arrives before expiration; and names an
+enrolled credential. Validation consumes the request so it cannot be reused.
+The returned `PhoneShare` is held in zeroizing memory and is never represented
+as an unlock boolean.
+
+Aliro belongs in a separate crate or repository that implements the adapter.
+Its APDU/TLV codecs, cryptography, state machines, conformance fixtures, BLE
+transport, and platform bindings remain outside this crate. This separation
+also allows FactorSeal to test vault behavior with a mock provider before an
+Aliro transport is available.
 
 The version 2 format and public API still contain hardware-only paths, with or
 without a biometric gate, for prototype development and migration. Those

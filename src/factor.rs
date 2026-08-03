@@ -15,12 +15,11 @@ pub enum FactorKind {
     PlatformHardware,
     /// Platform biometric user verification gating a hardware operation.
     Biometric,
-    /// A challenge-response authenticator app.
+    /// A phone holding an independently protected vault-key share.
     ///
-    /// A conventional TOTP code alone cannot protect an offline vault-key
-    /// share because the local verifier would also need to retain the TOTP
-    /// seed.
-    AuthenticatorApp,
+    /// The transport and mutual-authentication protocol, such as Aliro, are
+    /// separate from FactorSeal's vault policy and share handling.
+    Phone,
     /// A YubiKey using the PIV provider.
     #[serde(rename = "yubikey")]
     YubiKey,
@@ -36,7 +35,7 @@ impl FactorKind {
             Self::Password => "password",
             Self::PlatformHardware => "platform-hardware",
             Self::Biometric => "biometric",
-            Self::AuthenticatorApp => "authenticator-app",
+            Self::Phone => "phone",
             Self::YubiKey => "yubikey",
             Self::Passkey => "passkey",
         }
@@ -59,7 +58,7 @@ mod tests {
             (FactorKind::Password, "password"),
             (FactorKind::PlatformHardware, "platform-hardware"),
             (FactorKind::Biometric, "biometric"),
-            (FactorKind::AuthenticatorApp, "authenticator-app"),
+            (FactorKind::Phone, "phone"),
             (FactorKind::YubiKey, "yubikey"),
             (FactorKind::Passkey, "passkey"),
         ] {
