@@ -21,11 +21,99 @@ jobs:
       - uses: cachix/cachix-action@v16
         with:
           name: devenv
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Install native Linux package dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libdbus-1-dev libtss2-dev pkg-config
       - name: Install devenv
         run: nix profile add nixpkgs#devenv
       - name: Check formatting
         run: devenv shell -- cargo fmt --all -- --check
       - name: Run Clippy
-        run: devenv shell -- cargo clippy --all-targets --all-features
+        run: devenv shell -- cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: devenv test
+        run: devenv shell -- cargo test --all-targets --all-features
+      - name: Check the feature combinations packagers and embedders build
+        run: |
+          for features in agent-client agent-client,hardware hardware cli agent agent,cli,hardware; do
+            devenv shell -- cargo check --no-default-features --features "$features"
+          done
+      - name: Lint packaged shell scripts
+        run: devenv shell -- shellcheck packaging/build-unix.sh packaging/linux/factorseal-agent-start
+      - name: Lint packaged POSIX helpers
+        run: devenv shell -- shellcheck -s sh packaging/macos/factorseal-askpass
+      - name: Run NixOS agent module VM test
+        run: nix --extra-experimental-features 'nix-command flakes' build --print-build-logs .#checks.x86_64-linux.nixos-module
+      - name: Build and inspect Linux package
+        run: |
+          packaging/build-unix.sh linux
+          tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/share/systemd/user/factorseal-agent.service$'
+          tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/bin/factorseal$'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: factorseal-linux
+          path: dist/*
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --all-targets --all-features
+      - name: Build and inspect macOS package
+        run: |
+          packaging/build-unix.sh macos
+          tar -tzf dist/factorseal-*-macos-*.tar.gz | grep '/Factorseal Agent.app/Contents/MacOS/factorseal$'
+          pkgutil --payload-files dist/factorseal-*-macos-*.pkg | grep 'Applications/Factorseal Agent.app/Contents/MacOS/factorseal$'
+          plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.agent.plist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: factorseal-macos
+          path: dist/*
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --all-targets --all-features
+      - name: Parse the Windows askpass helper
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path packaging/windows/factorseal-askpass.ps1), [ref]$null, [ref]$errors)
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output $_.ToString() }; throw 'askpass helper does not parse' }
+      - name: Build and inspect Windows package
+        shell: pwsh
+        run: |
+          ./packaging/build-windows.ps1
+          $archive = Get-ChildItem dist/factorseal-*-windows-*.zip | Select-Object -First 1
+          $entries = [System.IO.Compression.ZipFile]::OpenRead($archive.FullName)
+          try {
+            if (-not ($entries.Entries.FullName -match 'factorseal.exe$')) { throw 'agent executable missing from package' }
+            if (-not ($entries.Entries.FullName -match 'factorseal-agent-task.xml.in$')) { throw 'task template missing from package' }
+          } finally { $entries.Dispose() }
+          [xml](Get-Content packaging/windows/factorseal-agent-task.xml.in) | Out-Null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: factorseal-windows
+          path: dist/*

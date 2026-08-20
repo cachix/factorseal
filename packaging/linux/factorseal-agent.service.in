@@ -1,0 +1,25 @@
+[Unit]
+Description=Factorseal per-user secret agent
+Documentation=https://github.com/factorseal/factorseal
+
+[Service]
+Type=simple
+ExecStart=@INSTALL_DIR@/factorseal --password-file=%t/factorseal/session-password run
+Restart=no
+UMask=0077
+NoNewPrivileges=yes
+# Do not add filesystem mount-namespace options here. Caller authentication
+# reads /proc/<SO_PEERCRED pid>/exe, which becomes inaccessible from a
+# namespaced systemd user service on common Linux configurations.
+RuntimeDirectory=factorseal
+RuntimeDirectoryMode=0700
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+# Deliberately no WantedBy: Linux requires an interactive Factorseal password
+# for each agent session. Start it through factorseal-agent-start.

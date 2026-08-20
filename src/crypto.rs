@@ -56,18 +56,6 @@ pub(crate) fn decrypt(
         .map_err(|_| AuthenticationError)
 }
 
-#[cfg(any(feature = "yubikey", test))]
-pub(crate) fn xor_keys(
-    left: &[u8; KEY_BYTES],
-    right: &[u8; KEY_BYTES],
-) -> Zeroizing<[u8; KEY_BYTES]> {
-    let mut output = Zeroizing::new([0_u8; KEY_BYTES]);
-    for (target, (left, right)) in output.iter_mut().zip(left.iter().zip(right)) {
-        *target = left ^ right;
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,14 +95,5 @@ mod tests {
 
         assert_ne!(first.nonce, second.nonce);
         assert_ne!(first.ciphertext, second.ciphertext);
-    }
-
-    #[test]
-    fn xor_is_its_own_inverse() {
-        let key = [0xa5; KEY_BYTES];
-        let share = [0x3c; KEY_BYTES];
-        let wrapped = xor_keys(&key, &share);
-
-        assert_eq!(*xor_keys(&wrapped, &share), key);
     }
 }

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Factorseal askpass helper for macOS.
+#
+# launchd starts the agent with no controlling terminal, so the agent runs this
+# helper to obtain the seal's nested factor and reads it from standard output.
+# The secret crosses a pipe and is never written to disk.
+#
+# Cancelling the dialog makes osascript exit non-zero, which the agent reports
+# as a refused factor rather than an empty one.
+set -eu
+
+label=${1:-Factorseal password:}
+escaped=$(printf '%s' "$label" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+
+exec /usr/bin/osascript -e "tell application \"System Events\" to text returned of (display dialog \"$escaped\" with title \"Factorseal\" default answer \"\" with hidden answer buttons {\"Cancel\", \"Unlock\"} default button \"Unlock\")"

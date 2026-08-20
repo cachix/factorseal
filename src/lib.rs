@@ -1,49 +1,50 @@
-//! Local encrypted credential vault for FactorSeal.
+//! Factorseal's hardware-bound per-user secret agent.
 //!
-//! Two-factor authentication (2FA) is required by design for supported
-//! persistent vaults. The current 2FA provider combines platform hardware with
-//! a PIN-protected YubiKey. Supported platform hardware can additionally
-//! require biometric user verification.
+//! The per-user agent is the primary architecture: one process owns an
+//! embedded Turso database containing encrypted, signed Automerge documents.
+//! Every platform nests a Factorseal password inside its hardware key
+//! wrapping, so neither factor unlocks alone. Applications use authenticated
+//! local IPC and never open the database or receive its keys.
 //!
-//! A vault is unlocked once into an [`UnlockedVault`]. The session retains a
-//! zeroizing vault key, never a cache of decrypted credentials. Each `get`
-//! decrypts only the requested value.
-
 mod crypto;
 mod error;
-mod factor;
-mod phone_factor;
-mod vault;
 
-pub use error::{Error, Result};
-pub use factor::FactorKind;
-pub use phone_factor::{
-    MAX_PHONE_UNLOCK_LIFETIME, PHONE_CHALLENGE_BYTES, PHONE_CREDENTIAL_ID_BYTES,
-    PHONE_REQUEST_ID_BYTES, PHONE_SHARE_BYTES, PHONE_UNLOCK_VERSION, PHONE_VAULT_ID_BYTES,
-    PhoneCredentialId, PhoneFactor, PhoneFactorError, PhoneFactorFuture, PhoneFactorResult,
-    PhoneShare, PhoneUnlockAction, PhoneUnlockRequest, PhoneUnlockResponse, ValidatedPhoneShare,
+#[cfg(any(feature = "agent", feature = "agent-client"))]
+pub mod agent;
+
+pub(crate) use error::{Error, Result};
+
+#[cfg(feature = "agent-client")]
+pub use agent::{
+    AgentAction, AgentClient, AgentError, AgentRequest, AgentResponse, AgentResponseBody,
+    AgentResponseError, AgentResponseErrorCode, AgentResult, DeviceKeyId, DeviceSeal, DocumentId,
+    DocumentScope, NestedFactorKind, RequestId, Seal, SealId, SecretAddress, UnlockFactor,
+    WireSecret, WireSecretAddress,
 };
-pub use vault::{
-    CredentialMetadata, CredentialOptions, ReferenceOptions, SecretReference, UnlockedVault, Vault,
-    VaultInfo,
+
+#[cfg(feature = "agent")]
+pub use agent::{
+    AgentService, AgentStore, CallerIdentity, CallerPlatform, GrantPermission, UnlockLeasePolicy,
+    UnlockedSeal,
 };
+
+#[cfg(all(feature = "agent-client", target_os = "linux"))]
+pub use agent::LinuxAgentClient;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub use agent::{LinuxAgentOptions, linux_caller_identity_for_executable, serve_linux_agent};
+
+#[cfg(all(feature = "agent-client", target_os = "macos"))]
+pub use agent::MacosAgentClient;
+
+#[cfg(all(feature = "agent", target_os = "macos"))]
+pub use agent::{MacosAgentOptions, macos_caller_identity_for_executable, serve_macos_agent};
+
+#[cfg(all(feature = "agent-client", target_os = "windows"))]
+pub use agent::WindowsAgentClient;
+
+#[cfg(all(feature = "agent", target_os = "windows"))]
+pub use agent::{WindowsAgentOptions, serve_windows_agent, windows_caller_identity_for_executable};
 
 #[cfg(feature = "hardware")]
 mod hardware;
-
-#[cfg(feature = "keyring")]
-mod keyring;
-
-#[cfg(feature = "keyring")]
-pub use keyring::{
-    EVICT_AT_ATTRIBUTE, FactorSealStore, FactorSealStoreOptions, RETENTION_SECONDS_MODIFIER,
-};
-
-#[cfg(all(target_os = "linux", feature = "secret-service"))]
-mod secret_service;
-
-#[cfg(all(target_os = "linux", feature = "secret-service"))]
-pub use secret_service::{SecretServiceError, SecretServiceOptions, serve_secret_service};
-
-#[cfg(feature = "yubikey")]
-mod yubikey_factor;

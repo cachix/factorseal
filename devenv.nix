@@ -7,6 +7,7 @@
     pcsclite
     rustc
     rustfmt
+    shellcheck
     tpm2-tss
   ];
 

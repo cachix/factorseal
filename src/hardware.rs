@@ -3,8 +3,6 @@ use std::path::Path;
 use hardware_enclave::{
     AccessPolicy, BackendKind, EnclaveConfig, EncryptorHandle, create_encryptor,
 };
-#[cfg(target_os = "windows")]
-use hardware_enclave::{PlatformConfig, WindowsConfig};
 use zeroize::Zeroizing;
 
 use crate::{Error, Result};
@@ -25,17 +23,6 @@ impl HardwareBackend {
             Self::SecureEnclave => "secure-enclave",
             Self::Tpm => "tpm",
             Self::TpmBridge => "tpm-bridge",
-        }
-    }
-
-    pub(crate) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "secure-enclave" => Ok(Self::SecureEnclave),
-            "tpm" => Ok(Self::Tpm),
-            "tpm-bridge" => Ok(Self::TpmBridge),
-            _ => Err(Error::InvalidMetadata(format!(
-                "unsupported hardware backend `{value}`"
-            ))),
         }
     }
 }
@@ -62,14 +49,12 @@ impl PlatformProtector {
         } else {
             AccessPolicy::None
         });
-        #[cfg(target_os = "windows")]
-        if biometric {
-            config.platform = PlatformConfig::Windows(WindowsConfig {
-                prefer_windows_hello_ux: true,
-                ..WindowsConfig::default()
-            });
-        }
-
+        // Keep the Windows default `prefer_windows_hello_ux = false`.
+        // hardware-enclave's convenience Hello path replaces the CNG key's
+        // OS-mediated UI policy with a hookable application-level consent
+        // result and may degrade when Hello is unavailable. Factorseal keeps
+        // the hardware-enforced key-use policy and treats modern Hello prompt
+        // behavior as a native release-acceptance requirement.
         let handle = create_encryptor(&config).map_err(map_hardware_error)?;
         let backend = verify_hardware_backend(&handle, &keys_dir, label)?;
         Ok(Self {
@@ -98,6 +83,7 @@ impl KeyProtector for PlatformProtector {
     }
 }
 
+#[allow(unused_variables)]
 fn verify_hardware_backend(
     handle: &EncryptorHandle,
     keys_dir: &Path,

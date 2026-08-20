@@ -1,148 +1,203 @@
 # Architecture
 
-FactorSeal is a local credential store. It does not model people or machines as
-encryption recipients.
+This document describes Factorseal's hardware-bound per-user agent.
 
-```text
-application
-    |
-item + optional field
-    |
-keyring metadata: service + account
-    |
-unlocked FactorSeal session
-    |               \
-encrypted entry      zeroizing vault key
-```
+## Trust boundaries
 
-## Vault formats
+Factorseal separates five responsibilities:
 
-Version 2 is the current format. Initialization creates a random 256-bit vault
-key and a vault-specific platform key through `hardware-enclave`. The platform
-key encrypts either the complete vault key or one share of it. Vault metadata
-records the platform access policy. Existing vaults default to `none`;
-biometric-gated vaults record `biometric` and must reopen the hardware key with
-the same policy.
+1. a platform adapter authenticates the local caller and handles lifecycle
+   events;
+2. `AgentService` validates protocol, grants, replay, and unlock lease;
+3. the Automerge domain wrapper applies allowed secret operations;
+4. the envelope layer encrypts and device-signs durable state;
+5. the sole `AgentStore` worker persists envelopes in Turso.
 
-Version 1 derives a wrapping key from a password with Argon2id. It remains
-readable only when the non-default `password` feature is enabled. Migrating
-from version 1 to version 2 replaces `vault.json` after a successful hardware
-wrap; credential entries remain unchanged.
+Neither Turso nor Automerge authorizes a caller. Turso receives no plaintext
+document content. Automerge accepts changes only through Factorseal's domain
+and envelope verification paths.
 
-Hardware key labels include the random vault ID. Platform metadata and Linux
-TPM blobs live under the vault's `hardware/` directory. A copied TPM blob is
-useless without the TPM that created it.
+## Seal bootstrap
 
-## Two-factor composition
+`seal.json` contains non-secret public identity and hardware-wrapped
+bootstrap material:
 
-Two-factor authentication (2FA) is required by design for every supported
-persistent vault. FactorSeal's current design requires two independently
-protected shares under an `all` policy; no factor may wrap or recover the
-complete vault key by itself.
+- random permanent `SealId`;
+- `DeviceKeyId`, Ed25519 public key, and stable Automerge actor ID;
+- recorded TPM/Secure Enclave backend and biometric policy;
+- distinct platform labels for the wrapping and signing keys;
+- wrapped 256-bit DEK and wrapped Ed25519 seed;
+- platform identifier and, on Linux, Argon2id parameters and separate AEAD
+  nonces for the mandatory password layer;
+- local key epoch and creation time.
 
-A `hardware+yubikey` vault uses a 2-of-2 XOR construction:
+Creation opens two distinct `hardware-enclave` keys. The platform wrapper
+rejects DPAPI-only and Linux software-keyring fallback backends. On Linux,
+Argon2id derives a password key which encrypts the DEK and signing seed with
+separate XChaCha20-Poly1305 nonces before those ciphertexts are TPM-wrapped;
+neither factor can recover a seal key alone. Every platform requires
+the platform user-verification policy. Unlock reopens the recorded labels,
+checks the backend and policy, unwraps both values, applies the password layer
+where required, derives the public signing identity again, and rejects any
+mismatch before opening the database.
 
-```text
-vault key = platform share XOR YubiKey share
-```
+The present signing seed is hardware-wrapped and lives in zeroizing agent
+memory during the lease. A later native adapter may implement signatures with a
+non-exportable platform key while keeping the `DeviceKeyId` and envelope
+contract stable.
 
-Both shares are uniformly random when considered independently. Platform
-hardware encrypts the platform share. For the other share, FactorSeal asks a
-PIN-protected RSA-2048 key in YubiKey PIV slot `9d` to sign a domain-separated,
-vault-specific challenge. The `yubikey` crate performs SHA-256 and
-EMSA-PKCS1-v1_5 encoding. FactorSeal hashes the deterministic signature into an
-XChaCha20-Poly1305 wrapping key.
+## Document scopes
 
-The signature is not stored. Vault metadata records the device serial, PIV
-slot, algorithm, nonce, and encrypted share. Unlock therefore requires the
-same platform hardware, the selected YubiKey, and its PIN. A PIV touch policy
-can additionally require physical presence.
+| Scope | MVP use | Replication |
+| --- | --- | --- |
+| `device-cache` | SecretSpec cache documents | never |
+| `device-local` | caller grants and local agent policy | never |
 
-Platform biometric verification is an access policy on the platform hardware
-operation. It gates release of the platform share but does not produce an
-independent share of its own. A `hardware+biometric+yubikey` vault therefore
-keeps the same two independently protected shares and adds a biometric check
-to the platform side. A `hardware+biometric` vault has only one protected key
-share and remains a transitional profile.
+A document ID is a domain-separated digest of seal ID, scope, and
+namespace. It is opaque in SQL. The namespace and secret item/field live only
+inside the encrypted Automerge document.
 
-Future passkey providers must derive a wrapping key from stable WebAuthn PRF
-or CTAP `hmac-secret` output. Authentication signatures are not assumed to be
-stable key material. Phone providers must hold independent key material and
-use vault-bound challenge-response. TOTP verification alone cannot protect an
-offline share because the local verifier would need the same TOTP seed.
+The secret domain stores one serialized record as an Automerge byte value. A
+record binds its item, optional field, value, format version, and optional
+eviction deadline. The map key is a separate digest of item and field. On read,
+Factorseal checks that the record and requested coordinates match. Automerge's
+`get_all` is used so concurrent values cannot be hidden by its deterministic
+display winner. Different visible values return `Conflict`.
 
-## Phone-factor boundary
+## Encrypted change envelopes
 
-FactorSeal owns vault policy and the FactorSeal phone-share exchange, but it
-does not own the protocol used to authenticate a phone. The `PhoneFactor`
-boundary allows an external adapter to run that protocol and return a response
-from the active, mutually authenticated, user-authorized session.
+Every durable snapshot and change uses XChaCha20-Poly1305 with a fresh 192-bit
+nonce and the seal DEK. Ed25519 signatures cover a domain-separated
+transcript including:
 
-Each `PhoneUnlockRequest` contains the protocol version, vault ID, fresh
-request ID, fresh challenge, requested action, expiration time, and laptop
-name. FactorSeal accepts a response only when it echoes the version, vault,
-request, challenge, and action; arrives before expiration; and names an
-enrolled credential. Validation consumes the request so it cannot be reused.
-The returned `PhoneShare` is held in zeroizing memory and is never represented
-as an unlock boolean.
+- envelope version;
+- document ID and scope;
+- device key and Automerge actor;
+- generation and data-key epoch;
+- Automerge dependencies and change hash for a change;
+- snapshot heads for a snapshot;
+- nonce and ciphertext digest.
 
-Aliro belongs in a separate crate or repository that implements the adapter.
-Its APDU/TLV codecs, cryptography, state machines, conformance fixtures, BLE
-transport, and platform bindings remain outside this crate. This separation
-also allows FactorSeal to test vault behavior with a mock provider before an
-Aliro transport is available.
+Verification checks the signature before accepting data, decrypts with the
+same associated data, decodes the Automerge change, and compares its actor,
+hash, and dependencies to the signed header.
 
-The version 2 format and public API still contain hardware-only paths, with or
-without a biometric gate, for prototype development and migration. Those
-transitional paths do not meet the 2FA design requirement and are not supported
-deployment profiles. Version 1 password vaults are legacy compatibility only.
+## Turso persistence
 
-## Credential storage
+One worker thread owns one Turso connection and an exclusive seal lock
+file. All in-process handles send bounded commands to that worker. Dropping or
+locking the shared control stops the worker and zeroizes the DEK; every clone is
+invalidated.
 
-Each reference, consisting of a required `item` and optional `field`, maps to
-one file beneath `entries/`. The filename is a SHA-256 digest, so
-user-controlled names cannot escape the vault.
+The schema contains:
 
-XChaCha20-Poly1305 encrypts every value with a fresh 192-bit nonce. The vault
-ID, item, and optional field are authenticated as associated data. Moving an
-entry to a different reference or vault therefore fails authentication.
+- `store_meta` for schema version and current protected head;
+- `device_seal` for the checked public device identity;
+- `documents` for opaque ID, scope, generation, epoch, and current commit;
+- `document_snapshots` for encrypted signed snapshots;
+- `document_changes` for encrypted signed changes;
+- `protected_commits` for the signed global commit chain;
+- `sync_peers` and `sync_outbox` reserved for encrypted future sync state.
 
-Keyring service/account pairs are additional metadata in a separately
-authenticated, encrypted reference index. They can be changed without moving
-the entry or changing its cryptographic identity. Legacy entries whose paths
-were derived from service/account remain readable and migrate to opaque
-references when rewritten or explicitly resolved.
+Mutation first builds and signs envelopes, then uses one Turso transaction to
+compare-and-swap the document generation, append snapshot and changes, append a
+protected commit, and move the current head. Opening the store walks the entire
+head chain, rejects cycles/orphans/missing commits, verifies signatures, and
+checks each snapshot/change-set digest.
 
-On Unix, FactorSeal creates vault directories with mode `0700`, creates the
-initial configuration with mode `0600`, and refuses to open a vault directory
-that is accessible to group or other users.
+This detects database content tamper and inconsistent partial rollback when a
+newer protected head or commit remains. No cross-platform local primitive can
+prove that an attacker did not roll back the complete seal directory.
+The offline MVP therefore excludes whole-directory rollback from its threat
+claim. Detecting it needs a checkpoint held outside that directory.
 
-## Session model
+## Expiry
 
-With the `keyring` feature, the keyring adapter owns an unlocked vault. It
-holds one vault key but no decrypted credential cache. Every `get` performs a
-fresh authenticated decryption and returns only the requested value.
+Storage deadlines are inside encrypted records. Reads delete an expired entry
+before returning a miss. The store also scans every `device-cache` document at
+startup and exposes a purge operation for the live scheduler. Packaged agents
+must call it at the next deadline or at a short bounded interval; tests prove
+that explicit purge removes an entry without a read and that it remains absent
+after restart.
 
-The Linux Secret Service provider keeps its `default` and `session`
-collections in separate stores. Default items use the persistent encrypted
-vault. Session item values use zeroizing in-memory buffers and are never added
-to the vault or its encrypted metadata index. Clearing the session store drops
-and zeroizes every value without modifying persistent items.
+An unresolved conflict containing any expired value is removed as a whole.
+For a cache, failing closed and refetching from the authoritative provider is
+safer than returning a possibly stale concurrent value.
 
-The CLI currently starts a new session for each invocation. A desktop unlock
-agent is planned to provide an “authorize once” experience across processes.
-That agent must have a bounded lifetime, support explicit locking, and retain
-only the vault key.
+## Local protocol and grants
 
-## Security boundary
+Requests and responses are JSON envelopes with a fixed version, random 128-bit
+request ID, strict fields, and a 1 MiB limit. Secret request/response values use
+buffers that zeroize on drop. The service retains a bounded replay window and
+binds each response to its request ID.
 
-Hardware binding protects a copied vault from offline decryption. It cannot
-prevent an already-authorized application from reading and exfiltrating a
-credential returned to it. The desktop agent therefore also needs application
-authorization and session-expiry controls; hardware binding alone does not
-solve an active compromised-session threat.
+`CallerIdentity` includes platform, user identity, application identity,
+executable digest, and optional signing identity. These values are supplied by
+the authenticated transport adapter. A digest of the complete caller identity
+is part of every durable grant.
 
-Credential encryption has a post-quantum symmetric security margin, but the
-hardware wrapping mechanisms are currently P-256 and RSA-2048. FactorSeal
-cannot offer end-to-end post-quantum hardware binding until the relevant
-hardware APIs expose suitable primitives.
+Grants can target one exact namespace/item/field or an entire namespace. They
+contain an explicit set of get/put/delete/clear/lock permissions and an optional
+expiry that is also applied as a storage eviction deadline. Grants are stored
+in the encrypted `device-local` document.
+
+An unlock lease has independent idle and absolute deadlines. Authorized
+operations refresh only the idle deadline and can never pass the absolute
+deadline. Explicit lock and timer, logout, suspend, or shutdown hooks all call
+the same store lock path.
+
+## SecretSpec seam
+
+SecretSpec owns provider addresses, operations, translation, and provider
+tests. Factorseal intentionally does not reproduce those types. Its stable seam
+is `AgentClient`: the in-process test client and each native platform client
+send the same versioned Factorseal agent requests.
+
+The Factorseal crate exposes that seam through the lightweight `agent-client`
+feature. SecretSpec compiles a `factorseal://` provider against it and calls the
+platform client directly. The provider translates convention and native
+addresses plus get, set, expiring set, and delete operations; it never opens
+the embedded database or handles seal keys.
+
+This keeps the trust boundary explicit and single-hop. The SecretSpec CLI or
+application embedding SecretSpec is the process authenticated by the Unix
+socket or Windows named pipe and must receive the durable grant. There is no
+provider subprocess, provider registration, forwarded JSON identity, or
+delegation protocol. The remaining release proof is native end-to-end
+conformance on each platform.
+
+## Platform adapters
+
+The shared core implements the following native adapters:
+
+- Linux: TPM 2.0 plus a Factorseal password, a private Unix socket authenticated
+  with `SO_PEERCRED`, executable digest grants, and a systemd user unit;
+- macOS: Secure Enclave user verification, a private Unix socket authenticated
+  with kernel peer credentials, peer PID, and audit token, plus a LaunchAgent;
+- Windows: TPM 2.0 plus an OS-mediated CNG key-use policy, a local-only named
+  pipe protected by a same-user DACL and verified through client
+  impersonation, SID, PID, and executable digest, plus a per-user Scheduled
+  Task template.
+
+- Linux subscribes to logind session-lock and pre-sleep/pre-shutdown signals
+  while holding a delay inhibitor until the store is locked;
+- macOS observes AppKit sleep, power-off, and session-resign notifications;
+- Windows registers a hidden-window power/session listener and locks directly
+  from suspend, shutdown, session-lock, logout, and disconnect callbacks.
+
+The transports, lifecycle monitors, and developer packaging inputs are
+implemented. Code-signature identities, official signing/notarization, and
+physical-hardware/lifecycle acceptance remain release work. Windows uses the
+CNG key's OS-mediated UI-protection policy; the current hardware library's
+application-level modern Hello convenience gate is intentionally disabled
+because it is not bound to the TPM operation and can degrade when Hello is not
+available. The shared caller identity type is never populated from untrusted
+JSON fields.
+
+Linux executable authentication reads the ptrace-gated
+`/proc/<SO_PEERCRED pid>/exe` link. Filesystem mount-namespace directives on an
+unprivileged systemd user service make that link unreadable on the tested
+NixOS configuration, so the current unit deliberately retains non-namespace
+hardening only. A future IPC principal based on a verified sandbox/application
+identity, or a privileged broker design, is required before mount-namespace
+isolation can be restored without weakening caller authentication.

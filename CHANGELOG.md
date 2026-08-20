@@ -4,21 +4,52 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
-- Add a protocol-neutral phone-factor boundary with short-lived vault-bound
-  requests, enrolled-credential response validation, distinct transport and
-  authorization errors, and zeroizing phone-share handling. Aliro remains an
-  external protocol implementation.
-- Establish two-factor authentication as a design requirement for every
-  supported persistent vault; hardware-only and legacy-password paths are
-  prototype compatibility gaps, not deployment profiles.
-- Bind version 2 vaults to macOS Secure Enclave or Windows/Linux TPM hardware,
-  refusing DPAPI and Linux keyring fallback.
-- Add PIN-protected YubiKey PIV 2-of-2 unlock using independent vault-key
-  shares.
-- Add optional platform-biometric gating for hardware operations, including
-  biometric + YubiKey composition, and report configured factors through the
-  Rust API and CLI.
-- Make password vault support non-default and add migration from version 1
-  password wrapping to version 2 hardware wrapping.
-- Add encrypted credential storage, CLI, and optional `keyring-core` API in a
-  single crate.
+- Remove the legacy file vault, its compatibility adapters and examples, and
+  make the per-user agent the sole product CLI under the `factorseal` command.
+- Add the per-user agent: embedded Turso persistence, Automerge
+  documents, encrypted and Ed25519-signed change envelopes, scoped grants,
+  bounded leases, and expiration.
+- Add authenticated Linux, macOS, and Windows local transports plus native
+  developer packaging inputs, an unsigned macOS pkg builder, and CI package
+  smoke tests.
+- Obtain the seal's nested factor from `--password-file`, an `--askpass`
+  helper, or the controlling terminal, and ship askpass helpers with the macOS
+  and Windows packages so both can keep starting the agent at login without a
+  console and without writing the factor to disk. The helpers are interim:
+  prompting and asking are planned to move into the agent itself.
+- Lock and zeroize the agent from native Linux logind, macOS AppKit, and
+  Windows power/session lifecycle notifications; bound IPC frame time as well
+  as size so a stalled client cannot hold the agent indefinitely.
+- Tag every envelope with its signature algorithm and bind that identifier
+  into both the signed payload and the AEAD additional data, so a post-quantum
+  or hybrid signature becomes a new `SignatureAlgorithm` variant rather than a
+  format migration. Unknown or absent algorithms are refused rather than
+  ignored. Envelope format version 2.
+- Verify signed Turso commit metadata against SQL rows and detect missing
+  history, rolled-back heads, a single document rewound behind its newest
+  commit, orphaned changes, scope tamper, and signature tamper when opening
+  the store.
+- Re-sign and compact the protected commit chain once it passes a bound,
+  down to one commit and one snapshot per document. Every mutation appends a
+  whole encrypted document snapshot, so an unpruned chain grew both the
+  database and unlock latency without bound in the number of writes. The chain
+  is a tamper check, not an audit log.
+- Require one nested factor inside platform key wrapping on every target, so
+  Linux, macOS, and Windows share a single create/unlock path. The factor is
+  modelled as `UnlockFactor`/`NestedFactorKind` with an Argon2id password as
+  the first variant; a variant qualifies only if it derives its key from a
+  hash or symmetric primitive, since TPM 2.0 and the Secure Enclave both wrap
+  with P-256.
+- Expose the native transport through a lightweight Rust `agent-client`
+  feature and integrate it as SecretSpec's compiled `factorseal://` provider.
+  The consuming SecretSpec CLI or embedding application connects directly and
+  is authorized as the native agent caller; no provider subprocess or
+  registration file is involved.
+- Generate the Linux systemd user unit from a template so its absolute
+  `ExecStart` comes from whichever packager installed the binary, rather than
+  a hardcoded prefix that only one install location satisfied.
+- Add a Nix package, NixOS module, and virtual-TPM VM test for the Linux user
+  service, native socket authorization, persistence, delay inhibition, idle
+  lockout, and session-lock shutdown; carry a
+  scoped downstream fix for missing Linux TPM authorization sessions in the
+  pinned hardware dependency.

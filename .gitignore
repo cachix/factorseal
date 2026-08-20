@@ -3,3 +3,6 @@
 /.direnv
 /.env
 /.factorseal
+/dist
+/result
+/.nixos-test-history
