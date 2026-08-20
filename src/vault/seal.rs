@@ -19,12 +19,12 @@ use zeroize::Zeroizing;
 #[cfg(feature = "hardware")]
 use crate::hardware::{KeyProtector, PlatformProtector};
 
-use super::{AgentError, AgentResult, DeviceKeyId, SealId};
+use super::{DeviceKeyId, VaultError, VaultId, VaultResult};
 
-const SEAL_FILE: &str = "seal.json";
-const SEAL_FORMAT: &str = "factorseal-device-seal";
-const SEAL_VERSION: u32 = 2;
-const MAX_SEAL_FILE_BYTES: u64 = 1024 * 1024;
+const VAULT_FILE: &str = "factorseal.json";
+const VAULT_FORMAT: &str = "factorseal-vault";
+const VAULT_VERSION: u32 = 1;
+const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 const KEY_BYTES: usize = 32;
 const SALT_BYTES: usize = 16;
 #[cfg(all(feature = "hardware", not(test)))]
@@ -45,26 +45,26 @@ const TEST_PASSWORD: &[u8] = b"factorseal-test-password";
 #[cfg(feature = "hardware")]
 type ProtectedKeyPayloads = (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>, NestedProtection);
 #[cfg(feature = "hardware")]
-type UnwrappedSealKeys = (Zeroizing<[u8; KEY_BYTES]>, Zeroizing<[u8; KEY_BYTES]>);
+type UnsealedVaultKeys = (Zeroizing<[u8; KEY_BYTES]>, Zeroizing<[u8; KEY_BYTES]>);
 
-/// Public, stable identity of this seal.
+/// Public, stable identity of this vault.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeviceSeal {
-    seal_id: SealId,
+pub struct VaultMetadata {
+    vault_id: VaultId,
     device_key_id: DeviceKeyId,
     public_signing_key: [u8; KEY_BYTES],
     actor_id: Vec<u8>,
-    platform: SealPlatform,
+    platform: VaultPlatform,
     hardware_backend: String,
     nested_factor: NestedFactorKind,
     key_epoch: u64,
     created_at: u64,
 }
 
-impl DeviceSeal {
+impl VaultMetadata {
     #[must_use]
-    pub const fn seal_id(&self) -> SealId {
-        self.seal_id
+    pub const fn vault_id(&self) -> VaultId {
+        self.vault_id
     }
 
     #[must_use]
@@ -87,7 +87,7 @@ impl DeviceSeal {
         &self.hardware_backend
     }
 
-    /// The nested factor this seal requires in addition to its
+    /// The nested factor this vault requires in addition to its
     /// platform hardware key. Exactly one is always required.
     #[must_use]
     pub const fn nested_factor(&self) -> NestedFactorKind {
@@ -110,18 +110,18 @@ impl DeviceSeal {
     }
 }
 
-/// Hardware-unwrapped seal secrets held only by the agent lease.
+/// Hardware-unwrapped vault secrets held only during an unseal lease.
 #[allow(dead_code)]
-pub struct UnlockedSeal {
-    public: DeviceSeal,
+pub struct UnsealedVault {
+    public: VaultMetadata,
     data_key: Zeroizing<[u8; KEY_BYTES]>,
     signing_seed: Zeroizing<[u8; KEY_BYTES]>,
 }
 
-impl std::fmt::Debug for UnlockedSeal {
+impl std::fmt::Debug for UnsealedVault {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("UnlockedSeal")
+            .debug_struct("UnsealedVault")
             .field("public", &self.public)
             .field("data_key", &"[REDACTED]")
             .field("signing_seed", &"[REDACTED]")
@@ -129,9 +129,9 @@ impl std::fmt::Debug for UnlockedSeal {
     }
 }
 
-impl UnlockedSeal {
+impl UnsealedVault {
     #[must_use]
-    pub const fn public(&self) -> &DeviceSeal {
+    pub const fn public(&self) -> &VaultMetadata {
         &self.public
     }
 
@@ -139,7 +139,7 @@ impl UnlockedSeal {
     pub(crate) fn into_parts(
         self,
     ) -> (
-        DeviceSeal,
+        VaultMetadata,
         Zeroizing<[u8; KEY_BYTES]>,
         Zeroizing<[u8; KEY_BYTES]>,
     ) {
@@ -147,31 +147,31 @@ impl UnlockedSeal {
     }
 }
 
-/// Creates and unlocks the permanent hardware-bound seal.
-pub struct Seal;
+/// Creates and unseals the permanent hardware-bound vault.
+pub struct Vault;
 
-impl Seal {
-    /// Read and validate public seal metadata without unwrapping any
+impl Vault {
+    /// Read and validate public vault metadata without unwrapping any
     /// hardware-protected key material.
-    pub fn inspect(root: impl AsRef<Path>) -> AgentResult<DeviceSeal> {
+    pub fn inspect(root: impl AsRef<Path>) -> VaultResult<VaultMetadata> {
         let root = root.as_ref();
         validate_root(root)?;
-        read_seal(root).map(|stored| stored.public())
+        read_vault(root).map(|stored| stored.public())
     }
 
-    /// Delete a seal whose store could never be opened, so initialization can
+    /// Delete a vault whose store could never be opened, so initialization can
     /// be retried.
     ///
-    /// [`Self::create`] writes `seal.json` before the caller can open the
+    /// [`Self::create`] writes `factorseal.json` before the caller can open the
     /// store, and refuses to run again while that file exists, so a store that
     /// fails to open leaves a root that initialization can never complete and
     /// the user cannot recover without deleting keys by hand. Call this only
     /// on the failure path of a `create` the same process just performed: it
     /// destroys the hardware-wrapped keys along with everything they protect.
     #[cfg(feature = "hardware")]
-    pub fn discard_initialization(root: impl AsRef<Path>) -> AgentResult<()> {
+    pub fn discard_initialization(root: impl AsRef<Path>) -> VaultResult<()> {
         let root = root.as_ref();
-        for name in [SEAL_FILE, super::DATABASE_FILE, super::LOCK_FILE] {
+        for name in [VAULT_FILE, super::DATABASE_FILE, super::LOCK_FILE] {
             let path = root.join(name);
             match fs::remove_file(&path) {
                 Ok(()) => {}
@@ -179,35 +179,39 @@ impl Seal {
                 Err(error) => return Err(path_error(&path, error)),
             }
         }
-        Ok(())
+        match fs::remove_dir(root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(path_error(root, error)),
+        }
     }
 
-    /// Create a new seal using distinct platform wrapping keys for the
+    /// Create a new vault using distinct platform wrapping keys for the
     /// DEK and the device-signing seed.
     ///
     /// Every platform nests Argon2id password encryption inside the hardware
-    /// wrapping, so neither the password nor the platform key unlocks alone.
-    /// The password is also the seal's only post-quantum layer:
+    /// wrapping, so neither the password nor the platform key unseals it alone.
+    /// The password is also the vault's only post-quantum layer:
     /// platform key wrapping is elliptic-curve on all three targets.
     #[cfg(feature = "hardware")]
     pub fn create(
         root: impl AsRef<Path>,
-        factor: UnlockFactor<'_>,
+        factor: UnsealFactor<'_>,
         biometric: bool,
-    ) -> AgentResult<UnlockedSeal> {
+    ) -> VaultResult<UnsealedVault> {
         let root = root.as_ref();
         prepare_root(root)?;
-        let seal_id = SealId::random()?;
-        let label_suffix = hex::encode(seal_id.as_bytes());
-        let wrapping_label = format!("seal-wrap-{label_suffix}");
-        let signing_label = format!("seal-sign-{label_suffix}");
+        let vault_id = VaultId::random()?;
+        let label_suffix = hex::encode(vault_id.as_bytes());
+        let wrapping_label = format!("vault-wrap-{label_suffix}");
+        let signing_label = format!("vault-sign-{label_suffix}");
         let wrapping = PlatformProtector::open(root, &wrapping_label, biometric)
-            .map_err(|error| AgentError::Seal(error.to_string()))?;
+            .map_err(|error| VaultError::Protection(error.to_string()))?;
         let signing = PlatformProtector::open(root, &signing_label, biometric)
-            .map_err(|error| AgentError::Seal(error.to_string()))?;
+            .map_err(|error| VaultError::Protection(error.to_string()))?;
         create_with_protectors(
             root,
-            seal_id,
+            vault_id,
             &wrapping_label,
             &signing_label,
             &wrapping,
@@ -222,38 +226,41 @@ impl Seal {
     #[cfg(not(feature = "hardware"))]
     pub fn create(
         _root: impl AsRef<Path>,
-        _factor: UnlockFactor<'_>,
+        _factor: UnsealFactor<'_>,
         _biometric: bool,
-    ) -> AgentResult<UnlockedSeal> {
-        Err(AgentError::Seal(
+    ) -> VaultResult<UnsealedVault> {
+        Err(VaultError::Protection(
             "this build does not include platform hardware support".to_owned(),
         ))
     }
 
-    /// Reopen the existing seal with its mandatory Factorseal password
+    /// Reopen the existing vault with its mandatory Factorseal password
     /// and require the recorded hardware backend and public signing identity
     /// to match.
     #[cfg(feature = "hardware")]
-    pub fn unlock(root: impl AsRef<Path>, factor: UnlockFactor<'_>) -> AgentResult<UnlockedSeal> {
+    pub fn unseal(root: impl AsRef<Path>, factor: UnsealFactor<'_>) -> VaultResult<UnsealedVault> {
         let root = root.as_ref();
         validate_root(root)?;
-        let stored = read_seal(root)?;
+        let stored = read_vault(root)?;
         let wrapping = PlatformProtector::open(root, &stored.wrapping_key_label, stored.biometric)
-            .map_err(|error| AgentError::Seal(error.to_string()))?;
+            .map_err(|error| VaultError::Protection(error.to_string()))?;
         let signing = PlatformProtector::open(root, &stored.signing_key_label, stored.biometric)
-            .map_err(|error| AgentError::Seal(error.to_string()))?;
-        unlock_with_protectors(&stored, &wrapping, &signing, factor)
+            .map_err(|error| VaultError::Protection(error.to_string()))?;
+        unseal_with_protectors(&stored, &wrapping, &signing, factor)
     }
 
     #[cfg(not(feature = "hardware"))]
-    pub fn unlock(_root: impl AsRef<Path>, _factor: UnlockFactor<'_>) -> AgentResult<UnlockedSeal> {
-        Err(AgentError::Seal(
+    pub fn unseal(
+        _root: impl AsRef<Path>,
+        _factor: UnsealFactor<'_>,
+    ) -> VaultResult<UnsealedVault> {
+        Err(VaultError::Protection(
             "this build does not include platform hardware support".to_owned(),
         ))
     }
 
     #[cfg(all(test, feature = "hardware"))]
-    pub(crate) fn create_for_test(root: &Path) -> AgentResult<UnlockedSeal> {
+    pub(crate) fn create_for_test(root: &Path) -> VaultResult<UnsealedVault> {
         use crate::hardware::TestProtector;
 
         prepare_root(root)?;
@@ -261,38 +268,38 @@ impl Seal {
         let signing = TestProtector::new([0x97; KEY_BYTES]);
         create_with_protectors(
             root,
-            SealId::random()?,
-            "test-seal-wrap",
-            "test-seal-sign",
+            VaultId::random()?,
+            "test-vault-wrap",
+            "test-vault-sign",
             &wrapping,
             &signing,
             false,
             1_700_000_000,
-            SealPlatform::Test,
-            UnlockFactor::Password(TEST_PASSWORD),
+            VaultPlatform::Test,
+            UnsealFactor::Password(TEST_PASSWORD),
         )
     }
 
     #[cfg(all(test, feature = "hardware"))]
-    pub(crate) fn unlock_for_test(root: &Path) -> AgentResult<UnlockedSeal> {
+    pub(crate) fn unseal_for_test(root: &Path) -> VaultResult<UnsealedVault> {
         use crate::hardware::TestProtector;
 
         validate_root(root)?;
-        let stored = read_seal(root)?;
+        let stored = read_vault(root)?;
         let wrapping = TestProtector::new([0x35; KEY_BYTES]);
         let signing = TestProtector::new([0x97; KEY_BYTES]);
-        unlock_with_protectors(
+        unseal_with_protectors(
             &stored,
             &wrapping,
             &signing,
-            UnlockFactor::Password(TEST_PASSWORD),
+            UnsealFactor::Password(TEST_PASSWORD),
         )
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum SealPlatform {
+enum VaultPlatform {
     Linux,
     Macos,
     Windows,
@@ -300,7 +307,7 @@ enum SealPlatform {
     Test,
 }
 
-impl SealPlatform {
+impl VaultPlatform {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Linux => "linux",
@@ -340,7 +347,7 @@ impl FactorParameters {
     }
 }
 
-/// The nested factor recorded for an seal, with the nonces that
+/// The nested factor recorded for an vault, with the nonces that
 /// bind its derived key to the wrapped data key and signing seed.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -350,7 +357,7 @@ struct NestedProtection {
     signing_seed_nonce: [u8; crate::crypto::NONCE_BYTES],
 }
 
-/// Which nested factor an seal requires in addition to its platform
+/// Which nested factor an vault requires in addition to its platform
 /// hardware key. Exactly one is always required.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -378,12 +385,12 @@ impl std::fmt::Display for NestedFactorKind {
 /// The secret material supplied by the caller to satisfy the nested factor.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
-pub enum UnlockFactor<'a> {
+pub enum UnsealFactor<'a> {
     /// A Factorseal password stretched with Argon2id.
     Password(&'a [u8]),
 }
 
-impl UnlockFactor<'_> {
+impl UnsealFactor<'_> {
     #[must_use]
     pub const fn kind(&self) -> NestedFactorKind {
         match self {
@@ -392,10 +399,10 @@ impl UnlockFactor<'_> {
     }
 }
 
-impl std::fmt::Debug for UnlockFactor<'_> {
+impl std::fmt::Debug for UnsealFactor<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("UnlockFactor")
+            .debug_struct("UnsealFactor")
             .field("kind", &self.kind())
             .field("secret", &"[REDACTED]")
             .finish()
@@ -404,14 +411,14 @@ impl std::fmt::Debug for UnlockFactor<'_> {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SealFile {
+struct VaultFile {
     format: String,
     version: u32,
-    seal_id: SealId,
+    vault_id: VaultId,
     device_key_id: DeviceKeyId,
     public_signing_key: [u8; KEY_BYTES],
     actor_id: Vec<u8>,
-    platform: SealPlatform,
+    platform: VaultPlatform,
     hardware_backend: String,
     wrapping_key_label: String,
     signing_key_label: String,
@@ -427,23 +434,23 @@ struct SealFile {
 #[allow(clippy::too_many_arguments)]
 fn create_with_protectors(
     root: &Path,
-    seal_id: SealId,
+    vault_id: VaultId,
     wrapping_key_label: &str,
     signing_key_label: &str,
     wrapping: &dyn KeyProtector,
     signing: &dyn KeyProtector,
     biometric: bool,
     created_at: u64,
-    platform: SealPlatform,
-    factor: UnlockFactor<'_>,
-) -> AgentResult<UnlockedSeal> {
+    platform: VaultPlatform,
+    factor: UnsealFactor<'_>,
+) -> VaultResult<UnsealedVault> {
     if wrapping_key_label == signing_key_label {
-        return Err(AgentError::Seal(
+        return Err(VaultError::Protection(
             "wrapping and signing key labels must be distinct".to_owned(),
         ));
     }
     if wrapping.backend() != signing.backend() {
-        return Err(AgentError::Seal(
+        return Err(VaultError::Protection(
             "wrapping and signing keys use different hardware backends".to_owned(),
         ));
     }
@@ -456,17 +463,17 @@ fn create_with_protectors(
     let device_key_id = DeviceKeyId::for_public_key(&public_signing_key);
     let actor_id = actor_id_for_public_key(&public_signing_key).to_vec();
     let (data_key_payload, signing_seed_payload, nested_protection) =
-        protect_with_factor(seal_id, &data_key, &signing_seed, factor)?;
+        protect_with_factor(vault_id, &data_key, &signing_seed, factor)?;
     let wrapped_data_key = wrapping
         .wrap(&data_key_payload)
-        .map_err(|error| AgentError::Seal(error.to_string()))?;
+        .map_err(|error| VaultError::Protection(error.to_string()))?;
     let wrapped_signing_seed = signing
         .wrap(&signing_seed_payload)
-        .map_err(|error| AgentError::Seal(error.to_string()))?;
-    let stored = SealFile {
-        format: SEAL_FORMAT.to_owned(),
-        version: SEAL_VERSION,
-        seal_id,
+        .map_err(|error| VaultError::Protection(error.to_string()))?;
+    let stored = VaultFile {
+        format: VAULT_FORMAT.to_owned(),
+        version: VAULT_VERSION,
+        vault_id,
         device_key_id,
         public_signing_key,
         actor_id,
@@ -481,8 +488,8 @@ fn create_with_protectors(
         key_epoch: 0,
         created_at,
     };
-    write_seal(root, &stored)?;
-    Ok(UnlockedSeal {
+    write_vault(root, &stored)?;
+    Ok(UnsealedVault {
         public: stored.public(),
         data_key,
         signing_seed,
@@ -490,26 +497,26 @@ fn create_with_protectors(
 }
 
 #[cfg(feature = "hardware")]
-fn unlock_with_protectors(
-    stored: &SealFile,
+fn unseal_with_protectors(
+    stored: &VaultFile,
     wrapping: &dyn KeyProtector,
     signing: &dyn KeyProtector,
-    factor: UnlockFactor<'_>,
-) -> AgentResult<UnlockedSeal> {
+    factor: UnsealFactor<'_>,
+) -> VaultResult<UnsealedVault> {
     stored.validate()?;
     if wrapping.backend().as_str() != stored.hardware_backend
         || signing.backend().as_str() != stored.hardware_backend
     {
-        return Err(AgentError::Seal(
-            "seal hardware backend does not match its metadata".to_owned(),
+        return Err(VaultError::Protection(
+            "vault hardware backend does not match its metadata".to_owned(),
         ));
     }
     let wrapped_data_key = wrapping
         .unwrap(&stored.wrapped_data_key)
-        .map_err(|error| AgentError::Seal(error.to_string()))?;
+        .map_err(|error| VaultError::Protection(error.to_string()))?;
     let wrapped_signing_seed = signing
         .unwrap(&stored.wrapped_signing_seed)
-        .map_err(|error| AgentError::Seal(error.to_string()))?;
+        .map_err(|error| VaultError::Protection(error.to_string()))?;
     let (data_key, signing_seed) =
         unprotect_with_factor(stored, &wrapped_data_key, &wrapped_signing_seed, factor)?;
     let signing_key = SigningKey::from_bytes(&signing_seed);
@@ -518,21 +525,21 @@ fn unlock_with_protectors(
         || DeviceKeyId::for_public_key(&public_signing_key) != stored.device_key_id
         || actor_id_for_public_key(&public_signing_key).as_slice() != stored.actor_id
     {
-        return Err(AgentError::Seal(
-            "device-signing key does not match seal identity".to_owned(),
+        return Err(VaultError::Protection(
+            "device-signing key does not match vault identity".to_owned(),
         ));
     }
-    Ok(UnlockedSeal {
+    Ok(UnsealedVault {
         public: stored.public(),
         data_key,
         signing_seed,
     })
 }
 
-impl SealFile {
-    fn public(&self) -> DeviceSeal {
-        DeviceSeal {
-            seal_id: self.seal_id,
+impl VaultFile {
+    fn public(&self) -> VaultMetadata {
+        VaultMetadata {
+            vault_id: self.vault_id,
             device_key_id: self.device_key_id,
             public_signing_key: self.public_signing_key,
             actor_id: self.actor_id.clone(),
@@ -544,10 +551,10 @@ impl SealFile {
         }
     }
 
-    fn validate(&self) -> AgentResult<()> {
-        if self.format != SEAL_FORMAT || self.version != SEAL_VERSION {
-            return Err(AgentError::Seal(
-                "unsupported seal metadata format or version".to_owned(),
+    fn validate(&self) -> VaultResult<()> {
+        if self.format != VAULT_FORMAT || self.version != VAULT_VERSION {
+            return Err(VaultError::Protection(
+                "unsupported vault metadata format or version".to_owned(),
             ));
         }
         if !matches!(
@@ -562,7 +569,9 @@ impl SealFile {
             || DeviceKeyId::for_public_key(&self.public_signing_key) != self.device_key_id
             || actor_id_for_public_key(&self.public_signing_key).as_slice() != self.actor_id
         {
-            return Err(AgentError::Seal("seal metadata is inconsistent".to_owned()));
+            return Err(VaultError::Protection(
+                "vault metadata is inconsistent".to_owned(),
+            ));
         }
         validate_factor_parameters(&self.nested_protection.factor)?;
         Ok(())
@@ -571,25 +580,25 @@ impl SealFile {
 
 #[cfg(feature = "hardware")]
 fn protect_with_factor(
-    seal_id: SealId,
+    vault_id: VaultId,
     data_key: &[u8; KEY_BYTES],
     signing_seed: &[u8; KEY_BYTES],
-    factor: UnlockFactor<'_>,
-) -> AgentResult<ProtectedKeyPayloads> {
+    factor: UnsealFactor<'_>,
+) -> VaultResult<ProtectedKeyPayloads> {
     let parameters = new_factor_parameters(factor)?;
     let factor_key = derive_factor_key(factor, &parameters)?;
     let data = crate::crypto::encrypt(
         &factor_key,
-        &factor_aad(seal_id, b"data-encryption-key"),
+        &factor_aad(vault_id, b"data-encryption-key"),
         data_key,
     )
-    .map_err(|_| AgentError::Crypto)?;
+    .map_err(|_| VaultError::Crypto)?;
     let signing = crate::crypto::encrypt(
         &factor_key,
-        &factor_aad(seal_id, b"device-signing-seed"),
+        &factor_aad(vault_id, b"device-signing-seed"),
         signing_seed,
     )
-    .map_err(|_| AgentError::Crypto)?;
+    .map_err(|_| VaultError::Crypto)?;
     Ok((
         Zeroizing::new(data.ciphertext),
         Zeroizing::new(signing.ciphertext),
@@ -602,9 +611,9 @@ fn protect_with_factor(
 }
 
 #[cfg(feature = "hardware")]
-fn new_factor_parameters(factor: UnlockFactor<'_>) -> AgentResult<FactorParameters> {
+fn new_factor_parameters(factor: UnsealFactor<'_>) -> VaultResult<FactorParameters> {
     match factor {
-        UnlockFactor::Password(password) => {
+        UnsealFactor::Password(password) => {
             if password.is_empty() {
                 return Err(factor_empty_error(factor.kind()));
             }
@@ -623,24 +632,24 @@ fn new_factor_parameters(factor: UnlockFactor<'_>) -> AgentResult<FactorParamete
 
 #[cfg(feature = "hardware")]
 fn unprotect_with_factor(
-    stored: &SealFile,
+    stored: &VaultFile,
     data_key_payload: &Zeroizing<Vec<u8>>,
     signing_seed_payload: &Zeroizing<Vec<u8>>,
-    factor: UnlockFactor<'_>,
-) -> AgentResult<UnwrappedSealKeys> {
+    factor: UnsealFactor<'_>,
+) -> VaultResult<UnsealedVaultKeys> {
     let protection = &stored.nested_protection;
     let factor_key = derive_factor_key(factor, &protection.factor)?;
     let data_key = crate::crypto::decrypt(
         &factor_key,
         &protection.data_key_nonce,
-        &factor_aad(stored.seal_id, b"data-encryption-key"),
+        &factor_aad(stored.vault_id, b"data-encryption-key"),
         data_key_payload,
     )
     .map_err(|_| factor_incorrect_error(protection.factor.kind()))?;
     let signing_seed = crate::crypto::decrypt(
         &factor_key,
         &protection.signing_seed_nonce,
-        &factor_aad(stored.seal_id, b"device-signing-seed"),
+        &factor_aad(stored.vault_id, b"device-signing-seed"),
         signing_seed_payload,
     )
     .map_err(|_| factor_incorrect_error(protection.factor.kind()))?;
@@ -651,22 +660,22 @@ fn unprotect_with_factor(
 }
 
 /// Derive the nested factor's key. The supplied factor must match the one the
-/// seal recorded; a mismatch is rejected rather than silently ignored.
+/// vault recorded; a mismatch is rejected rather than silently ignored.
 #[cfg(feature = "hardware")]
 fn derive_factor_key(
-    factor: UnlockFactor<'_>,
+    factor: UnsealFactor<'_>,
     parameters: &FactorParameters,
-) -> AgentResult<Zeroizing<[u8; KEY_BYTES]>> {
+) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
     validate_factor_parameters(parameters)?;
     if factor.kind() != parameters.kind() {
-        return Err(AgentError::Seal(format!(
-            "this seal requires the {} factor",
+        return Err(VaultError::Protection(format!(
+            "this vault requires the {} factor",
             parameters.kind()
         )));
     }
     match (factor, parameters) {
         (
-            UnlockFactor::Password(password),
+            UnsealFactor::Password(password),
             FactorParameters::Argon2id {
                 memory_kib,
                 iterations,
@@ -679,18 +688,22 @@ fn derive_factor_key(
                 return Err(factor_empty_error(factor.kind()));
             }
             let params = Params::new(*memory_kib, *iterations, *parallelism, Some(KEY_BYTES))
-                .map_err(|error| AgentError::Seal(format!("invalid Argon2 parameters: {error}")))?;
+                .map_err(|error| {
+                    VaultError::Protection(format!("invalid Argon2 parameters: {error}"))
+                })?;
             let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
             let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
             argon2
                 .hash_password_into(password, salt, &mut *key)
-                .map_err(|error| AgentError::Seal(format!("factor derivation failed: {error}")))?;
+                .map_err(|error| {
+                    VaultError::Protection(format!("factor derivation failed: {error}"))
+                })?;
             Ok(key)
         }
     }
 }
 
-fn validate_factor_parameters(parameters: &FactorParameters) -> AgentResult<()> {
+fn validate_factor_parameters(parameters: &FactorParameters) -> VaultResult<()> {
     let FactorParameters::Argon2id {
         version,
         memory_kib,
@@ -706,7 +719,7 @@ fn validate_factor_parameters(parameters: &FactorParameters) -> AgentResult<()> 
         || *parallelism == 0
         || *parallelism > MAX_ARGON2_PARALLELISM
     {
-        return Err(AgentError::Seal(
+        return Err(VaultError::Protection(
             "unsupported or unsafe nested-factor parameters".to_owned(),
         ));
     }
@@ -714,37 +727,37 @@ fn validate_factor_parameters(parameters: &FactorParameters) -> AgentResult<()> 
 }
 
 #[cfg(feature = "hardware")]
-fn factor_aad(seal_id: SealId, purpose: &[u8]) -> Vec<u8> {
+fn factor_aad(vault_id: VaultId, purpose: &[u8]) -> Vec<u8> {
     let mut aad = Vec::with_capacity(64 + purpose.len());
-    aad.extend_from_slice(b"factorseal/seal-factor/v1\0");
-    aad.extend_from_slice(seal_id.as_bytes());
+    aad.extend_from_slice(b"factorseal/vault-factor/v1\0");
+    aad.extend_from_slice(vault_id.as_bytes());
     aad.extend_from_slice(&(purpose.len() as u64).to_be_bytes());
     aad.extend_from_slice(purpose);
     aad
 }
 
 #[cfg(feature = "hardware")]
-fn factor_incorrect_error(kind: NestedFactorKind) -> AgentError {
-    AgentError::Seal(format!(
-        "the {kind} factor is incorrect or seal metadata was modified"
+fn factor_incorrect_error(kind: NestedFactorKind) -> VaultError {
+    VaultError::Protection(format!(
+        "the {kind} factor is incorrect or vault metadata was modified"
     ))
 }
 
 #[cfg(feature = "hardware")]
-fn factor_empty_error(kind: NestedFactorKind) -> AgentError {
-    AgentError::Seal(format!("the {kind} factor must not be empty"))
+fn factor_empty_error(kind: NestedFactorKind) -> VaultError {
+    VaultError::Protection(format!("the {kind} factor must not be empty"))
 }
 
 #[cfg(feature = "hardware")]
-fn current_platform() -> AgentResult<SealPlatform> {
+fn current_platform() -> VaultResult<VaultPlatform> {
     #[cfg(target_os = "linux")]
-    return Ok(SealPlatform::Linux);
+    return Ok(VaultPlatform::Linux);
     #[cfg(target_os = "macos")]
-    return Ok(SealPlatform::Macos);
+    return Ok(VaultPlatform::Macos);
     #[cfg(target_os = "windows")]
-    return Ok(SealPlatform::Windows);
+    return Ok(VaultPlatform::Windows);
     #[allow(unreachable_code)]
-    Err(AgentError::Seal(
+    Err(VaultError::Protection(
         "this platform is not a first-release target".to_owned(),
     ))
 }
@@ -760,70 +773,90 @@ fn actor_id_for_public_key(public_key: &[u8; KEY_BYTES]) -> [u8; KEY_BYTES] {
 fn decode_key(
     plaintext: &Zeroizing<Vec<u8>>,
     name: &'static str,
-) -> AgentResult<Zeroizing<[u8; KEY_BYTES]>> {
+) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
     let length = plaintext.len();
     let bytes: [u8; KEY_BYTES] = plaintext
         .as_slice()
         .try_into()
-        .map_err(|_| AgentError::Seal(format!("unwrapped {name} has {length} bytes")))?;
+        .map_err(|_| VaultError::Protection(format!("unwrapped {name} has {length} bytes")))?;
     Ok(Zeroizing::new(bytes))
 }
 
 #[cfg(feature = "hardware")]
-fn prepare_root(root: &Path) -> AgentResult<()> {
-    if root.join(SEAL_FILE).exists() {
-        return Err(AgentError::Seal(format!(
-            "seal already exists at `{}`",
-            root.display()
-        )));
+fn prepare_root(root: &Path) -> VaultResult<()> {
+    if let Some(parent) = root.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|error| path_error(parent, error))?;
     }
-    fs::create_dir_all(root).map_err(|error| path_error(root, error))?;
-    set_private_permissions(root)?;
+    create_private_root(root).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            VaultError::Protection(format!(
+                "refusing to initialize in pre-existing vault root `{}`",
+                root.display()
+            ))
+        } else {
+            path_error(root, error)
+        }
+    })?;
     validate_root(root)
 }
 
-fn validate_root(root: &Path) -> AgentResult<()> {
+#[cfg(all(feature = "hardware", unix))]
+fn create_private_root(root: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700).create(root)
+}
+
+#[cfg(all(feature = "hardware", not(unix)))]
+fn create_private_root(root: &Path) -> std::io::Result<()> {
+    fs::create_dir(root)
+}
+
+fn validate_root(root: &Path) -> VaultResult<()> {
     let metadata = fs::symlink_metadata(root).map_err(|error| path_error(root, error))?;
     if !metadata.file_type().is_dir() {
-        return Err(AgentError::Seal(format!(
-            "seal root `{}` is not a directory",
+        return Err(VaultError::Protection(format!(
+            "vault root `{}` is not a directory",
             root.display()
         )));
     }
     validate_private_permissions(root, &metadata)
 }
 
-fn read_seal(root: &Path) -> AgentResult<SealFile> {
-    let path = root.join(SEAL_FILE);
+fn read_vault(root: &Path) -> VaultResult<VaultFile> {
+    let path = root.join(VAULT_FILE);
     let mut file = fs::File::open(&path).map_err(|error| path_error(&path, error))?;
     let metadata = file.metadata().map_err(|error| path_error(&path, error))?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_SEAL_FILE_BYTES {
-        return Err(AgentError::Seal(
-            "seal metadata is not a bounded regular file".to_owned(),
+    if !metadata.file_type().is_file() || metadata.len() > MAX_VAULT_FILE_BYTES {
+        return Err(VaultError::Protection(
+            "vault metadata is not a bounded regular file".to_owned(),
         ));
     }
     let capacity = usize::try_from(metadata.len())
-        .map_err(|_| AgentError::Seal("seal metadata does not fit in memory".to_owned()))?;
+        .map_err(|_| VaultError::Protection("vault metadata does not fit in memory".to_owned()))?;
     let mut bytes = Vec::with_capacity(capacity);
     file.read_to_end(&mut bytes)
         .map_err(|error| path_error(&path, error))?;
-    let stored: SealFile =
-        serde_json::from_slice(&bytes).map_err(|error| AgentError::Seal(error.to_string()))?;
+    let stored: VaultFile = serde_json::from_slice(&bytes)
+        .map_err(|error| VaultError::Protection(error.to_string()))?;
     stored.validate()?;
     Ok(stored)
 }
 
 #[cfg(feature = "hardware")]
-fn write_seal(root: &Path, stored: &SealFile) -> AgentResult<()> {
+fn write_vault(root: &Path, stored: &VaultFile) -> VaultResult<()> {
     stored.validate()?;
-    let path = root.join(SEAL_FILE);
-    let bytes =
-        serde_json::to_vec_pretty(stored).map_err(|error| AgentError::Seal(error.to_string()))?;
+    let path = root.join(VAULT_FILE);
+    let bytes = serde_json::to_vec_pretty(stored)
+        .map_err(|error| VaultError::Protection(error.to_string()))?;
     write_new_private_file(&path, &bytes)
 }
 
 #[cfg(all(feature = "hardware", unix))]
-fn write_new_private_file(path: &Path, bytes: &[u8]) -> AgentResult<()> {
+fn write_new_private_file(path: &Path, bytes: &[u8]) -> VaultResult<()> {
     use std::os::unix::fs::OpenOptionsExt;
 
     let mut options = OpenOptions::new();
@@ -832,14 +865,14 @@ fn write_new_private_file(path: &Path, bytes: &[u8]) -> AgentResult<()> {
 }
 
 #[cfg(all(feature = "hardware", not(unix)))]
-fn write_new_private_file(path: &Path, bytes: &[u8]) -> AgentResult<()> {
+fn write_new_private_file(path: &Path, bytes: &[u8]) -> VaultResult<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     write_and_sync(path, &options, bytes)
 }
 
 #[cfg(feature = "hardware")]
-fn write_and_sync(path: &Path, options: &OpenOptions, bytes: &[u8]) -> AgentResult<()> {
+fn write_and_sync(path: &Path, options: &OpenOptions, bytes: &[u8]) -> VaultResult<()> {
     let mut file = options
         .open(path)
         .map_err(|error| path_error(path, error))?;
@@ -848,28 +881,14 @@ fn write_and_sync(path: &Path, options: &OpenOptions, bytes: &[u8]) -> AgentResu
     file.sync_all().map_err(|error| path_error(path, error))
 }
 
-#[cfg(all(feature = "hardware", unix))]
-fn set_private_permissions(path: &Path) -> AgentResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|error| path_error(path, error))
-}
-
-#[cfg(all(feature = "hardware", not(unix)))]
-#[allow(clippy::unnecessary_wraps)]
-fn set_private_permissions(_path: &Path) -> AgentResult<()> {
-    Ok(())
-}
-
 #[cfg(unix)]
-fn validate_private_permissions(path: &Path, metadata: &fs::Metadata) -> AgentResult<()> {
+fn validate_private_permissions(path: &Path, metadata: &fs::Metadata) -> VaultResult<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let mode = metadata.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
-        return Err(AgentError::Seal(format!(
-            "seal root `{}` is accessible by group or other users (mode {mode:o})",
+        return Err(VaultError::Protection(format!(
+            "vault root `{}` is accessible by group or other users (mode {mode:o})",
             path.display()
         )));
     }
@@ -878,21 +897,21 @@ fn validate_private_permissions(path: &Path, metadata: &fs::Metadata) -> AgentRe
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-fn validate_private_permissions(_path: &Path, _metadata: &fs::Metadata) -> AgentResult<()> {
+fn validate_private_permissions(_path: &Path, _metadata: &fs::Metadata) -> VaultResult<()> {
     Ok(())
 }
 
 #[cfg(feature = "hardware")]
-fn unix_time() -> AgentResult<u64> {
+fn unix_time() -> VaultResult<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .map_err(|error| AgentError::Seal(error.to_string()))
+        .map_err(|error| VaultError::Protection(error.to_string()))
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn path_error(path: &Path, error: std::io::Error) -> AgentError {
-    AgentError::Seal(format!("I/O error for `{}`: {error}", path.display()))
+fn path_error(path: &Path, error: std::io::Error) -> VaultError {
+    VaultError::Protection(format!("I/O error for `{}`: {error}", path.display()))
 }
 
 #[cfg(all(test, feature = "hardware"))]
@@ -900,35 +919,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_discarded_initialization_can_be_retried() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("factorseal");
-        Seal::create_for_test(&root).unwrap();
-        // This is what a failed store open leaves behind: a seal that
-        // `create` will not write over.
-        assert!(Seal::create_for_test(&root).is_err());
-
-        Seal::discard_initialization(&root).unwrap();
-        assert!(!root.join(SEAL_FILE).exists());
-        // Discarding an already discarded root is not an error, so the
-        // failure path can call it without checking first.
-        Seal::discard_initialization(&root).unwrap();
-        Seal::create_for_test(&root).unwrap();
+    fn persisted_vault_artifacts_use_the_factorseal_basename() {
+        assert_eq!(VAULT_FILE, "factorseal.json");
+        assert_eq!(super::super::DATABASE_FILE, "factorseal.db");
+        assert_eq!(super::super::LOCK_FILE, "factorseal.lock");
     }
 
     #[test]
-    fn installation_identity_and_actor_survive_unlock() {
+    fn a_discarded_initialization_can_be_retried() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
-        let created = Seal::create_for_test(&root).unwrap();
+        Vault::create_for_test(&root).unwrap();
+        // This is what a failed store open leaves behind: a vault that
+        // `create` will not write over.
+        assert!(Vault::create_for_test(&root).is_err());
+
+        Vault::discard_initialization(&root).unwrap();
+        assert!(!root.exists());
+        // Discarding an already discarded root is not an error, so the
+        // failure path can call it without checking first.
+        Vault::discard_initialization(&root).unwrap();
+        Vault::create_for_test(&root).unwrap();
+    }
+
+    #[test]
+    fn initialization_refuses_a_preexisting_root_without_mutating_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("factorseal");
+        fs::create_dir(&root).unwrap();
+        let database = root.join(super::super::DATABASE_FILE);
+        let lock = root.join(super::super::LOCK_FILE);
+        fs::write(&database, b"existing database").unwrap();
+        fs::write(&lock, b"existing lock").unwrap();
+
+        let error = Vault::create_for_test(&root).unwrap_err();
+        assert!(error.to_string().contains("pre-existing vault root"));
+        assert_eq!(fs::read(database).unwrap(), b"existing database");
+        assert_eq!(fs::read(lock).unwrap(), b"existing lock");
+        assert!(!root.join(VAULT_FILE).exists());
+    }
+
+    #[test]
+    fn installation_identity_and_actor_survive_unseal() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("factorseal");
+        let created = Vault::create_for_test(&root).unwrap();
         let expected = created.public().clone();
         drop(created);
 
-        let unlocked = Seal::unlock_for_test(&root).unwrap();
-        assert_eq!(unlocked.public(), &expected);
+        let unsealed = Vault::unseal_for_test(&root).unwrap();
+        assert_eq!(unsealed.public(), &expected);
         assert_ne!(
-            unlocked.public().device_key_id().as_bytes()[..16],
-            unlocked.public().seal_id().as_bytes()[..]
+            unsealed.public().device_key_id().as_bytes()[..16],
+            unsealed.public().vault_id().as_bytes()[..]
         );
     }
 
@@ -936,19 +979,19 @@ mod tests {
     fn installation_uses_distinct_wrapping_and_signing_material() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
-        Seal::create_for_test(&root).unwrap();
-        let stored = read_seal(&root).unwrap();
+        Vault::create_for_test(&root).unwrap();
+        let stored = read_vault(&root).unwrap();
 
         assert_ne!(stored.wrapping_key_label, stored.signing_key_label);
         assert_ne!(stored.wrapped_data_key, stored.wrapped_signing_seed);
     }
 
     #[test]
-    fn tampered_public_identity_is_rejected_before_unlock() {
+    fn tampered_public_identity_is_rejected_before_unseal() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
-        Seal::create_for_test(&root).unwrap();
-        let mut stored = read_seal(&root).unwrap();
+        Vault::create_for_test(&root).unwrap();
+        let mut stored = read_vault(&root).unwrap();
         stored.actor_id[0] ^= 1;
 
         assert!(stored.validate().is_err());
@@ -959,9 +1002,9 @@ mod tests {
         use crate::hardware::TestProtector;
 
         for platform in [
-            SealPlatform::Linux,
-            SealPlatform::Macos,
-            SealPlatform::Windows,
+            VaultPlatform::Linux,
+            VaultPlatform::Macos,
+            VaultPlatform::Windows,
         ] {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().join("factorseal");
@@ -970,7 +1013,7 @@ mod tests {
             let signing = TestProtector::new([0x97; KEY_BYTES]);
             let created = create_with_protectors(
                 &root,
-                SealId::random().unwrap(),
+                VaultId::random().unwrap(),
                 "platform-test-wrap",
                 "platform-test-sign",
                 &wrapping,
@@ -978,46 +1021,46 @@ mod tests {
                 false,
                 1_700_000_000,
                 platform,
-                UnlockFactor::Password(b"correct horse battery staple"),
+                UnsealFactor::Password(b"correct horse battery staple"),
             )
             .unwrap();
             let expected = created.public().clone();
             assert_eq!(expected.nested_factor(), NestedFactorKind::Argon2idPassword);
             drop(created);
 
-            let stored = read_seal(&root).unwrap();
+            let stored = read_vault(&root).unwrap();
             assert!(
-                unlock_with_protectors(&stored, &wrapping, &signing, UnlockFactor::Password(b""))
+                unseal_with_protectors(&stored, &wrapping, &signing, UnsealFactor::Password(b""))
                     .is_err()
             );
             assert!(
-                unlock_with_protectors(
+                unseal_with_protectors(
                     &stored,
                     &wrapping,
                     &signing,
-                    UnlockFactor::Password(b"wrong password")
+                    UnsealFactor::Password(b"wrong password")
                 )
                 .is_err()
             );
 
             let wrong_hardware = TestProtector::new([0x36; KEY_BYTES]);
             assert!(
-                unlock_with_protectors(
+                unseal_with_protectors(
                     &stored,
                     &wrong_hardware,
                     &signing,
-                    UnlockFactor::Password(b"correct horse battery staple"),
+                    UnsealFactor::Password(b"correct horse battery staple"),
                 )
                 .is_err()
             );
-            let unlocked = unlock_with_protectors(
+            let unsealed = unseal_with_protectors(
                 &stored,
                 &wrapping,
                 &signing,
-                UnlockFactor::Password(b"correct horse battery staple"),
+                UnsealFactor::Password(b"correct horse battery staple"),
             )
             .unwrap();
-            assert_eq!(unlocked.public(), &expected);
+            assert_eq!(unsealed.public(), &expected);
         }
     }
 }

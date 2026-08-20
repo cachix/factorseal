@@ -1,45 +1,45 @@
-//! Storage and protocol primitives for the per-user agent.
+//! Storage and protocol primitives for the per-user vault.
 //!
-//! The agent is the only component that opens the embedded database. Its
+//! The vault service is the only component that opens the embedded database. Its
 //! callers use domain operations; raw Automerge mutation is deliberately not
 //! part of the public API.
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 mod document;
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 mod envelope;
 mod protocol;
 mod seal;
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 mod store;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod transport;
 
-#[cfg(all(feature = "agent", target_os = "linux"))]
+#[cfg(all(feature = "vault", target_os = "linux"))]
 mod linux;
 
-#[cfg(all(feature = "agent", target_os = "macos"))]
+#[cfg(all(feature = "vault", target_os = "macos"))]
 mod macos;
 
-#[cfg(all(feature = "agent", target_os = "windows"))]
+#[cfg(all(feature = "vault", target_os = "windows"))]
 mod windows;
-#[cfg(all(feature = "agent-client", target_os = "windows"))]
+#[cfg(all(feature = "vault-client", target_os = "windows"))]
 mod windows_client;
 
 #[cfg(all(
-    feature = "agent-client",
+    feature = "vault-client",
     any(target_os = "linux", target_os = "macos")
 ))]
 mod unix_client;
 
 #[cfg(all(
-    feature = "agent",
+    feature = "vault",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 use std::collections::HashMap;
 use std::fmt;
 #[cfg(all(
-    feature = "agent",
+    feature = "vault",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 use std::sync::Mutex;
@@ -48,64 +48,64 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 pub(crate) use document::{DocumentMutation, SecretDocument, SecretRead};
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 pub use envelope::{
     EncryptedSnapshot, SignatureAlgorithm, SignedChangeEnvelope, verify_and_decrypt_change,
     verify_and_decrypt_snapshot,
 };
 pub use protocol::{
-    AgentAction, AgentClient, AgentRequest, AgentResponse, AgentResponseBody, AgentResponseError,
-    AgentResponseErrorCode, CallerIdentity, CallerPlatform, RequestId, WireSecret,
+    CallerIdentity, CallerPlatform, RequestId, VaultAction, VaultClient, VaultRequest,
+    VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret,
     WireSecretAddress,
 };
-#[cfg(feature = "agent")]
-pub use protocol::{AgentService, GrantPermission, UnlockLeasePolicy};
-#[cfg(feature = "agent")]
-pub use seal::UnlockedSeal;
-pub use seal::{DeviceSeal, NestedFactorKind, Seal, UnlockFactor};
-#[cfg(feature = "agent")]
-pub use store::AgentStore;
+#[cfg(feature = "vault")]
+pub use protocol::{GrantPermission, UnsealLeasePolicy, VaultService};
+#[cfg(feature = "vault")]
+pub use seal::UnsealedVault;
+pub use seal::{NestedFactorKind, UnsealFactor, Vault, VaultMetadata};
+#[cfg(feature = "vault")]
+pub use store::VaultStore;
 
-#[cfg(all(feature = "agent", target_os = "linux"))]
-pub use linux::{LinuxAgentOptions, linux_caller_identity_for_executable, serve_linux_agent};
-#[cfg(all(feature = "agent", target_os = "macos"))]
-pub use macos::{MacosAgentOptions, macos_caller_identity_for_executable, serve_macos_agent};
+#[cfg(all(feature = "vault", target_os = "linux"))]
+pub use linux::{LinuxVaultOptions, linux_caller_identity_for_executable, serve_linux_vault};
+#[cfg(all(feature = "vault", target_os = "macos"))]
+pub use macos::{MacosVaultOptions, macos_caller_identity_for_executable, serve_macos_vault};
 
 // Linux and macOS share one Unix socket client; each target names it after
 // the transport it talks to.
-#[cfg(all(feature = "agent-client", target_os = "linux"))]
-pub use unix_client::UnixAgentClient as LinuxAgentClient;
-#[cfg(all(feature = "agent-client", target_os = "macos"))]
-pub use unix_client::UnixAgentClient as MacosAgentClient;
+#[cfg(all(feature = "vault-client", target_os = "linux"))]
+pub use unix_client::UnixVaultClient as LinuxVaultClient;
+#[cfg(all(feature = "vault-client", target_os = "macos"))]
+pub use unix_client::UnixVaultClient as MacosVaultClient;
 
-#[cfg(all(feature = "agent", target_os = "windows"))]
+#[cfg(all(feature = "vault", target_os = "windows"))]
 pub use windows::{
-    WindowsAgentOptions, serve_windows_agent, windows_caller_identity_for_executable,
+    WindowsVaultOptions, serve_windows_vault, windows_caller_identity_for_executable,
 };
-#[cfg(all(feature = "agent-client", target_os = "windows"))]
-pub use windows_client::WindowsAgentClient;
+#[cfg(all(feature = "vault-client", target_os = "windows"))]
+pub use windows_client::WindowsVaultClient;
 
-/// Files the store owns inside a seal root. `seal` needs their names to
-/// undo a half-finished initialization, and it compiles without `agent`.
-#[cfg(any(feature = "agent", feature = "hardware"))]
-const DATABASE_FILE: &str = "agent.db";
-#[cfg(any(feature = "agent", feature = "hardware"))]
-const LOCK_FILE: &str = "agent.lock";
+/// Files the store owns inside a vault root. The sealing layer needs their
+/// names to undo a half-finished initialization without the `vault` feature.
+#[cfg(any(feature = "vault", feature = "hardware"))]
+const DATABASE_FILE: &str = "factorseal.db";
+#[cfg(any(feature = "vault", feature = "hardware"))]
+const LOCK_FILE: &str = "factorseal.lock";
 
-const SEAL_ID_BYTES: usize = 16;
+const VAULT_ID_BYTES: usize = 16;
 const DEVICE_KEY_ID_BYTES: usize = 32;
 const DOCUMENT_ID_BYTES: usize = 32;
 const MAX_ADDRESS_COMPONENT_BYTES: usize = 4 * 1024;
 #[cfg(all(
-    feature = "agent",
+    feature = "vault",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 const MAX_CALLER_IDENTITY_CACHE_ENTRIES: usize = 256;
 
 #[cfg(all(
-    feature = "agent",
+    feature = "vault",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 #[derive(Default)]
@@ -114,19 +114,19 @@ struct CallerIdentityCache {
 }
 
 #[cfg(all(
-    feature = "agent",
+    feature = "vault",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 impl CallerIdentityCache {
     fn resolve(
         &self,
         key: String,
-        create: impl FnOnce() -> AgentResult<CallerIdentity>,
-    ) -> AgentResult<CallerIdentity> {
+        create: impl FnOnce() -> VaultResult<CallerIdentity>,
+    ) -> VaultResult<CallerIdentity> {
         let mut entries = self
             .entries
             .lock()
-            .map_err(|_| AgentError::WorkerUnavailable)?;
+            .map_err(|_| VaultError::WorkerUnavailable)?;
         if let Some(identity) = entries.get(&key) {
             return Ok(identity.clone());
         }
@@ -139,9 +139,9 @@ impl CallerIdentityCache {
     }
 }
 
-/// Errors returned by the agent layer.
+/// Errors returned by the vault layer.
 #[derive(Debug, thiserror::Error)]
-pub enum AgentError {
+pub enum VaultError {
     #[error("secret address {component} must not be empty")]
     EmptyAddress { component: &'static str },
 
@@ -151,16 +151,16 @@ pub enum AgentError {
         maximum: usize,
     },
 
-    #[error("invalid agent data: {0}")]
+    #[error("invalid vault data: {0}")]
     InvalidData(String),
 
     #[error("Automerge operation failed: {0}")]
     Automerge(String),
 
-    #[error("agent cryptographic operation failed")]
+    #[error("vault cryptographic operation failed")]
     Crypto,
 
-    #[error("agent signature verification failed")]
+    #[error("vault signature verification failed")]
     Signature,
 
     #[error("the secret has concurrent values and requires explicit resolution")]
@@ -172,14 +172,14 @@ pub enum AgentError {
     #[error("random-number generation failed: {0}")]
     Random(String),
 
-    #[error("agent database operation failed: {0}")]
+    #[error("vault database operation failed: {0}")]
     Database(String),
 
-    #[error("the agent worker is unavailable")]
+    #[error("the vault worker is unavailable")]
     WorkerUnavailable,
 
-    #[error("the agent is locked")]
-    Locked,
+    #[error("the vault is sealed")]
+    Sealed,
 
     #[error("the request was already consumed")]
     Replay,
@@ -187,60 +187,60 @@ pub enum AgentError {
     #[error("application authorization is required")]
     AuthorizationRequired,
 
-    #[error("invalid agent protocol message: {0}")]
+    #[error("invalid vault protocol message: {0}")]
     Protocol(String),
 
-    #[error("agent seal operation failed: {0}")]
-    Seal(String),
+    #[error("vault protection operation failed: {0}")]
+    Protection(String),
 }
 
-pub type AgentResult<T> = std::result::Result<T, AgentError>;
+pub type VaultResult<T> = std::result::Result<T, VaultError>;
 
-impl From<getrandom::Error> for AgentError {
+impl From<getrandom::Error> for VaultError {
     fn from(error: getrandom::Error) -> Self {
         Self::Random(error.to_string())
     }
 }
 
-/// Permanent random identifier for one Factorseal seal.
+/// Permanent random identifier for one Factorseal vault.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct SealId([u8; SEAL_ID_BYTES]);
+pub struct VaultId([u8; VAULT_ID_BYTES]);
 
-impl SealId {
-    pub fn random() -> AgentResult<Self> {
-        let mut bytes = [0_u8; SEAL_ID_BYTES];
+impl VaultId {
+    pub fn random() -> VaultResult<Self> {
+        let mut bytes = [0_u8; VAULT_ID_BYTES];
         getrandom::fill(&mut bytes)?;
         Ok(Self(bytes))
     }
 
     #[must_use]
-    pub const fn from_bytes(bytes: [u8; SEAL_ID_BYTES]) -> Self {
+    pub const fn from_bytes(bytes: [u8; VAULT_ID_BYTES]) -> Self {
         Self(bytes)
     }
 
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; SEAL_ID_BYTES] {
+    pub const fn as_bytes(&self) -> &[u8; VAULT_ID_BYTES] {
         &self.0
     }
 }
 
-impl fmt::Debug for SealId {
+impl fmt::Debug for VaultId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_tuple("SealId")
+            .debug_tuple("VaultId")
             .field(&URL_SAFE_NO_PAD.encode(self.0))
             .finish()
     }
 }
 
-impl fmt::Display for SealId {
+impl fmt::Display for VaultId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&URL_SAFE_NO_PAD.encode(self.0))
     }
 }
 
-/// Digest identifier for the seal's separate signing key.
+/// Digest identifier for the vault's separate signing key.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DeviceKeyId([u8; DEVICE_KEY_ID_BYTES]);
@@ -298,12 +298,12 @@ impl DocumentScope {
         }
     }
 
-    #[cfg(feature = "agent")]
-    pub(crate) fn parse(value: &str) -> AgentResult<Self> {
+    #[cfg(feature = "vault")]
+    pub(crate) fn parse(value: &str) -> VaultResult<Self> {
         match value {
             "device-cache" => Ok(Self::DeviceCache),
             "device-local" => Ok(Self::DeviceLocal),
-            _ => Err(AgentError::InvalidData(format!(
+            _ => Err(VaultError::InvalidData(format!(
                 "unknown document scope `{value}`"
             ))),
         }
@@ -318,10 +318,10 @@ pub struct DocumentId([u8; DOCUMENT_ID_BYTES]);
 impl DocumentId {
     /// Derive an opaque document ID without exposing `namespace` to SQL.
     #[must_use]
-    pub fn derive(seal_id: SealId, scope: DocumentScope, namespace: &[u8]) -> Self {
+    pub fn derive(vault_id: VaultId, scope: DocumentScope, namespace: &[u8]) -> Self {
         let mut digest = Sha256::new();
         digest.update(b"factorseal/document-id/v1\0");
-        digest.update(seal_id.as_bytes());
+        digest.update(vault_id.as_bytes());
         digest.update(scope.as_str().as_bytes());
         digest.update((namespace.len() as u64).to_be_bytes());
         digest.update(namespace);
@@ -362,7 +362,7 @@ pub struct SecretAddress {
 }
 
 impl SecretAddress {
-    pub fn new(item: impl Into<String>, field: Option<String>) -> AgentResult<Self> {
+    pub fn new(item: impl Into<String>, field: Option<String>) -> VaultResult<Self> {
         let address = Self {
             item: item.into(),
             field,
@@ -381,7 +381,7 @@ impl SecretAddress {
         self.field.as_deref()
     }
 
-    #[cfg(any(feature = "agent", test))]
+    #[cfg(any(feature = "vault", test))]
     pub(crate) fn storage_key(&self) -> String {
         let mut digest = Sha256::new();
         digest.update(b"factorseal/secret-address/v1\0");
@@ -398,7 +398,7 @@ impl SecretAddress {
         URL_SAFE_NO_PAD.encode(digest.finalize())
     }
 
-    fn validate(&self) -> AgentResult<()> {
+    fn validate(&self) -> VaultResult<()> {
         validate_address_component("item", &self.item)?;
         if let Some(field) = &self.field {
             validate_address_component("field", field)?;
@@ -407,12 +407,12 @@ impl SecretAddress {
     }
 }
 
-fn validate_address_component(component: &'static str, value: &str) -> AgentResult<()> {
+fn validate_address_component(component: &'static str, value: &str) -> VaultResult<()> {
     if value.is_empty() {
-        return Err(AgentError::EmptyAddress { component });
+        return Err(VaultError::EmptyAddress { component });
     }
     if value.len() > MAX_ADDRESS_COMPONENT_BYTES {
-        return Err(AgentError::AddressTooLong {
+        return Err(VaultError::AddressTooLong {
             component,
             maximum: MAX_ADDRESS_COMPONENT_BYTES,
         });
@@ -426,8 +426,8 @@ mod tests {
 
     #[test]
     fn document_ids_are_scoped_and_installation_specific() {
-        let first = SealId::from_bytes([1; SEAL_ID_BYTES]);
-        let second = SealId::from_bytes([2; SEAL_ID_BYTES]);
+        let first = VaultId::from_bytes([1; VAULT_ID_BYTES]);
+        let second = VaultId::from_bytes([2; VAULT_ID_BYTES]);
         let cache = DocumentId::derive(first, DocumentScope::DeviceCache, b"secretspec");
 
         assert_ne!(

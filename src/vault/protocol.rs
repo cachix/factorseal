@@ -1,35 +1,35 @@
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fmt;
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 use std::sync::Mutex;
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::{AgentError, AgentResult, SecretAddress};
-#[cfg(feature = "agent")]
-use super::{AgentStore, DocumentScope};
+#[cfg(feature = "vault")]
+use super::{DocumentScope, VaultStore};
+use super::{SecretAddress, VaultError, VaultResult};
 
 const PROTOCOL_VERSION: u8 = 1;
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 const GRANT_VERSION: u8 = 1;
 const REQUEST_ID_BYTES: usize = 16;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_NAMESPACE_BYTES: usize = 4 * 1024;
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 const MAX_REPLAY_IDS: usize = 4096;
-#[cfg(feature = "agent")]
-const GRANT_DOCUMENT_NAMESPACE: &[u8] = b"factorseal-agent-grants/v1";
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
+const GRANT_DOCUMENT_NAMESPACE: &[u8] = b"factorseal/vault-grants/v1";
+#[cfg(feature = "vault")]
 const CALLER_FINGERPRINT_DOMAIN: &[u8] = b"factorseal/caller-identity/v1\0";
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 const GRANT_TARGET_DOMAIN: &[u8] = b"factorseal/grant-target/v1\0";
 
 /// Platform that authenticated one local IPC caller.
@@ -61,7 +61,7 @@ impl CallerIdentity {
         application_id: impl Into<String>,
         executable_digest: [u8; 32],
         signer_id: Option<String>,
-    ) -> AgentResult<Self> {
+    ) -> VaultResult<Self> {
         let identity = Self {
             platform,
             user_id: user_id.into(),
@@ -98,7 +98,7 @@ impl CallerIdentity {
         self.signer_id.as_deref()
     }
 
-    #[cfg(feature = "agent")]
+    #[cfg(feature = "vault")]
     fn fingerprint(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
         digest.update(CALLER_FINGERPRINT_DOMAIN);
@@ -119,7 +119,7 @@ impl CallerIdentity {
         digest.finalize().into()
     }
 
-    fn validate(&self) -> AgentResult<()> {
+    fn validate(&self) -> VaultResult<()> {
         validate_identity_component("user ID", &self.user_id)?;
         validate_identity_component("application ID", &self.application_id)?;
         if let Some(signer_id) = &self.signer_id {
@@ -135,7 +135,7 @@ impl CallerIdentity {
 pub struct RequestId([u8; REQUEST_ID_BYTES]);
 
 impl RequestId {
-    pub fn random() -> AgentResult<Self> {
+    pub fn random() -> VaultResult<Self> {
         let mut bytes = [0_u8; REQUEST_ID_BYTES];
         getrandom::fill(&mut bytes)?;
         Ok(Self(bytes))
@@ -174,12 +174,12 @@ impl WireSecretAddress {
         }
     }
 
-    /// Validate the public wire address without performing an agent request.
-    pub fn validate(&self) -> AgentResult<()> {
+    /// Validate the public wire address without performing an keyring request.
+    pub fn validate(&self) -> VaultResult<()> {
         self.resolve().map(|_| ())
     }
 
-    fn resolve(&self) -> AgentResult<SecretAddress> {
+    fn resolve(&self) -> VaultResult<SecretAddress> {
         SecretAddress::new(self.item.clone(), self.field.clone())
     }
 }
@@ -219,14 +219,14 @@ impl Drop for WireSecret {
 /// Versioned request sent over an authenticated local transport.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentRequest {
+pub struct VaultRequest {
     version: u8,
     request_id: RequestId,
-    pub action: AgentAction,
+    pub action: VaultAction,
 }
 
-impl AgentRequest {
-    pub fn new(action: AgentAction) -> AgentResult<Self> {
+impl VaultRequest {
+    pub fn new(action: VaultAction) -> VaultResult<Self> {
         Ok(Self {
             version: PROTOCOL_VERSION,
             request_id: RequestId::random()?,
@@ -235,7 +235,7 @@ impl AgentRequest {
     }
 
     #[must_use]
-    pub const fn with_id(request_id: RequestId, action: AgentAction) -> Self {
+    pub const fn with_id(request_id: RequestId, action: VaultAction) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             request_id,
@@ -248,29 +248,29 @@ impl AgentRequest {
         self.request_id
     }
 
-    pub fn decode(bytes: &[u8]) -> AgentResult<Self> {
+    pub fn decode(bytes: &[u8]) -> VaultResult<Self> {
         if bytes.len() > MAX_MESSAGE_BYTES {
-            return Err(AgentError::Protocol("request is too large".to_owned()));
+            return Err(VaultError::Protocol("request is too large".to_owned()));
         }
         let request: Self = serde_json::from_slice(bytes)
-            .map_err(|error| AgentError::Protocol(error.to_string()))?;
+            .map_err(|error| VaultError::Protocol(error.to_string()))?;
         request.validate()?;
         Ok(request)
     }
 
-    pub fn encode(&self) -> AgentResult<Zeroizing<Vec<u8>>> {
+    pub fn encode(&self) -> VaultResult<Zeroizing<Vec<u8>>> {
         self.validate()?;
         let bytes =
-            serde_json::to_vec(self).map_err(|error| AgentError::Protocol(error.to_string()))?;
+            serde_json::to_vec(self).map_err(|error| VaultError::Protocol(error.to_string()))?;
         if bytes.len() > MAX_MESSAGE_BYTES {
-            return Err(AgentError::Protocol("request is too large".to_owned()));
+            return Err(VaultError::Protocol("request is too large".to_owned()));
         }
         Ok(Zeroizing::new(bytes))
     }
 
-    fn validate(&self) -> AgentResult<()> {
+    fn validate(&self) -> VaultResult<()> {
         if self.version != PROTOCOL_VERSION {
-            return Err(AgentError::Protocol(
+            return Err(VaultError::Protocol(
                 "unsupported request version".to_owned(),
             ));
         }
@@ -281,12 +281,14 @@ impl AgentRequest {
 /// Operations available to an authenticated local client.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum AgentAction {
+pub enum VaultAction {
     Status,
+    /// Read from the durable local keyring.
     Get {
         namespace: Vec<u8>,
         address: WireSecretAddress,
     },
+    /// Write to the durable local keyring.
     Put {
         namespace: Vec<u8>,
         address: WireSecretAddress,
@@ -294,37 +296,73 @@ pub enum AgentAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         evict_at: Option<u64>,
     },
+    /// Delete from the durable local keyring.
     Delete {
         namespace: Vec<u8>,
         address: WireSecretAddress,
     },
+    /// Clear one durable local-keyring namespace.
     Clear {
         namespace: Vec<u8>,
     },
-    Lock {
+    /// Read from the disposable application cache.
+    GetCache {
+        namespace: Vec<u8>,
+        address: WireSecretAddress,
+    },
+    /// Write to the disposable application cache.
+    PutCache {
+        namespace: Vec<u8>,
+        address: WireSecretAddress,
+        value: WireSecret,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evict_at: Option<u64>,
+    },
+    /// Delete from the disposable application cache.
+    DeleteCache {
+        namespace: Vec<u8>,
+        address: WireSecretAddress,
+    },
+    /// Clear one disposable application-cache namespace.
+    ClearCache {
+        namespace: Vec<u8>,
+    },
+    Seal {
+        namespace: Vec<u8>,
+    },
+    /// Seal the vault using a disposable-cache namespace grant.
+    SealCache {
         namespace: Vec<u8>,
     },
 }
 
-impl AgentAction {
-    fn validate(&self) -> AgentResult<()> {
+impl VaultAction {
+    fn validate(&self) -> VaultResult<()> {
         match self {
             Self::Status => Ok(()),
             Self::Get { namespace, address }
+            | Self::GetCache { namespace, address }
             | Self::Delete { namespace, address }
+            | Self::DeleteCache { namespace, address }
             | Self::Put {
+                namespace, address, ..
+            }
+            | Self::PutCache {
                 namespace, address, ..
             } => {
                 validate_namespace(namespace)?;
                 address.resolve().map(|_| ())
             }
-            Self::Clear { namespace } | Self::Lock { namespace } => validate_namespace(namespace),
+            Self::Clear { namespace }
+            | Self::ClearCache { namespace }
+            | Self::Seal { namespace }
+            | Self::SealCache { namespace } => validate_namespace(namespace),
         }
     }
 }
 
 /// Permission persisted in one caller grant.
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GrantPermission {
@@ -332,29 +370,29 @@ pub enum GrantPermission {
     Put,
     Delete,
     Clear,
-    Lock,
+    Seal,
 }
 
 /// Successful or failed response bound to the request ID.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentResponse {
+pub struct VaultResponse {
     version: u8,
     request_id: RequestId,
-    pub result: Result<AgentResponseBody, AgentResponseError>,
+    pub result: Result<VaultResponseBody, VaultResponseError>,
 }
 
-/// Transport-independent client boundary used by integrations such as
-/// SecretSpec. Implementations authenticate the caller through their native
-/// platform transport; they never open the agent database directly.
-pub trait AgentClient: Send + Sync {
-    fn request(&self, request: &AgentRequest) -> AgentResult<AgentResponse>;
+/// Transport-independent vault client used by the keyring interface and integrations such
+/// as SecretSpec. Implementations authenticate the caller through their native
+/// platform transport; they never open the vault database directly.
+pub trait VaultClient: Send + Sync {
+    fn request(&self, request: &VaultRequest) -> VaultResult<VaultResponse>;
 }
 
-impl AgentResponse {
-    /// Construct a successful response for an [`AgentClient`] implementation.
+impl VaultResponse {
+    /// Construct a successful response for a [`VaultClient`] implementation.
     #[must_use]
-    pub const fn success(request_id: RequestId, body: AgentResponseBody) -> Self {
+    pub const fn success(request_id: RequestId, body: VaultResponseBody) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             request_id,
@@ -362,9 +400,9 @@ impl AgentResponse {
         }
     }
 
-    /// Construct a failed response for an [`AgentClient`] implementation.
+    /// Construct a failed response for a [`VaultClient`] implementation.
     #[must_use]
-    pub const fn failure(request_id: RequestId, error: AgentResponseError) -> Self {
+    pub const fn failure(request_id: RequestId, error: VaultResponseError) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             request_id,
@@ -377,25 +415,25 @@ impl AgentResponse {
         self.request_id
     }
 
-    pub fn decode(bytes: &[u8]) -> AgentResult<Self> {
+    pub fn decode(bytes: &[u8]) -> VaultResult<Self> {
         if bytes.len() > MAX_MESSAGE_BYTES {
-            return Err(AgentError::Protocol("response is too large".to_owned()));
+            return Err(VaultError::Protocol("response is too large".to_owned()));
         }
         let response: Self = serde_json::from_slice(bytes)
-            .map_err(|error| AgentError::Protocol(error.to_string()))?;
+            .map_err(|error| VaultError::Protocol(error.to_string()))?;
         if response.version != PROTOCOL_VERSION {
-            return Err(AgentError::Protocol(
+            return Err(VaultError::Protocol(
                 "unsupported response version".to_owned(),
             ));
         }
         Ok(response)
     }
 
-    pub fn encode(&self) -> AgentResult<Zeroizing<Vec<u8>>> {
+    pub fn encode(&self) -> VaultResult<Zeroizing<Vec<u8>>> {
         let bytes =
-            serde_json::to_vec(self).map_err(|error| AgentError::Protocol(error.to_string()))?;
+            serde_json::to_vec(self).map_err(|error| VaultError::Protocol(error.to_string()))?;
         if bytes.len() > MAX_MESSAGE_BYTES {
-            return Err(AgentError::Protocol("response is too large".to_owned()));
+            return Err(VaultError::Protocol("response is too large".to_owned()));
         }
         Ok(Zeroizing::new(bytes))
     }
@@ -404,10 +442,10 @@ impl AgentResponse {
 /// Response data. Secret bytes are zeroized when this value is dropped.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum AgentResponseBody {
+pub enum VaultResponseBody {
     Status {
-        unlocked: bool,
-        seal_id: String,
+        unsealed: bool,
+        vault_id: String,
         device_key_id: String,
         hardware_backend: String,
         idle_deadline: u64,
@@ -423,37 +461,37 @@ pub enum AgentResponseBody {
     Cleared {
         entries: usize,
     },
-    Locked,
+    Sealed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentResponseError {
-    pub code: AgentResponseErrorCode,
+pub struct VaultResponseError {
+    pub code: VaultResponseErrorCode,
     pub message: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum AgentResponseErrorCode {
+pub enum VaultResponseErrorCode {
     InvalidRequest,
     AuthorizationRequired,
     Replay,
-    Locked,
+    Sealed,
     Conflict,
     Internal,
 }
 
-/// Bounded lifetime for one hardware-unlocked agent session.
-#[cfg(feature = "agent")]
+/// Bounded lifetime for one hardware-unsealed vault session.
+#[cfg(feature = "vault")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UnlockLeasePolicy {
+pub struct UnsealLeasePolicy {
     pub idle_timeout: Duration,
     pub maximum_lifetime: Duration,
 }
 
-#[cfg(feature = "agent")]
-impl Default for UnlockLeasePolicy {
+#[cfg(feature = "vault")]
+impl Default for UnsealLeasePolicy {
     fn default() -> Self {
         Self {
             idle_timeout: Duration::from_mins(5),
@@ -462,39 +500,39 @@ impl Default for UnlockLeasePolicy {
     }
 }
 
-#[cfg(feature = "agent")]
-impl UnlockLeasePolicy {
-    fn validate(self) -> AgentResult<()> {
+#[cfg(feature = "vault")]
+impl UnsealLeasePolicy {
+    fn validate(self) -> VaultResult<()> {
         if self.idle_timeout.is_zero()
             || self.maximum_lifetime.is_zero()
             || self.idle_timeout > self.maximum_lifetime
         {
-            return Err(AgentError::Protocol(
-                "unlock lease timeouts are invalid".to_owned(),
+            return Err(VaultError::Protocol(
+                "unseal lease timeouts are invalid".to_owned(),
             ));
         }
         Ok(())
     }
 }
 
-#[cfg(feature = "agent")]
-struct UnlockLease {
+#[cfg(feature = "vault")]
+struct UnsealLease {
     idle_timeout_seconds: u64,
     idle_deadline: u64,
     absolute_deadline: u64,
 }
 
-#[cfg(feature = "agent")]
-impl UnlockLease {
-    fn new(now: u64, policy: UnlockLeasePolicy) -> AgentResult<Self> {
+#[cfg(feature = "vault")]
+impl UnsealLease {
+    fn new(now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
         policy.validate()?;
         let idle_timeout_seconds = policy.idle_timeout.as_secs();
         let absolute_deadline = now
             .checked_add(policy.maximum_lifetime.as_secs())
-            .ok_or_else(|| AgentError::Protocol("unlock lease overflows time".to_owned()))?;
+            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?;
         let idle_deadline = now
             .checked_add(idle_timeout_seconds)
-            .ok_or_else(|| AgentError::Protocol("unlock lease overflows time".to_owned()))?
+            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
             .min(absolute_deadline);
         Ok(Self {
             idle_timeout_seconds,
@@ -507,22 +545,22 @@ impl UnlockLease {
         now >= self.idle_deadline || now >= self.absolute_deadline
     }
 
-    fn touch(&mut self, now: u64) -> AgentResult<()> {
+    fn touch(&mut self, now: u64) -> VaultResult<()> {
         self.idle_deadline = now
             .checked_add(self.idle_timeout_seconds)
-            .ok_or_else(|| AgentError::Protocol("unlock lease overflows time".to_owned()))?
+            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
             .min(self.absolute_deadline);
         Ok(())
     }
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 struct ReplayWindow {
     set: HashSet<RequestId>,
     order: VecDeque<RequestId>,
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 impl ReplayWindow {
     fn new() -> Self {
         Self {
@@ -531,9 +569,9 @@ impl ReplayWindow {
         }
     }
 
-    fn consume(&mut self, request_id: RequestId) -> AgentResult<()> {
+    fn consume(&mut self, request_id: RequestId) -> VaultResult<()> {
         if !self.set.insert(request_id) {
-            return Err(AgentError::Replay);
+            return Err(VaultError::Replay);
         }
         self.order.push_back(request_id);
         if self.order.len() > MAX_REPLAY_IDS
@@ -545,7 +583,7 @@ impl ReplayWindow {
     }
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccessGrant {
@@ -557,16 +595,16 @@ struct AccessGrant {
 }
 
 /// Shared request processor used behind every platform transport.
-#[cfg(feature = "agent")]
-pub struct AgentService {
+#[cfg(feature = "vault")]
+pub struct VaultService {
     state: Mutex<ServiceState>,
-    lock_handle: AgentStore,
+    seal_handle: VaultStore,
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 struct ServiceState {
-    store: AgentStore,
-    lease: UnlockLease,
+    store: VaultStore,
+    lease: UnsealLease,
     replay: ReplayWindow,
     /// Whole second the storage eviction sweep last ran in. The sweep
     /// decrypts, verifies, and re-parses every cached document, while platform
@@ -577,21 +615,21 @@ struct ServiceState {
     purges: usize,
 }
 
-#[cfg(feature = "agent")]
-impl AgentService {
-    pub fn new(store: AgentStore, now: u64, policy: UnlockLeasePolicy) -> AgentResult<Self> {
-        let lock_handle = store.clone();
+#[cfg(feature = "vault")]
+impl VaultService {
+    pub fn new(store: VaultStore, now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
+        let seal_handle = store.clone();
         Ok(Self {
             state: Mutex::new(ServiceState {
                 store,
-                lease: UnlockLease::new(now, policy)?,
+                lease: UnsealLease::new(now, policy)?,
                 replay: ReplayWindow::new(),
                 // Opening the store already swept this second.
                 last_purge_at: now,
                 #[cfg(all(test, feature = "hardware"))]
                 purges: 0,
             }),
-            lock_handle,
+            seal_handle,
         })
     }
 
@@ -608,7 +646,7 @@ impl AgentService {
         panic!("poison request state");
     }
 
-    /// Persist approval for exactly one caller, namespace, and secret entry.
+    /// Persist approval for one durable keyring entry.
     #[allow(clippy::too_many_arguments)]
     pub fn authorize_entry(
         &self,
@@ -618,12 +656,13 @@ impl AgentService {
         permissions: impl IntoIterator<Item = GrantPermission>,
         expires_at: Option<u64>,
         now: u64,
-    ) -> AgentResult<()> {
+    ) -> VaultResult<()> {
         let mut state = self.lock_live_state(now)?;
         store_grant(
             &state.store,
             caller,
             GrantTarget::Entry {
+                scope: DocumentScope::DeviceLocal,
                 namespace,
                 address: &address.resolve()?,
             },
@@ -634,8 +673,34 @@ impl AgentService {
         state.lease.touch(now)
     }
 
-    /// Persist approval for namespace-wide operations such as cache clear or
-    /// a trusted SecretSpec process serving multiple declared entries.
+    /// Persist approval for one disposable application-cache entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_cache_entry(
+        &self,
+        caller: &CallerIdentity,
+        namespace: &[u8],
+        address: &WireSecretAddress,
+        permissions: impl IntoIterator<Item = GrantPermission>,
+        expires_at: Option<u64>,
+        now: u64,
+    ) -> VaultResult<()> {
+        let mut state = self.lock_live_state(now)?;
+        store_grant(
+            &state.store,
+            caller,
+            GrantTarget::Entry {
+                scope: DocumentScope::DeviceCache,
+                namespace,
+                address: &address.resolve()?,
+            },
+            permissions,
+            expires_at,
+            now,
+        )?;
+        state.lease.touch(now)
+    }
+
+    /// Persist approval for durable keyring namespace operations.
     pub fn authorize_namespace(
         &self,
         caller: &CallerIdentity,
@@ -643,12 +708,39 @@ impl AgentService {
         permissions: impl IntoIterator<Item = GrantPermission>,
         expires_at: Option<u64>,
         now: u64,
-    ) -> AgentResult<()> {
+    ) -> VaultResult<()> {
         let mut state = self.lock_live_state(now)?;
         store_grant(
             &state.store,
             caller,
-            GrantTarget::Namespace(namespace),
+            GrantTarget::Namespace {
+                scope: DocumentScope::DeviceLocal,
+                namespace,
+            },
+            permissions,
+            expires_at,
+            now,
+        )?;
+        state.lease.touch(now)
+    }
+
+    /// Persist approval for a disposable application-cache namespace.
+    pub fn authorize_cache_namespace(
+        &self,
+        caller: &CallerIdentity,
+        namespace: &[u8],
+        permissions: impl IntoIterator<Item = GrantPermission>,
+        expires_at: Option<u64>,
+        now: u64,
+    ) -> VaultResult<()> {
+        let mut state = self.lock_live_state(now)?;
+        store_grant(
+            &state.store,
+            caller,
+            GrantTarget::Namespace {
+                scope: DocumentScope::DeviceCache,
+                namespace,
+            },
             permissions,
             expires_at,
             now,
@@ -661,17 +753,17 @@ impl AgentService {
     pub fn handle(
         &self,
         caller: &CallerIdentity,
-        request: AgentRequest,
+        request: VaultRequest,
         now: u64,
-    ) -> AgentResponse {
+    ) -> VaultResponse {
         let request_id = request.request_id;
         let result = self.handle_inner(caller, request, now);
         let result = match result {
-            Ok(AgentResponseBody::Locked) => Ok(AgentResponseBody::Locked),
-            _ if self.lock_handle.is_locked() => Err(AgentError::Locked),
+            Ok(VaultResponseBody::Sealed) => Ok(VaultResponseBody::Sealed),
+            _ if self.seal_handle.is_sealed() => Err(VaultError::Sealed),
             result => result,
         };
-        AgentResponse {
+        VaultResponse {
             version: PROTOCOL_VERSION,
             request_id,
             result: result.map_err(|error| response_error(&error)),
@@ -680,21 +772,21 @@ impl AgentService {
 
     /// Run storage eviction and enforce the lease even when no request arrives.
     ///
-    /// Returns `true` once the service has locked and should stop accepting
+    /// Returns `true` once the service has sealed and should stop accepting
     /// connections. Platform event loops call this from their bounded timer.
-    pub fn expire_if_needed(&self, now: u64) -> AgentResult<bool> {
-        if self.lock_handle.is_locked() {
+    pub fn expire_if_needed(&self, now: u64) -> VaultResult<bool> {
+        if self.seal_handle.is_sealed() {
             return Ok(true);
         }
         let mut state = self
             .state
             .lock()
-            .map_err(|_| AgentError::WorkerUnavailable)?;
-        if state.store.is_locked() {
+            .map_err(|_| VaultError::WorkerUnavailable)?;
+        if state.store.is_sealed() {
             return Ok(true);
         }
         if state.lease.is_expired(now) {
-            state.store.lock();
+            state.store.seal();
             return Ok(true);
         }
         if state.last_purge_at != now {
@@ -708,25 +800,25 @@ impl AgentService {
         Ok(false)
     }
 
-    /// Logout, suspend, and shutdown hooks use the same immediate lock path.
-    pub fn lock(&self) -> AgentResult<()> {
+    /// Logout, suspend, and shutdown hooks use the same immediate seal path.
+    pub fn seal(&self) -> VaultResult<()> {
         // This clone sits outside the request-state mutex so a lifecycle event
         // can fail closed even if a request panics and poisons that mutex.
-        self.lock_handle.lock();
+        self.seal_handle.seal();
         Ok(())
     }
 
-    fn lock_live_state(&self, now: u64) -> AgentResult<std::sync::MutexGuard<'_, ServiceState>> {
-        if self.lock_handle.is_locked() {
-            return Err(AgentError::Locked);
+    fn lock_live_state(&self, now: u64) -> VaultResult<std::sync::MutexGuard<'_, ServiceState>> {
+        if self.seal_handle.is_sealed() {
+            return Err(VaultError::Sealed);
         }
         let state = self
             .state
             .lock()
-            .map_err(|_| AgentError::WorkerUnavailable)?;
-        if state.store.is_locked() || state.lease.is_expired(now) {
-            state.store.lock();
-            return Err(AgentError::Locked);
+            .map_err(|_| VaultError::WorkerUnavailable)?;
+        if state.store.is_sealed() || state.lease.is_expired(now) {
+            state.store.seal();
+            return Err(VaultError::Sealed);
         }
         Ok(state)
     }
@@ -735,28 +827,66 @@ impl AgentService {
     fn handle_inner(
         &self,
         caller: &CallerIdentity,
-        request: AgentRequest,
+        request: VaultRequest,
         now: u64,
-    ) -> AgentResult<AgentResponseBody> {
+    ) -> VaultResult<VaultResponseBody> {
         caller.validate()?;
         request.validate()?;
         let mut state = self.lock_live_state(now)?;
         state.replay.consume(request.request_id)?;
 
-        let result = match request.action {
-            AgentAction::Status => AgentResponseBody::Status {
-                unlocked: true,
-                seal_id: state.store.device().seal_id().to_string(),
-                device_key_id: state.store.device().device_key_id().to_string(),
-                hardware_backend: state.store.device().hardware_backend().to_owned(),
-                idle_deadline: state.lease.idle_deadline,
-                absolute_deadline: state.lease.absolute_deadline,
-            },
-            AgentAction::Get { namespace, address } => {
+        // Normalize explicit cache operations so authorization and mutation
+        // share one implementation while the document scope remains explicit.
+        let (action, document_scope) = match request.action {
+            VaultAction::GetCache { namespace, address } => (
+                VaultAction::Get { namespace, address },
+                DocumentScope::DeviceCache,
+            ),
+            VaultAction::PutCache {
+                namespace,
+                address,
+                value,
+                evict_at,
+            } => (
+                VaultAction::Put {
+                    namespace,
+                    address,
+                    value,
+                    evict_at,
+                },
+                DocumentScope::DeviceCache,
+            ),
+            VaultAction::DeleteCache { namespace, address } => (
+                VaultAction::Delete { namespace, address },
+                DocumentScope::DeviceCache,
+            ),
+            VaultAction::ClearCache { namespace } => {
+                (VaultAction::Clear { namespace }, DocumentScope::DeviceCache)
+            }
+            VaultAction::SealCache { namespace } => {
+                (VaultAction::Seal { namespace }, DocumentScope::DeviceCache)
+            }
+            action => (action, DocumentScope::DeviceLocal),
+        };
+
+        let (result, refresh_lease) = match action {
+            VaultAction::Status => (
+                VaultResponseBody::Status {
+                    unsealed: true,
+                    vault_id: state.store.device().vault_id().to_string(),
+                    device_key_id: state.store.device().device_key_id().to_string(),
+                    hardware_backend: state.store.device().hardware_backend().to_owned(),
+                    idle_deadline: state.lease.idle_deadline,
+                    absolute_deadline: state.lease.absolute_deadline,
+                },
+                false,
+            ),
+            VaultAction::Get { namespace, address } => {
                 let address = address.resolve()?;
                 require_grant(
                     &state.store,
                     caller,
+                    document_scope,
                     &namespace,
                     Some(&address),
                     GrantPermission::Get,
@@ -764,11 +894,11 @@ impl AgentService {
                 )?;
                 let value = state
                     .store
-                    .get_at(DocumentScope::DeviceCache, &namespace, &address, now)?
+                    .get_at(document_scope, &namespace, &address, now)?
                     .map(|value| WireSecret::new(value.to_vec()));
-                AgentResponseBody::Secret { value }
+                (VaultResponseBody::Secret { value }, true)
             }
-            AgentAction::Put {
+            VaultAction::Put {
                 namespace,
                 address,
                 value,
@@ -778,102 +908,112 @@ impl AgentService {
                 require_grant(
                     &state.store,
                     caller,
+                    document_scope,
                     &namespace,
                     Some(&address),
                     GrantPermission::Put,
                     now,
                 )?;
-                // A deadline equal to the agent's whole-second clock is a
+                // A deadline equal to the vault's whole-second clock is a
                 // valid immediately-expired write. This lets sub-second
                 // upstream TTLs round down without exceeding their bound.
                 if evict_at.is_some_and(|deadline| deadline < now) {
-                    return Err(AgentError::Expired);
+                    return Err(VaultError::Expired);
                 }
                 state.store.put_at(
-                    DocumentScope::DeviceCache,
+                    document_scope,
                     &namespace,
                     &address,
                     value.expose(),
                     evict_at,
                 )?;
-                AgentResponseBody::Stored
+                (VaultResponseBody::Stored, true)
             }
-            AgentAction::Delete { namespace, address } => {
+            VaultAction::Delete { namespace, address } => {
                 let address = address.resolve()?;
                 require_grant(
                     &state.store,
                     caller,
+                    document_scope,
                     &namespace,
                     Some(&address),
                     GrantPermission::Delete,
                     now,
                 )?;
-                let existed =
-                    state
-                        .store
-                        .delete(DocumentScope::DeviceCache, &namespace, &address)?;
-                AgentResponseBody::Deleted { existed }
+                let existed = state.store.delete(document_scope, &namespace, &address)?;
+                (VaultResponseBody::Deleted { existed }, true)
             }
-            AgentAction::Clear { namespace } => {
+            VaultAction::Clear { namespace } => {
                 require_grant(
                     &state.store,
                     caller,
+                    document_scope,
                     &namespace,
                     None,
                     GrantPermission::Clear,
                     now,
                 )?;
-                let entries = state.store.clear(DocumentScope::DeviceCache, &namespace)?;
-                AgentResponseBody::Cleared { entries }
+                let entries = state.store.clear(document_scope, &namespace)?;
+                (VaultResponseBody::Cleared { entries }, true)
             }
-            AgentAction::Lock { namespace } => {
+            VaultAction::Seal { namespace } => {
                 require_grant(
                     &state.store,
                     caller,
+                    document_scope,
                     &namespace,
                     None,
-                    GrantPermission::Lock,
+                    GrantPermission::Seal,
                     now,
                 )?;
-                state.store.lock();
-                AgentResponseBody::Locked
+                state.store.seal();
+                (VaultResponseBody::Sealed, false)
             }
+            VaultAction::GetCache { .. }
+            | VaultAction::PutCache { .. }
+            | VaultAction::DeleteCache { .. }
+            | VaultAction::ClearCache { .. }
+            | VaultAction::SealCache { .. } => unreachable!("cache action was normalized"),
         };
-        if !state.store.is_locked() {
+        if refresh_lease {
             state.lease.touch(now)?;
         }
         Ok(result)
     }
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 #[derive(Clone, Copy)]
 enum GrantTarget<'a> {
-    Namespace(&'a [u8]),
+    Namespace {
+        scope: DocumentScope,
+        namespace: &'a [u8],
+    },
     Entry {
+        scope: DocumentScope,
         namespace: &'a [u8],
         address: &'a SecretAddress,
     },
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 fn store_grant(
-    store: &AgentStore,
+    store: &VaultStore,
     caller: &CallerIdentity,
     target: GrantTarget<'_>,
     permissions: impl IntoIterator<Item = GrantPermission>,
     expires_at: Option<u64>,
     now: u64,
-) -> AgentResult<()> {
+) -> VaultResult<()> {
     caller.validate()?;
     if expires_at.is_some_and(|deadline| deadline <= now) {
-        return Err(AgentError::Expired);
+        return Err(VaultError::Expired);
     }
     let caller_fingerprint = caller.fingerprint();
     let target_digest = grant_target_digest(&target);
     let permissions: BTreeSet<_> = permissions.into_iter().collect();
     if permissions.is_empty() {
-        return Err(AgentError::Protocol(
+        return Err(VaultError::Protocol(
             "grant must contain a permission".to_owned(),
         ));
     }
@@ -885,7 +1025,7 @@ fn store_grant(
         expires_at,
     };
     let bytes = Zeroizing::new(
-        serde_json::to_vec(&grant).map_err(|error| AgentError::Protocol(error.to_string()))?,
+        serde_json::to_vec(&grant).map_err(|error| VaultError::Protocol(error.to_string()))?,
     );
     store.put_at(
         DocumentScope::DeviceLocal,
@@ -896,24 +1036,29 @@ fn store_grant(
     )
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 fn require_grant(
-    store: &AgentStore,
+    store: &VaultStore,
     caller: &CallerIdentity,
+    scope: DocumentScope,
     namespace: &[u8],
     address: Option<&SecretAddress>,
     permission: GrantPermission,
     now: u64,
-) -> AgentResult<()> {
+) -> VaultResult<()> {
     let caller_fingerprint = caller.fingerprint();
     let mut targets = Vec::with_capacity(2);
     if let Some(address) = address {
         targets.push(grant_target_digest(&GrantTarget::Entry {
+            scope,
             namespace,
             address,
         }));
     }
-    targets.push(grant_target_digest(&GrantTarget::Namespace(namespace)));
+    targets.push(grant_target_digest(&GrantTarget::Namespace {
+        scope,
+        namespace,
+    }));
     for target_digest in targets {
         let Some(bytes) = store.get_at(
             DocumentScope::DeviceLocal,
@@ -925,7 +1070,7 @@ fn require_grant(
             continue;
         };
         let grant: AccessGrant = serde_json::from_slice(&bytes)
-            .map_err(|error| AgentError::Protocol(error.to_string()))?;
+            .map_err(|error| VaultError::Protocol(error.to_string()))?;
         if grant.version == GRANT_VERSION
             && grant.caller_fingerprint == caller_fingerprint
             && grant.target_digest == target_digest
@@ -935,20 +1080,30 @@ fn require_grant(
             return Ok(());
         }
     }
-    Err(AgentError::AuthorizationRequired)
+    Err(VaultError::AuthorizationRequired)
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 fn grant_target_digest(target: &GrantTarget<'_>) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(GRANT_TARGET_DOMAIN);
     match target {
-        GrantTarget::Namespace(namespace) => {
-            digest.update([1]);
+        GrantTarget::Namespace { scope, namespace } => {
+            digest.update([match scope {
+                DocumentScope::DeviceLocal => 1,
+                DocumentScope::DeviceCache => 3,
+            }]);
             append_digest_bytes(&mut digest, namespace);
         }
-        GrantTarget::Entry { namespace, address } => {
-            digest.update([2]);
+        GrantTarget::Entry {
+            scope,
+            namespace,
+            address,
+        } => {
+            digest.update([match scope {
+                DocumentScope::DeviceLocal => 2,
+                DocumentScope::DeviceCache => 4,
+            }]);
             append_digest_bytes(&mut digest, namespace);
             append_digest_bytes(&mut digest, address.item().as_bytes());
             if let Some(field) = address.field() {
@@ -962,11 +1117,11 @@ fn grant_target_digest(target: &GrantTarget<'_>) -> [u8; 32] {
     digest.finalize().into()
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 fn grant_address(
     caller_fingerprint: [u8; 32],
     target_digest: [u8; 32],
-) -> AgentResult<SecretAddress> {
+) -> VaultResult<SecretAddress> {
     SecretAddress::new(
         format!(
             "grant/{}/{}",
@@ -977,58 +1132,58 @@ fn grant_address(
     )
 }
 
-#[cfg(feature = "agent")]
-fn response_error(error: &AgentError) -> AgentResponseError {
+#[cfg(feature = "vault")]
+fn response_error(error: &VaultError) -> VaultResponseError {
     let code = match error {
-        AgentError::AuthorizationRequired => AgentResponseErrorCode::AuthorizationRequired,
-        AgentError::Replay => AgentResponseErrorCode::Replay,
-        AgentError::Locked | AgentError::WorkerUnavailable => AgentResponseErrorCode::Locked,
-        AgentError::Conflict => AgentResponseErrorCode::Conflict,
-        AgentError::EmptyAddress { .. }
-        | AgentError::AddressTooLong { .. }
-        | AgentError::Expired
-        | AgentError::Protocol(_) => AgentResponseErrorCode::InvalidRequest,
-        AgentError::InvalidData(_)
-        | AgentError::Automerge(_)
-        | AgentError::Crypto
-        | AgentError::Signature
-        | AgentError::Random(_)
-        | AgentError::Database(_)
-        | AgentError::Seal(_) => AgentResponseErrorCode::Internal,
+        VaultError::AuthorizationRequired => VaultResponseErrorCode::AuthorizationRequired,
+        VaultError::Replay => VaultResponseErrorCode::Replay,
+        VaultError::Sealed | VaultError::WorkerUnavailable => VaultResponseErrorCode::Sealed,
+        VaultError::Conflict => VaultResponseErrorCode::Conflict,
+        VaultError::EmptyAddress { .. }
+        | VaultError::AddressTooLong { .. }
+        | VaultError::Expired
+        | VaultError::Protocol(_) => VaultResponseErrorCode::InvalidRequest,
+        VaultError::InvalidData(_)
+        | VaultError::Automerge(_)
+        | VaultError::Crypto
+        | VaultError::Signature
+        | VaultError::Random(_)
+        | VaultError::Database(_)
+        | VaultError::Protection(_) => VaultResponseErrorCode::Internal,
     };
     let message = match code {
-        AgentResponseErrorCode::InvalidRequest => "the request is invalid",
-        AgentResponseErrorCode::AuthorizationRequired => "application authorization is required",
-        AgentResponseErrorCode::Replay => "the request was already consumed",
-        AgentResponseErrorCode::Locked => "the agent is locked",
-        AgentResponseErrorCode::Conflict => "the secret has unresolved concurrent values",
-        AgentResponseErrorCode::Internal => "the agent could not complete the request",
+        VaultResponseErrorCode::InvalidRequest => "the request is invalid",
+        VaultResponseErrorCode::AuthorizationRequired => "application authorization is required",
+        VaultResponseErrorCode::Replay => "the request was already consumed",
+        VaultResponseErrorCode::Sealed => "the vault is sealed",
+        VaultResponseErrorCode::Conflict => "the secret has unresolved concurrent values",
+        VaultResponseErrorCode::Internal => "the vault could not complete the request",
     };
-    AgentResponseError {
+    VaultResponseError {
         code,
         message: message.to_owned(),
     }
 }
 
-fn validate_identity_component(name: &str, value: &str) -> AgentResult<()> {
+fn validate_identity_component(name: &str, value: &str) -> VaultResult<()> {
     if value.is_empty() || value.len() > MAX_IDENTITY_COMPONENT_BYTES {
-        return Err(AgentError::Protocol(format!(
+        return Err(VaultError::Protocol(format!(
             "caller {name} is empty or too long"
         )));
     }
     Ok(())
 }
 
-fn validate_namespace(namespace: &[u8]) -> AgentResult<()> {
+fn validate_namespace(namespace: &[u8]) -> VaultResult<()> {
     if namespace.is_empty() || namespace.len() > MAX_NAMESPACE_BYTES {
-        return Err(AgentError::Protocol(
+        return Err(VaultError::Protocol(
             "document namespace is empty or too long".to_owned(),
         ));
     }
     Ok(())
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 fn append_digest_bytes(digest: &mut Sha256, bytes: &[u8]) {
     digest.update((bytes.len() as u64).to_be_bytes());
     digest.update(bytes);
@@ -1044,16 +1199,16 @@ mod redaction_tests {
     fn debug_output_never_carries_secret_bytes() {
         const NEEDLE: &[u8] = b"needle-secret-value";
 
-        let request = AgentRequest::new(AgentAction::Put {
+        let request = VaultRequest::new(VaultAction::Put {
             namespace: b"secretspec".to_vec(),
             address: WireSecretAddress::new("demo/default/TOKEN", None),
             value: WireSecret::new(NEEDLE.to_vec()),
             evict_at: None,
         })
         .unwrap();
-        let response = AgentResponse::success(
+        let response = VaultResponse::success(
             request.request_id(),
-            AgentResponseBody::Secret {
+            VaultResponseBody::Secret {
                 value: Some(WireSecret::new(NEEDLE.to_vec())),
             },
         );
@@ -1072,17 +1227,17 @@ mod redaction_tests {
     }
 }
 
-#[cfg(all(test, feature = "agent", feature = "hardware"))]
+#[cfg(all(test, feature = "vault", feature = "hardware"))]
 mod tests {
     use super::*;
-    use crate::Seal;
+    use crate::Vault;
 
-    fn service(now: u64, policy: UnlockLeasePolicy) -> (tempfile::TempDir, AgentService) {
+    fn service(now: u64, policy: UnsealLeasePolicy) -> (tempfile::TempDir, VaultService) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
-        let seal = Seal::create_for_test(&root).unwrap();
-        let store = AgentStore::open(root, seal).unwrap();
-        (directory, AgentService::new(store, now, policy).unwrap())
+        let unsealed = Vault::create_for_test(&root).unwrap();
+        let store = VaultStore::open(root, unsealed).unwrap();
+        (directory, VaultService::new(store, now, policy).unwrap())
     }
 
     fn caller() -> CallerIdentity {
@@ -1102,26 +1257,26 @@ mod tests {
 
     #[test]
     fn request_round_trip_is_versioned_and_bounded() {
-        let request = AgentRequest::new(AgentAction::Get {
+        let request = VaultRequest::new(VaultAction::Get {
             namespace: b"secretspec".to_vec(),
             address: address(),
         })
         .unwrap();
         let bytes = request.encode().unwrap();
-        let decoded = AgentRequest::decode(&bytes).unwrap();
+        let decoded = VaultRequest::decode(&bytes).unwrap();
         assert_eq!(decoded.request_id(), request.request_id());
-        assert!(matches!(decoded.action, AgentAction::Get { .. }));
-        assert!(AgentRequest::decode(&vec![0; MAX_MESSAGE_BYTES + 1]).is_err());
+        assert!(matches!(decoded.action, VaultAction::Get { .. }));
+        assert!(VaultRequest::decode(&vec![0; MAX_MESSAGE_BYTES + 1]).is_err());
     }
 
     #[test]
     fn wire_errors_never_echo_internal_or_secret_details() {
         let marker = "visible-project/API_TOKEN=needle-secret-value";
         for error in [
-            AgentError::InvalidData(marker.to_owned()),
-            AgentError::Protocol(marker.to_owned()),
-            AgentError::Database(marker.to_owned()),
-            AgentError::Seal(marker.to_owned()),
+            VaultError::InvalidData(marker.to_owned()),
+            VaultError::Protocol(marker.to_owned()),
+            VaultError::Database(marker.to_owned()),
+            VaultError::Protection(marker.to_owned()),
         ] {
             let response = response_error(&error);
             assert!(!response.message.contains(marker));
@@ -1131,13 +1286,13 @@ mod tests {
 
     #[test]
     fn exact_grant_is_required_and_replay_is_rejected() {
-        let (_directory, service) = service(100, UnlockLeasePolicy::default());
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
         let caller = caller();
         let put_id = RequestId::from_bytes([1; REQUEST_ID_BYTES]);
         let put = || {
-            AgentRequest::with_id(
+            VaultRequest::with_id(
                 put_id,
-                AgentAction::Put {
+                VaultAction::Put {
                     namespace: b"secretspec".to_vec(),
                     address: address(),
                     value: WireSecret::new(b"secret".to_vec()),
@@ -1148,7 +1303,7 @@ mod tests {
         let denied = service.handle(&caller, put(), 101);
         assert_eq!(
             denied.result.unwrap_err().code,
-            AgentResponseErrorCode::AuthorizationRequired
+            VaultResponseErrorCode::AuthorizationRequired
         );
 
         service
@@ -1164,12 +1319,12 @@ mod tests {
         let replayed = service.handle(&caller, put(), 102);
         assert_eq!(
             replayed.result.unwrap_err().code,
-            AgentResponseErrorCode::Replay
+            VaultResponseErrorCode::Replay
         );
 
         let accepted = service.handle(
             &caller,
-            AgentRequest::new(AgentAction::Put {
+            VaultRequest::new(VaultAction::Put {
                 namespace: b"secretspec".to_vec(),
                 address: address(),
                 value: WireSecret::new(b"secret".to_vec()),
@@ -1178,12 +1333,12 @@ mod tests {
             .unwrap(),
             102,
         );
-        assert!(matches!(accepted.result, Ok(AgentResponseBody::Stored)));
+        assert!(matches!(accepted.result, Ok(VaultResponseBody::Stored)));
     }
 
     #[test]
     fn caller_identity_is_part_of_grant_authority() {
-        let (_directory, service) = service(100, UnlockLeasePolicy::default());
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
         let caller = caller();
         service
             .authorize_entry(
@@ -1205,7 +1360,7 @@ mod tests {
         .unwrap();
         let response = service.handle(
             &other,
-            AgentRequest::new(AgentAction::Get {
+            VaultRequest::new(VaultAction::Get {
                 namespace: b"secretspec".to_vec(),
                 address: address(),
             })
@@ -1214,13 +1369,103 @@ mod tests {
         );
         assert_eq!(
             response.result.unwrap_err().code,
-            AgentResponseErrorCode::AuthorizationRequired
+            VaultResponseErrorCode::AuthorizationRequired
         );
     }
 
     #[test]
-    fn idle_deadline_locks_without_a_request() {
-        let policy = UnlockLeasePolicy {
+    fn local_keyring_operations_are_separate_from_disposable_cache_entries() {
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
+        let caller = caller();
+        service
+            .authorize_namespace(
+                &caller,
+                b"factorseal/keyring/v1",
+                [GrantPermission::Get, GrantPermission::Put],
+                None,
+                100,
+            )
+            .unwrap();
+
+        let stored = service.handle(
+            &caller,
+            VaultRequest::new(VaultAction::Put {
+                namespace: b"factorseal/keyring/v1".to_vec(),
+                address: address(),
+                value: WireSecret::new(b"durable secret".to_vec()),
+                evict_at: None,
+            })
+            .unwrap(),
+            101,
+        );
+        assert!(matches!(stored.result, Ok(VaultResponseBody::Stored)));
+
+        service
+            .authorize_cache_namespace(
+                &caller,
+                b"factorseal/keyring/v1",
+                [GrantPermission::Get],
+                None,
+                101,
+            )
+            .unwrap();
+        let cache_read = service.handle(
+            &caller,
+            VaultRequest::new(VaultAction::GetCache {
+                namespace: b"factorseal/keyring/v1".to_vec(),
+                address: address(),
+            })
+            .unwrap(),
+            102,
+        );
+        assert!(matches!(
+            cache_read.result,
+            Ok(VaultResponseBody::Secret { value: None })
+        ));
+
+        let local_read = service.handle(
+            &caller,
+            VaultRequest::new(VaultAction::Get {
+                namespace: b"factorseal/keyring/v1".to_vec(),
+                address: address(),
+            })
+            .unwrap(),
+            103,
+        );
+        let Ok(VaultResponseBody::Secret { value: Some(value) }) = local_read.result else {
+            panic!("expected durable keyring secret");
+        };
+        assert_eq!(value.expose(), b"durable secret");
+    }
+
+    #[test]
+    fn cache_grants_cannot_authorize_durable_keyring_operations() {
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
+        let caller = caller();
+        service
+            .authorize_cache_namespace(&caller, b"shared-name", [GrantPermission::Put], None, 100)
+            .unwrap();
+
+        let response = service.handle(
+            &caller,
+            VaultRequest::new(VaultAction::Put {
+                namespace: b"shared-name".to_vec(),
+                address: address(),
+                value: WireSecret::new(b"must not persist".to_vec()),
+                evict_at: None,
+            })
+            .unwrap(),
+            101,
+        );
+        assert_eq!(
+            response.result.unwrap_err().code,
+            VaultResponseErrorCode::AuthorizationRequired
+        );
+    }
+
+    #[test]
+    fn idle_deadline_seals_without_a_request() {
+        let policy = UnsealLeasePolicy {
             idle_timeout: Duration::from_secs(5),
             maximum_lifetime: Duration::from_secs(10),
         };
@@ -1230,18 +1475,38 @@ mod tests {
 
         let response = service.handle(
             &caller(),
-            AgentRequest::new(AgentAction::Status).unwrap(),
+            VaultRequest::new(VaultAction::Status).unwrap(),
             105,
         );
         assert_eq!(
             response.result.unwrap_err().code,
-            AgentResponseErrorCode::Locked
+            VaultResponseErrorCode::Sealed
         );
     }
 
     #[test]
+    fn status_requests_do_not_refresh_the_idle_deadline() {
+        let policy = UnsealLeasePolicy {
+            idle_timeout: Duration::from_secs(5),
+            maximum_lifetime: Duration::from_secs(10),
+        };
+        let (_directory, service) = service(100, policy);
+
+        let response = service.handle(
+            &caller(),
+            VaultRequest::new(VaultAction::Status).unwrap(),
+            104,
+        );
+        let VaultResponseBody::Status { idle_deadline, .. } = response.result.unwrap() else {
+            panic!("expected status response");
+        };
+        assert_eq!(idle_deadline, 105);
+        assert!(service.expire_if_needed(105).unwrap());
+    }
+
+    #[test]
     fn storage_eviction_sweeps_at_most_once_a_second() {
-        let (_directory, service) = service(100, UnlockLeasePolicy::default());
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
         for _ in 0..5 {
             assert!(!service.expire_if_needed(100).unwrap());
         }
@@ -1261,33 +1526,33 @@ mod tests {
     }
 
     #[test]
-    fn explicit_lock_invalidates_the_service() {
-        let (_directory, service) = service(100, UnlockLeasePolicy::default());
+    fn explicit_seal_invalidates_the_service() {
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
         let caller = caller();
         service
-            .authorize_namespace(&caller, b"secretspec", [GrantPermission::Lock], None, 100)
+            .authorize_namespace(&caller, b"secretspec", [GrantPermission::Seal], None, 100)
             .unwrap();
         let response = service.handle(
             &caller,
-            AgentRequest::new(AgentAction::Lock {
+            VaultRequest::new(VaultAction::Seal {
                 namespace: b"secretspec".to_vec(),
             })
             .unwrap(),
             101,
         );
-        assert!(matches!(response.result, Ok(AgentResponseBody::Locked)));
+        assert!(matches!(response.result, Ok(VaultResponseBody::Sealed)));
         assert!(service.expire_if_needed(101).unwrap());
     }
 
     #[test]
-    fn lifecycle_lock_survives_a_poisoned_request_mutex() {
-        let (_directory, service) = service(100, UnlockLeasePolicy::default());
+    fn lifecycle_seal_survives_a_poisoned_request_mutex() {
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             service.poison_state_for_test();
         }));
         assert!(poisoned.is_err());
 
-        service.lock().unwrap();
-        assert!(service.lock_handle.is_locked());
+        service.seal().unwrap();
+        assert!(service.seal_handle.is_sealed());
     }
 }

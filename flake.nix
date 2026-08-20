@@ -36,7 +36,7 @@
         in
         {
           inherit package;
-          nixos-module = import ./nix/tests/factorseal-agent.nix {
+          nixos-module = import ./nix/tests/factorseal.nix {
             inherit pkgs;
             module = self.nixosModules.default;
           };

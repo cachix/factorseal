@@ -1,6 +1,7 @@
 # Architecture
 
-This document describes Factorseal's hardware-bound per-user agent.
+This document describes Factorseal's hardware-bound vault, its keyring
+interface, and its per-user background service.
 
 ## Trust boundaries
 
@@ -8,21 +9,26 @@ Factorseal separates five responsibilities:
 
 1. a platform adapter authenticates the local caller and handles lifecycle
    events;
-2. `AgentService` validates protocol, grants, replay, and unlock lease;
+2. `VaultService` validates protocol, grants, replay, and the unseal lease;
 3. the Automerge domain wrapper applies allowed secret operations;
 4. the envelope layer encrypts and device-signs durable state;
-5. the sole `AgentStore` worker persists envelopes in Turso.
+5. the sole `VaultStore` worker persists envelopes in Turso.
 
 Neither Turso nor Automerge authorizes a caller. Turso receives no plaintext
 document content. Automerge accepts changes only through Factorseal's domain
 and envelope verification paths.
 
-## Seal bootstrap
+## Vault bootstrap
 
-`seal.json` contains non-secret public identity and hardware-wrapped
+The platform-local Factorseal directory contains only Factorseal-named
+artifacts: `factorseal.json`, `factorseal.db`, `factorseal.lock`, and—while the
+vault is unsealed—`factorseal.sock` on Unix. The JSON file and database together
+form the persisted vault; the socket is only the live service endpoint.
+
+`factorseal.json` contains non-secret public identity and hardware-wrapped
 bootstrap material:
 
-- random permanent `SealId`;
+- random permanent `VaultId`;
 - `DeviceKeyId`, Ed25519 public key, and stable Automerge actor ID;
 - recorded TPM/Secure Enclave backend and biometric policy;
 - distinct platform labels for the wrapping and signing keys;
@@ -35,13 +41,13 @@ Creation opens two distinct `hardware-enclave` keys. The platform wrapper
 rejects DPAPI-only and Linux software-keyring fallback backends. On Linux,
 Argon2id derives a password key which encrypts the DEK and signing seed with
 separate XChaCha20-Poly1305 nonces before those ciphertexts are TPM-wrapped;
-neither factor can recover a seal key alone. Every platform requires
-the platform user-verification policy. Unlock reopens the recorded labels,
+neither factor can recover a vault key alone. Every platform requires
+the platform user-verification policy. Unsealing reopens the recorded labels,
 checks the backend and policy, unwraps both values, applies the password layer
 where required, derives the public signing identity again, and rejects any
 mismatch before opening the database.
 
-The present signing seed is hardware-wrapped and lives in zeroizing agent
+The present signing seed is hardware-wrapped and lives in zeroizing vault
 memory during the lease. A later native adapter may implement signatures with a
 non-exportable platform key while keeping the `DeviceKeyId` and envelope
 contract stable.
@@ -51,9 +57,9 @@ contract stable.
 | Scope | MVP use | Replication |
 | --- | --- | --- |
 | `device-cache` | SecretSpec cache documents | never |
-| `device-local` | caller grants and local agent policy | never |
+| `device-local` | durable CLI/application keyring, caller grants, and local policy | never |
 
-A document ID is a domain-separated digest of seal ID, scope, and
+A document ID is a domain-separated digest of vault ID, scope, and
 namespace. It is opaque in SQL. The namespace and secret item/field live only
 inside the encrypted Automerge document.
 
@@ -67,7 +73,7 @@ display winner. Different visible values return `Conflict`.
 ## Encrypted change envelopes
 
 Every durable snapshot and change uses XChaCha20-Poly1305 with a fresh 192-bit
-nonce and the seal DEK. Ed25519 signatures cover a domain-separated
+nonce and the vault DEK. Ed25519 signatures cover a domain-separated
 transcript including:
 
 - envelope version;
@@ -84,15 +90,15 @@ hash, and dependencies to the signed header.
 
 ## Turso persistence
 
-One worker thread owns one Turso connection and an exclusive seal lock
-file. All in-process handles send bounded commands to that worker. Dropping or
-locking the shared control stops the worker and zeroizes the DEK; every clone is
+One worker thread owns one Turso connection and the exclusive `factorseal.lock`
+file. All in-process handles send bounded commands to that worker. Sealing the
+shared control stops the worker and zeroizes the DEK; every clone is
 invalidated.
 
 The schema contains:
 
 - `store_meta` for schema version and current protected head;
-- `device_seal` for the checked public device identity;
+- `vault_identity` for the checked public vault identity;
 - `documents` for opaque ID, scope, generation, epoch, and current commit;
 - `document_snapshots` for encrypted signed snapshots;
 - `document_changes` for encrypted signed changes;
@@ -107,7 +113,7 @@ checks each snapshot/change-set digest.
 
 This detects database content tamper and inconsistent partial rollback when a
 newer protected head or commit remains. No cross-platform local primitive can
-prove that an attacker did not roll back the complete seal directory.
+prove that an attacker did not roll back the complete vault directory.
 The offline MVP therefore excludes whole-directory rollback from its threat
 claim. Detecting it needs a checkpoint held outside that directory.
 
@@ -115,7 +121,7 @@ claim. Detecting it needs a checkpoint held outside that directory.
 
 Storage deadlines are inside encrypted records. Reads delete an expired entry
 before returning a miss. The store also scans every `device-cache` document at
-startup and exposes a purge operation for the live scheduler. Packaged agents
+startup and exposes a purge operation for the live scheduler. Packaged vault services
 must call it at the next deadline or at a short bounded interval; tests prove
 that explicit purge removes an entry without a read and that it remains absent
 after restart.
@@ -136,28 +142,30 @@ executable digest, and optional signing identity. These values are supplied by
 the authenticated transport adapter. A digest of the complete caller identity
 is part of every durable grant.
 
-Grants can target one exact namespace/item/field or an entire namespace. They
-contain an explicit set of get/put/delete/clear/lock permissions and an optional
-expiry that is also applied as a storage eviction deadline. Grants are stored
-in the encrypted `device-local` document.
+Grants bind the document scope and can target one exact namespace/item/field or
+an entire namespace. They contain an explicit set of
+get/put/delete/clear/seal permissions and an optional expiry that is also
+applied as a storage eviction deadline. A disposable cache grant therefore
+cannot authorize a durable keyring write. Grants are stored in the encrypted
+`device-local` document.
 
-An unlock lease has independent idle and absolute deadlines. Authorized
+An unseal lease has independent idle and absolute deadlines. Authorized
 operations refresh only the idle deadline and can never pass the absolute
-deadline. Explicit lock and timer, logout, suspend, or shutdown hooks all call
-the same store lock path.
+deadline. Explicit seal and timer, logout, suspend, or shutdown hooks all call
+the same vault-sealing path.
 
 ## SecretSpec seam
 
 SecretSpec owns provider addresses, operations, translation, and provider
 tests. Factorseal intentionally does not reproduce those types. Its stable seam
-is `AgentClient`: the in-process test client and each native platform client
-send the same versioned Factorseal agent requests.
+is the `Keyring` trait. It is implemented for every `VaultClient`; the native
+platform clients send the same versioned Factorseal vault requests.
 
-The Factorseal crate exposes that seam through the lightweight `agent-client`
+The Factorseal crate exposes that seam through the lightweight `vault-client`
 feature. SecretSpec compiles a `factorseal://` provider against it and calls the
-platform client directly. The provider translates convention and native
+keyring interface directly. The provider translates convention and native
 addresses plus get, set, expiring set, and delete operations; it never opens
-the embedded database or handles seal keys.
+the embedded database or handles vault keys.
 
 This keeps the trust boundary explicit and single-hop. The SecretSpec CLI or
 application embedding SecretSpec is the process authenticated by the Unix
@@ -180,9 +188,9 @@ The shared core implements the following native adapters:
   Task template.
 
 - Linux subscribes to logind session-lock and pre-sleep/pre-shutdown signals
-  while holding a delay inhibitor until the store is locked;
+  while holding a delay inhibitor until the vault is sealed;
 - macOS observes AppKit sleep, power-off, and session-resign notifications;
-- Windows registers a hidden-window power/session listener and locks directly
+- Windows registers a hidden-window power/session listener and seals directly
   from suspend, shutdown, session-lock, logout, and disconnect callbacks.
 
 The transports, lifecycle monitors, and developer packaging inputs are

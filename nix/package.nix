@@ -42,7 +42,7 @@ rustPlatform.buildRustPackage {
 
   cargoBuildFlags = [
     "--no-default-features"
-    "--features=agent,cli,hardware"
+    "--features=vault,cli,hardware"
     "--bin=factorseal"
   ];
 
@@ -54,19 +54,19 @@ rustPlatform.buildRustPackage {
 
     install -Dm0755 target/${stdenv.hostPlatform.rust.rustcTarget}/release/factorseal \
       "$out/bin/factorseal"
-    install -Dm0755 ${../packaging/linux/factorseal-agent-start} \
-      "$out/bin/factorseal-agent-start"
-    substitute ${../packaging/linux/factorseal-agent.service.in} \
-      factorseal-agent.service --replace-fail "@INSTALL_DIR@" "$out/bin"
-    install -Dm0644 factorseal-agent.service \
-      "$out/share/systemd/user/factorseal-agent.service"
-    patchShebangs "$out/bin/factorseal-agent-start"
+    install -Dm0755 ${../packaging/linux/factorseal-start} \
+      "$out/bin/factorseal-start"
+    substitute ${../packaging/linux/factorseal.service.in} \
+      factorseal.service --replace-fail "@INSTALL_DIR@" "$out/bin"
+    install -Dm0644 factorseal.service \
+      "$out/share/systemd/user/factorseal.service"
+    patchShebangs "$out/bin/factorseal-start"
 
     runHook postInstall
   '';
 
   meta = {
-    description = "Hardware-bound per-user Factorseal secret agent";
+    description = "Hardware-bound Factorseal vault with a keyring interface";
     homepage = "https://github.com/factorseal/factorseal";
     license = lib.licenses.asl20;
     mainProgram = "factorseal";

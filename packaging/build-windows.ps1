@@ -13,13 +13,13 @@ $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetR
 $stage = Join-Path $stageRoot $archive
 
 try {
-    cargo build --locked --release --no-default-features --features agent,cli,hardware --bin factorseal
+    cargo build --locked --release --no-default-features --features vault,cli,hardware --bin factorseal
     $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
-    $agent = Join-Path $metadata.target_directory "release/factorseal.exe"
+    $factorseal = Join-Path $metadata.target_directory "release/factorseal.exe"
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-    Copy-Item $agent, "LICENSE", "README.md" -Destination $stage
-    Copy-Item "packaging/windows/factorseal-agent-task.xml.in", "packaging/windows/factorseal-askpass.ps1", "packaging/windows/factorseal-askpass.cmd" -Destination $stage
+    Copy-Item $factorseal, "LICENSE", "README.md" -Destination $stage
+    Copy-Item "packaging/windows/factorseal-task.xml.in", "packaging/windows/factorseal-askpass.ps1", "packaging/windows/factorseal-askpass.cmd" -Destination $stage
     $zip = Join-Path $OutputDirectory "$archive.zip"
     Compress-Archive -Path $stage -DestinationPath $zip -Force
     Write-Output $zip

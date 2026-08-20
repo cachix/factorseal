@@ -4,7 +4,7 @@ let
   package = pkgs.callPackage ../package.nix { };
 in
 pkgs.testers.runNixOSTest {
-  name = "factorseal-agent";
+  name = "factorseal";
 
   nodes.machine = { pkgs, ... }: {
     imports = [ module ];
@@ -33,10 +33,10 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     alice_prefix = "runuser -u alice -- env HOME=/home/alice XDG_RUNTIME_DIR=/run/user/1000"
-    root = "/home/alice/.local/share/factorseal/agent"
+    root = "/home/alice/.local/share/factorseal"
     runtime = "/run/user/1000/factorseal"
     password_file = f"{runtime}/session-password"
-    socket = f"{root}/agent.sock"
+    socket = f"{root}/factorseal.sock"
 
     def as_alice(command):
         return machine.succeed(f"{alice_prefix} {command}")
@@ -48,9 +48,9 @@ pkgs.testers.runNixOSTest {
             f"chown alice:users {password_file} && chmod 0600 {password_file}"
         )
 
-    def start_agent():
+    def start_vault():
         write_password()
-        as_alice("systemctl --user start factorseal-agent.service")
+        as_alice("systemctl --user start factorseal.service")
         machine.wait_until_succeeds(f"test -S {socket}")
         machine.succeed(f"rm -f {password_file}")
 
@@ -64,21 +64,20 @@ pkgs.testers.runNixOSTest {
         machine.wait_for_unit("polkit.service")
         machine.succeed("id -nG alice | grep -w tss")
         machine.fail(
-            f"{alice_prefix} systemctl --user cat factorseal-agent.service "
+            f"{alice_prefix} systemctl --user cat factorseal.service "
             "| grep -q '^WantedBy='"
         )
-        as_alice("systemctl --user cat factorseal-agent.service | grep -- '--idle-seconds=5'")
-        machine.succeed("test -x ${package}/bin/factorseal-agent-start")
+        as_alice("systemctl --user cat factorseal.service | grep -- '--idle-seconds=5'")
+        machine.succeed("test -x ${package}/bin/factorseal-start")
         machine.succeed("test -x ${package}/bin/factorseal")
 
     with subtest("service fails closed without a runtime password"):
-        machine.succeed("install -d -m 0700 -o alice -g users /home/alice/.local/share/factorseal")
-        as_alice("systemctl --user start factorseal-agent.service")
+        as_alice("systemctl --user start factorseal.service")
         machine.wait_until_succeeds(
-            f"{alice_prefix} systemctl --user is-failed factorseal-agent.service"
+            f"{alice_prefix} systemctl --user is-failed factorseal.service"
         )
         machine.fail(f"test -S {socket}")
-        as_alice("systemctl --user reset-failed factorseal-agent.service")
+        as_alice("systemctl --user reset-failed factorseal.service")
 
     with subtest("initialize a real device through the virtual TPM"):
         write_password()
@@ -87,37 +86,37 @@ pkgs.testers.runNixOSTest {
             f"--password-file={password_file} init"
         )
         machine.succeed(f"rm -f {password_file}")
-        as_alice(f"${package}/bin/factorseal --root={root} status | jq -e '.state == \"locked\"'")
+        as_alice(f"${package}/bin/factorseal --root={root} status | jq -e '.state == \"sealed\"'")
         machine.succeed(f"test $(stat -c %a {root}) = 700")
 
     with subtest("start the native socket"):
-        start_agent()
+        start_vault()
         machine.succeed("systemd-inhibit --list | grep -F Factorseal")
         machine.succeed(f"test $(stat -c %a {socket}) = 600")
         machine.succeed(f"test $(stat -c %a {root}) = 700")
 
-    with subtest("idle expiry locks the store and removes the socket"):
+    with subtest("idle expiry seals the vault and removes the socket"):
         # The 5 s idle lease above is what ends this; wait for the outcome
         # rather than for a fixed duration.
         machine.wait_until_fails(f"test -e {socket}")
         machine.wait_until_fails(
-            f"{alice_prefix} systemctl --user is-active factorseal-agent.service"
+            f"{alice_prefix} systemctl --user is-active factorseal.service"
         )
 
     with subtest("a stopped service cannot be restarted without a new handoff"):
-        as_alice("systemctl --user start factorseal-agent.service")
+        as_alice("systemctl --user start factorseal.service")
         machine.wait_until_succeeds(
-            f"{alice_prefix} systemctl --user is-failed factorseal-agent.service"
+            f"{alice_prefix} systemctl --user is-failed factorseal.service"
         )
         machine.fail(f"test -S {socket}")
 
-    with subtest("a logind session-lock event locks the agent"):
-        as_alice("systemctl --user reset-failed factorseal-agent.service")
-        start_agent()
+    with subtest("a logind session-lock event seals the vault"):
+        as_alice("systemctl --user reset-failed factorseal.service")
+        start_vault()
         machine.succeed("loginctl lock-sessions")
         machine.wait_until_fails(f"test -e {socket}")
         machine.wait_until_fails(
-            f"{alice_prefix} systemctl --user is-active factorseal-agent.service"
+            f"{alice_prefix} systemctl --user is-active factorseal.service"
         )
   '';
 }

@@ -11,13 +11,13 @@ let
 in
 {
   options.services.factorseal = {
-    enable = lib.mkEnableOption "the per-user Factorseal secret agent";
+    enable = lib.mkEnableOption "the per-user Factorseal vault";
 
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ../package.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ./nix/package.nix { }";
-      description = "Factorseal package providing the agent and interactive starter.";
+      description = "Factorseal package providing the vault and interactive starter.";
     };
 
     users = lib.mkOption {
@@ -34,13 +34,13 @@ in
     idleSeconds = lib.mkOption {
       type = lib.types.ints.positive;
       default = 300;
-      description = "Idle seconds before the agent discards unwrapped keys.";
+      description = "Idle seconds before the vault seals and discards unwrapped keys.";
     };
 
     maximumSeconds = lib.mkOption {
       type = lib.types.ints.positive;
       default = 28800;
-      description = "Absolute maximum lifetime of one unlocked agent session.";
+      description = "Absolute maximum lifetime of one unsealed vault session.";
     };
   };
 
@@ -72,18 +72,18 @@ in
       "${tpmGroup}".members = cfg.users;
     };
 
-    systemd.user.services.factorseal-agent = {
-      description = "Factorseal per-user secret agent";
+    systemd.user.services.factorseal = {
+      description = "Factorseal per-user vault service";
       documentation = [ "https://github.com/factorseal/factorseal" ];
 
       # Deliberately no wantedBy: Linux requires an interactive password for
-      # every unlock session. factorseal-agent-start performs that handoff.
+      # every unseal session. factorseal-start performs that handoff.
       serviceConfig = {
         Type = "simple";
         ExecStart = lib.concatStringsSep " " [
           "${cfg.package}/bin/factorseal"
           "--password-file=%t/factorseal/session-password"
-          "run"
+          "unseal"
           "--idle-seconds=${toString cfg.idleSeconds}"
           "--maximum-seconds=${toString cfg.maximumSeconds}"
         ];

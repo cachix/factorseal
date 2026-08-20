@@ -5,7 +5,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{AgentError, AgentResult, DeviceKeyId, DocumentId, DocumentScope};
+use super::{DeviceKeyId, DocumentId, DocumentScope, VaultError, VaultResult};
 
 const ENVELOPE_VERSION: u8 = 2;
 const NONCE_BYTES: usize = 24;
@@ -41,7 +41,7 @@ impl SignatureAlgorithm {
     }
 }
 
-/// Encrypted and device-signed Automerge snapshot persisted by the agent.
+/// Encrypted and device-signed Automerge snapshot persisted by the vault.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EncryptedSnapshot {
@@ -91,7 +91,7 @@ impl EncryptedSnapshot {
     }
 }
 
-/// One encrypted Automerge change authenticated by the seal device.
+/// One encrypted Automerge change authenticated by the vault device.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedChangeEnvelope {
@@ -173,7 +173,7 @@ pub(crate) fn encrypt_snapshot(
     plaintext: &[u8],
     data_key: &[u8; 32],
     signing_key: &SigningKey,
-) -> AgentResult<EncryptedSnapshot> {
+) -> VaultResult<EncryptedSnapshot> {
     let heads: Vec<[u8; DIGEST_BYTES]> = heads.iter().map(|head| head.0).collect();
     let mut nonce = [0_u8; NONCE_BYTES];
     getrandom::fill(&mut nonce)?;
@@ -210,7 +210,7 @@ pub(crate) fn encrypt_changes(
     changes: &[Change],
     data_key: &[u8; 32],
     signing_key: &SigningKey,
-) -> AgentResult<Vec<SignedChangeEnvelope>> {
+) -> VaultResult<Vec<SignedChangeEnvelope>> {
     changes
         .iter()
         .map(|change| encrypt_change(context, change, data_key, signing_key))
@@ -222,9 +222,9 @@ fn encrypt_change(
     change: &Change,
     data_key: &[u8; 32],
     signing_key: &SigningKey,
-) -> AgentResult<SignedChangeEnvelope> {
+) -> VaultResult<SignedChangeEnvelope> {
     if change.actor_id().to_bytes() != context.actor_id {
-        return Err(AgentError::InvalidData(
+        return Err(VaultError::InvalidData(
             "Automerge change actor does not match the device actor".to_owned(),
         ));
     }
@@ -277,9 +277,9 @@ pub fn verify_and_decrypt_snapshot(
     expected_device_key_id: DeviceKeyId,
     public_key: &[u8; 32],
     data_key: &[u8; 32],
-) -> AgentResult<Vec<u8>> {
+) -> VaultResult<Vec<u8>> {
     if envelope.version != ENVELOPE_VERSION || envelope.device_key_id != expected_device_key_id {
-        return Err(AgentError::Signature);
+        return Err(VaultError::Signature);
     }
     verify_ciphertext_digest(&envelope.ciphertext, &envelope.ciphertext_digest)?;
     let context = EnvelopeContext {
@@ -312,9 +312,9 @@ pub fn verify_and_decrypt_change(
     expected_device_key_id: DeviceKeyId,
     public_key: &[u8; 32],
     data_key: &[u8; 32],
-) -> AgentResult<Change> {
+) -> VaultResult<Change> {
     if envelope.version != ENVELOPE_VERSION || envelope.device_key_id != expected_device_key_id {
-        return Err(AgentError::Signature);
+        return Err(VaultError::Signature);
     }
     verify_ciphertext_digest(&envelope.ciphertext, &envelope.ciphertext_digest)?;
     let context = EnvelopeContext {
@@ -344,7 +344,7 @@ pub fn verify_and_decrypt_change(
     )?;
     let plaintext = decrypt(data_key, &envelope.nonce, &aad, &envelope.ciphertext)?;
     let change = Change::from_bytes(plaintext).map_err(|error| {
-        AgentError::InvalidData(format!("invalid encrypted Automerge change: {error}"))
+        VaultError::InvalidData(format!("invalid encrypted Automerge change: {error}"))
     })?;
     let dependencies: Vec<[u8; DIGEST_BYTES]> = change
         .deps()
@@ -355,7 +355,7 @@ pub fn verify_and_decrypt_change(
         || change.hash().0 != envelope.change_hash
         || dependencies != envelope.dependencies
     {
-        return Err(AgentError::Signature);
+        return Err(VaultError::Signature);
     }
     Ok(change)
 }
@@ -365,7 +365,7 @@ fn encrypt(
     nonce: &[u8; NONCE_BYTES],
     aad: &[u8],
     plaintext: &[u8],
-) -> AgentResult<Vec<u8>> {
+) -> VaultResult<Vec<u8>> {
     XChaCha20Poly1305::new(data_key.into())
         .encrypt(
             XNonce::from_slice(nonce),
@@ -374,7 +374,7 @@ fn encrypt(
                 aad,
             },
         )
-        .map_err(|_| AgentError::Crypto)
+        .map_err(|_| VaultError::Crypto)
 }
 
 fn decrypt(
@@ -382,7 +382,7 @@ fn decrypt(
     nonce: &[u8; NONCE_BYTES],
     aad: &[u8],
     ciphertext: &[u8],
-) -> AgentResult<Vec<u8>> {
+) -> VaultResult<Vec<u8>> {
     XChaCha20Poly1305::new(data_key.into())
         .decrypt(
             XNonce::from_slice(nonce),
@@ -391,14 +391,14 @@ fn decrypt(
                 aad,
             },
         )
-        .map_err(|_| AgentError::Crypto)
+        .map_err(|_| VaultError::Crypto)
 }
 
-fn verify_ciphertext_digest(ciphertext: &[u8], expected: &[u8; DIGEST_BYTES]) -> AgentResult<()> {
+fn verify_ciphertext_digest(ciphertext: &[u8], expected: &[u8; DIGEST_BYTES]) -> VaultResult<()> {
     if digest(ciphertext) == *expected {
         Ok(())
     } else {
-        Err(AgentError::Signature)
+        Err(VaultError::Signature)
     }
 }
 
@@ -407,15 +407,15 @@ fn verify_signature(
     public_key: &[u8; 32],
     payload: &[u8],
     bytes: &[u8],
-) -> AgentResult<()> {
+) -> VaultResult<()> {
     match algorithm {
         SignatureAlgorithm::Ed25519 => {
             let verifying_key =
-                VerifyingKey::from_bytes(public_key).map_err(|_| AgentError::Signature)?;
-            let signature = Signature::from_slice(bytes).map_err(|_| AgentError::Signature)?;
+                VerifyingKey::from_bytes(public_key).map_err(|_| VaultError::Signature)?;
+            let signature = Signature::from_slice(bytes).map_err(|_| VaultError::Signature)?;
             verifying_key
                 .verify_strict(payload, &signature)
-                .map_err(|_| AgentError::Signature)
+                .map_err(|_| VaultError::Signature)
         }
     }
 }
@@ -545,12 +545,12 @@ mod tests {
     use automerge::{ActorId, AutoCommit, ROOT};
 
     use super::*;
-    use crate::agent::SealId;
+    use crate::vault::VaultId;
 
     fn context<'a>(actor_id: &'a [u8], public_key: &[u8]) -> EnvelopeContext<'a> {
         EnvelopeContext {
             document_id: DocumentId::derive(
-                SealId::from_bytes([7; 16]),
+                VaultId::from_bytes([7; 16]),
                 DocumentScope::DeviceCache,
                 b"secretspec",
             ),
@@ -598,7 +598,7 @@ mod tests {
                 &verifying,
                 &data_key,
             ),
-            Err(AgentError::Signature)
+            Err(VaultError::Signature)
         ));
     }
 
@@ -627,7 +627,7 @@ mod tests {
         tampered.change_hash[0] ^= 1;
         assert!(matches!(
             verify_and_decrypt_change(&tampered, context.device_key_id, &verifying, &data_key,),
-            Err(AgentError::Signature)
+            Err(VaultError::Signature)
         ));
     }
 }

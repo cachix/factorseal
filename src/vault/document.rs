@@ -2,7 +2,7 @@ use automerge::transaction::Transactable;
 use automerge::{ActorId, AutoCommit, Change, ChangeHash, ObjId, ObjType, ROOT, ReadDoc};
 use serde::{Deserialize, Serialize};
 
-use super::{AgentError, AgentResult, SecretAddress};
+use super::{SecretAddress, VaultError, VaultResult};
 
 const ENTRIES_KEY: &str = "entries";
 const RECORD_VERSION: u8 = 1;
@@ -38,7 +38,7 @@ pub(crate) struct SecretDocument {
 }
 
 impl SecretDocument {
-    pub(crate) fn new(actor_id: &[u8]) -> AgentResult<Self> {
+    pub(crate) fn new(actor_id: &[u8]) -> VaultResult<Self> {
         let mut document = AutoCommit::new().with_actor(ActorId::from(actor_id));
         let entries = document
             .put_object(ROOT, ENTRIES_KEY, ObjType::Map)
@@ -50,17 +50,17 @@ impl SecretDocument {
         })
     }
 
-    pub(crate) fn load(snapshot: &[u8], actor_id: &[u8]) -> AgentResult<Self> {
+    pub(crate) fn load(snapshot: &[u8], actor_id: &[u8]) -> VaultResult<Self> {
         let mut document = AutoCommit::load(snapshot).map_err(automerge_error)?;
         document.set_actor(ActorId::from(actor_id));
         let Some((value, entries)) = document.get(ROOT, ENTRIES_KEY).map_err(automerge_error)?
         else {
-            return Err(AgentError::InvalidData(
+            return Err(VaultError::InvalidData(
                 "secret document has no entries map".to_owned(),
             ));
         };
         if value != automerge::Value::Object(ObjType::Map) {
-            return Err(AgentError::InvalidData(
+            return Err(VaultError::InvalidData(
                 "secret document entries value is not a map".to_owned(),
             ));
         }
@@ -72,7 +72,7 @@ impl SecretDocument {
         })
     }
 
-    pub(crate) fn get(&self, address: &SecretAddress, now: u64) -> AgentResult<SecretRead> {
+    pub(crate) fn get(&self, address: &SecretAddress, now: u64) -> VaultResult<SecretRead> {
         let values = self
             .document
             .get_all(&self.entries, address.storage_key())
@@ -84,10 +84,10 @@ impl SecretDocument {
         let mut records = Vec::with_capacity(values.len());
         for (value, _) in values {
             let bytes = value.into_bytes().map_err(|_| {
-                AgentError::InvalidData("secret document record is not bytes".to_owned())
+                VaultError::InvalidData("secret document record is not bytes".to_owned())
             })?;
             let record: SecretRecord = serde_json::from_slice(&bytes)
-                .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+                .map_err(|error| VaultError::InvalidData(error.to_string()))?;
             validate_record(&record, address)?;
             records.push(record);
         }
@@ -110,7 +110,7 @@ impl SecretDocument {
         address: &SecretAddress,
         value: &[u8],
         evict_at: Option<u64>,
-    ) -> AgentResult<DocumentMutation> {
+    ) -> VaultResult<DocumentMutation> {
         let record = SecretRecord {
             version: RECORD_VERSION,
             item: address.item().to_owned(),
@@ -119,7 +119,7 @@ impl SecretDocument {
             evict_at,
         };
         let bytes = serde_json::to_vec(&record)
-            .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+            .map_err(|error| VaultError::InvalidData(error.to_string()))?;
         self.document
             .put(&self.entries, address.storage_key(), bytes)
             .map_err(automerge_error)?;
@@ -129,7 +129,7 @@ impl SecretDocument {
     pub(crate) fn delete(
         &mut self,
         address: &SecretAddress,
-    ) -> AgentResult<Option<DocumentMutation>> {
+    ) -> VaultResult<Option<DocumentMutation>> {
         let key = address.storage_key();
         if self
             .document
@@ -145,7 +145,7 @@ impl SecretDocument {
         Ok(Some(self.finish_mutation()))
     }
 
-    pub(crate) fn purge_expired(&mut self, now: u64) -> AgentResult<Option<DocumentMutation>> {
+    pub(crate) fn purge_expired(&mut self, now: u64) -> VaultResult<Option<DocumentMutation>> {
         let keys: Vec<String> = self.document.keys(&self.entries).collect();
         let mut expired = Vec::new();
         for key in keys {
@@ -156,10 +156,10 @@ impl SecretDocument {
             let mut should_delete = false;
             for (value, _) in values {
                 let bytes = value.into_bytes().map_err(|_| {
-                    AgentError::InvalidData("secret document record is not bytes".to_owned())
+                    VaultError::InvalidData("secret document record is not bytes".to_owned())
                 })?;
                 let record: SecretRecord = serde_json::from_slice(&bytes)
-                    .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+                    .map_err(|error| VaultError::InvalidData(error.to_string()))?;
                 if record.evict_at.is_some_and(|deadline| deadline <= now) {
                     should_delete = true;
                     break;
@@ -181,7 +181,7 @@ impl SecretDocument {
         Ok(Some(self.finish_mutation()))
     }
 
-    pub(crate) fn clear(&mut self) -> AgentResult<Option<(usize, DocumentMutation)>> {
+    pub(crate) fn clear(&mut self) -> VaultResult<Option<(usize, DocumentMutation)>> {
         let keys: Vec<String> = self.document.keys(&self.entries).collect();
         if keys.is_empty() {
             return Ok(None);
@@ -213,20 +213,20 @@ impl SecretDocument {
     }
 }
 
-fn validate_record(record: &SecretRecord, address: &SecretAddress) -> AgentResult<()> {
+fn validate_record(record: &SecretRecord, address: &SecretAddress) -> VaultResult<()> {
     if record.version != RECORD_VERSION
         || record.item != address.item()
         || record.field.as_deref() != address.field()
     {
-        return Err(AgentError::InvalidData(
+        return Err(VaultError::InvalidData(
             "secret document record does not match its authenticated address".to_owned(),
         ));
     }
     Ok(())
 }
 
-fn automerge_error(error: impl std::fmt::Display) -> AgentError {
-    AgentError::Automerge(error.to_string())
+fn automerge_error(error: impl std::fmt::Display) -> VaultError {
+    VaultError::Automerge(error.to_string())
 }
 
 #[cfg(test)]

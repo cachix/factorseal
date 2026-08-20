@@ -15,9 +15,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::envelope::{EnvelopeContext, encrypt_changes, encrypt_snapshot};
 use super::{
-    AgentError, AgentResult, DATABASE_FILE, DeviceKeyId, DeviceSeal, DocumentId, DocumentScope,
-    EncryptedSnapshot, LOCK_FILE, SecretAddress, SecretDocument, SecretRead, SignedChangeEnvelope,
-    UnlockedSeal, verify_and_decrypt_snapshot,
+    DATABASE_FILE, DeviceKeyId, DocumentId, DocumentScope, EncryptedSnapshot, LOCK_FILE,
+    SecretAddress, SecretDocument, SecretRead, SignedChangeEnvelope, UnsealedVault, VaultError,
+    VaultMetadata, VaultResult, verify_and_decrypt_snapshot,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -26,42 +26,42 @@ const COMMAND_QUEUE: usize = 64;
 const MAX_COMMIT_CHAIN: usize = 1_000_000;
 /// Chain length that triggers compaction. Every mutation appends a whole
 /// encrypted document snapshot plus one signed commit, and startup verifies
-/// the whole chain, so an unpruned history grows both the database and unlock
+/// the whole chain, so an unpruned history grows both the database and unseal
 /// latency without bound in the number of writes.
 const MAX_RETAINED_COMMITS: usize = 256;
 const COMMIT_DOMAIN: &[u8] = b"factorseal/protected-commit/v1\0";
 const COMMIT_SIGNATURE_DOMAIN: &[u8] = b"factorseal/protected-commit-signature/v1\0";
 
-/// Handle used by the per-user agent to access its sole Turso connection.
+/// Handle used by the per-user vault to access its sole Turso connection.
 ///
 /// Every clone talks to the same dedicated worker thread. Opening a second
-/// `AgentStore` for the seal fails while the first is alive.
+/// `VaultStore` for the vault fails while the first is alive.
 #[derive(Clone)]
-pub struct AgentStore {
+pub struct VaultStore {
     control: Arc<WorkerControl>,
-    device: DeviceSeal,
+    device: VaultMetadata,
 }
 
-impl AgentStore {
-    /// Open the seal's embedded Turso database and consume the
-    /// hardware-unwrapped seal secrets into the worker.
-    pub fn open(root: impl AsRef<Path>, unlocked: UnlockedSeal) -> AgentResult<Self> {
+impl VaultStore {
+    /// Open the vault's embedded Turso database and consume its
+    /// hardware-unwrapped secrets into the worker.
+    pub fn open(root: impl AsRef<Path>, unsealed: UnsealedVault) -> VaultResult<Self> {
         let root = root.as_ref().to_owned();
-        let device = unlocked.public().clone();
+        let device = unsealed.public().clone();
         let (sender, receiver) = mpsc::sync_channel(COMMAND_QUEUE);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let worker_root = root.clone();
         let join = thread::Builder::new()
-            .name("factorseal-agent-store".to_owned())
-            .spawn(move || run_worker(worker_root, unlocked, receiver, ready_sender))
-            .map_err(|error| AgentError::Database(error.to_string()))?;
+            .name("factorseal-store".to_owned())
+            .spawn(move || run_worker(worker_root, unsealed, receiver, ready_sender))
+            .map_err(|error| VaultError::Database(error.to_string()))?;
 
         match ready_receiver.recv() {
             Ok(Ok(())) => Ok(Self {
                 control: Arc::new(WorkerControl {
                     sender,
                     join: Mutex::new(Some(join)),
-                    locked: AtomicBool::new(false),
+                    sealed: AtomicBool::new(false),
                 }),
                 device,
             }),
@@ -71,25 +71,25 @@ impl AgentStore {
             }
             Err(_) => {
                 let _ = join.join();
-                Err(AgentError::WorkerUnavailable)
+                Err(VaultError::WorkerUnavailable)
             }
         }
     }
 
     #[must_use]
-    pub const fn device(&self) -> &DeviceSeal {
+    pub const fn device(&self) -> &VaultMetadata {
         &self.device
     }
 
-    /// Stop the sole database worker and zeroize its unlocked key material.
-    /// All clones become locked.
-    pub fn lock(&self) {
+    /// Stop the sole database worker and zeroize its unsealed key material.
+    /// All clones become sealed.
+    pub fn seal(&self) {
         self.control.shutdown();
     }
 
     #[must_use]
-    pub fn is_locked(&self) -> bool {
-        self.control.locked.load(Ordering::Acquire)
+    pub fn is_sealed(&self) -> bool {
+        self.control.sealed.load(Ordering::Acquire)
     }
 
     /// Retrieve one secret, deleting it first when its storage deadline has
@@ -99,7 +99,7 @@ impl AgentStore {
         scope: DocumentScope,
         namespace: &[u8],
         address: &SecretAddress,
-    ) -> AgentResult<Option<Zeroizing<Vec<u8>>>> {
+    ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
         self.get_at(scope, namespace, address, unix_time()?)
     }
 
@@ -111,10 +111,10 @@ impl AgentStore {
         address: &SecretAddress,
         value: &[u8],
         evict_at: Option<u64>,
-    ) -> AgentResult<()> {
+    ) -> VaultResult<()> {
         let now = unix_time()?;
         if evict_at.is_some_and(|deadline| deadline <= now) {
-            return Err(AgentError::Expired);
+            return Err(VaultError::Expired);
         }
         self.put_at(scope, namespace, address, value, evict_at)
     }
@@ -125,7 +125,7 @@ impl AgentStore {
         scope: DocumentScope,
         namespace: &[u8],
         address: &SecretAddress,
-    ) -> AgentResult<bool> {
+    ) -> VaultResult<bool> {
         let document_id = self.document_id(scope, namespace);
         request(&self.control.sender, |response| Command::Delete {
             document_id,
@@ -136,12 +136,12 @@ impl AgentStore {
     }
 
     /// Remove every expired entry from every device-cache document.
-    pub fn purge_expired(&self) -> AgentResult<usize> {
+    pub fn purge_expired(&self) -> VaultResult<usize> {
         self.purge_expired_at(unix_time()?)
     }
 
     /// Clear every secret from one scoped document.
-    pub fn clear(&self, scope: DocumentScope, namespace: &[u8]) -> AgentResult<usize> {
+    pub fn clear(&self, scope: DocumentScope, namespace: &[u8]) -> VaultResult<usize> {
         let document_id = self.document_id(scope, namespace);
         request(&self.control.sender, |response| Command::Clear {
             document_id,
@@ -156,7 +156,7 @@ impl AgentStore {
         namespace: &[u8],
         address: &SecretAddress,
         now: u64,
-    ) -> AgentResult<Option<Zeroizing<Vec<u8>>>> {
+    ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
         let document_id = self.document_id(scope, namespace);
         request(&self.control.sender, |response| Command::Get {
             document_id,
@@ -174,7 +174,7 @@ impl AgentStore {
         address: &SecretAddress,
         value: &[u8],
         evict_at: Option<u64>,
-    ) -> AgentResult<()> {
+    ) -> VaultResult<()> {
         let document_id = self.document_id(scope, namespace);
         request(&self.control.sender, |response| Command::Put {
             document_id,
@@ -186,7 +186,7 @@ impl AgentStore {
         })
     }
 
-    pub(crate) fn purge_expired_at(&self, now: u64) -> AgentResult<usize> {
+    pub(crate) fn purge_expired_at(&self, now: u64) -> VaultResult<usize> {
         request(&self.control.sender, |response| Command::PurgeExpired {
             now,
             response,
@@ -194,19 +194,19 @@ impl AgentStore {
     }
 
     fn document_id(&self, scope: DocumentScope, namespace: &[u8]) -> DocumentId {
-        DocumentId::derive(self.device.seal_id(), scope, namespace)
+        DocumentId::derive(self.device.vault_id(), scope, namespace)
     }
 }
 
 struct WorkerControl {
     sender: mpsc::SyncSender<Command>,
     join: Mutex<Option<JoinHandle<()>>>,
-    locked: AtomicBool,
+    sealed: AtomicBool,
 }
 
 impl WorkerControl {
     fn shutdown(&self) {
-        if self.locked.swap(true, Ordering::AcqRel) {
+        if self.sealed.swap(true, Ordering::AcqRel) {
             return;
         }
         let _ = self.sender.send(Command::Shutdown);
@@ -230,7 +230,7 @@ enum Command {
         scope: DocumentScope,
         address: SecretAddress,
         now: u64,
-        response: mpsc::Sender<AgentResult<Option<Zeroizing<Vec<u8>>>>>,
+        response: mpsc::Sender<VaultResult<Option<Zeroizing<Vec<u8>>>>>,
     },
     Put {
         document_id: DocumentId,
@@ -238,45 +238,45 @@ enum Command {
         address: SecretAddress,
         value: Zeroizing<Vec<u8>>,
         evict_at: Option<u64>,
-        response: mpsc::Sender<AgentResult<()>>,
+        response: mpsc::Sender<VaultResult<()>>,
     },
     Delete {
         document_id: DocumentId,
         scope: DocumentScope,
         address: SecretAddress,
-        response: mpsc::Sender<AgentResult<bool>>,
+        response: mpsc::Sender<VaultResult<bool>>,
     },
     PurgeExpired {
         now: u64,
-        response: mpsc::Sender<AgentResult<usize>>,
+        response: mpsc::Sender<VaultResult<usize>>,
     },
     Clear {
         document_id: DocumentId,
         scope: DocumentScope,
-        response: mpsc::Sender<AgentResult<usize>>,
+        response: mpsc::Sender<VaultResult<usize>>,
     },
     Shutdown,
 }
 
 fn request<T>(
     sender: &mpsc::SyncSender<Command>,
-    command: impl FnOnce(mpsc::Sender<AgentResult<T>>) -> Command,
-) -> AgentResult<T> {
+    command: impl FnOnce(mpsc::Sender<VaultResult<T>>) -> Command,
+) -> VaultResult<T> {
     let (response_sender, response_receiver) = mpsc::channel();
     sender
         .send(command(response_sender))
-        .map_err(|_| AgentError::WorkerUnavailable)?;
+        .map_err(|_| VaultError::WorkerUnavailable)?;
     response_receiver
         .recv()
-        .map_err(|_| AgentError::WorkerUnavailable)?
+        .map_err(|_| VaultError::WorkerUnavailable)?
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_worker(
     root: PathBuf,
-    unlocked: UnlockedSeal,
+    unsealed: UnsealedVault,
     receiver: mpsc::Receiver<Command>,
-    ready: mpsc::SyncSender<AgentResult<()>>,
+    ready: mpsc::SyncSender<VaultResult<()>>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -284,11 +284,11 @@ fn run_worker(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = ready.send(Err(AgentError::Database(error.to_string())));
+            let _ = ready.send(Err(VaultError::Database(error.to_string())));
             return;
         }
     };
-    let mut worker = match runtime.block_on(StoreWorker::open(&root, unlocked)) {
+    let mut worker = match runtime.block_on(StoreWorker::open(&root, unsealed)) {
         Ok(worker) => worker,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -350,7 +350,7 @@ fn run_worker(
 
 struct StoreWorker {
     connection: Connection,
-    device: DeviceSeal,
+    device: VaultMetadata,
     data_key: Zeroizing<[u8; 32]>,
     signing_key: SigningKey,
     lock_file: fs::File,
@@ -368,24 +368,24 @@ struct DocumentRow {
 }
 
 impl StoreWorker {
-    async fn open(root: &Path, unlocked: UnlockedSeal) -> AgentResult<Self> {
+    async fn open(root: &Path, unsealed: UnsealedVault) -> VaultResult<Self> {
         let lock = open_lock(root)?;
         lock.try_lock_exclusive().map_err(|error| {
-            AgentError::Database(format!(
-                "another Factorseal agent owns `{}`: {error}",
+            VaultError::Database(format!(
+                "another Factorseal vault owns `{}`: {error}",
                 root.display()
             ))
         })?;
         let database_path = root.join(DATABASE_FILE);
         let database_path = database_path.to_str().ok_or_else(|| {
-            AgentError::Database("agent database path is not valid Unicode".to_owned())
+            VaultError::Database("vault database path is not valid Unicode".to_owned())
         })?;
         let database = turso::Builder::new_local(database_path)
             .build()
             .await
             .map_err(database_error)?;
         let connection = database.connect().map_err(database_error)?;
-        let (device, data_key, signing_seed) = unlocked.into_parts();
+        let (device, data_key, signing_seed) = unsealed.into_parts();
         let signing_key = SigningKey::from_bytes(&signing_seed);
         drop(signing_seed);
         let mut worker = Self {
@@ -401,12 +401,12 @@ impl StoreWorker {
         worker.chain_length = worker.verify_commit_chain().await?;
         worker.purge_expired(unix_time()?).await?;
         // A database written before compaction existed still carries its whole
-        // history; shrink it once here so the next unlock is fast.
+        // history; shrink it once here so the next unseal is fast.
         worker.compact_if_needed().await?;
         Ok(worker)
     }
 
-    async fn initialize_schema(&self) -> AgentResult<()> {
+    async fn initialize_schema(&self) -> VaultResult<()> {
         self.connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
@@ -414,9 +414,9 @@ impl StoreWorker {
                      key TEXT PRIMARY KEY NOT NULL,
                      value BLOB NOT NULL
                  );
-                 CREATE TABLE IF NOT EXISTS device_seal (
+                 CREATE TABLE IF NOT EXISTS vault_identity (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                     seal_id BLOB NOT NULL,
+                     vault_id BLOB NOT NULL,
                      device_key_id BLOB NOT NULL,
                      public_signing_key BLOB NOT NULL,
                      actor_id BLOB NOT NULL,
@@ -482,24 +482,24 @@ impl StoreWorker {
             (),
         )
         .await?
-        .ok_or_else(|| AgentError::Database("missing schema version".to_owned()))?;
+        .ok_or_else(|| VaultError::Database("missing schema version".to_owned()))?;
         if stored != schema {
-            return Err(AgentError::Database(
-                "unsupported agent database schema version".to_owned(),
+            return Err(VaultError::Database(
+                "unsupported vault database schema version".to_owned(),
             ));
         }
         Ok(())
     }
 
-    async fn verify_installation_row(&self) -> AgentResult<()> {
+    async fn verify_installation_row(&self) -> VaultResult<()> {
         self.connection
             .execute(
-                "INSERT OR IGNORE INTO device_seal(
-                     singleton, seal_id, device_key_id, public_signing_key,
+                "INSERT OR IGNORE INTO vault_identity(
+                     singleton, vault_id, device_key_id, public_signing_key,
                      actor_id, hardware_backend, key_epoch, created_at
                  ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    self.device.seal_id().as_bytes().to_vec(),
+                    self.device.vault_id().as_bytes().to_vec(),
                     self.device.device_key_id().as_bytes().to_vec(),
                     self.device.public_signing_key().to_vec(),
                     self.device.actor_id().to_vec(),
@@ -513,9 +513,9 @@ impl StoreWorker {
         let mut rows = self
             .connection
             .query(
-                "SELECT seal_id, device_key_id, public_signing_key, actor_id,
+                "SELECT vault_id, device_key_id, public_signing_key, actor_id,
                         hardware_backend, key_epoch, created_at
-                 FROM device_seal WHERE singleton = 1",
+                 FROM vault_identity WHERE singleton = 1",
                 (),
             )
             .await
@@ -524,8 +524,8 @@ impl StoreWorker {
             .next()
             .await
             .map_err(database_error)?
-            .ok_or_else(|| AgentError::Database("missing seal row".to_owned()))?;
-        let matches = row_blob(&row, 0)? == self.device.seal_id().as_bytes()
+            .ok_or_else(|| VaultError::Database("missing vault identity row".to_owned()))?;
+        let matches = row_blob(&row, 0)? == self.device.vault_id().as_bytes()
             && row_blob(&row, 1)? == self.device.device_key_id().as_bytes()
             && row_blob(&row, 2)? == self.device.public_signing_key()
             && row_blob(&row, 3)? == self.device.actor_id()
@@ -533,8 +533,8 @@ impl StoreWorker {
             && row_integer(&row, 5)? == to_i64(self.device.key_epoch())?
             && row_integer(&row, 6)? == to_i64(self.device.created_at())?;
         if !matches {
-            return Err(AgentError::Database(
-                "database belongs to a different device seal".to_owned(),
+            return Err(VaultError::Database(
+                "database belongs to a different vault".to_owned(),
             ));
         }
         Ok(())
@@ -546,7 +546,7 @@ impl StoreWorker {
         scope: DocumentScope,
         address: &SecretAddress,
         now: u64,
-    ) -> AgentResult<Option<Zeroizing<Vec<u8>>>> {
+    ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
         let Some((mut document, generation, key_epoch)) =
             self.load_document(document_id, scope).await?
         else {
@@ -555,10 +555,10 @@ impl StoreWorker {
         match document.get(address, now)? {
             SecretRead::Missing => Ok(None),
             SecretRead::Value(value) => Ok(Some(Zeroizing::new(value))),
-            SecretRead::Conflict => Err(AgentError::Conflict),
+            SecretRead::Conflict => Err(VaultError::Conflict),
             SecretRead::Expired => {
                 let mutation = document.delete(address)?.ok_or_else(|| {
-                    AgentError::InvalidData("expired secret disappeared during deletion".to_owned())
+                    VaultError::InvalidData("expired secret disappeared during deletion".to_owned())
                 })?;
                 self.commit_mutation(document_id, scope, Some(generation), key_epoch, mutation)
                     .await?;
@@ -574,7 +574,7 @@ impl StoreWorker {
         address: &SecretAddress,
         value: &[u8],
         evict_at: Option<u64>,
-    ) -> AgentResult<()> {
+    ) -> VaultResult<()> {
         let loaded = self.load_document(document_id, scope).await?;
         let (mut document, expected_generation, key_epoch) = match loaded {
             Some((document, generation, key_epoch)) => (document, Some(generation), key_epoch),
@@ -594,7 +594,7 @@ impl StoreWorker {
         document_id: DocumentId,
         scope: DocumentScope,
         address: &SecretAddress,
-    ) -> AgentResult<bool> {
+    ) -> VaultResult<bool> {
         let Some((mut document, generation, key_epoch)) =
             self.load_document(document_id, scope).await?
         else {
@@ -608,7 +608,7 @@ impl StoreWorker {
         Ok(true)
     }
 
-    async fn purge_expired(&mut self, now: u64) -> AgentResult<usize> {
+    async fn purge_expired(&mut self, now: u64) -> VaultResult<usize> {
         let mut rows = self
             .connection
             .query(
@@ -646,7 +646,7 @@ impl StoreWorker {
         Ok(changed)
     }
 
-    async fn clear(&mut self, document_id: DocumentId, scope: DocumentScope) -> AgentResult<usize> {
+    async fn clear(&mut self, document_id: DocumentId, scope: DocumentScope) -> VaultResult<usize> {
         let Some((mut document, generation, key_epoch)) =
             self.load_document(document_id, scope).await?
         else {
@@ -664,7 +664,7 @@ impl StoreWorker {
         &self,
         document_id: DocumentId,
         expected_scope: DocumentScope,
-    ) -> AgentResult<Option<(SecretDocument, u64, u64)>> {
+    ) -> VaultResult<Option<(SecretDocument, u64, u64)>> {
         let mut rows = self
             .connection
             .query(
@@ -680,7 +680,7 @@ impl StoreWorker {
         let generation = from_i64(row_integer(&row, 1)?, "document generation")?;
         let key_epoch = from_i64(row_integer(&row, 2)?, "document key epoch")?;
         if scope != expected_scope {
-            return Err(AgentError::InvalidData(
+            return Err(VaultError::InvalidData(
                 "document scope does not match requested operation".to_owned(),
             ));
         }
@@ -693,15 +693,15 @@ impl StoreWorker {
             params![document_id.as_bytes().to_vec(), to_i64(generation)?],
         )
         .await?
-        .ok_or_else(|| AgentError::InvalidData("document has no current snapshot".to_owned()))?;
+        .ok_or_else(|| VaultError::InvalidData("document has no current snapshot".to_owned()))?;
         let envelope: EncryptedSnapshot = serde_json::from_slice(&envelope_bytes)
-            .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+            .map_err(|error| VaultError::InvalidData(error.to_string()))?;
         if envelope.document_id() != document_id
             || envelope.scope() != scope
             || envelope.generation() != generation
             || envelope.key_epoch() != key_epoch
         {
-            return Err(AgentError::InvalidData(
+            return Err(VaultError::InvalidData(
                 "snapshot metadata does not match document row".to_owned(),
             ));
         }
@@ -723,10 +723,10 @@ impl StoreWorker {
         expected_generation: Option<u64>,
         key_epoch: u64,
         mutation: super::DocumentMutation,
-    ) -> AgentResult<()> {
+    ) -> VaultResult<()> {
         let generation = expected_generation.map_or(1, |value| value.saturating_add(1));
         if generation == u64::MAX {
-            return Err(AgentError::InvalidData(
+            return Err(VaultError::InvalidData(
                 "document generation is exhausted".to_owned(),
             ));
         }
@@ -752,14 +752,14 @@ impl StoreWorker {
             &self.signing_key,
         )?;
         let snapshot_bytes = serde_json::to_vec(&snapshot)
-            .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+            .map_err(|error| VaultError::InvalidData(error.to_string()))?;
         let change_bytes: Vec<Vec<u8>> = changes
             .iter()
             .map(|change| {
                 serde_json::to_vec(change)
-                    .map_err(|error| AgentError::InvalidData(error.to_string()))
+                    .map_err(|error| VaultError::InvalidData(error.to_string()))
             })
-            .collect::<AgentResult<_>>()?;
+            .collect::<VaultResult<_>>()?;
         let previous_commit_id = self.current_commit_head().await?;
         let protected_commit = ProtectedCommit::new(
             previous_commit_id,
@@ -773,7 +773,7 @@ impl StoreWorker {
             &self.signing_key,
         );
         let protected_bytes = serde_json::to_vec(&protected_commit)
-            .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+            .map_err(|error| VaultError::InvalidData(error.to_string()))?;
 
         let transaction = self
             .connection
@@ -799,7 +799,7 @@ impl StoreWorker {
                     .await
                     .map_err(database_error)?;
                 if updated != 1 {
-                    return Err(AgentError::Database(
+                    return Err(VaultError::Database(
                         "document generation changed concurrently".to_owned(),
                     ));
                 }
@@ -879,7 +879,7 @@ impl StoreWorker {
         self.compact_if_needed().await
     }
 
-    async fn current_commit_head(&self) -> AgentResult<Option<[u8; 32]>> {
+    async fn current_commit_head(&self) -> VaultResult<Option<[u8; 32]>> {
         query_optional_blob(
             &self.connection,
             "SELECT value FROM store_meta WHERE key = 'current-commit-head'",
@@ -891,14 +891,14 @@ impl StoreWorker {
     }
 
     /// Verify the whole protected chain and return the number of commits in it.
-    async fn verify_commit_chain(&self) -> AgentResult<usize> {
+    async fn verify_commit_chain(&self) -> VaultResult<usize> {
         let mut current = self.current_commit_head().await?;
         let mut visited = HashSet::new();
         let mut count = 0_usize;
         while let Some(commit_id) = current {
             count += 1;
             if count > MAX_COMMIT_CHAIN || !visited.insert(commit_id) {
-                return Err(AgentError::InvalidData(
+                return Err(VaultError::InvalidData(
                     "protected commit chain is cyclic or too long".to_owned(),
                 ));
             }
@@ -911,7 +911,7 @@ impl StoreWorker {
         Ok(count)
     }
 
-    async fn verify_protected_commit(&self, commit_id: [u8; 32]) -> AgentResult<ProtectedCommit> {
+    async fn verify_protected_commit(&self, commit_id: [u8; 32]) -> VaultResult<ProtectedCommit> {
         let mut rows = self
             .connection
             .query(
@@ -922,7 +922,7 @@ impl StoreWorker {
             .await
             .map_err(database_error)?;
         let row = rows.next().await.map_err(database_error)?.ok_or_else(|| {
-            AgentError::InvalidData("protected commit chain is incomplete".to_owned())
+            VaultError::InvalidData("protected commit chain is incomplete".to_owned())
         })?;
         let stored_previous = row_optional_blob(&row, 0)?
             .map(|bytes| array_from_blob(&bytes, "previous commit ID"))
@@ -932,7 +932,7 @@ impl StoreWorker {
         let record_bytes = row_blob(&row, 3)?;
         drop(rows);
         let record: ProtectedCommit = serde_json::from_slice(&record_bytes)
-            .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+            .map_err(|error| VaultError::InvalidData(error.to_string()))?;
         record.verify(
             commit_id,
             self.device.device_key_id(),
@@ -942,7 +942,7 @@ impl StoreWorker {
             || stored_document_id != record.document_id
             || stored_generation != record.generation
         {
-            return Err(AgentError::InvalidData(
+            return Err(VaultError::InvalidData(
                 "protected commit SQL metadata does not match its signed record".to_owned(),
             ));
         }
@@ -950,7 +950,7 @@ impl StoreWorker {
         Ok(record)
     }
 
-    async fn verify_protected_commit_payload(&self, record: &ProtectedCommit) -> AgentResult<()> {
+    async fn verify_protected_commit_payload(&self, record: &ProtectedCommit) -> VaultResult<()> {
         let snapshot = query_optional_blob(
             &self.connection,
             "SELECT envelope FROM document_snapshots
@@ -962,16 +962,16 @@ impl StoreWorker {
         )
         .await?
         .ok_or_else(|| {
-            AgentError::InvalidData("protected commit snapshot is missing".to_owned())
+            VaultError::InvalidData("protected commit snapshot is missing".to_owned())
         })?;
         if digest(&snapshot) != record.snapshot_digest {
-            return Err(AgentError::Signature);
+            return Err(VaultError::Signature);
         }
         let (envelopes, serialized_changes) = self
             .change_envelopes(record.document_id, record.generation)
             .await?;
         if digest_change_envelopes(&envelopes, &serialized_changes) != record.changes_digest {
-            return Err(AgentError::Signature);
+            return Err(VaultError::Signature);
         }
         Ok(())
     }
@@ -982,7 +982,7 @@ impl StoreWorker {
         &self,
         document_id: DocumentId,
         generation: u64,
-    ) -> AgentResult<(Vec<SignedChangeEnvelope>, Vec<Vec<u8>>)> {
+    ) -> VaultResult<(Vec<SignedChangeEnvelope>, Vec<Vec<u8>>)> {
         let mut rows = self
             .connection
             .query(
@@ -997,14 +997,14 @@ impl StoreWorker {
         while let Some(row) = rows.next().await.map_err(database_error)? {
             let bytes = row_blob(&row, 0)?;
             let envelope: SignedChangeEnvelope = serde_json::from_slice(&bytes)
-                .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+                .map_err(|error| VaultError::InvalidData(error.to_string()))?;
             serialized.push(bytes);
             envelopes.push(envelope);
         }
         Ok((envelopes, serialized))
     }
 
-    async fn verify_protected_row_sets(&self, chain_count: usize) -> AgentResult<()> {
+    async fn verify_protected_row_sets(&self, chain_count: usize) -> VaultResult<()> {
         let commit_count = query_count(
             &self.connection,
             "SELECT COUNT(*) FROM protected_commits",
@@ -1012,7 +1012,7 @@ impl StoreWorker {
         )
         .await?;
         if commit_count != chain_count as u64 {
-            return Err(AgentError::InvalidData(
+            return Err(VaultError::InvalidData(
                 "database contains commits outside the protected chain".to_owned(),
             ));
         }
@@ -1023,7 +1023,7 @@ impl StoreWorker {
         )
         .await?;
         if snapshot_count != commit_count {
-            return Err(AgentError::InvalidData(
+            return Err(VaultError::InvalidData(
                 "database contains missing or uncommitted snapshots".to_owned(),
             ));
         }
@@ -1039,14 +1039,14 @@ impl StoreWorker {
         )
         .await?;
         if orphan_changes != 0 {
-            return Err(AgentError::InvalidData(
+            return Err(VaultError::InvalidData(
                 "database contains changes outside the protected chain".to_owned(),
             ));
         }
         Ok(())
     }
 
-    async fn document_rows(&self) -> AgentResult<Vec<DocumentRow>> {
+    async fn document_rows(&self) -> VaultResult<Vec<DocumentRow>> {
         let mut rows = self
             .connection
             .query(
@@ -1069,10 +1069,10 @@ impl StoreWorker {
         Ok(documents)
     }
 
-    async fn verify_document_heads(&self, visited: &HashSet<[u8; 32]>) -> AgentResult<()> {
+    async fn verify_document_heads(&self, visited: &HashSet<[u8; 32]>) -> VaultResult<()> {
         for document in self.document_rows().await? {
             if !visited.contains(&document.current_commit_id) {
-                return Err(AgentError::InvalidData(
+                return Err(VaultError::InvalidData(
                     "document points outside the protected commit chain".to_owned(),
                 ));
             }
@@ -1082,15 +1082,15 @@ impl StoreWorker {
                 [document.current_commit_id.to_vec()],
             )
             .await?
-            .ok_or_else(|| AgentError::InvalidData("document commit is missing".to_owned()))?;
+            .ok_or_else(|| VaultError::InvalidData("document commit is missing".to_owned()))?;
             let record: ProtectedCommit = serde_json::from_slice(&record)
-                .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+                .map_err(|error| VaultError::InvalidData(error.to_string()))?;
             if record.document_id != document.document_id
                 || record.scope != document.scope
                 || record.generation != document.generation
                 || record.key_epoch != document.key_epoch
             {
-                return Err(AgentError::InvalidData(
+                return Err(VaultError::InvalidData(
                     "document metadata does not match its signed commit".to_owned(),
                 ));
             }
@@ -1109,7 +1109,7 @@ impl StoreWorker {
             )
             .await?;
             if newer != 0 {
-                return Err(AgentError::InvalidData(
+                return Err(VaultError::InvalidData(
                     "document is behind its newest protected commit".to_owned(),
                 ));
             }
@@ -1117,7 +1117,7 @@ impl StoreWorker {
         Ok(())
     }
 
-    async fn compact_if_needed(&mut self) -> AgentResult<()> {
+    async fn compact_if_needed(&mut self) -> VaultResult<()> {
         if self.chain_length <= MAX_RETAINED_COMMITS {
             return Ok(());
         }
@@ -1131,7 +1131,7 @@ impl StoreWorker {
     /// re-signing preserves every invariant that verification checks: one
     /// commit per document, one snapshot per commit, no change rows outside the
     /// chain, and every document at its newest commit.
-    async fn compact(&mut self) -> AgentResult<()> {
+    async fn compact(&mut self) -> VaultResult<()> {
         let documents = self.document_rows().await?;
         let commits = self.resign_current_state(&documents).await?;
         self.replace_chain(&documents, &commits).await?;
@@ -1144,7 +1144,7 @@ impl StoreWorker {
     async fn resign_current_state(
         &self,
         documents: &[DocumentRow],
-    ) -> AgentResult<Vec<ProtectedCommit>> {
+    ) -> VaultResult<Vec<ProtectedCommit>> {
         let mut previous_commit_id = None;
         let mut commits = Vec::with_capacity(documents.len());
         for document in documents {
@@ -1159,7 +1159,7 @@ impl StoreWorker {
             )
             .await?
             .ok_or_else(|| {
-                AgentError::InvalidData("document has no current snapshot".to_owned())
+                VaultError::InvalidData("document has no current snapshot".to_owned())
             })?;
             let (envelopes, serialized) = self
                 .change_envelopes(document.document_id, document.generation)
@@ -1187,7 +1187,7 @@ impl StoreWorker {
         &mut self,
         documents: &[DocumentRow],
         commits: &[ProtectedCommit],
-    ) -> AgentResult<()> {
+    ) -> VaultResult<()> {
         let transaction = self
             .connection
             .transaction()
@@ -1216,7 +1216,7 @@ impl StoreWorker {
             .map_err(database_error)?;
         for (document, commit) in documents.iter().zip(commits) {
             let record = serde_json::to_vec(commit)
-                .map_err(|error| AgentError::InvalidData(error.to_string()))?;
+                .map_err(|error| VaultError::InvalidData(error.to_string()))?;
             transaction
                 .execute(
                     "INSERT INTO protected_commits(
@@ -1337,12 +1337,12 @@ impl ProtectedCommit {
         expected_commit_id: [u8; 32],
         expected_device_key_id: DeviceKeyId,
         public_key: &[u8; 32],
-    ) -> AgentResult<()> {
+    ) -> VaultResult<()> {
         if self.version != COMMIT_VERSION
             || self.commit_id != expected_commit_id
             || self.device_key_id != expected_device_key_id
         {
-            return Err(AgentError::Signature);
+            return Err(VaultError::Signature);
         }
         let transcript = commit_transcript(
             self.previous_commit_id,
@@ -1355,15 +1355,15 @@ impl ProtectedCommit {
             self.device_key_id,
         );
         if digest(&transcript) != self.commit_id {
-            return Err(AgentError::Signature);
+            return Err(VaultError::Signature);
         }
         let verifying_key =
-            VerifyingKey::from_bytes(public_key).map_err(|_| AgentError::Signature)?;
+            VerifyingKey::from_bytes(public_key).map_err(|_| VaultError::Signature)?;
         let signature =
-            Signature::from_slice(&self.signature).map_err(|_| AgentError::Signature)?;
+            Signature::from_slice(&self.signature).map_err(|_| VaultError::Signature)?;
         verifying_key
             .verify_strict(&commit_signature_payload(&self.commit_id), &signature)
-            .map_err(|_| AgentError::Signature)
+            .map_err(|_| VaultError::Signature)
     }
 }
 
@@ -1423,7 +1423,7 @@ fn digest_change_envelopes(envelopes: &[SignedChangeEnvelope], serialized: &[Vec
     digest.finalize().into()
 }
 
-fn open_lock(root: &Path) -> AgentResult<fs::File> {
+fn open_lock(root: &Path) -> VaultResult<fs::File> {
     let path = root.join(LOCK_FILE);
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
@@ -1433,7 +1433,7 @@ fn open_lock(root: &Path) -> AgentResult<fs::File> {
         options.mode(0o600);
     }
     options.open(&path).map_err(|error| {
-        AgentError::Database(format!("I/O error for `{}`: {error}", path.display()))
+        VaultError::Database(format!("I/O error for `{}`: {error}", path.display()))
     })
 }
 
@@ -1441,7 +1441,7 @@ async fn query_optional_blob(
     connection: &Connection,
     sql: &str,
     parameters: impl turso::IntoParams,
-) -> AgentResult<Option<Vec<u8>>> {
+) -> VaultResult<Option<Vec<u8>>> {
     let mut rows = connection
         .query(sql, parameters)
         .await
@@ -1453,7 +1453,7 @@ async fn query_optional_blob(
         .map(|row| row_blob(&row, 0))
         .transpose()?;
     if rows.next().await.map_err(database_error)?.is_some() {
-        return Err(AgentError::InvalidData(
+        return Err(VaultError::InvalidData(
             "database query returned duplicate rows".to_owned(),
         ));
     }
@@ -1464,7 +1464,7 @@ async fn query_count(
     connection: &Connection,
     sql: &str,
     parameters: impl turso::IntoParams,
-) -> AgentResult<u64> {
+) -> VaultResult<u64> {
     let mut rows = connection
         .query(sql, parameters)
         .await
@@ -1473,70 +1473,70 @@ async fn query_count(
         .next()
         .await
         .map_err(database_error)?
-        .ok_or_else(|| AgentError::InvalidData("count query returned no row".to_owned()))?;
+        .ok_or_else(|| VaultError::InvalidData("count query returned no row".to_owned()))?;
     from_i64(row_integer(&row, 0)?, "row count")
 }
 
-fn row_blob(row: &turso::Row, index: usize) -> AgentResult<Vec<u8>> {
+fn row_blob(row: &turso::Row, index: usize) -> VaultResult<Vec<u8>> {
     match row.get_value(index).map_err(database_error)? {
         Value::Blob(value) => Ok(value),
-        _ => Err(AgentError::InvalidData(
+        _ => Err(VaultError::InvalidData(
             "database column is not a BLOB".to_owned(),
         )),
     }
 }
 
-fn row_optional_blob(row: &turso::Row, index: usize) -> AgentResult<Option<Vec<u8>>> {
+fn row_optional_blob(row: &turso::Row, index: usize) -> VaultResult<Option<Vec<u8>>> {
     match row.get_value(index).map_err(database_error)? {
         Value::Null => Ok(None),
         Value::Blob(value) => Ok(Some(value)),
-        _ => Err(AgentError::InvalidData(
+        _ => Err(VaultError::InvalidData(
             "database column is not a nullable BLOB".to_owned(),
         )),
     }
 }
 
-fn row_text(row: &turso::Row, index: usize) -> AgentResult<String> {
+fn row_text(row: &turso::Row, index: usize) -> VaultResult<String> {
     match row.get_value(index).map_err(database_error)? {
         Value::Text(value) => Ok(value),
-        _ => Err(AgentError::InvalidData(
+        _ => Err(VaultError::InvalidData(
             "database column is not text".to_owned(),
         )),
     }
 }
 
-fn row_integer(row: &turso::Row, index: usize) -> AgentResult<i64> {
+fn row_integer(row: &turso::Row, index: usize) -> VaultResult<i64> {
     match row.get_value(index).map_err(database_error)? {
         Value::Integer(value) => Ok(value),
-        _ => Err(AgentError::InvalidData(
+        _ => Err(VaultError::InvalidData(
             "database column is not an integer".to_owned(),
         )),
     }
 }
 
-fn document_id_from_blob(bytes: &[u8]) -> AgentResult<DocumentId> {
+fn document_id_from_blob(bytes: &[u8]) -> VaultResult<DocumentId> {
     Ok(DocumentId::from_bytes(array_from_blob(
         bytes,
         "document ID",
     )?))
 }
 
-fn array_from_blob<const N: usize>(bytes: &[u8], name: &str) -> AgentResult<[u8; N]> {
+fn array_from_blob<const N: usize>(bytes: &[u8], name: &str) -> VaultResult<[u8; N]> {
     bytes
         .try_into()
-        .map_err(|_| AgentError::InvalidData(format!("{name} has the wrong size")))
+        .map_err(|_| VaultError::InvalidData(format!("{name} has the wrong size")))
 }
 
-fn to_i64(value: u64) -> AgentResult<i64> {
+fn to_i64(value: u64) -> VaultResult<i64> {
     value
         .try_into()
-        .map_err(|_| AgentError::InvalidData("integer exceeds database range".to_owned()))
+        .map_err(|_| VaultError::InvalidData("integer exceeds database range".to_owned()))
 }
 
-fn from_i64(value: i64, name: &str) -> AgentResult<u64> {
+fn from_i64(value: i64, name: &str) -> VaultResult<u64> {
     value
         .try_into()
-        .map_err(|_| AgentError::InvalidData(format!("{name} is negative")))
+        .map_err(|_| VaultError::InvalidData(format!("{name} is negative")))
 }
 
 fn append_bytes(target: &mut Vec<u8>, value: &[u8]) {
@@ -1549,27 +1549,27 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn database_error(error: turso::Error) -> AgentError {
-    AgentError::Database(error.to_string())
+fn database_error(error: turso::Error) -> VaultError {
+    VaultError::Database(error.to_string())
 }
 
-fn unix_time() -> AgentResult<u64> {
+fn unix_time() -> VaultResult<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .map_err(|error| AgentError::Database(error.to_string()))
+        .map_err(|error| VaultError::Database(error.to_string()))
 }
 
 #[cfg(all(test, feature = "hardware"))]
 mod tests {
     use super::*;
-    use crate::agent::Seal;
+    use crate::vault::Vault;
 
-    fn store() -> (tempfile::TempDir, PathBuf, AgentStore) {
+    fn store() -> (tempfile::TempDir, PathBuf, VaultStore) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
-        let unlocked = Seal::create_for_test(&root).unwrap();
-        let store = AgentStore::open(&root, unlocked).unwrap();
+        let unsealed = Vault::create_for_test(&root).unwrap();
+        let store = VaultStore::open(&root, unsealed).unwrap();
         (directory, root, store)
     }
 
@@ -1603,7 +1603,7 @@ mod tests {
         })
     }
 
-    fn put_two_generations(store: &AgentStore) -> SecretAddress {
+    fn put_two_generations(store: &VaultStore) -> SecretAddress {
         let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
         store
             .put_at(
@@ -1650,8 +1650,8 @@ mod tests {
         let expected_device = store.device().clone();
         drop(store);
 
-        let reopened = Seal::unlock_for_test(&root).unwrap();
-        let store = AgentStore::open(&root, reopened).unwrap();
+        let reopened = Vault::unseal_for_test(&root).unwrap();
+        let store = VaultStore::open(&root, reopened).unwrap();
         assert_eq!(store.device(), &expected_device);
         assert_eq!(
             store
@@ -1690,7 +1690,7 @@ mod tests {
         assert_eq!(store.purge_expired_at(50).unwrap(), 1);
         drop(store);
 
-        let store = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap()).unwrap();
+        let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
         assert!(
             store
                 .get_at(DocumentScope::DeviceCache, b"secretspec", &address, 50,)
@@ -1744,7 +1744,7 @@ mod tests {
                     let bytes = fs::read(path).unwrap();
                     assert!(
                         !bytes.windows(needle.len()).any(|window| window == needle),
-                        "secret material appeared in an seal file"
+                        "secret material appeared in a vault file"
                     );
                 }
             }
@@ -1754,8 +1754,8 @@ mod tests {
     #[test]
     fn one_worker_owns_the_database() {
         let (_directory, root, first) = store();
-        let second = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap());
-        assert!(matches!(second, Err(AgentError::Database(_))));
+        let second = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        assert!(matches!(second, Err(VaultError::Database(_))));
         drop(first);
     }
 
@@ -1776,10 +1776,10 @@ mod tests {
 
         execute_database_mutation(&root, "UPDATE document_snapshots SET envelope = X'00'");
 
-        let reopened = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap());
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
         assert!(matches!(
             reopened,
-            Err(AgentError::Signature | AgentError::InvalidData(_))
+            Err(VaultError::Signature | VaultError::InvalidData(_))
         ));
     }
 
@@ -1793,8 +1793,8 @@ mod tests {
             "DELETE FROM protected_commits WHERE previous_commit_id IS NULL",
         );
 
-        let reopened = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap());
-        assert!(matches!(reopened, Err(AgentError::InvalidData(_))));
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
     }
 
     #[test]
@@ -1812,8 +1812,8 @@ mod tests {
              WHERE key = 'current-commit-head'",
         );
 
-        let reopened = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap());
-        assert!(matches!(reopened, Err(AgentError::InvalidData(_))));
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
     }
 
     #[test]
@@ -1835,8 +1835,8 @@ mod tests {
               WHERE generation = 2",
         );
 
-        let reopened = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap());
-        let Err(AgentError::InvalidData(message)) = reopened else {
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        let Err(VaultError::InvalidData(message)) = reopened else {
             panic!("a rolled-back document must not open");
         };
         assert!(
@@ -1878,7 +1878,7 @@ mod tests {
             );
         }
 
-        let store = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap()).unwrap();
+        let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
         for (namespace, expected) in namespaces.iter().zip(&latest) {
             assert_eq!(
                 store
@@ -1909,10 +1909,10 @@ mod tests {
         drop(store);
         execute_database_mutation(&root, "UPDATE document_snapshots SET envelope = X'00'");
 
-        let reopened = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap());
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
         assert!(matches!(
             reopened,
-            Err(AgentError::Signature | AgentError::InvalidData(_))
+            Err(VaultError::Signature | VaultError::InvalidData(_))
         ));
     }
 
@@ -1932,8 +1932,8 @@ mod tests {
         drop(store);
         execute_database_mutation(&root, "DELETE FROM document_changes");
 
-        let reopened = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap());
-        assert!(matches!(reopened, Err(AgentError::Signature)));
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        assert!(matches!(reopened, Err(VaultError::Signature)));
     }
 
     #[test]
@@ -1952,8 +1952,8 @@ mod tests {
         drop(store);
         execute_database_mutation(&root, "UPDATE documents SET scope = 'device-local'");
 
-        let reopened = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap());
-        assert!(matches!(reopened, Err(AgentError::InvalidData(_))));
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
     }
 
     #[test]
@@ -2000,7 +2000,7 @@ mod tests {
                 .unwrap();
         });
 
-        let reopened = AgentStore::open(&root, Seal::unlock_for_test(&root).unwrap());
-        assert!(matches!(reopened, Err(AgentError::Signature)));
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        assert!(matches!(reopened, Err(VaultError::Signature)));
     }
 }

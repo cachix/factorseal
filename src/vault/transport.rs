@@ -5,32 +5,32 @@
 //! to be repeated six times to stay consistent, and applying it to only some
 //! of them was silently inconsistent.
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 use std::fs::File;
 use std::io::{self, Read, Write};
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "vault")]
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::{AgentError, AgentResult};
+use super::{VaultError, VaultResult};
 
 pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// Bounds one frame exchanged with a peer that has already been accepted.
 /// This is deliberately short so a connected client cannot pin the
-/// single-user agent with a partial frame.
-#[cfg(feature = "agent")]
+/// single-user vault with a partial frame.
+#[cfg(feature = "vault")]
 pub(crate) const IPC_FRAME_IO_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Allows the server to authenticate a previously unseen executable and
 /// complete a local store operation before the client abandons the response.
 /// This remains a finite fail-closed bound for direct Rust clients such as the
 /// provider compiled into SecretSpec.
-#[cfg(feature = "agent-client")]
+#[cfg(feature = "vault-client")]
 pub(crate) const IPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const IO_RETRY_INTERVAL: Duration = Duration::from_millis(2);
@@ -70,20 +70,20 @@ impl IoBudget {
 pub(crate) fn read_frame(
     reader: &mut impl Read,
     budget: IoBudget,
-) -> AgentResult<Zeroizing<Vec<u8>>> {
+) -> VaultResult<Zeroizing<Vec<u8>>> {
     let mut length = [0_u8; 4];
     read_exact_bounded(reader, &mut length, budget)
-        .map_err(|error| AgentError::Protocol(format!("could not read frame length: {error}")))?;
+        .map_err(|error| VaultError::Protocol(format!("could not read frame length: {error}")))?;
     let length = usize::try_from(u32::from_be_bytes(length))
-        .map_err(|_| AgentError::Protocol("frame length does not fit in memory".to_owned()))?;
+        .map_err(|_| VaultError::Protocol("frame length does not fit in memory".to_owned()))?;
     if length == 0 || length > MAX_FRAME_BYTES {
-        return Err(AgentError::Protocol(
+        return Err(VaultError::Protocol(
             "frame length is outside the supported range".to_owned(),
         ));
     }
     let mut bytes = Zeroizing::new(vec![0_u8; length]);
     read_exact_bounded(reader, &mut bytes, budget)
-        .map_err(|error| AgentError::Protocol(format!("could not read frame: {error}")))?;
+        .map_err(|error| VaultError::Protocol(format!("could not read frame: {error}")))?;
     Ok(bytes)
 }
 
@@ -92,17 +92,17 @@ pub(crate) fn write_frame(
     writer: &mut impl Write,
     bytes: &[u8],
     budget: IoBudget,
-) -> AgentResult<()> {
+) -> VaultResult<()> {
     if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES {
-        return Err(AgentError::Protocol(
+        return Err(VaultError::Protocol(
             "frame length is outside the supported range".to_owned(),
         ));
     }
     let length = u32::try_from(bytes.len())
-        .map_err(|_| AgentError::Protocol("frame is too large".to_owned()))?;
+        .map_err(|_| VaultError::Protocol("frame is too large".to_owned()))?;
     write_all_bounded(writer, &length.to_be_bytes(), budget)
         .and_then(|()| write_all_bounded(writer, bytes, budget))
-        .map_err(|error| AgentError::Protocol(format!("could not write frame: {error}")))
+        .map_err(|error| VaultError::Protocol(format!("could not write frame: {error}")))
 }
 
 fn read_exact_bounded(
@@ -118,7 +118,7 @@ fn read_exact_bounded(
             // A nonblocking Windows pipe reports "nothing to read yet" as a
             // successful zero-byte read rather than WouldBlock, and a pipe
             // that has actually closed surfaces as an error instead. Treating
-            // that as end of file made the agent drop every connection the
+            // that as end of file made the vault drop every connection the
             // instant it accepted one, before the client had written. On Unix
             // a zero-byte read is end of file and has to stay one.
             Ok(0) if cfg!(windows) => {
@@ -177,8 +177,8 @@ fn write_all_bounded(
 
 /// Digest an already opened executable, so the bytes hashed are the bytes of
 /// the file the caller resolved rather than whatever the path names later.
-#[cfg(feature = "agent")]
-pub(crate) fn hash_open_file(file: &mut File, path: &Path) -> AgentResult<[u8; 32]> {
+#[cfg(feature = "vault")]
+pub(crate) fn hash_open_file(file: &mut File, path: &Path) -> VaultResult<[u8; 32]> {
     let mut digest = Sha256::new();
     let mut buffer = Zeroizing::new(vec![0_u8; 64 * 1024]);
     loop {
@@ -193,32 +193,32 @@ pub(crate) fn hash_open_file(file: &mut File, path: &Path) -> AgentResult<[u8; 3
     Ok(digest.finalize().into())
 }
 
-#[cfg(feature = "agent")]
-pub(crate) fn hash_file(path: &Path) -> AgentResult<[u8; 32]> {
+#[cfg(feature = "vault")]
+pub(crate) fn hash_file(path: &Path) -> VaultResult<[u8; 32]> {
     let mut file = File::open(path).map_err(|error| path_io_error(path, &error))?;
     hash_open_file(&mut file, path)
 }
 
-#[cfg(feature = "agent")]
-pub(crate) fn unix_time() -> AgentResult<u64> {
+#[cfg(feature = "vault")]
+pub(crate) fn unix_time() -> VaultResult<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .map_err(|error| AgentError::Protocol(error.to_string()))
+        .map_err(|error| VaultError::Protocol(error.to_string()))
 }
 
-#[cfg(feature = "agent")]
-pub(crate) fn path_io_error(path: &Path, error: &io::Error) -> AgentError {
-    AgentError::Protocol(format!("I/O error for `{}`: {error}", path.display()))
+#[cfg(feature = "vault")]
+pub(crate) fn path_io_error(path: &Path, error: &io::Error) -> VaultError {
+    VaultError::Protocol(format!("I/O error for `{}`: {error}", path.display()))
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn pipe_io_error(operation: &str, error: &io::Error) -> AgentError {
-    AgentError::Protocol(format!("Windows IPC could not {operation}: {error}"))
+pub(crate) fn pipe_io_error(operation: &str, error: &io::Error) -> VaultError {
+    VaultError::Protocol(format!("Windows IPC could not {operation}: {error}"))
 }
 
 /// Same-user Unix socket lifecycle shared by the Linux and macOS servers.
-#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(feature = "vault", any(target_os = "linux", target_os = "macos")))]
 pub(crate) mod unix_socket {
     use std::fs;
     use std::io;
@@ -230,7 +230,7 @@ pub(crate) mod unix_socket {
     use nix::unistd::getuid;
 
     use super::path_io_error;
-    use crate::agent::{AgentError, AgentResult};
+    use crate::vault::{VaultError, VaultResult};
 
     /// Reject a configuration the transport cannot make private before it
     /// binds anything.
@@ -238,14 +238,14 @@ pub(crate) mod unix_socket {
         platform: &str,
         socket_path: &Path,
         poll_interval: Duration,
-    ) -> AgentResult<()> {
+    ) -> VaultResult<()> {
         if poll_interval.is_zero() || poll_interval > Duration::from_secs(1) {
-            return Err(AgentError::Protocol(format!(
-                "{platform} agent poll interval must be between zero and one second"
+            return Err(VaultError::Protocol(format!(
+                "{platform} vault poll interval must be between zero and one second"
             )));
         }
         let parent = socket_path.parent().ok_or_else(|| {
-            AgentError::Protocol(format!("{platform} agent socket path has no parent"))
+            VaultError::Protocol(format!("{platform} vault socket path has no parent"))
         })?;
         let metadata =
             fs::symlink_metadata(parent).map_err(|error| path_io_error(parent, &error))?;
@@ -254,26 +254,26 @@ pub(crate) mod unix_socket {
             || metadata.uid() != getuid().as_raw()
             || mode & 0o077 != 0
         {
-            return Err(AgentError::Protocol(format!(
-                "{platform} agent socket parent must be a private directory owned by this user"
+            return Err(VaultError::Protocol(format!(
+                "{platform} vault socket parent must be a private directory owned by this user"
             )));
         }
         Ok(())
     }
 
-    /// Remove a stale socket left by a previous agent, refusing to replace a
-    /// live agent or a path this user does not own.
-    pub(crate) fn prepare_socket_path(path: &Path) -> AgentResult<()> {
+    /// Remove a stale socket left by a previous vault, refusing to replace a
+    /// live vault or a path this user does not own.
+    pub(crate) fn prepare_socket_path(path: &Path) -> VaultResult<()> {
         match UnixStream::connect(path) {
-            Ok(_) => Err(AgentError::Protocol(
-                "another Factorseal agent is already accepting connections".to_owned(),
+            Ok(_) => Err(VaultError::Protocol(
+                "another Factorseal vault is already accepting connections".to_owned(),
             )),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(_) => {
                 let metadata =
                     fs::symlink_metadata(path).map_err(|error| path_io_error(path, &error))?;
                 if !metadata.file_type().is_socket() || metadata.uid() != getuid().as_raw() {
-                    return Err(AgentError::Protocol(
+                    return Err(VaultError::Protocol(
                         "refusing to replace a non-socket or foreign-owned path".to_owned(),
                     ));
                 }
@@ -309,7 +309,7 @@ mod tests {
     /// The server hashes a previously unseen executable before it answers,
     /// which is why the client budget is not the frame budget.
     #[test]
-    #[cfg(all(feature = "agent", feature = "agent-client"))]
+    #[cfg(all(feature = "vault", feature = "vault-client"))]
     fn a_client_deadline_outlasts_first_use_caller_authentication() {
         assert!(IPC_RESPONSE_TIMEOUT >= IPC_FRAME_IO_TIMEOUT * 4);
     }

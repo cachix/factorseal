@@ -1,7 +1,7 @@
 # Factorseal askpass helper for Windows.
 #
-# The logon task starts the agent with no console, so the agent runs this
-# helper to obtain the seal's nested factor and reads it from standard output.
+# The logon task starts the vault with no console, so the vault runs this
+# helper to obtain the vault's nested factor and reads it from standard output.
 # The secret crosses a pipe and is never written to disk.
 [CmdletBinding()]
 param([string]$Label = 'Factorseal password:')
@@ -30,7 +30,7 @@ $input.SetBounds(12, 40, 336, 24)
 $form.Controls.Add($input)
 
 $ok = New-Object System.Windows.Forms.Button
-$ok.Text = 'Unlock'
+$ok.Text = 'Unseal'
 $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
 $ok.SetBounds(192, 80, 75, 26)
 $form.Controls.Add($ok)
@@ -49,5 +49,6 @@ if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
     exit 1
 }
 
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::Out.Write($input.Text)
 exit 0

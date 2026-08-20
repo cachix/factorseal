@@ -38,19 +38,19 @@ jobs:
         run: devenv shell -- cargo test --all-targets --all-features
       - name: Check the feature combinations packagers and embedders build
         run: |
-          for features in agent-client agent-client,hardware hardware cli agent agent,cli,hardware; do
+          for features in vault-client vault-client,hardware hardware cli vault vault,cli,hardware; do
             devenv shell -- cargo check --no-default-features --features "$features"
           done
       - name: Lint packaged shell scripts
-        run: devenv shell -- shellcheck packaging/build-unix.sh packaging/linux/factorseal-agent-start
+        run: devenv shell -- shellcheck packaging/build-unix.sh packaging/linux/factorseal-start
       - name: Lint packaged POSIX helpers
         run: devenv shell -- shellcheck -s sh packaging/macos/factorseal-askpass
-      - name: Run NixOS agent module VM test
+      - name: Run NixOS vault module VM test
         run: nix --extra-experimental-features 'nix-command flakes' build --print-build-logs .#checks.x86_64-linux.nixos-module
       - name: Build and inspect Linux package
         run: |
           packaging/build-unix.sh linux
-          tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/share/systemd/user/factorseal-agent.service$'
+          tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/share/systemd/user/factorseal.service$'
           tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/bin/factorseal$'
       - uses: actions/upload-artifact@v4
         with:
@@ -74,9 +74,9 @@ jobs:
       - name: Build and inspect macOS package
         run: |
           packaging/build-unix.sh macos
-          tar -tzf dist/factorseal-*-macos-*.tar.gz | grep '/Factorseal Agent.app/Contents/MacOS/factorseal$'
-          pkgutil --payload-files dist/factorseal-*-macos-*.pkg | grep 'Applications/Factorseal Agent.app/Contents/MacOS/factorseal$'
-          plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.agent.plist
+          tar -tzf dist/factorseal-*-macos-*.tar.gz | grep '/Factorseal.app/Contents/MacOS/factorseal$'
+          pkgutil --payload-files dist/factorseal-*-macos-*.pkg | grep 'Applications/Factorseal.app/Contents/MacOS/factorseal$'
+          plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist
       - uses: actions/upload-artifact@v4
         with:
           name: factorseal-macos
@@ -109,10 +109,10 @@ jobs:
           $archive = Get-ChildItem dist/factorseal-*-windows-*.zip | Select-Object -First 1
           $entries = [System.IO.Compression.ZipFile]::OpenRead($archive.FullName)
           try {
-            if (-not ($entries.Entries.FullName -match 'factorseal.exe$')) { throw 'agent executable missing from package' }
-            if (-not ($entries.Entries.FullName -match 'factorseal-agent-task.xml.in$')) { throw 'task template missing from package' }
+            if (-not ($entries.Entries.FullName -match 'factorseal.exe$')) { throw 'Factorseal executable missing from package' }
+            if (-not ($entries.Entries.FullName -match 'factorseal-task.xml.in$')) { throw 'task template missing from package' }
           } finally { $entries.Dispose() }
-          [xml](Get-Content packaging/windows/factorseal-agent-task.xml.in) | Out-Null
+          [xml](Get-Content packaging/windows/factorseal-task.xml.in) | Out-Null
       - uses: actions/upload-artifact@v4
         with:
           name: factorseal-windows

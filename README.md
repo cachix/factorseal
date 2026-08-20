@@ -11,11 +11,10 @@
 > [!WARNING]
 > Factorseal is an unaudited prototype. It is not ready for production secrets.
 
-Factorseal is a hardware-rooted secret agent for local applications on Linux,
-macOS, and Windows. Its first job is to provide an interactive, per-user
-replacement for the OS keyring used as a SecretSpec cache and to serve
-Factorseal-aware applications. Each seal is created as a permanent device with
-its own stable keys.
+Factorseal is a hardware-bound local vault for Linux, macOS, and Windows. The
+vault can be sealed or unsealed, implements a durable keyring interface for
+applications, provides the same operations through its CLI, and keeps a
+separate disposable SecretSpec cache. Each vault has its own stable keys.
 
 The project is intentionally narrower than a password manager and broader than
 an encrypted file:
@@ -23,23 +22,28 @@ an encrypted file:
 - TPM 2.0 on Linux and Windows, or Secure Enclave on macOS, wraps the local
   data-encryption key;
 - every platform nests one factor inside that wrapping, so neither the factor
-  nor the platform key opens a seal alone, and because the nested factor is
+  nor the platform key unseals the vault alone, and because the nested factor is
   hash-derived it is also the only layer that survives a quantum adversary;
-- a separate hardware-wrapped signing key gives the seal a stable
+- a separate hardware-wrapped signing key gives the vault a stable
   device identity and Automerge actor ID;
 - encrypted, device-signed Automerge snapshots and changes are persisted in an
   embedded local Turso database;
-- one per-user agent owns that database and applies caller grants, unlock
-  leases, expiry, and replay protection;
-- document scope keeps disposable device caches separate from local agent
+- one per-user background service owns that database and applies caller grants,
+  unseal leases, expiry, and replay protection;
+- document scope keeps disposable device caches separate from local keyring
   policy.
 
 Factorseal is a broker backed by platform security hardware. It is not itself a
 "secure enclave," and it does not claim to transparently implement every Apple
 Keychain or Windows Credential Manager API.
 
+In the Rust API, `Keyring` means the credential capability implemented by a
+`VaultClient`; it does not mean Linux's in-kernel `keyctl` keyrings. Native
+compatibility adapters such as the Linux Secret Service API, macOS Keychain,
+and Windows Credential Manager remain distinct platform interfaces.
+
 The first release is deliberately the user profile: a logged-in user, local
-application callers, interactive verification, and session-bound locking. A
+application callers, interactive verification, and session-bound sealing. A
 future headless workload profile would require its own workload identity,
 hardware-bound unattended activation, lifecycle, and threat model. It is not a
 passwordless mode of the user profile and is outside the MVP.
@@ -47,15 +51,15 @@ passwordless mode of the user profile and is outside the MVP.
 ## Architecture
 
 ```text
-         SecretSpec / aware application
+       Factorseal CLI / SecretSpec / aware application
                          |
-       compiled SecretSpec `factorseal` provider
+              Factorseal `Keyring` interface
                          |
-          Factorseal `AgentClient` interface
+                  `VaultClient`
                          |
         authenticated, length-bounded native transport
                          |
-                 per-user Factorseal agent
+             per-user Factorseal vault service
           caller grants | lease | expiry scheduler
                          |
             scoped Automerge domain operations
@@ -69,12 +73,16 @@ passwordless mode of the user profile and is outside the MVP.
 
 The architecture has three protocol layers: SecretSpec's compiled provider or
 an application adapter owns the portable application contract, and Factorseal's
-lightweight `AgentClient` and native transport form the host-local trust
-boundary. The local agent protocol is not a remote secret API.
+lightweight `VaultClient` and native transport form the host-local trust
+boundary. The `Keyring` trait provides durable credential operations on top of
+that protocol. The local protocol is not a remote secret API.
 
 Turso is a persistence engine, not a trust boundary. Factorseal encrypts
 application data before Turso sees it. Turso Cloud Sync is not enabled and is
 not an authorization mechanism.
+
+The local Factorseal directory uses `factorseal.json`, `factorseal.db`,
+`factorseal.lock`, and the live Unix endpoint `factorseal.sock`.
 
 Automerge is the document/change and convergence interface. Applications do
 not receive raw `AutoCommit` access. They call operations such as get, put,
@@ -88,7 +96,7 @@ The code-level storage and security boundaries are documented in
 
 The storage foundation currently implements:
 
-- permanent `SealId`, `DeviceKeyId`, public signing identity, and stable
+- permanent `VaultId`, `DeviceKeyId`, public signing identity, and stable
   Automerge actor ID;
 - distinct platform key labels for wrapping the DEK and signing seed;
 - fail-closed rejection of Windows DPAPI and Linux software-keyring hardware
@@ -98,14 +106,14 @@ The storage foundation currently implements:
 - XChaCha20-Poly1305 encrypted and Ed25519-signed snapshots and changes;
 - signed linear protected commits, document generation compare-and-swap, and
   tamper verification at database open;
-- an embedded Turso schema owned by one locked worker;
+- an embedded Turso schema owned by one sealed worker;
 - startup and live-call expiry cleanup, idempotent deletion, and full cache
   clear;
-- a versioned local agent protocol with caller-bound grants, request replay
+- a versioned local vault protocol with caller-bound grants, request replay
   rejection, zeroizing wire secret buffers, and bounded idle/absolute leases;
-- a transport-neutral `AgentClient` interface implemented by the native
-  platform clients, available separately through the lightweight
-  `agent-client` crate feature;
+- a transport-neutral `VaultClient` implemented by the native platform
+  clients, available separately through the lightweight `vault-client` crate
+  feature, plus a `Keyring` trait implemented for every vault client;
 - a built-in provider in SecretSpec that maps `factorseal://` addresses,
   reads, writes, expiry, and deletion directly into that authenticated Rust
   client interface;
@@ -116,11 +124,13 @@ The storage foundation currently implements:
 - fail-closed native lifecycle monitors for logind sleep/shutdown/session-lock
   events, AppKit sleep/power-off/session-resign notifications, and Windows
   suspend/shutdown/session notifications.
+- durable `set`, `get`, and `delete` commands in the Factorseal CLI, using the
+  same authenticated transport and caller grants as application clients.
 
 Still required before MVP release:
 
 - installed SecretSpec end-to-end conformance coverage for direct Factorseal
-  agent access on Linux, macOS, and Windows;
+  vault-backed keyring access on Linux, macOS, and Windows;
 - signed/notarized release artifacts, native lifecycle acceptance, and
   physical hardware tests on every target, including verification of the
   OS-mediated Windows TPM prompt and modern Windows Hello UX.
@@ -132,7 +142,7 @@ builds on Linux.
 
 SecretSpec builds the `factorseal` provider into its Rust library. It accepts
 `factorseal://default` and `factorseal://default?namespace=cache` and calls the
-Factorseal Rust `AgentClient` directly over the platform-native transport.
+Factorseal Rust `Keyring` interface directly over the platform-native transport.
 There is no provider subprocess or registration file.
 
 Factorseal authenticates the process that actually opens the socket. Authorize
@@ -143,11 +153,30 @@ when SecretSpec is embedded as a library:
 factorseal grant-secretspec /absolute/path/to/secretspec
 ```
 
-The provider uses the agent's default root and socket;
-`FACTORSEAL_AGENT_ROOT` and `FACTORSEAL_AGENT_SOCKET` provide explicit
+The provider uses the vault's default root and socket;
+`FACTORSEAL_ROOT` and `FACTORSEAL_SOCKET` provide explicit
 overrides. Replacing an authorized executable changes its digest and requires a
 new grant. Installed native lifecycle and end-to-end conformance remain release
 gates.
+
+## Command-line keyring
+
+`factorseal init` authorizes the exact CLI executable that created the vault.
+With the per-user vault unsealed, durable local values can be
+stored, retrieved, and deleted without giving the CLI direct database access:
+
+```console
+factorseal set github --field token
+printf '%s' 'secret value' | factorseal set github --field token
+factorseal get github --field token
+factorseal delete github --field token
+```
+
+`set` prompts without echo when standard input is a terminal, accepts exact
+bytes from standard input, or reads `--value-file`. `get` writes exact bytes
+without adding a newline. After replacing or upgrading the Factorseal binary,
+stop the service and run `factorseal grant-cli` to authorize the new executable
+digest.
 
 ## Build and test
 
@@ -178,13 +207,13 @@ authorization, and proves idle lockout.
 
 ## Security model in brief
 
-- The plaintext DEK is never persisted. It exists only in zeroizing agent
-  memory during an unlock lease.
-- Copying the database and seal metadata to another machine must not
+- The plaintext DEK is never persisted. It exists only in zeroizing vault
+  memory during an unseal lease.
+- Copying `factorseal.db` and `factorseal.json` to another machine must not
   recover its secrets because the wrapping keys are hardware-bound.
 - A local application receives only an explicitly requested secret after its
   transport-authenticated identity matches a durable grant.
-- Grants, unlock lifetime, and secret storage lifetime are independent.
+- Grants, unseal lifetime, and secret storage lifetime are independent.
 - Hardware binding cannot stop an already authorized process from exfiltrating
   a secret returned to it.
 - Current Ed25519 device signing keys are hardware-wrapped rather than executed
@@ -192,7 +221,7 @@ authorization, and proves idle lockout.
   signing operations is tracked as platform hardening.
 - The signed commit chain detects content tamper, missing commits, divergent
   writers, and inconsistent partial rollback when a newer protected head or
-  commit remains. Nothing stored in the same seal directory can
+  commit remains. Nothing stored in the same vault directory can
   detect rollback of that directory as a whole. The offline MVP does not claim
   that property; detecting it needs a checkpoint held outside that directory.
 

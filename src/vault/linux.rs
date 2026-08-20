@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use dbus::Path as DbusPath;
 use dbus::arg::OwnedFd;
 use dbus::blocking::Connection;
 use dbus::message::MatchRule;
@@ -18,19 +19,20 @@ use super::transport::{
     IPC_FRAME_IO_TIMEOUT, IoBudget, hash_file, hash_open_file, path_io_error, read_frame,
     unix_time, write_frame,
 };
-#[cfg(all(test, feature = "hardware"))]
-use super::{AgentClient, LinuxAgentClient};
 use super::{
-    AgentError, AgentRequest, AgentResult, AgentService, CallerIdentity, CallerIdentityCache,
-    CallerPlatform,
+    CallerIdentity, CallerIdentityCache, CallerPlatform, VaultError, VaultRequest, VaultResult,
+    VaultService,
 };
+#[cfg(all(test, feature = "hardware"))]
+use super::{LinuxVaultClient, VaultClient};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIFECYCLE_DBUS_TIMEOUT: Duration = Duration::from_secs(5);
+const SESSION_ID_ENVIRONMENT: [&str; 2] = ["FACTORSEAL_SESSION_ID", "XDG_SESSION_ID"];
 
 /// Linux per-user socket configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LinuxAgentOptions {
+pub struct LinuxVaultOptions {
     pub socket_path: PathBuf,
     pub poll_interval: Duration,
     /// Install SIGINT/SIGTERM handlers. Disable only when embedding the server
@@ -41,7 +43,7 @@ pub struct LinuxAgentOptions {
     pub install_lifecycle_monitor: bool,
 }
 
-impl LinuxAgentOptions {
+impl LinuxVaultOptions {
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -53,12 +55,12 @@ impl LinuxAgentOptions {
     }
 }
 
-/// Serve the shared agent protocol through a same-user Unix socket.
+/// Serve the shared vault protocol through a same-user Unix socket.
 ///
 /// Caller identity comes from `SO_PEERCRED` and `/proc/<pid>/exe`; no identity
 /// field from the request is trusted. This function blocks until explicit
 /// lock, lease expiry, session lock, suspend, shutdown, SIGINT, or SIGTERM.
-pub fn serve_linux_agent(service: &AgentService, options: &LinuxAgentOptions) -> AgentResult<()> {
+pub fn serve_linux_vault(service: &VaultService, options: &LinuxVaultOptions) -> VaultResult<()> {
     validate_socket_options("Linux", &options.socket_path, options.poll_interval)?;
     prepare_socket_path(&options.socket_path)?;
     let listener = UnixListener::bind(&options.socket_path)
@@ -71,47 +73,47 @@ pub fn serve_linux_agent(service: &AgentService, options: &LinuxAgentOptions) ->
     let _socket_guard = SocketGuard::new(options.socket_path.clone());
 
     let stopping = Arc::new(AtomicBool::new(false));
-    let lifecycle_lock_requested = Arc::new(AtomicBool::new(false));
+    let lifecycle_seal_requested = Arc::new(AtomicBool::new(false));
     let lifecycle_monitor = options
         .install_lifecycle_monitor
-        .then(|| LinuxLifecycleMonitor::new(&lifecycle_lock_requested))
+        .then(|| LinuxLifecycleMonitor::new(&lifecycle_seal_requested))
         .transpose()?;
     if options.install_signal_handler {
         let signal_stopping = Arc::clone(&stopping);
         ctrlc::set_handler(move || signal_stopping.store(true, Ordering::Release)).map_err(
-            |error| AgentError::Protocol(format!("could not install signal handler: {error}")),
+            |error| VaultError::Protocol(format!("could not install signal handler: {error}")),
         )?;
     }
 
     // Every exit from the loop discards the hardware-unwrapped keys, including
     // the error exits. Returning `?` straight out of the loop skipped the lock
     // and left them to whatever the caller did next.
-    let served = accept_until_locked(
+    let served = accept_until_sealed(
         service,
         options,
         &listener,
         &stopping,
-        &lifecycle_lock_requested,
+        &lifecycle_seal_requested,
         lifecycle_monitor.as_ref(),
     );
-    let locked = service.lock();
-    served.and(locked)
+    let sealed = service.seal();
+    served.and(sealed)
 }
 
-fn accept_until_locked(
-    service: &AgentService,
-    options: &LinuxAgentOptions,
+fn accept_until_sealed(
+    service: &VaultService,
+    options: &LinuxVaultOptions,
     listener: &UnixListener,
     stopping: &AtomicBool,
-    lifecycle_lock_requested: &AtomicBool,
+    lifecycle_seal_requested: &AtomicBool,
     lifecycle_monitor: Option<&LinuxLifecycleMonitor>,
-) -> AgentResult<()> {
+) -> VaultResult<()> {
     let caller_cache = CallerIdentityCache::default();
     while !stopping.load(Ordering::Acquire) {
         if let Some(monitor) = lifecycle_monitor {
             monitor.process()?;
         }
-        if lifecycle_lock_requested.load(Ordering::Acquire) {
+        if lifecycle_seal_requested.load(Ordering::Acquire) {
             return Ok(());
         }
         if service.expire_if_needed(unix_time()?)? {
@@ -120,7 +122,7 @@ fn accept_until_locked(
         match listener.accept() {
             Ok((mut stream, _)) => {
                 // A malformed or disconnected client must not terminate the
-                // per-user agent. Protocol responses intentionally contain no
+                // per-user vault. Protocol responses intentionally contain no
                 // request details when a frame cannot be authenticated.
                 let _ = handle_connection(service, &caller_cache, &mut stream);
             }
@@ -133,7 +135,7 @@ fn accept_until_locked(
     Ok(())
 }
 
-/// Owns logind's delay inhibitor until the store has locked. Dropping the
+/// Owns logind's delay inhibitor until the store has sealed. Dropping the
 /// returned file descriptor releases suspend or shutdown to continue.
 struct LinuxLifecycleMonitor {
     connection: Connection,
@@ -141,13 +143,32 @@ struct LinuxLifecycleMonitor {
 }
 
 impl LinuxLifecycleMonitor {
-    fn new(lock_requested: &Arc<AtomicBool>) -> AgentResult<Self> {
+    fn new(lock_requested: &Arc<AtomicBool>) -> VaultResult<Self> {
         let connection = Connection::new_system().map_err(|error| lifecycle_error(&error))?;
         let manager = connection.with_proxy(
             "org.freedesktop.login1",
             "/org/freedesktop/login1",
             LIFECYCLE_DBUS_TIMEOUT,
         );
+        let session_id = SESSION_ID_ENVIRONMENT.iter().find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|session_id| !session_id.is_empty())
+        });
+        let (session_path,): (DbusPath<'static>,) = if let Some(session_id) = session_id {
+            manager.method_call(
+                "org.freedesktop.login1.Manager",
+                "GetSession",
+                (session_id,),
+            )
+        } else {
+            manager.method_call(
+                "org.freedesktop.login1.Manager",
+                "GetSessionByPID",
+                (std::process::id(),),
+            )
+        }
+        .map_err(|error| lifecycle_error(&error))?;
         let (delay_inhibitor,): (OwnedFd,) = manager
             .method_call(
                 "org.freedesktop.login1.Manager",
@@ -181,7 +202,7 @@ impl LinuxLifecycleMonitor {
         connection
             .add_match::<(), _>(
                 MatchRule::new_signal("org.freedesktop.login1.Session", "Lock")
-                    .with_namespaced_path("/org/freedesktop/login1/session"),
+                    .with_path(session_path),
                 move |(), _, _| {
                     requested.store(true, Ordering::Release);
                     true
@@ -195,7 +216,7 @@ impl LinuxLifecycleMonitor {
         })
     }
 
-    fn process(&self) -> AgentResult<()> {
+    fn process(&self) -> VaultResult<()> {
         self.connection
             .process(Duration::ZERO)
             .map(|_| ())
@@ -203,8 +224,8 @@ impl LinuxLifecycleMonitor {
     }
 }
 
-fn lifecycle_error(error: &dbus::Error) -> AgentError {
-    AgentError::Protocol(format!(
+fn lifecycle_error(error: &dbus::Error) -> VaultError {
+    VaultError::Protocol(format!(
         "could not monitor Linux session lifecycle: {error}"
     ))
 }
@@ -214,7 +235,7 @@ fn lifecycle_error(error: &dbus::Error) -> AgentError {
 /// replacing the executable changes its digest and invalidates the grant.
 pub fn linux_caller_identity_for_executable(
     executable: impl AsRef<Path>,
-) -> AgentResult<CallerIdentity> {
+) -> VaultResult<CallerIdentity> {
     let executable = executable.as_ref();
     let executable_path =
         fs::canonicalize(executable).map_err(|error| path_io_error(executable, &error))?;
@@ -229,37 +250,37 @@ pub fn linux_caller_identity_for_executable(
 }
 
 fn handle_connection(
-    service: &AgentService,
+    service: &VaultService,
     caller_cache: &CallerIdentityCache,
     stream: &mut UnixStream,
-) -> AgentResult<()> {
+) -> VaultResult<()> {
     stream
         .set_nonblocking(true)
-        .map_err(|error| AgentError::Protocol(format!("could not bound client I/O: {error}")))?;
+        .map_err(|error| VaultError::Protocol(format!("could not bound client I/O: {error}")))?;
     let caller = caller_identity(stream, caller_cache)?;
     let bytes = read_frame(stream, IoBudget::new(IPC_FRAME_IO_TIMEOUT))?;
-    let request = AgentRequest::decode(&bytes)?;
+    let request = VaultRequest::decode(&bytes)?;
     let response = service.handle(&caller, request, unix_time()?);
     let bytes = response.encode()?;
     // The response gets its own budget so a slow store operation cannot make
-    // the agent drop a reply it has already committed.
+    // the vault drop a reply it has already committed.
     write_frame(stream, &bytes, IoBudget::new(IPC_FRAME_IO_TIMEOUT))
 }
 
 fn caller_identity(
     stream: &UnixStream,
     cache: &CallerIdentityCache,
-) -> AgentResult<CallerIdentity> {
+) -> VaultResult<CallerIdentity> {
     let credentials = getsockopt(stream, PeerCredentials).map_err(|error| {
-        AgentError::Protocol(format!("could not read peer credentials: {error}"))
+        VaultError::Protocol(format!("could not read peer credentials: {error}"))
     })?;
     let expected_uid = getuid().as_raw();
     if credentials.uid() != expected_uid {
-        return Err(AgentError::AuthorizationRequired);
+        return Err(VaultError::AuthorizationRequired);
     }
     let pid = credentials.pid();
     if pid <= 0 {
-        return Err(AgentError::Protocol(
+        return Err(VaultError::Protocol(
             "local peer has an invalid process ID".to_owned(),
         ));
     }
@@ -299,24 +320,24 @@ fn caller_identity(
         )
     })?;
     if process_start_time(pid)? != start_time {
-        return Err(AgentError::AuthorizationRequired);
+        return Err(VaultError::AuthorizationRequired);
     }
     Ok(identity)
 }
 
-fn process_start_time(pid: i32) -> AgentResult<u64> {
+fn process_start_time(pid: i32) -> VaultResult<u64> {
     let path = PathBuf::from(format!("/proc/{pid}/stat"));
     let stat = fs::read_to_string(&path).map_err(|error| path_io_error(&path, &error))?;
     let fields = stat
         .rsplit_once(") ")
-        .ok_or_else(|| AgentError::Protocol("peer process stat is malformed".to_owned()))?
+        .ok_or_else(|| VaultError::Protocol("peer process stat is malformed".to_owned()))?
         .1;
     fields
         .split_ascii_whitespace()
         .nth(19)
-        .ok_or_else(|| AgentError::Protocol("peer process start time is missing".to_owned()))?
+        .ok_or_else(|| VaultError::Protocol("peer process start time is missing".to_owned()))?
         .parse()
-        .map_err(|_| AgentError::Protocol("peer process start time is invalid".to_owned()))
+        .map_err(|_| VaultError::Protocol("peer process start time is invalid".to_owned()))
 }
 
 #[cfg(test)]
@@ -324,7 +345,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "hardware")]
     use crate::{
-        AgentAction, AgentResponseBody, AgentStore, GrantPermission, Seal, UnlockLeasePolicy,
+        GrantPermission, UnsealLeasePolicy, Vault, VaultAction, VaultResponseBody, VaultStore,
         WireSecret, WireSecretAddress,
     };
     #[test]
@@ -349,7 +370,7 @@ mod tests {
     fn socket_parent_must_be_private() {
         let directory = tempfile::tempdir().unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        let options = LinuxAgentOptions::new(directory.path().join("agent.sock"));
+        let options = LinuxVaultOptions::new(directory.path().join("factorseal.sock"));
         assert!(
             validate_socket_options("Linux", &options.socket_path, options.poll_interval).is_err()
         );
@@ -357,13 +378,13 @@ mod tests {
 
     #[test]
     #[cfg(feature = "hardware")]
-    fn a_failing_event_loop_still_locks_the_store() {
+    fn a_failing_event_loop_still_seals_the_vault() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
-        let seal = Seal::create_for_test(&root).unwrap();
-        let store = AgentStore::open(&root, seal).unwrap();
+        let unsealed = Vault::create_for_test(&root).unwrap();
+        let store = VaultStore::open(&root, unsealed).unwrap();
         let service =
-            AgentService::new(store, unix_time().unwrap(), UnlockLeasePolicy::default()).unwrap();
+            VaultService::new(store, unix_time().unwrap(), UnsealLeasePolicy::default()).unwrap();
 
         // A panicking request poisons the request-state mutex, so the first
         // expire_if_needed of the loop fails rather than returning cleanly.
@@ -372,13 +393,13 @@ mod tests {
         }));
         assert!(poisoned.is_err());
 
-        let options = LinuxAgentOptions {
-            socket_path: root.join("test-agent.sock"),
+        let options = LinuxVaultOptions {
+            socket_path: root.join("test-factorseal.sock"),
             poll_interval: Duration::from_millis(5),
             install_signal_handler: false,
             install_lifecycle_monitor: false,
         };
-        assert!(serve_linux_agent(&service, &options).is_err());
+        assert!(serve_linux_vault(&service, &options).is_err());
         assert!(
             service.expire_if_needed(unix_time().unwrap()).unwrap(),
             "an error exit must still discard the unwrapped keys"
@@ -388,21 +409,31 @@ mod tests {
 
     #[test]
     fn production_options_require_lifecycle_monitoring() {
-        let options = LinuxAgentOptions::new("/run/user/1000/factorseal/agent.sock");
+        let options = LinuxVaultOptions::new("/run/user/1000/factorseal/factorseal.sock");
         assert!(options.install_signal_handler);
         assert!(options.install_lifecycle_monitor);
     }
 
     #[test]
+    fn session_lock_match_uses_an_exact_object_path() {
+        let path = DbusPath::from("/org/freedesktop/login1/session/_32").into_static();
+        let rule =
+            MatchRule::new_signal("org.freedesktop.login1.Session", "Lock").with_path(path.clone());
+
+        assert_eq!(rule.path, Some(path));
+        assert!(!rule.path_is_namespace);
+    }
+
+    #[test]
     #[cfg(feature = "hardware")]
-    fn native_transport_round_trips_and_locks() {
+    fn native_transport_round_trips_and_seals() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
-        let seal = Seal::create_for_test(&root).unwrap();
-        let store = AgentStore::open(&root, seal).unwrap();
+        let unsealed = Vault::create_for_test(&root).unwrap();
+        let store = VaultStore::open(&root, unsealed).unwrap();
         let now = unix_time().unwrap();
         let service =
-            Arc::new(AgentService::new(store, now, UnlockLeasePolicy::default()).unwrap());
+            Arc::new(VaultService::new(store, now, UnsealLeasePolicy::default()).unwrap());
         let caller =
             linux_caller_identity_for_executable(std::env::current_exe().unwrap()).unwrap();
         let namespace = b"native-transport-test";
@@ -413,29 +444,29 @@ mod tests {
                 [
                     GrantPermission::Get,
                     GrantPermission::Put,
-                    GrantPermission::Lock,
+                    GrantPermission::Seal,
                 ],
                 None,
                 now,
             )
             .unwrap();
 
-        let socket = root.join("test-agent.sock");
-        let options = LinuxAgentOptions {
+        let socket = root.join("test-factorseal.sock");
+        let options = LinuxVaultOptions {
             socket_path: socket.clone(),
             poll_interval: Duration::from_millis(5),
             install_signal_handler: false,
             install_lifecycle_monitor: false,
         };
         let server_service = Arc::clone(&service);
-        let server = std::thread::spawn(move || serve_linux_agent(&server_service, &options));
-        let client = LinuxAgentClient::new(socket);
+        let server = std::thread::spawn(move || serve_linux_vault(&server_service, &options));
+        let client = LinuxVaultClient::new(socket);
         wait_until_ready(&client, &server);
 
         let address = WireSecretAddress::new("project/default/TOKEN", None);
         let stored = client
             .request(
-                &AgentRequest::new(AgentAction::Put {
+                &VaultRequest::new(VaultAction::Put {
                     namespace: namespace.to_vec(),
                     address: address.clone(),
                     value: WireSecret::new(b"transport-secret".to_vec()),
@@ -444,31 +475,31 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        assert!(matches!(stored.result, Ok(AgentResponseBody::Stored)));
+        assert!(matches!(stored.result, Ok(VaultResponseBody::Stored)));
 
         let fetched = client
             .request(
-                &AgentRequest::new(AgentAction::Get {
+                &VaultRequest::new(VaultAction::Get {
                     namespace: namespace.to_vec(),
                     address,
                 })
                 .unwrap(),
             )
             .unwrap();
-        let Ok(AgentResponseBody::Secret { value: Some(value) }) = fetched.result else {
+        let Ok(VaultResponseBody::Secret { value: Some(value) }) = fetched.result else {
             panic!("expected secret response");
         };
         assert_eq!(value.expose(), b"transport-secret");
 
-        let locked = client
+        let sealed = client
             .request(
-                &AgentRequest::new(AgentAction::Lock {
+                &VaultRequest::new(VaultAction::Seal {
                     namespace: namespace.to_vec(),
                 })
                 .unwrap(),
             )
             .unwrap();
-        assert!(matches!(locked.result, Ok(AgentResponseBody::Locked)));
+        assert!(matches!(sealed.result, Ok(VaultResponseBody::Sealed)));
         server.join().unwrap().unwrap();
     }
 
@@ -480,12 +511,12 @@ mod tests {
     /// server has usually already failed, and its error is the useful one.
     #[cfg(feature = "hardware")]
     fn wait_until_ready(
-        client: &LinuxAgentClient,
-        server: &std::thread::JoinHandle<AgentResult<()>>,
+        client: &LinuxVaultClient,
+        server: &std::thread::JoinHandle<VaultResult<()>>,
     ) {
         let mut last = None;
         for _ in 0..200 {
-            let status = AgentRequest::new(AgentAction::Status).unwrap();
+            let status = VaultRequest::new(VaultAction::Status).unwrap();
             match client.request(&status) {
                 Ok(_) => return,
                 Err(error) => last = Some(error),
@@ -494,8 +525,8 @@ mod tests {
         }
         assert!(
             server.is_finished(),
-            "the Linux agent is still serving but unreachable: {last:?}"
+            "the Linux vault is still serving but unreachable: {last:?}"
         );
-        panic!("the Linux agent thread exited during startup: {last:?}");
+        panic!("the Linux vault thread exited during startup: {last:?}");
     }
 }

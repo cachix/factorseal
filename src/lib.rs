@@ -1,50 +1,63 @@
-//! Factorseal's hardware-bound per-user secret agent.
+//! Factorseal's hardware-bound vault.
 //!
-//! The per-user agent is the primary architecture: one process owns an
+//! A per-user background service owns an
 //! embedded Turso database containing encrypted, signed Automerge documents.
 //! Every platform nests a Factorseal password inside its hardware key
-//! wrapping, so neither factor unlocks alone. Applications use authenticated
-//! local IPC and never open the database or receive its keys.
+//! wrapping, so neither factor unseals it alone. Applications use its keyring
+//! interface over authenticated local IPC and never open the database or
+//! receive its keys.
 //!
 mod crypto;
 mod error;
 
-#[cfg(any(feature = "agent", feature = "agent-client"))]
-pub mod agent;
+#[cfg(feature = "vault-client")]
+pub mod keyring;
+
+#[cfg(any(feature = "vault", feature = "vault-client"))]
+pub mod vault;
 
 pub(crate) use error::{Error, Result};
 
-#[cfg(feature = "agent-client")]
-pub use agent::{
-    AgentAction, AgentClient, AgentError, AgentRequest, AgentResponse, AgentResponseBody,
-    AgentResponseError, AgentResponseErrorCode, AgentResult, DeviceKeyId, DeviceSeal, DocumentId,
-    DocumentScope, NestedFactorKind, RequestId, Seal, SealId, SecretAddress, UnlockFactor,
-    WireSecret, WireSecretAddress,
+#[cfg(feature = "vault-client")]
+pub use keyring::{Keyring, KeyringError, KeyringResult};
+
+#[cfg(feature = "vault-client")]
+pub use vault::{
+    DeviceKeyId, DocumentId, DocumentScope, NestedFactorKind, RequestId, SecretAddress,
+    UnsealFactor, Vault, VaultAction, VaultClient, VaultError, VaultId, VaultMetadata,
+    VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
+    VaultResult, WireSecret, WireSecretAddress,
 };
 
-#[cfg(feature = "agent")]
-pub use agent::{
-    AgentService, AgentStore, CallerIdentity, CallerPlatform, GrantPermission, UnlockLeasePolicy,
-    UnlockedSeal,
+#[cfg(feature = "vault")]
+pub use vault::{
+    CallerIdentity, CallerPlatform, GrantPermission, UnsealLeasePolicy, UnsealedVault,
+    VaultService, VaultStore,
 };
 
-#[cfg(all(feature = "agent-client", target_os = "linux"))]
-pub use agent::LinuxAgentClient;
+#[cfg(all(feature = "vault-client", target_os = "linux"))]
+pub use vault::LinuxVaultClient;
+#[cfg(all(feature = "vault-client", target_os = "linux"))]
+pub type NativeVaultClient = LinuxVaultClient;
 
-#[cfg(all(feature = "agent", target_os = "linux"))]
-pub use agent::{LinuxAgentOptions, linux_caller_identity_for_executable, serve_linux_agent};
+#[cfg(all(feature = "vault", target_os = "linux"))]
+pub use vault::{LinuxVaultOptions, linux_caller_identity_for_executable, serve_linux_vault};
 
-#[cfg(all(feature = "agent-client", target_os = "macos"))]
-pub use agent::MacosAgentClient;
+#[cfg(all(feature = "vault-client", target_os = "macos"))]
+pub use vault::MacosVaultClient;
+#[cfg(all(feature = "vault-client", target_os = "macos"))]
+pub type NativeVaultClient = MacosVaultClient;
 
-#[cfg(all(feature = "agent", target_os = "macos"))]
-pub use agent::{MacosAgentOptions, macos_caller_identity_for_executable, serve_macos_agent};
+#[cfg(all(feature = "vault", target_os = "macos"))]
+pub use vault::{MacosVaultOptions, macos_caller_identity_for_executable, serve_macos_vault};
 
-#[cfg(all(feature = "agent-client", target_os = "windows"))]
-pub use agent::WindowsAgentClient;
+#[cfg(all(feature = "vault-client", target_os = "windows"))]
+pub use vault::WindowsVaultClient;
+#[cfg(all(feature = "vault-client", target_os = "windows"))]
+pub type NativeVaultClient = WindowsVaultClient;
 
-#[cfg(all(feature = "agent", target_os = "windows"))]
-pub use agent::{WindowsAgentOptions, serve_windows_agent, windows_caller_identity_for_executable};
+#[cfg(all(feature = "vault", target_os = "windows"))]
+pub use vault::{WindowsVaultOptions, serve_windows_vault, windows_caller_identity_for_executable};
 
 #[cfg(feature = "hardware")]
 mod hardware;

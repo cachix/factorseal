@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Factorseal per-user secret agent</Description>
+    <Description>Factorseal per-user vault service</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger><Enabled>true</Enabled><UserId>@USER_SID@</UserId></LogonTrigger>
@@ -22,7 +22,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>@INSTALL_DIR@\factorseal.exe</Command>
-      <Arguments>--askpass "@INSTALL_DIR@\factorseal-askpass.cmd" run</Arguments>
+      <Arguments>--askpass "@INSTALL_DIR@\factorseal-askpass.cmd" unseal</Arguments>
       <WorkingDirectory>@INSTALL_DIR@</WorkingDirectory>
     </Exec>
   </Actions>

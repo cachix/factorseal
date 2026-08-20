@@ -7,32 +7,33 @@ independent review has been completed.
 Please report suspected vulnerabilities privately to the maintainers. Do not
 open a public issue before a coordinated fix is available.
 
-## Agent security boundary
+## Vault security boundary
 
-The per-user agent is the intended product architecture:
+The per-user vault is the intended product architecture. Its keyring interface
+is one authorized way to retrieve and update credentials:
 
 - one per-user process is the sole owner of the embedded Turso database and
-  plaintext seal keys;
+  plaintext vault keys;
 - every Automerge snapshot and change is encrypted with XChaCha20-Poly1305 and
-  every durable change and commit is signed by the seal device key;
+  every durable change and commit is signed by the vault device key;
 - secret names and values exist inside encrypted documents, not plaintext SQL
   columns or filenames;
 - a bounded local protocol authorizes transport-derived user, executable, and
   application identities against durable scoped grants;
 - replayed and oversized requests fail closed, and secret buffers use
   zeroizing storage where the API permits;
-- idle and absolute unlock leases, explicit lock, termination signals, startup
+- idle and absolute unseal leases, explicit sealing, termination signals, startup
   cleanup, native suspend/shutdown/session notifications, and live expiration
   all converge on the same store shutdown path.
 
-Every seal requires two nested factors. Argon2id uses 64 MiB and three
+Every vault requires two nested factors. Argon2id uses 64 MiB and three
 iterations to derive a password key; that key separately encrypts the DEK and
 device-signing seed, and the TPM then wraps both ciphertexts. Neither a copied
-seal plus its password nor the TPM material without the password can
+vault files plus their password nor the TPM material without the password can
 recover the keys. Password files are accepted only as private bounded regular
 files and are intended for short-lived session launch handoff.
 
-New macOS and Windows seals may additionally require platform user verification
+New macOS and Windows vaults may additionally require platform user verification
 when opening their Secure Enclave or TPM-backed keys. Software keyring and
 DPAPI-only fallbacks are rejected.
 
@@ -43,7 +44,7 @@ DPAPI-only fallbacks are rejected.
 - macOS uses a mode-0600 Unix socket, kernel peer credentials, peer PID, and an
   audit token, then binds the grant to the executable digest.
 - Windows uses a local-only named pipe with a current-user/System/admin DACL,
-  impersonates each client, verifies its immutable SID against the agent SID,
+  impersonates each client, verifies its immutable SID against the vault SID,
   and binds the grant to its PID-resolved executable digest.
 
 Caller identity is never accepted from request JSON. Replacing or updating an
@@ -63,10 +64,11 @@ resolution, so a reused process ID cannot inherit another process's grant.
   untouched. The chain is a tamper check, not an audit log: once it grows past
   a bound it is re-signed and compacted down to the current state of every
   document, and superseded generations are discarded. It cannot detect rollback
-  of the complete seal directory. Detecting that needs a checkpoint held
+  of the complete vault directory. Detecting that needs a checkpoint held
   outside the directory; the offline MVP does not claim whole-directory
   rollback detection.
-- SecretSpec compiles its Factorseal provider against the native `AgentClient`.
+- SecretSpec compiles its Factorseal provider against the `Keyring` interface
+  implemented by the native `VaultClient`.
   Packaged end-to-end conformance remains required on every target.
 - Linux executable authentication depends on access to the ptrace-gated
   `/proc/<pid>/exe` link. The current systemd user unit therefore cannot use
@@ -76,9 +78,9 @@ resolution, so a reused process ID cannot inherit another process's grant.
   supported platform reports the image a peer had at connect time. A same-user
   process can therefore connect, queue its request, and only then execute a
   granted binary. Executable grants are defense in depth against the wrong
-  program reaching the agent, not a boundary between same-user processes: a
+  program reaching the vault, not a boundary between same-user processes: a
   process that can execute a granted binary can also debug or preload it. The
-  boundary the agent does enforce is the Unix user or Windows SID.
+  boundary the vault does enforce is the Unix user or Windows SID.
 - Physical TPM/Secure Enclave matrices, official code signing/notarization,
   process-dump protection, locked memory, recovery, and independent audit are
   not complete.
@@ -87,7 +89,7 @@ resolution, so a reused process ID cannot inherit another process's grant.
   Native acceptance must establish the supported Windows prompt behavior and
   modern Windows Hello path before the release gate can pass.
 - The current Ed25519 signing seed is hardware-wrapped and exists in zeroizing
-  agent memory during a lease. Signing is not yet performed by a non-exportable
+  vault memory during an unseal lease. Signing is not yet performed by a non-exportable
   platform signing primitive.
 - Hardware binding cannot prevent an already authorized or compromised client
   from exfiltrating a secret returned to it.

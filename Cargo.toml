@@ -1,6 +1,6 @@
 [package]
 name = "factorseal"
-description = "A hardware-rooted secret agent for local applications"
+description = "A hardware-bound vault with a keyring interface and command-line access"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
@@ -8,10 +8,10 @@ license = "Apache-2.0"
 repository = "https://github.com/factorseal/factorseal"
 
 [features]
-default = ["agent", "cli", "hardware"]
-agent-client = ["dep:interprocess"]
-agent = [
-    "agent-client",
+default = ["vault", "cli", "hardware"]
+vault-client = ["dep:interprocess"]
+vault = [
+    "vault-client",
     "dep:argon2",
     "dep:automerge",
     "dep:block2",
@@ -33,13 +33,13 @@ agent = [
 cli = ["dep:clap", "dep:directories", "dep:rpassword"]
 # `seal` compiles its Argon2id nesting and its Ed25519 signing key behind
 # `hardware`, so the feature must carry those crates itself. Relying on
-# `agent` to supply them broke `agent-client` + `hardware`.
+# `vault` to supply them broke `vault-client` + `hardware`.
 hardware = ["dep:argon2", "dep:ed25519-dalek", "dep:hardware-enclave"]
 
 [[bin]]
 name = "factorseal"
 path = "src/bin/factorseal.rs"
-required-features = ["agent", "cli", "hardware"]
+required-features = ["vault", "cli", "hardware"]
 
 [dependencies]
 argon2 = { version = "0.5.3", optional = true }

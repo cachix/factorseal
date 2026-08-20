@@ -1,4 +1,4 @@
-//! macOS agent transport and lifecycle integration.
+//! macOS vault transport and lifecycle integration.
 //!
 //! Objective-C notification registration is isolated in this module. The
 //! generated bindings mark observer registration and removal unsafe because
@@ -37,18 +37,18 @@ use super::transport::{
     IPC_FRAME_IO_TIMEOUT, IoBudget, hash_file, hash_open_file, path_io_error, read_frame,
     unix_time, write_frame,
 };
-#[cfg(test)]
-use super::{AgentClient, MacosAgentClient};
 use super::{
-    AgentError, AgentRequest, AgentResult, AgentService, CallerIdentity, CallerIdentityCache,
-    CallerPlatform,
+    CallerIdentity, CallerIdentityCache, CallerPlatform, VaultError, VaultRequest, VaultResult,
+    VaultService,
 };
+#[cfg(test)]
+use super::{MacosVaultClient, VaultClient};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// macOS per-user socket configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MacosAgentOptions {
+pub struct MacosVaultOptions {
     pub socket_path: PathBuf,
     pub poll_interval: Duration,
     /// Install SIGINT/SIGTERM handlers. Disable only when the embedding
@@ -59,7 +59,7 @@ pub struct MacosAgentOptions {
     pub install_lifecycle_monitor: bool,
 }
 
-impl MacosAgentOptions {
+impl MacosVaultOptions {
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -73,10 +73,10 @@ impl MacosAgentOptions {
 
 /// Serve through a private Unix socket authenticated with macOS kernel peer
 /// credentials, peer PID, and audit token.
-pub fn serve_macos_agent(
-    service: &Arc<AgentService>,
-    options: &MacosAgentOptions,
-) -> AgentResult<()> {
+pub fn serve_macos_vault(
+    service: &Arc<VaultService>,
+    options: &MacosVaultOptions,
+) -> VaultResult<()> {
     validate_socket_options("macOS", &options.socket_path, options.poll_interval)?;
     prepare_socket_path(&options.socket_path)?;
     let listener = UnixListener::bind(&options.socket_path)
@@ -95,31 +95,31 @@ pub fn serve_macos_agent(
     if options.install_signal_handler {
         let signal_stopping = Arc::clone(&stopping);
         ctrlc::set_handler(move || signal_stopping.store(true, Ordering::Release)).map_err(
-            |error| AgentError::Protocol(format!("could not install signal handler: {error}")),
+            |error| VaultError::Protocol(format!("could not install signal handler: {error}")),
         )?;
     }
 
     // Every exit from the loop discards the hardware-unwrapped keys, including
     // the error exits. Returning `?` straight out of the loop skipped the lock
     // and left them to whatever the caller did next.
-    let served = accept_until_locked(
+    let served = accept_until_sealed(
         service,
         options,
         &listener,
         &stopping,
         lifecycle_monitor.as_ref(),
     );
-    let locked = service.lock();
-    served.and(locked)
+    let sealed = service.seal();
+    served.and(sealed)
 }
 
-fn accept_until_locked(
-    service: &AgentService,
-    options: &MacosAgentOptions,
+fn accept_until_sealed(
+    service: &VaultService,
+    options: &MacosVaultOptions,
     listener: &UnixListener,
     stopping: &AtomicBool,
     lifecycle_monitor: Option<&MacosLifecycleMonitor>,
-) -> AgentResult<()> {
+) -> VaultResult<()> {
     let caller_cache = CallerIdentityCache::default();
     while !stopping.load(Ordering::Acquire) {
         if let Some(monitor) = lifecycle_monitor {
@@ -131,7 +131,7 @@ fn accept_until_locked(
         match listener.accept() {
             Ok((mut stream, _)) => {
                 // A malformed or disconnected client must not terminate the
-                // per-user agent.
+                // per-user vault.
                 let _ = handle_connection(service, &caller_cache, &mut stream);
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -150,7 +150,7 @@ struct MacosLifecycleMonitor {
 }
 
 impl MacosLifecycleMonitor {
-    fn new(service: &Arc<AgentService>, stopping: &Arc<AtomicBool>) -> Self {
+    fn new(service: &Arc<VaultService>, stopping: &Arc<AtomicBool>) -> Self {
         let workspace = NSWorkspace::sharedWorkspace();
         let notification_center = workspace.notificationCenter();
         let mut observers = Vec::with_capacity(3);
@@ -171,7 +171,7 @@ impl MacosLifecycleMonitor {
                 // Lock synchronously before returning from the pre-sleep or
                 // session callback; the event-loop poll is not the security
                 // boundary for zeroizing hardware-unwrapped keys.
-                let _ = lifecycle_service.lock();
+                let _ = lifecycle_service.seal();
                 lifecycle_stopping.store(true, Ordering::Release);
             });
             let observer = unsafe {
@@ -211,7 +211,7 @@ impl Drop for MacosLifecycleMonitor {
 /// Construct the identity used for an offline executable grant.
 pub fn macos_caller_identity_for_executable(
     executable: impl AsRef<Path>,
-) -> AgentResult<CallerIdentity> {
+) -> VaultResult<CallerIdentity> {
     let executable = executable.as_ref();
     let executable_path =
         fs::canonicalize(executable).map_err(|error| path_io_error(executable, &error))?;
@@ -225,44 +225,44 @@ pub fn macos_caller_identity_for_executable(
 }
 
 fn handle_connection(
-    service: &AgentService,
+    service: &VaultService,
     caller_cache: &CallerIdentityCache,
     stream: &mut UnixStream,
-) -> AgentResult<()> {
+) -> VaultResult<()> {
     stream
         .set_nonblocking(true)
-        .map_err(|error| AgentError::Protocol(format!("could not bound client I/O: {error}")))?;
+        .map_err(|error| VaultError::Protocol(format!("could not bound client I/O: {error}")))?;
     let caller = caller_identity(stream, caller_cache)?;
     let bytes = read_frame(stream, IoBudget::new(IPC_FRAME_IO_TIMEOUT))?;
-    let request = AgentRequest::decode(&bytes)?;
+    let request = VaultRequest::decode(&bytes)?;
     let response = service.handle(&caller, request, unix_time()?);
     let bytes = response.encode()?;
     // The response gets its own budget so a slow store operation cannot make
-    // the agent drop a reply it has already committed.
+    // the vault drop a reply it has already committed.
     write_frame(stream, &bytes, IoBudget::new(IPC_FRAME_IO_TIMEOUT))
 }
 
 fn caller_identity(
     stream: &UnixStream,
     cache: &CallerIdentityCache,
-) -> AgentResult<CallerIdentity> {
+) -> VaultResult<CallerIdentity> {
     let credentials = getsockopt(stream, LocalPeerCred).map_err(|error| {
-        AgentError::Protocol(format!("could not read peer credentials: {error}"))
+        VaultError::Protocol(format!("could not read peer credentials: {error}"))
     })?;
     if credentials.uid() != getuid().as_raw() {
-        return Err(AgentError::AuthorizationRequired);
+        return Err(VaultError::AuthorizationRequired);
     }
     let pid = getsockopt(stream, LocalPeerPid)
-        .map_err(|error| AgentError::Protocol(format!("could not read peer PID: {error}")))?;
+        .map_err(|error| VaultError::Protocol(format!("could not read peer PID: {error}")))?;
     if pid <= 0 {
-        return Err(AgentError::Protocol(
+        return Err(VaultError::Protocol(
             "local peer has an invalid process ID".to_owned(),
         ));
     }
     // Requiring the kernel audit token prevents a transport that merely
     // supplies a PID/UID from being treated as authenticated on macOS.
     let _audit_token = getsockopt(stream, LocalPeerToken).map_err(|error| {
-        AgentError::Protocol(format!("could not read peer audit token: {error}"))
+        VaultError::Protocol(format!("could not read peer audit token: {error}"))
     })?;
     let (executable_path, start_time) = process_executable(pid)?;
     // Everything below reads one opened descriptor rather than the path, so
@@ -294,7 +294,7 @@ fn caller_identity(
     // The peer PID was captured at connect time and a PID is reusable, so the
     // process must still be the one that connected.
     if process_executable(pid)?.1 != start_time {
-        return Err(AgentError::AuthorizationRequired);
+        return Err(VaultError::AuthorizationRequired);
     }
     Ok(identity)
 }
@@ -304,9 +304,9 @@ fn caller_identity(
 /// `System::new_all()` scanned every process and all hardware on every
 /// incoming connection, and it ran before the caller-identity cache could
 /// avoid it, so a cache hit paid for it too.
-fn process_executable(process_id: i32) -> AgentResult<(PathBuf, u64)> {
+fn process_executable(process_id: i32) -> VaultResult<(PathBuf, u64)> {
     let process_id = u32::try_from(process_id)
-        .map_err(|_| AgentError::Protocol("peer PID is outside the supported range".to_owned()))?;
+        .map_err(|_| VaultError::Protocol("peer PID is outside the supported range".to_owned()))?;
     let process_id = Pid::from_u32(process_id);
     let mut system = System::new();
     system.refresh_processes_specifics(
@@ -316,13 +316,13 @@ fn process_executable(process_id: i32) -> AgentResult<(PathBuf, u64)> {
     );
     let process = system
         .process(process_id)
-        .ok_or_else(|| AgentError::Protocol("could not resolve client executable".to_owned()))?;
+        .ok_or_else(|| VaultError::Protocol("could not resolve client executable".to_owned()))?;
     let executable = process
         .exe()
-        .ok_or_else(|| AgentError::Protocol("could not resolve client executable".to_owned()))?;
+        .ok_or_else(|| VaultError::Protocol("could not resolve client executable".to_owned()))?;
     fs::canonicalize(executable)
         .map(|path| (path, process.start_time()))
-        .map_err(|error| AgentError::Protocol(format!("could not resolve client path: {error}")))
+        .map_err(|error| VaultError::Protocol(format!("could not resolve client path: {error}")))
 }
 
 #[cfg(test)]
@@ -330,7 +330,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "hardware")]
     use crate::{
-        AgentAction, AgentResponseBody, AgentStore, GrantPermission, Seal, UnlockLeasePolicy,
+        GrantPermission, UnsealLeasePolicy, Vault, VaultAction, VaultResponseBody, VaultStore,
         WireSecret, WireSecretAddress,
     };
     #[test]
@@ -354,7 +354,7 @@ mod tests {
     fn socket_parent_must_be_private() {
         let directory = tempfile::tempdir().unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        let options = MacosAgentOptions::new(directory.path().join("agent.sock"));
+        let options = MacosVaultOptions::new(directory.path().join("factorseal.sock"));
         assert!(
             validate_socket_options("macOS", &options.socket_path, options.poll_interval).is_err()
         );
@@ -362,13 +362,13 @@ mod tests {
 
     #[test]
     #[cfg(feature = "hardware")]
-    fn a_failing_event_loop_still_locks_the_store() {
+    fn a_failing_event_loop_still_seals_the_vault() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
-        let seal = Seal::create_for_test(&root).unwrap();
-        let store = AgentStore::open(&root, seal).unwrap();
+        let unsealed = Vault::create_for_test(&root).unwrap();
+        let store = VaultStore::open(&root, unsealed).unwrap();
         let service = Arc::new(
-            AgentService::new(store, unix_time().unwrap(), UnlockLeasePolicy::default()).unwrap(),
+            VaultService::new(store, unix_time().unwrap(), UnsealLeasePolicy::default()).unwrap(),
         );
 
         // A panicking request poisons the request-state mutex, so the first
@@ -378,13 +378,13 @@ mod tests {
         }));
         assert!(poisoned.is_err());
 
-        let options = MacosAgentOptions {
-            socket_path: root.join("test-agent.sock"),
+        let options = MacosVaultOptions {
+            socket_path: root.join("test-factorseal.sock"),
             poll_interval: Duration::from_millis(5),
             install_signal_handler: false,
             install_lifecycle_monitor: false,
         };
-        assert!(serve_macos_agent(&service, &options).is_err());
+        assert!(serve_macos_vault(&service, &options).is_err());
         assert!(
             service.expire_if_needed(unix_time().unwrap()).unwrap(),
             "an error exit must still discard the unwrapped keys"
@@ -397,11 +397,11 @@ mod tests {
     fn appkit_lifecycle_notifications_reach_the_lock_signal() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal-lifecycle");
-        let seal = Seal::create_for_test(&root).unwrap();
-        let store = AgentStore::open(&root, seal).unwrap();
+        let unsealed = Vault::create_for_test(&root).unwrap();
+        let store = VaultStore::open(&root, unsealed).unwrap();
         let now = unix_time().unwrap();
         let service =
-            Arc::new(AgentService::new(store, now, UnlockLeasePolicy::default()).unwrap());
+            Arc::new(VaultService::new(store, now, UnsealLeasePolicy::default()).unwrap());
         let stopping = Arc::new(AtomicBool::new(false));
         let monitor = MacosLifecycleMonitor::new(&service, &stopping);
         // SAFETY: This posts the same AppKit-owned notification name used by
@@ -417,21 +417,21 @@ mod tests {
 
     #[test]
     fn production_options_require_lifecycle_monitoring() {
-        let options = MacosAgentOptions::new("/tmp/factorseal/agent.sock");
+        let options = MacosVaultOptions::new("/tmp/factorseal/factorseal.sock");
         assert!(options.install_signal_handler);
         assert!(options.install_lifecycle_monitor);
     }
 
     #[test]
     #[cfg(feature = "hardware")]
-    fn native_transport_round_trips_and_locks() {
+    fn native_transport_round_trips_and_seals() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
-        let seal = Seal::create_for_test(&root).unwrap();
-        let store = AgentStore::open(&root, seal).unwrap();
+        let unsealed = Vault::create_for_test(&root).unwrap();
+        let store = VaultStore::open(&root, unsealed).unwrap();
         let now = unix_time().unwrap();
         let service =
-            Arc::new(AgentService::new(store, now, UnlockLeasePolicy::default()).unwrap());
+            Arc::new(VaultService::new(store, now, UnsealLeasePolicy::default()).unwrap());
         let caller =
             macos_caller_identity_for_executable(std::env::current_exe().unwrap()).unwrap();
         let namespace = b"native-transport-test";
@@ -442,29 +442,29 @@ mod tests {
                 [
                     GrantPermission::Get,
                     GrantPermission::Put,
-                    GrantPermission::Lock,
+                    GrantPermission::Seal,
                 ],
                 None,
                 now,
             )
             .unwrap();
 
-        let socket = root.join("test-agent.sock");
-        let options = MacosAgentOptions {
+        let socket = root.join("test-factorseal.sock");
+        let options = MacosVaultOptions {
             socket_path: socket.clone(),
             poll_interval: Duration::from_millis(5),
             install_signal_handler: false,
             install_lifecycle_monitor: false,
         };
         let server_service = Arc::clone(&service);
-        let server = std::thread::spawn(move || serve_macos_agent(&server_service, &options));
-        let client = MacosAgentClient::new(socket);
+        let server = std::thread::spawn(move || serve_macos_vault(&server_service, &options));
+        let client = MacosVaultClient::new(socket);
         wait_until_ready(&client, &server);
 
         let address = WireSecretAddress::new("project/default/TOKEN", None);
         let stored = client
             .request(
-                &AgentRequest::new(AgentAction::Put {
+                &VaultRequest::new(VaultAction::Put {
                     namespace: namespace.to_vec(),
                     address: address.clone(),
                     value: WireSecret::new(b"transport-secret".to_vec()),
@@ -473,31 +473,31 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        assert!(matches!(stored.result, Ok(AgentResponseBody::Stored)));
+        assert!(matches!(stored.result, Ok(VaultResponseBody::Stored)));
 
         let fetched = client
             .request(
-                &AgentRequest::new(AgentAction::Get {
+                &VaultRequest::new(VaultAction::Get {
                     namespace: namespace.to_vec(),
                     address,
                 })
                 .unwrap(),
             )
             .unwrap();
-        let Ok(AgentResponseBody::Secret { value: Some(value) }) = fetched.result else {
+        let Ok(VaultResponseBody::Secret { value: Some(value) }) = fetched.result else {
             panic!("expected secret response");
         };
         assert_eq!(value.expose(), b"transport-secret");
 
-        let locked = client
+        let sealed = client
             .request(
-                &AgentRequest::new(AgentAction::Lock {
+                &VaultRequest::new(VaultAction::Seal {
                     namespace: namespace.to_vec(),
                 })
                 .unwrap(),
             )
             .unwrap();
-        assert!(matches!(locked.result, Ok(AgentResponseBody::Locked)));
+        assert!(matches!(sealed.result, Ok(VaultResponseBody::Sealed)));
         server.join().unwrap().unwrap();
     }
 
@@ -509,12 +509,12 @@ mod tests {
     /// server has usually already failed, and its error is the useful one.
     #[cfg(feature = "hardware")]
     fn wait_until_ready(
-        client: &MacosAgentClient,
-        server: &std::thread::JoinHandle<AgentResult<()>>,
+        client: &MacosVaultClient,
+        server: &std::thread::JoinHandle<VaultResult<()>>,
     ) {
         let mut last = None;
         for _ in 0..200 {
-            let status = AgentRequest::new(AgentAction::Status).unwrap();
+            let status = VaultRequest::new(VaultAction::Status).unwrap();
             match client.request(&status) {
                 Ok(_) => return,
                 Err(error) => last = Some(error),
@@ -523,8 +523,8 @@ mod tests {
         }
         assert!(
             server.is_finished(),
-            "the macOS agent is still serving but unreachable: {last:?}"
+            "the macOS vault is still serving but unreachable: {last:?}"
         );
-        panic!("the macOS agent thread exited during startup: {last:?}");
+        panic!("the macOS vault thread exited during startup: {last:?}");
     }
 }
