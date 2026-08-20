@@ -377,6 +377,18 @@ impl StoreWorker {
             ))
         })?;
         let database_path = root.join(DATABASE_FILE);
+        let database_exists = database_path
+            .try_exists()
+            .map_err(|error| VaultError::Database(error.to_string()))?;
+        let (device, data_key, signing_seed, initialize_store) = unsealed.into_parts();
+        if database_exists == initialize_store {
+            let message = if initialize_store {
+                "refusing to initialize over a pre-existing vault database"
+            } else {
+                "initialized vault database is missing"
+            };
+            return Err(VaultError::Database(message.to_owned()));
+        }
         let database_path = database_path.to_str().ok_or_else(|| {
             VaultError::Database("vault database path is not valid Unicode".to_owned())
         })?;
@@ -385,7 +397,6 @@ impl StoreWorker {
             .await
             .map_err(database_error)?;
         let connection = database.connect().map_err(database_error)?;
-        let (device, data_key, signing_seed) = unsealed.into_parts();
         let signing_key = SigningKey::from_bytes(&signing_seed);
         drop(signing_seed);
         let mut worker = Self {
@@ -396,7 +407,12 @@ impl StoreWorker {
             lock_file: lock,
             chain_length: 0,
         };
-        worker.initialize_schema().await?;
+        if initialize_store {
+            worker.initialize_schema().await?;
+            worker.insert_installation_row().await?;
+        } else {
+            worker.verify_schema().await?;
+        }
         worker.verify_installation_row().await?;
         worker.chain_length = worker.verify_commit_chain().await?;
         worker.purge_expired(unix_time()?).await?;
@@ -491,10 +507,27 @@ impl StoreWorker {
         Ok(())
     }
 
-    async fn verify_installation_row(&self) -> VaultResult<()> {
+    async fn verify_schema(&self) -> VaultResult<()> {
+        let schema = SCHEMA_VERSION.to_be_bytes().to_vec();
+        let stored = query_optional_blob(
+            &self.connection,
+            "SELECT value FROM store_meta WHERE key = 'schema-version'",
+            (),
+        )
+        .await?
+        .ok_or_else(|| VaultError::Database("missing schema version".to_owned()))?;
+        if stored != schema {
+            return Err(VaultError::Database(
+                "unsupported vault database schema version".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn insert_installation_row(&self) -> VaultResult<()> {
         self.connection
             .execute(
-                "INSERT OR IGNORE INTO vault_identity(
+                "INSERT INTO vault_identity(
                      singleton, vault_id, device_key_id, public_signing_key,
                      actor_id, hardware_backend, key_epoch, created_at
                  ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -510,6 +543,10 @@ impl StoreWorker {
             )
             .await
             .map_err(database_error)?;
+        Ok(())
+    }
+
+    async fn verify_installation_row(&self) -> VaultResult<()> {
         let mut rows = self
             .connection
             .query(
@@ -1624,6 +1661,26 @@ mod tests {
             )
             .unwrap();
         address
+    }
+
+    #[test]
+    fn reopening_rejects_a_missing_database() {
+        let (_directory, root, store) = store();
+        drop(store);
+        fs::remove_file(root.join(DATABASE_FILE)).unwrap();
+
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        assert!(matches!(reopened, Err(VaultError::Database(_))));
+    }
+
+    #[test]
+    fn reopening_rejects_a_recreated_empty_database() {
+        let (_directory, root, store) = store();
+        drop(store);
+        fs::write(root.join(DATABASE_FILE), []).unwrap();
+
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        assert!(matches!(reopened, Err(VaultError::Database(_))));
     }
 
     #[test]

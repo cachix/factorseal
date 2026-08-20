@@ -10,8 +10,8 @@ use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use factorseal::{
     CallerIdentity, GrantPermission, Keyring, KeyringError, NativeVaultClient, UnsealFactor,
-    UnsealLeasePolicy, Vault, VaultError, VaultMetadata, VaultService, VaultStore,
-    WireSecretAddress,
+    UnsealLeasePolicy, Vault, VaultAction, VaultClient, VaultError, VaultMetadata, VaultRequest,
+    VaultResponseBody, VaultService, VaultStore, WireSecretAddress,
 };
 #[cfg(target_os = "linux")]
 use factorseal::{
@@ -222,7 +222,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 maximum_lifetime: Duration::from_secs(maximum_seconds),
             },
         ),
-        Command::Status => show_status(&root),
+        Command::Status => show_status(&root, socket),
         Command::Set {
             item,
             field,
@@ -245,9 +245,18 @@ fn initialize(root: &Path, biometric: bool, factor: FactorSource<'_>) -> Result<
     // The vault metadata is already on disk, and `create` refuses to run again while it
     // is there. Undo what this command wrote so `init` can simply be retried
     // rather than leaving a root nothing can finish or open.
-    let store = VaultStore::open(root, unsealed).inspect_err(|_| {
-        let _ = Vault::discard_initialization(root);
-    })?;
+    let store = match VaultStore::open(root, unsealed) {
+        Ok(store) => store,
+        Err(open_error) => {
+            return match Vault::discard_initialization(root) {
+                Ok(()) => Err(open_error.into()),
+                Err(cleanup_error) => Err(VaultError::Protection(format!(
+                    "{open_error}; initialization rollback failed: {cleanup_error}"
+                ))
+                .into()),
+            };
+        }
+    };
     let now = unix_time()?;
     let service = VaultService::new(store, now, UnsealLeasePolicy::default())?;
     authorize_cli(&service, now)?;
@@ -261,8 +270,9 @@ fn initialize(root: &Path, biometric: bool, factor: FactorSource<'_>) -> Result<
     Ok(())
 }
 
-fn show_status(root: &Path) -> Result<(), CliError> {
+fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
     let device = Vault::inspect(root)?;
+    let state = live_state(root, socket, &device);
     let status = Status {
         path: root.display().to_string(),
         vault_id: device.vault_id().to_string(),
@@ -274,10 +284,36 @@ fn show_status(root: &Path) -> Result<(), CliError> {
         nested_factor: device.nested_factor().as_str(),
         key_epoch: device.key_epoch(),
         created_at: device.created_at(),
-        state: "sealed",
+        state,
     };
     println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
+}
+
+fn live_state(root: &Path, socket: Option<&Path>, device: &VaultMetadata) -> &'static str {
+    let Ok(request) = VaultRequest::new(VaultAction::Status) else {
+        return "unknown";
+    };
+    let Ok(response) = native_client(root, socket).request(&request) else {
+        return "unknown";
+    };
+    match response.result {
+        Ok(VaultResponseBody::Status {
+            unsealed,
+            vault_id,
+            device_key_id,
+            ..
+        }) if vault_id == device.vault_id().to_string()
+            && device_key_id == device.device_key_id().to_string() =>
+        {
+            if unsealed {
+                "unsealed"
+            } else {
+                "sealed"
+            }
+        }
+        _ => "unknown",
+    }
 }
 
 fn set_keyring_value(

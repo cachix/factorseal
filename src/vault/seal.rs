@@ -116,6 +116,7 @@ pub struct UnsealedVault {
     public: VaultMetadata,
     data_key: Zeroizing<[u8; KEY_BYTES]>,
     signing_seed: Zeroizing<[u8; KEY_BYTES]>,
+    initialize_store: bool,
 }
 
 impl std::fmt::Debug for UnsealedVault {
@@ -125,6 +126,7 @@ impl std::fmt::Debug for UnsealedVault {
             .field("public", &self.public)
             .field("data_key", &"[REDACTED]")
             .field("signing_seed", &"[REDACTED]")
+            .field("initialize_store", &self.initialize_store)
             .finish()
     }
 }
@@ -142,8 +144,14 @@ impl UnsealedVault {
         VaultMetadata,
         Zeroizing<[u8; KEY_BYTES]>,
         Zeroizing<[u8; KEY_BYTES]>,
+        bool,
     ) {
-        (self.public, self.data_key, self.signing_seed)
+        (
+            self.public,
+            self.data_key,
+            self.signing_seed,
+            self.initialize_store,
+        )
     }
 }
 
@@ -171,19 +179,56 @@ impl Vault {
     #[cfg(feature = "hardware")]
     pub fn discard_initialization(root: impl AsRef<Path>) -> VaultResult<()> {
         let root = root.as_ref();
-        for name in [VAULT_FILE, super::DATABASE_FILE, super::LOCK_FILE] {
-            let path = root.join(name);
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(path_error(&path, error)),
+        let metadata = match fs::symlink_metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(path_error(root, error)),
+        };
+        if !metadata.file_type().is_dir() {
+            return Err(VaultError::Protection(format!(
+                "refusing to discard non-directory vault root `{}`",
+                root.display()
+            )));
+        }
+
+        let mut cleanup_error = None;
+        let vault_path = root.join(VAULT_FILE);
+        if vault_path.exists() {
+            match read_vault(root) {
+                Ok(stored) => {
+                    let delete_hardware = {
+                        #[cfg(test)]
+                        {
+                            stored.platform != VaultPlatform::Test
+                        }
+                        #[cfg(not(test))]
+                        {
+                            true
+                        }
+                    };
+                    if delete_hardware {
+                        for label in [&stored.wrapping_key_label, &stored.signing_key_label] {
+                            match PlatformProtector::open(root, label, stored.biometric)
+                                .and_then(|protector| protector.delete())
+                            {
+                                Err(error) if cleanup_error.is_none() => {
+                                    cleanup_error = Some(VaultError::Protection(error.to_string()));
+                                }
+                                Ok(()) | Err(_) => {}
+                            }
+                        }
+                    }
+                }
+                Err(error) => cleanup_error = Some(error),
             }
         }
-        match fs::remove_dir(root) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(path_error(root, error)),
+
+        if let Err(error) = fs::remove_dir_all(root)
+            && cleanup_error.is_none()
+        {
+            cleanup_error = Some(path_error(root, error));
         }
+        cleanup_error.map_or(Ok(()), Err)
     }
 
     /// Create a new vault using distinct platform wrapping keys for the
@@ -201,26 +246,59 @@ impl Vault {
     ) -> VaultResult<UnsealedVault> {
         let root = root.as_ref();
         prepare_root(root)?;
-        let vault_id = VaultId::random()?;
-        let label_suffix = hex::encode(vault_id.as_bytes());
-        let wrapping_label = format!("vault-wrap-{label_suffix}");
-        let signing_label = format!("vault-sign-{label_suffix}");
-        let wrapping = PlatformProtector::open(root, &wrapping_label, biometric)
-            .map_err(|error| VaultError::Protection(error.to_string()))?;
-        let signing = PlatformProtector::open(root, &signing_label, biometric)
-            .map_err(|error| VaultError::Protection(error.to_string()))?;
-        create_with_protectors(
-            root,
-            vault_id,
-            &wrapping_label,
-            &signing_label,
-            &wrapping,
-            &signing,
-            biometric,
-            unix_time()?,
-            current_platform()?,
-            factor,
-        )
+        let mut protectors = Vec::with_capacity(2);
+        let result = (|| {
+            let vault_id = VaultId::random()?;
+            let label_suffix = hex::encode(vault_id.as_bytes());
+            let wrapping_label = format!("vault-wrap-{label_suffix}");
+            let signing_label = format!("vault-sign-{label_suffix}");
+            protectors.push(
+                PlatformProtector::create(root, &wrapping_label, biometric)
+                    .map_err(|error| VaultError::Protection(error.to_string()))?,
+            );
+            protectors.push(
+                PlatformProtector::create(root, &signing_label, biometric)
+                    .map_err(|error| VaultError::Protection(error.to_string()))?,
+            );
+            create_with_protectors(
+                root,
+                vault_id,
+                &wrapping_label,
+                &signing_label,
+                &protectors[0],
+                &protectors[1],
+                biometric,
+                unix_time()?,
+                current_platform()?,
+                factor,
+            )
+        })();
+
+        match result {
+            Ok(unsealed) => Ok(unsealed),
+            Err(error) => {
+                let mut cleanup_error = None;
+                for protector in &protectors {
+                    if let Err(cleanup) = protector.delete()
+                        && cleanup_error.is_none()
+                    {
+                        cleanup_error = Some(cleanup.to_string());
+                    }
+                }
+                if let Err(cleanup) = fs::remove_dir_all(root)
+                    && cleanup_error.is_none()
+                {
+                    cleanup_error = Some(cleanup.to_string());
+                }
+                match cleanup_error {
+                    Some(cleanup) => Err(VaultError::Protection(format!(
+                        "{error}; initialization rollback failed for `{}`: {cleanup}",
+                        root.display()
+                    ))),
+                    None => Err(error),
+                }
+            }
+        }
     }
 
     #[cfg(not(feature = "hardware"))]
@@ -493,6 +571,7 @@ fn create_with_protectors(
         public: stored.public(),
         data_key,
         signing_seed,
+        initialize_store: true,
     })
 }
 
@@ -533,6 +612,7 @@ fn unseal_with_protectors(
         public: stored.public(),
         data_key,
         signing_seed,
+        initialize_store: false,
     })
 }
 
@@ -933,6 +1013,10 @@ mod tests {
         // This is what a failed store open leaves behind: a vault that
         // `create` will not write over.
         assert!(Vault::create_for_test(&root).is_err());
+
+        let hardware = root.join("hardware");
+        fs::create_dir(&hardware).unwrap();
+        fs::write(hardware.join("key-metadata"), b"temporary key").unwrap();
 
         Vault::discard_initialization(&root).unwrap();
         assert!(!root.exists());

@@ -4,7 +4,7 @@ use std::fmt;
 #[cfg(feature = "vault")]
 use std::sync::Mutex;
 #[cfg(feature = "vault")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -517,14 +517,20 @@ impl UnsealLeasePolicy {
 
 #[cfg(feature = "vault")]
 struct UnsealLease {
-    idle_timeout_seconds: u64,
+    idle_timeout: Duration,
     idle_deadline: u64,
     absolute_deadline: u64,
+    idle_expires_at: Instant,
+    absolute_expires_at: Instant,
 }
 
 #[cfg(feature = "vault")]
 impl UnsealLease {
     fn new(now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
+        Self::new_at(now, Instant::now(), policy)
+    }
+
+    fn new_at(now: u64, monotonic_now: Instant, policy: UnsealLeasePolicy) -> VaultResult<Self> {
         policy.validate()?;
         let idle_timeout_seconds = policy.idle_timeout.as_secs();
         let absolute_deadline = now
@@ -534,22 +540,35 @@ impl UnsealLease {
             .checked_add(idle_timeout_seconds)
             .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
             .min(absolute_deadline);
+        let absolute_expires_at = monotonic_now
+            .checked_add(policy.maximum_lifetime)
+            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?;
+        let idle_expires_at = monotonic_now
+            .checked_add(policy.idle_timeout)
+            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
+            .min(absolute_expires_at);
         Ok(Self {
-            idle_timeout_seconds,
+            idle_timeout: policy.idle_timeout,
             idle_deadline,
             absolute_deadline,
+            idle_expires_at,
+            absolute_expires_at,
         })
     }
 
-    fn is_expired(&self, now: u64) -> bool {
-        now >= self.idle_deadline || now >= self.absolute_deadline
+    fn is_expired(&self, monotonic_now: Instant) -> bool {
+        monotonic_now >= self.idle_expires_at || monotonic_now >= self.absolute_expires_at
     }
 
-    fn touch(&mut self, now: u64) -> VaultResult<()> {
+    fn touch(&mut self, now: u64, monotonic_now: Instant) -> VaultResult<()> {
         self.idle_deadline = now
-            .checked_add(self.idle_timeout_seconds)
+            .checked_add(self.idle_timeout.as_secs())
             .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
             .min(self.absolute_deadline);
+        self.idle_expires_at = monotonic_now
+            .checked_add(self.idle_timeout)
+            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
+            .min(self.absolute_expires_at);
         Ok(())
     }
 }
@@ -657,7 +676,7 @@ impl VaultService {
         expires_at: Option<u64>,
         now: u64,
     ) -> VaultResult<()> {
-        let mut state = self.lock_live_state(now)?;
+        let mut state = self.lock_live_state(Instant::now())?;
         store_grant(
             &state.store,
             caller,
@@ -670,7 +689,7 @@ impl VaultService {
             expires_at,
             now,
         )?;
-        state.lease.touch(now)
+        state.lease.touch(now, Instant::now())
     }
 
     /// Persist approval for one disposable application-cache entry.
@@ -684,7 +703,7 @@ impl VaultService {
         expires_at: Option<u64>,
         now: u64,
     ) -> VaultResult<()> {
-        let mut state = self.lock_live_state(now)?;
+        let mut state = self.lock_live_state(Instant::now())?;
         store_grant(
             &state.store,
             caller,
@@ -697,7 +716,7 @@ impl VaultService {
             expires_at,
             now,
         )?;
-        state.lease.touch(now)
+        state.lease.touch(now, Instant::now())
     }
 
     /// Persist approval for durable keyring namespace operations.
@@ -709,7 +728,7 @@ impl VaultService {
         expires_at: Option<u64>,
         now: u64,
     ) -> VaultResult<()> {
-        let mut state = self.lock_live_state(now)?;
+        let mut state = self.lock_live_state(Instant::now())?;
         store_grant(
             &state.store,
             caller,
@@ -721,7 +740,7 @@ impl VaultService {
             expires_at,
             now,
         )?;
-        state.lease.touch(now)
+        state.lease.touch(now, Instant::now())
     }
 
     /// Persist approval for a disposable application-cache namespace.
@@ -733,7 +752,7 @@ impl VaultService {
         expires_at: Option<u64>,
         now: u64,
     ) -> VaultResult<()> {
-        let mut state = self.lock_live_state(now)?;
+        let mut state = self.lock_live_state(Instant::now())?;
         store_grant(
             &state.store,
             caller,
@@ -745,7 +764,7 @@ impl VaultService {
             expires_at,
             now,
         )?;
-        state.lease.touch(now)
+        state.lease.touch(now, Instant::now())
     }
 
     /// Handle one already-decoded request for a transport-authenticated caller.
@@ -756,8 +775,18 @@ impl VaultService {
         request: VaultRequest,
         now: u64,
     ) -> VaultResponse {
+        self.handle_at(caller, request, now, Instant::now())
+    }
+
+    fn handle_at(
+        &self,
+        caller: &CallerIdentity,
+        request: VaultRequest,
+        now: u64,
+        monotonic_now: Instant,
+    ) -> VaultResponse {
         let request_id = request.request_id;
-        let result = self.handle_inner(caller, request, now);
+        let result = self.handle_inner(caller, request, now, monotonic_now);
         let result = match result {
             Ok(VaultResponseBody::Sealed) => Ok(VaultResponseBody::Sealed),
             _ if self.seal_handle.is_sealed() => Err(VaultError::Sealed),
@@ -775,6 +804,10 @@ impl VaultService {
     /// Returns `true` once the service has sealed and should stop accepting
     /// connections. Platform event loops call this from their bounded timer.
     pub fn expire_if_needed(&self, now: u64) -> VaultResult<bool> {
+        self.expire_if_needed_at(now, Instant::now())
+    }
+
+    fn expire_if_needed_at(&self, now: u64, monotonic_now: Instant) -> VaultResult<bool> {
         if self.seal_handle.is_sealed() {
             return Ok(true);
         }
@@ -785,7 +818,7 @@ impl VaultService {
         if state.store.is_sealed() {
             return Ok(true);
         }
-        if state.lease.is_expired(now) {
+        if state.lease.is_expired(monotonic_now) {
             state.store.seal();
             return Ok(true);
         }
@@ -808,7 +841,10 @@ impl VaultService {
         Ok(())
     }
 
-    fn lock_live_state(&self, now: u64) -> VaultResult<std::sync::MutexGuard<'_, ServiceState>> {
+    fn lock_live_state(
+        &self,
+        monotonic_now: Instant,
+    ) -> VaultResult<std::sync::MutexGuard<'_, ServiceState>> {
         if self.seal_handle.is_sealed() {
             return Err(VaultError::Sealed);
         }
@@ -816,7 +852,7 @@ impl VaultService {
             .state
             .lock()
             .map_err(|_| VaultError::WorkerUnavailable)?;
-        if state.store.is_sealed() || state.lease.is_expired(now) {
+        if state.store.is_sealed() || state.lease.is_expired(monotonic_now) {
             state.store.seal();
             return Err(VaultError::Sealed);
         }
@@ -829,10 +865,11 @@ impl VaultService {
         caller: &CallerIdentity,
         request: VaultRequest,
         now: u64,
+        monotonic_now: Instant,
     ) -> VaultResult<VaultResponseBody> {
         caller.validate()?;
         request.validate()?;
-        let mut state = self.lock_live_state(now)?;
+        let mut state = self.lock_live_state(monotonic_now)?;
         state.replay.consume(request.request_id)?;
 
         // Normalize explicit cache operations so authorization and mutation
@@ -976,7 +1013,7 @@ impl VaultService {
             | VaultAction::SealCache { .. } => unreachable!("cache action was normalized"),
         };
         if refresh_lease {
-            state.lease.touch(now)?;
+            state.lease.touch(now, monotonic_now)?;
         }
         Ok(result)
     }
@@ -1470,8 +1507,16 @@ mod tests {
             maximum_lifetime: Duration::from_secs(10),
         };
         let (_directory, service) = service(100, policy);
-        assert!(!service.expire_if_needed(104).unwrap());
-        assert!(service.expire_if_needed(105).unwrap());
+        let idle_expires_at = service.state.lock().unwrap().lease.idle_expires_at;
+        assert!(
+            !service
+                .expire_if_needed_at(
+                    104,
+                    idle_expires_at.checked_sub(Duration::from_secs(1)).unwrap(),
+                )
+                .unwrap()
+        );
+        assert!(service.expire_if_needed_at(105, idle_expires_at).unwrap());
 
         let response = service.handle(
             &caller(),
@@ -1491,17 +1536,34 @@ mod tests {
             maximum_lifetime: Duration::from_secs(10),
         };
         let (_directory, service) = service(100, policy);
+        let idle_expires_at = service.state.lock().unwrap().lease.idle_expires_at;
 
-        let response = service.handle(
+        let response = service.handle_at(
             &caller(),
             VaultRequest::new(VaultAction::Status).unwrap(),
             104,
+            idle_expires_at.checked_sub(Duration::from_secs(1)).unwrap(),
         );
         let VaultResponseBody::Status { idle_deadline, .. } = response.result.unwrap() else {
             panic!("expected status response");
         };
         assert_eq!(idle_deadline, 105);
-        assert!(service.expire_if_needed(105).unwrap());
+        assert!(service.expire_if_needed_at(105, idle_expires_at).unwrap());
+    }
+
+    #[test]
+    fn wall_clock_rollback_does_not_extend_the_unseal_lease() {
+        let policy = UnsealLeasePolicy {
+            idle_timeout: Duration::from_secs(5),
+            maximum_lifetime: Duration::from_secs(10),
+        };
+        let (_directory, service) = service(100, policy);
+        let idle_expires_at = service.state.lock().unwrap().lease.idle_expires_at;
+
+        assert!(
+            service.expire_if_needed_at(50, idle_expires_at).unwrap(),
+            "the monotonic deadline must win even if Unix time moves backward"
+        );
     }
 
     #[test]

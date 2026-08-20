@@ -41,6 +41,21 @@ pub(crate) struct PlatformProtector {
 
 impl PlatformProtector {
     pub(crate) fn open(root: &Path, label: &str, biometric: bool) -> Result<Self> {
+        Self::open_inner(root, label, biometric, false)
+    }
+
+    /// Open a fresh initialization key and delete it if backend validation
+    /// fails after the platform has already created it.
+    pub(crate) fn create(root: &Path, label: &str, biometric: bool) -> Result<Self> {
+        Self::open_inner(root, label, biometric, true)
+    }
+
+    fn open_inner(
+        root: &Path,
+        label: &str,
+        biometric: bool,
+        delete_on_validation_error: bool,
+    ) -> Result<Self> {
         let keys_dir = root.join(KEYS_DIRECTORY);
         let mut config = EnclaveConfig::new(APP_NAME, label);
         config.keys_dir = Some(keys_dir.clone());
@@ -56,12 +71,29 @@ impl PlatformProtector {
         // the hardware-enforced key-use policy and treats modern Hello prompt
         // behavior as a native release-acceptance requirement.
         let handle = create_encryptor(&config).map_err(map_hardware_error)?;
-        let backend = verify_hardware_backend(&handle, &keys_dir, label)?;
+        let backend = match verify_hardware_backend(&handle, &keys_dir, label) {
+            Ok(backend) => backend,
+            Err(error) => {
+                // `create_encryptor` creates or opens the key eagerly. If
+                // validation fails, this initialization attempt must not
+                // strand either native key material or its local metadata.
+                if delete_on_validation_error {
+                    let _ = handle.delete_key(label);
+                }
+                return Err(error);
+            }
+        };
         Ok(Self {
             handle,
             label: label.to_owned(),
             backend,
         })
+    }
+
+    pub(crate) fn delete(&self) -> Result<()> {
+        self.handle
+            .delete_key(&self.label)
+            .map_err(map_hardware_error)
     }
 }
 
