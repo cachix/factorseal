@@ -1,71 +1,119 @@
 [package]
 name = "factorseal"
-description = "A hardware-bound local keyring designed to require two-factor authentication"
+description = "A hardware-bound vault with a keyring interface and command-line access"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 license = "Apache-2.0"
 repository = "https://github.com/factorseal/factorseal"
 
 [features]
-default = ["cli", "hardware", "keyring", "secret-service"]
-cli = ["dep:clap", "dep:directories", "dep:rpassword"]
-hardware = ["dep:hardware-enclave"]
-keyring = ["dep:keyring-core"]
-password = ["dep:argon2"]
-secret-service = [
-    "cli",
-    "hardware",
-    "dep:aes",
-    "dep:cbc",
-    "dep:dbus",
-    "dep:dbus-crossroads",
-    "dep:hkdf",
-    "dep:num-bigint",
+default = ["vault", "cli", "hardware"]
+vault-client = ["dep:interprocess"]
+vault-store = [
+    "dep:automerge",
+    "dep:chacha20poly1305",
+    "dep:ed25519-dalek",
+    "dep:fs2",
+    "dep:tokio",
+    "dep:turso",
 ]
-yubikey = ["hardware", "dep:signature", "dep:yubikey"]
+# The legacy full desktop vault feature remains the default and retains its
+# public API. Mobile embedders use `vault-store` + `key-protection` instead.
+vault = [
+    "vault-client",
+    "vault-store",
+    "dep:block2",
+    "dep:ctrlc",
+    "dep:dbus",
+    "dep:nix",
+    "dep:nt-token",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+    "dep:sysinfo",
+    "dep:widestring",
+    "dep:windows",
+]
+cli = ["dep:clap", "dep:directories", "dep:rpassword"]
+# Portable key nesting and injected key protection. This deliberately does not
+# select the desktop-only `hardware-enclave` adapter.
+key-protection = ["dep:argon2", "dep:chacha20poly1305", "dep:ed25519-dalek"]
+hardware = ["key-protection", "dep:hardware-enclave"]
 
 [[bin]]
 name = "factorseal"
 path = "src/bin/factorseal.rs"
-required-features = ["cli"]
+required-features = ["vault", "cli", "hardware"]
 
 [dependencies]
 argon2 = { version = "0.5.3", optional = true }
-aes = { version = "0.8.4", optional = true }
+automerge = { version = "0.11.0", optional = true }
 base64 = "0.22.1"
-cbc = { version = "0.1.2", features = ["alloc", "block-padding"], optional = true }
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = { version = "0.10.1", optional = true }
 clap = { version = "4.5.41", features = ["derive", "env"], optional = true }
+ctrlc = { version = "3.5.1", features = ["termination"], optional = true }
 directories = { version = "6.0.0", optional = true }
+ed25519-dalek = { version = "3.0.0", optional = true }
 getrandom = "0.3.3"
+fs2 = { version = "0.4.3", optional = true }
 hardware-enclave = { version = "0.2.10", default-features = false, features = ["encryption", "linux-tpm"], optional = true }
 hex = "0.4.3"
-hkdf = { version = "0.12.4", optional = true }
-keyring-core = { version = "1.0.0", optional = true }
-num-bigint = { version = "0.4.6", optional = true }
 rpassword = { version = "7.4.0", optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"
 sha2 = "0.10.9"
-signature = { version = "2.2.0", optional = true }
-tempfile = "3.20.0"
 thiserror = "2.0.12"
-yubikey = { version = "0.8.0", optional = true }
+tokio = { version = "1.47.1", features = ["rt", "sync"], optional = true }
+turso = { version = "0.8.0-pre.4", default-features = false, optional = true }
 zeroize = "1.8.1"
+
+[dev-dependencies]
+tempfile = "3.20.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = { version = "0.9.12", optional = true }
-dbus-crossroads = { version = "0.5.3", optional = true }
+nix = { version = "0.31.3", features = ["socket", "user"], optional = true }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-dbus-secret-service = { version = "4.1.0", features = ["crypto-rust"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", optional = true }
+nix = { version = "0.31.3", features = ["socket", "user"], optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "block2"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDate", "NSNotification", "NSOperation", "NSRunLoop", "NSString", "block2"], optional = true }
+sysinfo = { version = "0.37.2", default-features = false, features = ["system"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+interprocess = { version = "2.4.2", optional = true }
+nt-token = { version = "0.5.0", optional = true }
+sysinfo = { version = "0.37.2", default-features = false, features = ["system"], optional = true }
+widestring = { version = "1.2.1", optional = true }
+windows = { version = "0.61.3", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 doc_markdown = "allow"
 missing_errors_doc = "allow"
+
+[profile.test]
+debug = 0
+
+# `create_encryptor` reported static platform detection instead of the backend
+# the storage initialized, so a Linux TPM key came back as `Keyring`. This is our
+# branch behind godaddy/hardware-enclave#208; Cargo.lock pins the exact commit.
+# Drop the patch once an upstream release carries the fix.
+[patch.crates-io]
+hardware-enclave = { git = "https://github.com/domenkozar/hardware-enclave", branch = "fix/encryptor-reports-initialized-backend" }

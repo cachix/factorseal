@@ -1,42 +1,71 @@
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::fs;
+use std::io::{IsTerminal as _, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-#[cfg(all(target_os = "linux", feature = "secret-service"))]
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
-use factorseal::{CredentialOptions, Error as VaultError, FactorKind, UnlockedVault, Vault};
-#[cfg(all(target_os = "linux", feature = "secret-service"))]
-use factorseal::{SecretServiceError, SecretServiceOptions, serve_secret_service};
+use factorseal::{
+    CallerIdentity, GrantPermission, Keyring, KeyringError, NativeVaultClient, UnsealFactor,
+    UnsealLeasePolicy, Vault, VaultAction, VaultClient, VaultError, VaultMetadata, VaultRequest,
+    VaultResponseBody, VaultResponseErrorCode, VaultService, VaultStore, WireSecretAddress,
+};
+#[cfg(target_os = "linux")]
+use factorseal::{
+    LinuxVaultClient, LinuxVaultOptions, linux_caller_identity_for_executable, serve_linux_vault,
+};
+#[cfg(target_os = "macos")]
+use factorseal::{
+    MacosVaultClient, MacosVaultOptions, macos_caller_identity_for_executable, serve_macos_vault,
+};
+#[cfg(target_os = "windows")]
+use factorseal::{
+    WindowsVaultClient, WindowsVaultOptions, serve_windows_vault,
+    windows_caller_identity_for_executable,
+};
 use serde::Serialize;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
-const MAX_SECRET_BYTES: u64 = 64 * 1024 * 1024;
-#[cfg(any(feature = "password", feature = "yubikey"))]
-const MAX_AUTH_INPUT_BYTES: u64 = 64 * 1024;
+const MAX_FACTOR_BYTES: u64 = 64 * 1024;
+const MAX_KEYRING_VALUE_BYTES: u64 = 64 * 1024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const DEFAULT_UNIX_SOCKET: &str = "factorseal.sock";
+const SECRETSPEC_CACHE_NAMESPACE: &[u8] = b"secretspec-cache/v1";
+const KEYRING_NAMESPACE: &[u8] = b"factorseal/keyring/v1";
+const KEYRING_PERMISSIONS: [GrantPermission; 3] = [
+    GrantPermission::Get,
+    GrantPermission::Put,
+    GrantPermission::Delete,
+];
 
 #[derive(Debug, Parser)]
 #[command(
     name = "factorseal",
     version,
-    about = "A hardware-bound local keyring designed to require two-factor authentication"
+    about = "Hardware-bound vault with a keyring interface and command-line access"
 )]
 struct Cli {
-    /// Vault directory. Defaults to the platform user-data directory.
-    #[arg(long, global = true, env = "FACTORSEAL_VAULT")]
-    vault: Option<PathBuf>,
+    /// Vault directory. Defaults to platform-local user data.
+    #[arg(long, global = true, env = "FACTORSEAL_ROOT")]
+    root: Option<PathBuf>,
 
-    /// Read the YubiKey PIN from a file instead of prompting.
-    #[cfg(feature = "yubikey")]
-    #[arg(long, global = true, env = "FACTORSEAL_YUBIKEY_PIN_FILE")]
-    yubikey_pin_file: Option<PathBuf>,
+    /// Local service socket or named pipe override.
+    #[arg(long, global = true, env = "FACTORSEAL_SOCKET")]
+    socket: Option<PathBuf>,
 
-    /// Read a legacy vault password from a file instead of prompting.
-    #[cfg(feature = "password")]
-    #[arg(long, global = true, env = "FACTORSEAL_PASSWORD_FILE")]
+    /// Read the nested factor from a private regular file.
+    #[arg(long, global = true)]
     password_file: Option<PathBuf>,
+
+    /// Run this helper to obtain the nested factor and read it from the
+    /// helper's standard output. Packages use it to prompt without a
+    /// controlling terminal; the prompt text is passed as the one argument.
+    #[arg(long, global = true, env = "FACTORSEAL_ASKPASS")]
+    askpass: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -44,169 +73,126 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a vault with platform hardware and selected factors.
+    /// Create and seal a hardware-bound vault.
     Init {
-        /// Require platform biometric verification for hardware-key use.
+        /// Require platform biometric verification when supported by key use.
         #[arg(long)]
         biometric: bool,
-
-        /// Use the required YubiKey PIV second factor in slot 9d.
-        #[cfg(feature = "yubikey")]
-        #[arg(long)]
-        yubikey: bool,
-
-        /// Create a legacy non-2FA password vault for development.
-        #[cfg(feature = "password")]
-        #[arg(long)]
-        password: bool,
     },
 
-    /// Store or replace a credential, reading its value from a file or stdin.
-    Set {
-        service: String,
-        account: String,
+    /// Unseal the vault service until its lease ends.
+    Unseal {
+        /// Idle seconds before hardware-unwrapped keys are discarded.
+        #[arg(long, default_value_t = 300)]
+        idle_seconds: u64,
 
-        /// Secret input file. Standard input is used when omitted.
-        #[arg(short, long)]
-        input: Option<PathBuf>,
-
-        /// Unix timestamp after which the credential is evicted.
-        #[arg(long, conflicts_with_all = ["retention_seconds", "no_eviction"])]
-        evict_at: Option<u64>,
-
-        /// Seconds to retain the credential after this write.
-        #[arg(long, conflicts_with_all = ["evict_at", "no_eviction"])]
-        retention_seconds: Option<u64>,
-
-        /// Clear any existing credential eviction deadline.
-        #[arg(long, conflicts_with_all = ["evict_at", "retention_seconds"])]
-        no_eviction: bool,
+        /// Absolute maximum seconds for one unseal lease.
+        #[arg(long, default_value_t = 28_800)]
+        maximum_seconds: u64,
     },
 
-    /// Retrieve a credential.
-    Get {
-        service: String,
-        account: String,
-
-        /// Plaintext output file. Standard output is used when omitted.
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-    },
-
-    /// Delete a credential.
-    Delete { service: String, account: String },
-
-    /// Show non-secret vault metadata without unlocking.
+    /// Print validated non-secret vault metadata without unsealing.
     Status,
 
-    /// Provide FactorSeal through the Linux Secret Service D-Bus API.
-    #[cfg(all(target_os = "linux", feature = "secret-service"))]
-    Serve {
-        /// Seconds an application may reuse an item-specific access grant.
-        #[arg(
-            long,
-            visible_alias = "approval-seconds",
-            default_value_t = 900,
-            env = "FACTORSEAL_GRANT_SECONDS"
-        )]
-        grant_seconds: u64,
+    /// Store or replace one value in the durable local keyring.
+    Set {
+        /// Stable name used to retrieve the value.
+        item: String,
 
-        /// Idle seconds before the provider wipes the unlocked vault key and exits.
-        #[arg(long, default_value_t = 1800, env = "FACTORSEAL_VAULT_IDLE_SECONDS")]
-        vault_idle_seconds: u64,
-    },
-
-    /// Add a YubiKey as a required second factor.
-    #[cfg(feature = "yubikey")]
-    AddYubikey,
-
-    /// Downgrade to transitional, non-2FA hardware-only compatibility.
-    #[cfg(feature = "yubikey")]
-    RemoveYubikey,
-
-    /// Rewrap a legacy vault key under a new password.
-    #[cfg(feature = "password")]
-    ChangePassword {
-        /// Read the new password from a file instead of prompting.
+        /// Optional field within the named item.
         #[arg(long)]
-        new_password_file: Option<PathBuf>,
+        field: Option<String>,
+
+        /// Read the value from this file instead of prompting or standard input.
+        #[arg(long)]
+        value_file: Option<PathBuf>,
     },
 
-    /// Replace a legacy password with transitional, non-2FA hardware binding.
-    #[cfg(feature = "password")]
-    MigratePassword,
-}
+    /// Write one keyring value to standard output without adding a newline.
+    Get {
+        item: String,
 
-impl Cli {
-    fn unlock_vault(&self, path: &Path) -> Result<UnlockedVault, CliError> {
-        let info = Vault::info(path)?;
-        match info.unlock_method.as_str() {
-            "hardware" | "hardware+biometric" => Ok(Vault::unlock(path)?),
-            "hardware+yubikey" | "hardware+biometric+yubikey" => {
-                #[cfg(feature = "yubikey")]
-                {
-                    let pin = read_yubikey_pin(self.yubikey_pin_file.as_deref())?;
-                    Ok(Vault::unlock_with_yubikey(path, &pin)?)
-                }
-                #[cfg(not(feature = "yubikey"))]
-                {
-                    Err(VaultError::YubiKeyFeatureDisabled.into())
-                }
-            }
-            "password" => {
-                #[cfg(feature = "password")]
-                {
-                    let password = read_current_password(self.password_file.as_deref())?;
-                    Ok(Vault::unlock_with_password(path, &password)?)
-                }
-                #[cfg(not(feature = "password"))]
-                {
-                    Err(VaultError::PasswordFeatureDisabled.into())
-                }
-            }
-            method => Err(VaultError::InvalidMetadata(format!(
-                "unsupported unlock method `{method}`"
-            ))
-            .into()),
-        }
-    }
+        #[arg(long)]
+        field: Option<String>,
+    },
+
+    /// Delete one value from the durable local keyring.
+    Delete {
+        item: String,
+
+        #[arg(long)]
+        field: Option<String>,
+    },
+
+    /// Reauthorize this exact Factorseal executable after an upgrade.
+    GrantCli,
+
+    /// Authorize one exact SecretSpec or embedding application executable.
+    GrantSecretspec {
+        executable: PathBuf,
+
+        /// Optional lifetime for the durable grant.
+        #[arg(long)]
+        expires_in_seconds: Option<u64>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
-    #[error("{0}")]
+    #[error(transparent)]
     Vault(#[from] VaultError),
 
-    #[error("could not determine the platform user-data directory; pass --vault")]
-    NoDefaultVault,
+    #[error(transparent)]
+    Keyring(#[from] KeyringError),
 
-    #[cfg(feature = "password")]
-    #[error("passwords do not match")]
-    PasswordMismatch,
+    #[error("could not determine the platform user-data directory; pass --root")]
+    NoDefaultRoot,
 
-    #[cfg(feature = "password")]
-    #[error("legacy --password cannot be combined with another factor")]
-    ConflictingInitFactors,
+    #[error("the requested lifetime is outside the supported range")]
+    LifetimeOverflow,
 
-    #[error("I/O error for `{path}`: {source}")]
-    Io {
-        path: String,
-        #[source]
-        source: io::Error,
-    },
+    #[error("password input failed: {0}")]
+    Password(String),
+
+    #[error("askpass helper failed: {0}")]
+    Askpass(String),
+
+    #[error("keyring value input failed: {0}")]
+    KeyringInput(String),
+
+    #[error("keyring entry was not found")]
+    KeyringEntryNotFound,
+
+    #[error("could not identify the Factorseal executable: {0}")]
+    CurrentExecutable(String),
+
+    #[error(
+        "no way to obtain the Factorseal factor: there is no controlling \
+         terminal, and neither --askpass nor --password-file was given"
+    )]
+    NoFactorSource,
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[error("this platform transport has not been implemented")]
+    UnsupportedPlatform,
 
     #[error("JSON serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+}
 
-    #[cfg(all(target_os = "linux", feature = "secret-service"))]
-    #[error(transparent)]
-    SecretService(#[from] SecretServiceError),
-
-    #[error("refusing to read more than {maximum} bytes from `{path}`")]
-    InputTooLarge { path: String, maximum: u64 },
-
-    #[error("credential retention deadline is outside the supported range")]
-    EvictionOverflow,
+#[derive(Serialize)]
+struct Status<'a> {
+    path: String,
+    vault_id: String,
+    device_key_id: String,
+    public_signing_key: String,
+    actor_id: String,
+    platform: &'a str,
+    hardware_backend: &'a str,
+    nested_factor: &'a str,
+    key_epoch: u64,
+    created_at: u64,
+    state: &'static str,
 }
 
 fn main() {
@@ -216,355 +202,508 @@ fn main() {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn run(cli: Cli) -> Result<(), CliError> {
-    let vault_path = resolve_vault_path(cli.vault.as_deref())?;
-    match &cli.command {
-        Command::Init { .. } => init_vault_from_cli(&cli, &vault_path),
-        Command::Set {
-            service,
-            account,
-            input,
-            evict_at,
-            retention_seconds,
-            no_eviction,
-        } => {
-            let vault = cli.unlock_vault(&vault_path)?;
-            let secret = Zeroizing::new(read_input(input.as_deref(), MAX_SECRET_BYTES)?);
-            if evict_at.is_some() || retention_seconds.is_some() || *no_eviction {
-                vault.set_with_options(
-                    service,
-                    account,
-                    &secret,
-                    CredentialOptions {
-                        evict_at: if *no_eviction {
-                            None
-                        } else {
-                            eviction_deadline(*evict_at, *retention_seconds)?
-                        },
-                    },
-                )?;
-            } else {
-                vault.set(service, account, &secret)?;
-            }
-            Ok(())
-        }
-        Command::Get {
-            service,
-            account,
-            output,
-        } => {
-            let vault = cli.unlock_vault(&vault_path)?;
-            let secret = vault.get(service, account)?;
-            write_output(output.as_deref(), &secret)
-        }
-        Command::Delete { service, account } => {
-            let vault = cli.unlock_vault(&vault_path)?;
-            vault.delete(service, account)?;
-            Ok(())
-        }
-        Command::Status => show_status(&vault_path),
-        #[cfg(all(target_os = "linux", feature = "secret-service"))]
-        Command::Serve {
-            grant_seconds,
-            vault_idle_seconds,
-        } => serve_vault(
-            cli.unlock_vault(&vault_path)?,
-            *grant_seconds,
-            *vault_idle_seconds,
+    let root = resolve_root(cli.root.as_deref())?;
+    let socket = cli.socket.as_deref();
+    let factor = FactorSource {
+        password_file: cli.password_file.as_deref(),
+        askpass: cli.askpass.as_deref(),
+    };
+    match cli.command {
+        Command::Init { biometric } => initialize(&root, biometric, factor),
+        Command::Unseal {
+            idle_seconds,
+            maximum_seconds,
+        } => run_vault(
+            &root,
+            socket,
+            factor,
+            UnsealLeasePolicy {
+                idle_timeout: Duration::from_secs(idle_seconds),
+                maximum_lifetime: Duration::from_secs(maximum_seconds),
+            },
         ),
-        #[cfg(feature = "yubikey")]
-        Command::AddYubikey => {
-            let pin = read_yubikey_pin(cli.yubikey_pin_file.as_deref())?;
-            Vault::add_yubikey(&vault_path, &pin)?;
-            Ok(())
-        }
-        #[cfg(feature = "yubikey")]
-        Command::RemoveYubikey => {
-            let pin = read_yubikey_pin(cli.yubikey_pin_file.as_deref())?;
-            Vault::remove_yubikey(&vault_path, &pin)?;
-            eprintln!(
-                "Warning: this hardware-only vault does not meet FactorSeal's 2FA design requirement."
-            );
-            Ok(())
-        }
-        #[cfg(feature = "password")]
-        Command::ChangePassword { new_password_file } => {
-            let current = read_current_password(cli.password_file.as_deref())?;
-            let new = read_new_password(new_password_file.as_deref())?;
-            Vault::change_password(&vault_path, &current, &new)?;
-            Ok(())
-        }
-        #[cfg(feature = "password")]
-        Command::MigratePassword => {
-            let password = read_current_password(cli.password_file.as_deref())?;
-            Vault::migrate_password_to_hardware(&vault_path, &password)?;
-            eprintln!(
-                "Warning: this hardware-only vault does not meet FactorSeal's 2FA design requirement."
-            );
-            Ok(())
-        }
+        Command::Status => show_status(&root, socket),
+        Command::Set {
+            item,
+            field,
+            value_file,
+        } => set_keyring_value(&root, socket, item, field, value_file.as_deref()),
+        Command::Get { item, field } => get_keyring_value(&root, socket, item, field),
+        Command::Delete { item, field } => delete_keyring_value(&root, socket, item, field),
+        Command::GrantCli => grant_cli(&root, factor),
+        Command::GrantSecretspec {
+            executable,
+            expires_in_seconds,
+        } => grant_secretspec(&root, &executable, expires_in_seconds, factor),
     }
 }
 
-fn init_vault_from_cli(cli: &Cli, path: &Path) -> Result<(), CliError> {
-    let Command::Init {
-        biometric,
-        #[cfg(feature = "yubikey")]
-        yubikey,
-        #[cfg(feature = "password")]
-        password,
-    } = &cli.command
-    else {
-        unreachable!("init_vault_from_cli is only called for Command::Init");
+fn initialize(root: &Path, biometric: bool, factor: FactorSource<'_>) -> Result<(), CliError> {
+    let password = read_factor(factor, true)?;
+    let unsealed = Vault::create(root, UnsealFactor::Password(&password), biometric)?;
+    let device = unsealed.public().clone();
+    // The vault metadata is already on disk, and `create` refuses to run again while it
+    // is there. Undo what this command wrote so `init` can simply be retried
+    // rather than leaving a root nothing can finish or open.
+    let store = match VaultStore::open(root, unsealed) {
+        Ok(store) => store,
+        Err(open_error) => {
+            return match Vault::discard_initialization(root) {
+                Ok(()) => Err(open_error.into()),
+                Err(cleanup_error) => Err(VaultError::Protection(format!(
+                    "{open_error}; initialization rollback failed: {cleanup_error}"
+                ))
+                .into()),
+            };
+        }
     };
-    init_vault(
-        path,
-        *biometric,
-        #[cfg(feature = "yubikey")]
-        *yubikey,
-        #[cfg(feature = "password")]
-        *password,
-        #[cfg(feature = "yubikey")]
-        cli.yubikey_pin_file.as_deref(),
-        #[cfg(feature = "password")]
-        cli.password_file.as_deref(),
-    )
+    let now = unix_time()?;
+    let service = VaultService::new(store, now, UnsealLeasePolicy::default())?;
+    authorize_cli(&service, now)?;
+    service.seal()?;
+    println!(
+        "Initialized Factorseal vault {} at {} using {}",
+        device.vault_id(),
+        root.display(),
+        device.hardware_backend()
+    );
+    Ok(())
 }
 
-fn show_status(path: &Path) -> Result<(), CliError> {
-    let info = Vault::info(path)?;
+fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
+    let device = Vault::inspect(root)?;
+    let state = live_state(root, socket, &device);
     let status = Status {
-        path: info.path.display().to_string(),
-        version: info.version,
-        vault_id: info.vault_id,
-        unlock_method: info.unlock_method,
-        factors: info.factors,
-        hardware_backend: info.hardware_backend,
-        yubikey_serial: info.yubikey_serial,
-        state: "locked",
+        path: root.display().to_string(),
+        vault_id: device.vault_id().to_string(),
+        device_key_id: device.device_key_id().to_string(),
+        public_signing_key: hex::encode(device.public_signing_key()),
+        actor_id: hex::encode(device.actor_id()),
+        platform: device.platform(),
+        hardware_backend: device.hardware_backend(),
+        nested_factor: device.nested_factor().as_str(),
+        key_epoch: device.key_epoch(),
+        created_at: device.created_at(),
+        state,
     };
     println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
 }
 
-#[cfg(all(target_os = "linux", feature = "secret-service"))]
-fn serve_vault(
-    vault: UnlockedVault,
-    grant_seconds: u64,
-    vault_idle_seconds: u64,
-) -> Result<(), CliError> {
-    eprintln!("FactorSeal is providing org.freedesktop.secrets; approvals will appear here.");
-    serve_secret_service(
-        vault,
-        SecretServiceOptions {
-            grant_ttl: Duration::from_secs(grant_seconds),
-            vault_idle_timeout: Duration::from_secs(vault_idle_seconds),
+/// Ask the running agent which state this vault is in.
+///
+/// A `Status` answer is itself the proof of an unsealed vault: the action is
+/// served behind the live-state lock, so a sealed vault answers with the
+/// `Sealed` code and a vault with no agent cannot be reached at all. Anything
+/// else, including an agent serving a different vault, stays `unknown`.
+fn live_state(root: &Path, socket: Option<&Path>, device: &VaultMetadata) -> &'static str {
+    let Ok(request) = VaultRequest::new(VaultAction::Status) else {
+        return "unknown";
+    };
+    match native_client(root, socket).request(&request) {
+        Ok(response) => match response.result {
+            Ok(VaultResponseBody::Status {
+                vault_id,
+                device_key_id,
+                ..
+            }) if vault_id == device.vault_id().to_string()
+                && device_key_id == device.device_key_id().to_string() =>
+            {
+                "unsealed"
+            }
+            Err(error) if error.code == VaultResponseErrorCode::Sealed => "sealed",
+            _ => "unknown",
         },
+        Err(VaultError::AgentUnreachable(_)) => "sealed",
+        Err(_) => "unknown",
+    }
+}
+
+fn set_keyring_value(
+    root: &Path,
+    socket: Option<&Path>,
+    item: String,
+    field: Option<String>,
+    value_file: Option<&Path>,
+) -> Result<(), CliError> {
+    let value = read_keyring_value(value_file)?;
+    let client = native_client(root, socket);
+    client.set(
+        KEYRING_NAMESPACE,
+        &WireSecretAddress::new(item, field),
+        &value,
     )?;
     Ok(())
 }
 
-fn eviction_deadline(
-    evict_at: Option<u64>,
-    retention_seconds: Option<u64>,
-) -> Result<Option<u64>, CliError> {
-    if let Some(evict_at) = evict_at {
-        return Ok(Some(evict_at));
-    }
-    let Some(retention_seconds) = retention_seconds else {
-        return Ok(None);
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| CliError::EvictionOverflow)?
-        .as_secs();
-    now.checked_add(retention_seconds)
-        .map(Some)
-        .ok_or(CliError::EvictionOverflow)
-}
-
-fn resolve_vault_path(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
-    if let Some(path) = explicit {
-        return Ok(path.to_owned());
-    }
-    let directories =
-        ProjectDirs::from("dev", "FactorSeal", "FactorSeal").ok_or(CliError::NoDefaultVault)?;
-    Ok(directories.data_local_dir().join("vault"))
-}
-
-fn init_vault(
-    path: &Path,
-    biometric: bool,
-    #[cfg(feature = "yubikey")] yubikey: bool,
-    #[cfg(feature = "password")] password: bool,
-    #[cfg(feature = "yubikey")] yubikey_pin_file: Option<&Path>,
-    #[cfg(feature = "password")] password_file: Option<&Path>,
+fn get_keyring_value(
+    root: &Path,
+    socket: Option<&Path>,
+    item: String,
+    field: Option<String>,
 ) -> Result<(), CliError> {
-    #[cfg(feature = "password")]
-    if password && biometric {
-        return Err(CliError::ConflictingInitFactors);
-    }
-    #[cfg(all(feature = "password", feature = "yubikey"))]
-    if password && yubikey {
-        return Err(CliError::ConflictingInitFactors);
-    }
-    #[cfg(feature = "password")]
-    if password {
-        let password = read_new_password(password_file)?;
-        Vault::create_with_password(path, &password)?;
-        println!(
-            "Initialized legacy, non-2FA FactorSeal vault at {}",
-            path.display()
-        );
-        return Ok(());
-    }
-    #[cfg(feature = "yubikey")]
-    if yubikey {
-        let pin = read_yubikey_pin(yubikey_pin_file)?;
-        if biometric {
-            Vault::create_with_biometric_and_yubikey(path, &pin)?;
-            println!(
-                "Initialized biometric-gated hardware + YubiKey FactorSeal vault at {}",
-                path.display()
-            );
-        } else {
-            Vault::create_with_yubikey(path, &pin)?;
-            println!(
-                "Initialized hardware + YubiKey FactorSeal vault at {}",
-                path.display()
-            );
-        }
-        return Ok(());
-    }
-    if biometric {
-        Vault::create_with_biometric(path)?;
-        println!(
-            "Initialized biometric-gated hardware FactorSeal vault at {} (no independent second key share)",
-            path.display()
-        );
-    } else {
-        Vault::create(path)?;
-        println!(
-            "Initialized transitional hardware-only FactorSeal vault at {} (not design-compliant 2FA)",
-            path.display()
-        );
+    let client = native_client(root, socket);
+    let value = client.get(KEYRING_NAMESPACE, &WireSecretAddress::new(item, field))?;
+    let value = value.ok_or(CliError::KeyringEntryNotFound)?;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(value.expose())
+        .and_then(|()| stdout.flush())
+        .map_err(|error| CliError::KeyringInput(error.to_string()))
+}
+
+fn delete_keyring_value(
+    root: &Path,
+    socket: Option<&Path>,
+    item: String,
+    field: Option<String>,
+) -> Result<(), CliError> {
+    let client = native_client(root, socket);
+    let existed = client.delete(KEYRING_NAMESPACE, &WireSecretAddress::new(item, field))?;
+    if !existed {
+        return Err(CliError::KeyringEntryNotFound);
     }
     Ok(())
 }
 
-#[cfg(feature = "yubikey")]
-fn read_yubikey_pin(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliError> {
-    match path {
-        Some(path) => read_auth_file(path),
-        None => prompt_secret("YubiKey PIN: "),
-    }
+#[cfg(target_os = "linux")]
+fn native_client(root: &Path, socket: Option<&Path>) -> NativeVaultClient {
+    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
+    LinuxVaultClient::new(socket)
 }
 
-#[cfg(feature = "password")]
-fn read_current_password(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliError> {
-    match path {
-        Some(path) => read_auth_file(path),
-        None => prompt_secret("FactorSeal password: "),
-    }
+#[cfg(target_os = "macos")]
+fn native_client(root: &Path, socket: Option<&Path>) -> NativeVaultClient {
+    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
+    MacosVaultClient::new(socket)
 }
 
-#[cfg(feature = "password")]
-fn read_new_password(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliError> {
+#[cfg(target_os = "windows")]
+fn native_client(_root: &Path, socket: Option<&Path>) -> NativeVaultClient {
+    let pipe_name = socket.map_or_else(
+        || r"\\.\pipe\factorseal".to_owned(),
+        |path| path.to_string_lossy().into_owned(),
+    );
+    WindowsVaultClient::new(pipe_name)
+}
+
+fn read_keyring_value(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliError> {
+    let mut value = Zeroizing::new(Vec::new());
     if let Some(path) = path {
-        return read_auth_file(path);
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| CliError::KeyringInput(format!("{}: {error}", path.display())))?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_KEYRING_VALUE_BYTES {
+            return Err(CliError::KeyringInput(format!(
+                "{} must be a regular file no larger than 64 KiB",
+                path.display()
+            )));
+        }
+        fs::File::open(path)
+            .and_then(|mut file| file.read_to_end(&mut value))
+            .map_err(|error| CliError::KeyringInput(format!("{}: {error}", path.display())))?;
+    } else if std::io::stdin().is_terminal() {
+        value = rpassword::prompt_password("Keyring value: ")
+            .map(|secret| Zeroizing::new(secret.into_bytes()))
+            .map_err(|error| CliError::KeyringInput(error.to_string()))?;
+    } else {
+        std::io::stdin()
+            .lock()
+            .take(MAX_KEYRING_VALUE_BYTES + 1)
+            .read_to_end(&mut value)
+            .map_err(|error| CliError::KeyringInput(error.to_string()))?;
     }
-    let first = prompt_secret("New FactorSeal password: ")?;
-    let second = prompt_secret("Confirm FactorSeal password: ")?;
-    if *first != *second {
-        return Err(CliError::PasswordMismatch);
+    if value.is_empty() {
+        return Err(CliError::KeyringInput(
+            "the keyring value must not be empty".to_owned(),
+        ));
     }
-    Ok(first)
+    if value.len() as u64 > MAX_KEYRING_VALUE_BYTES {
+        return Err(CliError::KeyringInput(
+            "the keyring value must not exceed 64 KiB".to_owned(),
+        ));
+    }
+    Ok(value)
 }
 
-#[cfg(any(feature = "password", feature = "yubikey"))]
-fn prompt_secret(prompt: &str) -> Result<Zeroizing<Vec<u8>>, CliError> {
-    let value = rpassword::prompt_password(prompt).map_err(|source| CliError::Io {
-        path: "<terminal>".to_owned(),
-        source,
-    })?;
-    Ok(Zeroizing::new(value.into_bytes()))
+fn run_vault(
+    root: &Path,
+    socket: Option<&Path>,
+    factor: FactorSource<'_>,
+    policy: UnsealLeasePolicy,
+) -> Result<(), CliError> {
+    let password = read_factor(factor, false)?;
+    let device = Vault::inspect(root)?;
+    let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
+    let store = VaultStore::open(root, unsealed)?;
+    let service = Arc::new(VaultService::new(store, unix_time()?, policy)?);
+    serve_vault(&device, &service, root, socket)
 }
 
-#[cfg(any(feature = "password", feature = "yubikey"))]
-fn read_auth_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, CliError> {
-    let mut value = read_file(path, MAX_AUTH_INPUT_BYTES)?;
-    if value.last() == Some(&b'\n') {
-        value.pop();
-        if value.last() == Some(&b'\r') {
-            value.pop();
+#[cfg(target_os = "linux")]
+fn serve_vault(
+    _device: &VaultMetadata,
+    service: &Arc<VaultService>,
+    root: &Path,
+    socket: Option<&Path>,
+) -> Result<(), CliError> {
+    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
+    serve_linux_vault(service, &LinuxVaultOptions::new(socket))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn serve_vault(
+    _device: &VaultMetadata,
+    service: &Arc<VaultService>,
+    root: &Path,
+    socket: Option<&Path>,
+) -> Result<(), CliError> {
+    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
+    serve_macos_vault(service, &MacosVaultOptions::new(socket))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn serve_vault(
+    _device: &VaultMetadata,
+    service: &Arc<VaultService>,
+    _root: &Path,
+    socket: Option<&Path>,
+) -> Result<(), CliError> {
+    let pipe_name = socket.map_or_else(
+        || r"\\.\pipe\factorseal".to_owned(),
+        |path| path.to_string_lossy().into_owned(),
+    );
+    serve_windows_vault(service, &WindowsVaultOptions::new(pipe_name))?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn serve_vault(
+    _device: &VaultMetadata,
+    _service: &Arc<VaultService>,
+    _root: &Path,
+    _socket: Option<&Path>,
+) -> Result<(), CliError> {
+    Err(CliError::UnsupportedPlatform)
+}
+
+fn grant_secretspec(
+    root: &Path,
+    executable: &Path,
+    expires_in_seconds: Option<u64>,
+    factor: FactorSource<'_>,
+) -> Result<(), CliError> {
+    let now = unix_time()?;
+    let expires_at = expires_in_seconds
+        .map(|seconds| now.checked_add(seconds).ok_or(CliError::LifetimeOverflow))
+        .transpose()?;
+    let caller = caller_identity_for_executable(executable)?;
+    let password = read_factor(factor, false)?;
+    let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
+    let store = VaultStore::open(root, unsealed)?;
+    let service = VaultService::new(store, now, UnsealLeasePolicy::default())?;
+    service.authorize_cache_namespace(
+        &caller,
+        SECRETSPEC_CACHE_NAMESPACE,
+        [
+            GrantPermission::Get,
+            GrantPermission::Put,
+            GrantPermission::Delete,
+            GrantPermission::Clear,
+        ],
+        expires_at,
+        now,
+    )?;
+    service.seal()?;
+    println!(
+        "Authorized {} for the Factorseal SecretSpec cache",
+        caller.application_id()
+    );
+    Ok(())
+}
+
+fn grant_cli(root: &Path, factor: FactorSource<'_>) -> Result<(), CliError> {
+    let now = unix_time()?;
+    let password = read_factor(factor, false)?;
+    let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
+    let store = VaultStore::open(root, unsealed)?;
+    let service = VaultService::new(store, now, UnsealLeasePolicy::default())?;
+    authorize_cli(&service, now)?;
+    service.seal()?;
+    println!("Authorized this Factorseal CLI for the local keyring");
+    Ok(())
+}
+
+fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
+    let executable =
+        std::env::current_exe().map_err(|error| CliError::CurrentExecutable(error.to_string()))?;
+    let caller = caller_identity_for_executable(&executable)?;
+    service.authorize_namespace(&caller, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, None, now)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn caller_identity_for_executable(executable: &Path) -> Result<CallerIdentity, CliError> {
+    Ok(linux_caller_identity_for_executable(executable)?)
+}
+
+#[cfg(target_os = "macos")]
+fn caller_identity_for_executable(executable: &Path) -> Result<CallerIdentity, CliError> {
+    Ok(macos_caller_identity_for_executable(executable)?)
+}
+
+#[cfg(target_os = "windows")]
+fn caller_identity_for_executable(executable: &Path) -> Result<CallerIdentity, CliError> {
+    Ok(windows_caller_identity_for_executable(executable)?)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn caller_identity_for_executable(_executable: &Path) -> Result<CallerIdentity, CliError> {
+    Err(CliError::UnsupportedPlatform)
+}
+
+/// Where the vault obtains its nested factor.
+#[derive(Clone, Copy)]
+struct FactorSource<'a> {
+    password_file: Option<&'a Path>,
+    askpass: Option<&'a Path>,
+}
+
+/// Read the nested factor from an explicit file, an askpass helper, or the
+/// controlling terminal, in that order.
+///
+/// A package that starts the vault from launchd, a logon task, or a systemd
+/// unit has no terminal, so it must supply one of the first two. Failing with
+/// a terminal prompt error in that case would say nothing useful.
+fn read_factor(source: FactorSource<'_>, confirm: bool) -> Result<Zeroizing<Vec<u8>>, CliError> {
+    let secret = if let Some(path) = source.password_file {
+        read_password_file(path)?
+    } else if let Some(helper) = source.askpass {
+        let first = run_askpass(helper, "Factorseal password:")?;
+        if confirm {
+            let second = run_askpass(helper, "Confirm Factorseal password:")?;
+            if first.as_slice() != second.as_slice() {
+                return Err(CliError::Password("passwords do not match".to_owned()));
+            }
+        }
+        first
+    } else if std::io::stdin().is_terminal() {
+        let first = prompt_on_terminal("Factorseal password: ")?;
+        if confirm {
+            let second = prompt_on_terminal("Confirm Factorseal password: ")?;
+            if first.as_slice() != second.as_slice() {
+                return Err(CliError::Password("passwords do not match".to_owned()));
+            }
+        }
+        first
+    } else {
+        return Err(CliError::NoFactorSource);
+    };
+    if secret.is_empty() {
+        return Err(CliError::Password(
+            "the Factorseal factor must not be empty".to_owned(),
+        ));
+    }
+    Ok(secret)
+}
+
+fn prompt_on_terminal(label: &str) -> Result<Zeroizing<Vec<u8>>, CliError> {
+    rpassword::prompt_password(label)
+        .map(|secret| Zeroizing::new(secret.into_bytes()))
+        .map_err(|error| CliError::Password(error.to_string()))
+}
+
+/// Run the askpass helper and take its standard output as the factor.
+///
+/// The secret crosses a pipe rather than the filesystem, so it is never
+/// written next to the vault it protects.
+fn run_askpass(helper: &Path, label: &str) -> Result<Zeroizing<Vec<u8>>, CliError> {
+    let mut child = process::Command::new(helper)
+        .arg(label)
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::piped())
+        .spawn()
+        .map_err(|error| CliError::Askpass(format!("{}: {error}", helper.display())))?;
+    let mut secret = Zeroizing::new(Vec::new());
+    let read = child
+        .stdout
+        .take()
+        .ok_or_else(|| CliError::Askpass("helper produced no output stream".to_owned()))
+        .and_then(|mut stdout| {
+            (&mut stdout)
+                .take(MAX_FACTOR_BYTES)
+                .read_to_end(&mut secret)
+                .map_err(|error| CliError::Askpass(error.to_string()))
+        });
+    let status = child
+        .wait()
+        .map_err(|error| CliError::Askpass(error.to_string()))?;
+    read?;
+    if !status.success() {
+        return Err(CliError::Askpass(format!(
+            "{} exited without providing a factor",
+            helper.display()
+        )));
+    }
+    strip_one_line_ending(&mut secret);
+    Ok(secret)
+}
+
+fn strip_one_line_ending(bytes: &mut Zeroizing<Vec<u8>>) {
+    if bytes.ends_with(b"\r\n") {
+        let new_length = bytes.len() - 2;
+        bytes.truncate(new_length);
+    } else if bytes.ends_with(b"\n") {
+        let new_length = bytes.len() - 1;
+        bytes.truncate(new_length);
+    }
+}
+
+fn read_password_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, CliError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| CliError::Password(format!("{}: {error}", path.display())))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_FACTOR_BYTES {
+        return Err(CliError::Password(format!(
+            "{} must be a regular file no larger than 64 KiB",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(CliError::Password(format!(
+                "{} is accessible by group or other users (mode {mode:o})",
+                path.display()
+            )));
         }
     }
-    Ok(Zeroizing::new(value))
-}
-
-fn read_input(path: Option<&Path>, maximum: u64) -> Result<Vec<u8>, CliError> {
-    match path {
-        Some(path) => read_file(path, maximum),
-        None => read_limited(io::stdin().lock(), "<stdin>", maximum),
-    }
-}
-
-fn read_file(path: &Path, maximum: u64) -> Result<Vec<u8>, CliError> {
-    let file = File::open(path).map_err(|source| CliError::Io {
-        path: path.display().to_string(),
-        source,
-    })?;
-    read_limited(file, &path.display().to_string(), maximum)
-}
-
-fn read_limited(reader: impl Read, path: &str, maximum: u64) -> Result<Vec<u8>, CliError> {
-    let mut bytes = Vec::new();
-    reader
-        .take(maximum + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| CliError::Io {
-            path: path.to_owned(),
-            source,
-        })?;
-    if bytes.len() as u64 > maximum {
-        return Err(CliError::InputTooLarge {
-            path: path.to_owned(),
-            maximum,
-        });
-    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(metadata.len()).unwrap_or(64 * 1024),
+    ));
+    fs::File::open(path)
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|error| CliError::Password(format!("{}: {error}", path.display())))?;
+    strip_one_line_ending(&mut bytes);
     Ok(bytes)
 }
 
-fn write_output(path: Option<&Path>, bytes: &[u8]) -> Result<(), CliError> {
-    if let Some(path) = path {
-        fs::write(path, bytes).map_err(|source| CliError::Io {
-            path: path.display().to_string(),
-            source,
-        })
-    } else {
-        let mut stdout = io::stdout().lock();
-        stdout.write_all(bytes).map_err(|source| CliError::Io {
-            path: "<stdout>".to_owned(),
-            source,
-        })?;
-        stdout.flush().map_err(|source| CliError::Io {
-            path: "<stdout>".to_owned(),
-            source,
-        })
+fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
+    if let Some(path) = explicit {
+        return Ok(path.to_owned());
     }
+    let directories =
+        ProjectDirs::from("dev", "Factorseal", "Factorseal").ok_or(CliError::NoDefaultRoot)?;
+    Ok(directories.data_local_dir().to_owned())
 }
 
-#[derive(Serialize)]
-struct Status {
-    path: String,
-    version: u32,
-    vault_id: String,
-    unlock_method: String,
-    factors: Vec<FactorKind>,
-    hardware_backend: Option<String>,
-    yubikey_serial: Option<u32>,
-    state: &'static str,
+fn unix_time() -> Result<u64, VaultError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|error| VaultError::Protocol(error.to_string()))
 }
 
 #[cfg(test)]
@@ -572,54 +711,199 @@ mod tests {
     use super::*;
 
     #[test]
-    fn init_accepts_biometric_factor_selection() {
-        let cli = Cli::try_parse_from(["factorseal", "init", "--biometric"]).unwrap();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn live_endpoint_uses_the_factorseal_basename() {
+        assert_eq!(DEFAULT_UNIX_SOCKET, "factorseal.sock");
+    }
+
+    /// One test writing a helper script while another forks makes the child
+    /// inherit the open write handle, and the exec of that script then fails
+    /// with ETXTBSY. Serializing helper use removes the overlap.
+    #[cfg(unix)]
+    static HELPER_EXEC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    fn askpass_helper(directory: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = directory.join("askpass");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn lock_helper_exec() -> std::sync::MutexGuard<'static, ()> {
+        HELPER_EXEC
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn askpass_output_is_the_factor_without_its_line_ending() {
+        let _serialized = lock_helper_exec();
+        let directory = tempfile::tempdir().unwrap();
+        let helper = askpass_helper(directory.path(), "printf 'correct horse\\n'");
+
+        let source = FactorSource {
+            password_file: None,
+            askpass: Some(&helper),
+        };
+        assert_eq!(
+            read_factor(source, false).unwrap().as_slice(),
+            b"correct horse"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn askpass_receives_the_prompt_and_rejects_a_mismatched_confirmation() {
+        let _serialized = lock_helper_exec();
+        let directory = tempfile::tempdir().unwrap();
+        // Echo the prompt back, so the two confirmation prompts disagree.
+        let helper = askpass_helper(directory.path(), "printf '%s' \"$1\"");
+
+        let source = FactorSource {
+            password_file: None,
+            askpass: Some(&helper),
+        };
+        assert!(read_factor(source, true).is_err());
+        assert_eq!(
+            read_factor(source, false).unwrap().as_slice(),
+            b"Factorseal password:"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_askpass_helper_does_not_yield_a_factor() {
+        let _serialized = lock_helper_exec();
+        let directory = tempfile::tempdir().unwrap();
+        let helper = askpass_helper(directory.path(), "exit 1");
+
+        let source = FactorSource {
+            password_file: None,
+            askpass: Some(&helper),
+        };
+        assert!(matches!(
+            read_factor(source, false),
+            Err(CliError::Askpass(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_factor_is_rejected() {
+        let _serialized = lock_helper_exec();
+        let directory = tempfile::tempdir().unwrap();
+        let helper = askpass_helper(directory.path(), "printf ''");
+
+        let source = FactorSource {
+            password_file: None,
+            askpass: Some(&helper),
+        };
+        assert!(read_factor(source, false).is_err());
+    }
+
+    #[test]
+    fn an_explicit_file_takes_precedence_over_the_helper() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("factor");
+        fs::write(&file, "from the file\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let source = FactorSource {
+            password_file: Some(&file),
+            askpass: Some(Path::new("/nonexistent/askpass")),
+        };
+        assert_eq!(
+            read_factor(source, false).unwrap().as_slice(),
+            b"from the file"
+        );
+    }
+
+    #[test]
+    fn askpass_is_configurable_through_the_environment() {
+        let cli =
+            Cli::try_parse_from(["factorseal", "--askpass", "/usr/bin/true", "unseal"]).unwrap();
+        assert_eq!(cli.askpass.unwrap(), PathBuf::from("/usr/bin/true"));
+    }
+
+    #[test]
+    fn unseal_policy_and_root_are_explicitly_configurable() {
+        let cli = Cli::try_parse_from([
+            "factorseal",
+            "--root",
+            "/tmp/factorseal-test",
+            "unseal",
+            "--idle-seconds",
+            "10",
+            "--maximum-seconds",
+            "20",
+        ])
+        .unwrap();
+        assert_eq!(cli.root.unwrap(), PathBuf::from("/tmp/factorseal-test"));
+        let Command::Unseal {
+            idle_seconds,
+            maximum_seconds,
+            ..
+        } = cli.command
+        else {
+            panic!("expected unseal command");
+        };
+        assert_eq!(idle_seconds, 10);
+        assert_eq!(maximum_seconds, 20);
+    }
+
+    #[test]
+    fn keyring_commands_accept_item_field_and_service_override() {
+        let cli = Cli::try_parse_from([
+            "factorseal",
+            "--socket",
+            "/tmp/factorseal.sock",
+            "set",
+            "github",
+            "--field",
+            "token",
+            "--value-file",
+            "/tmp/value",
+        ])
+        .unwrap();
+        assert_eq!(cli.socket.unwrap(), PathBuf::from("/tmp/factorseal.sock"));
+        let Command::Set {
+            item,
+            field,
+            value_file,
+        } = cli.command
+        else {
+            panic!("expected set command");
+        };
+        assert_eq!(item, "github");
+        assert_eq!(field.as_deref(), Some("token"));
+        assert_eq!(value_file.unwrap(), PathBuf::from("/tmp/value"));
+
+        let cli = Cli::try_parse_from(["factorseal", "get", "github", "--field", "token"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Init {
-                biometric: true,
-                ..
-            }
+            Command::Get { item, field }
+                if item == "github" && field.as_deref() == Some("token")
         ));
     }
 
     #[test]
-    fn limited_reads_accept_the_boundary_and_reject_more() {
-        assert_eq!(read_limited(&b"four"[..], "memory", 4).unwrap(), b"four");
-        assert!(matches!(
-            read_limited(&b"five!"[..], "memory", 4),
-            Err(CliError::InputTooLarge { maximum: 4, .. })
-        ));
-    }
-
-    #[test]
-    fn eviction_deadlines_accept_absolute_and_relative_values() {
-        assert_eq!(eviction_deadline(Some(42), None).unwrap(), Some(42));
-        assert_eq!(eviction_deadline(None, None).unwrap(), None);
-
-        let before = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let deadline = eviction_deadline(None, Some(60)).unwrap().unwrap();
-        let after = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        assert!(deadline >= before + 60);
-        assert!(deadline <= after + 60);
-    }
-
-    #[cfg(any(feature = "password", feature = "yubikey"))]
-    #[test]
-    fn auth_files_strip_one_line_ending() {
+    fn keyring_value_files_preserve_exact_binary_bytes() {
         let directory = tempfile::tempdir().unwrap();
-        let crlf = directory.path().join("crlf");
-        let repeated = directory.path().join("repeated");
-        fs::write(&crlf, b"secret\r\n").unwrap();
-        fs::write(&repeated, b"secret\n\n").unwrap();
+        let path = directory.path().join("value");
+        fs::write(&path, b"secret\0with\nbytes").unwrap();
 
-        assert_eq!(read_auth_file(&crlf).unwrap().as_slice(), b"secret");
-        assert_eq!(read_auth_file(&repeated).unwrap().as_slice(), b"secret\n");
+        assert_eq!(
+            read_keyring_value(Some(&path)).unwrap().as_slice(),
+            b"secret\0with\nbytes"
+        );
     }
 }

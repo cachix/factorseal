@@ -1,49 +1,81 @@
-//! Local encrypted credential vault for FactorSeal.
+//! Factorseal's hardware-bound vault.
 //!
-//! Two-factor authentication (2FA) is required by design for supported
-//! persistent vaults. The current 2FA provider combines platform hardware with
-//! a PIN-protected YubiKey. Supported platform hardware can additionally
-//! require biometric user verification.
+//! A per-user background service owns an
+//! embedded Turso database containing encrypted, signed Automerge documents.
+//! Every platform nests a Factorseal password inside its hardware key
+//! wrapping, so neither factor unseals it alone. Applications use its keyring
+//! interface over authenticated local IPC and never open the database or
+//! receive its keys.
 //!
-//! A vault is unlocked once into an [`UnlockedVault`]. The session retains a
-//! zeroizing vault key, never a cache of decrypted credentials. Each `get`
-//! decrypts only the requested value.
-
+#[cfg(feature = "key-protection")]
 mod crypto;
+#[cfg(feature = "key-protection")]
 mod error;
-mod factor;
-mod phone_factor;
-mod vault;
 
-pub use error::{Error, Result};
-pub use factor::FactorKind;
-pub use phone_factor::{
-    MAX_PHONE_UNLOCK_LIFETIME, PHONE_CHALLENGE_BYTES, PHONE_CREDENTIAL_ID_BYTES,
-    PHONE_REQUEST_ID_BYTES, PHONE_SHARE_BYTES, PHONE_UNLOCK_VERSION, PHONE_VAULT_ID_BYTES,
-    PhoneCredentialId, PhoneFactor, PhoneFactorError, PhoneFactorFuture, PhoneFactorResult,
-    PhoneShare, PhoneUnlockAction, PhoneUnlockRequest, PhoneUnlockResponse, ValidatedPhoneShare,
-};
+#[cfg(feature = "vault-client")]
+pub mod keyring;
+
+#[cfg(any(
+    feature = "key-protection",
+    feature = "vault-client",
+    feature = "vault-store"
+))]
+pub mod vault;
+
+#[cfg(feature = "key-protection")]
+pub(crate) use error::{Error, Result};
+
+#[cfg(feature = "vault-client")]
+pub use keyring::{Keyring, KeyringError, KeyringResult};
+
+#[cfg(any(
+    feature = "key-protection",
+    feature = "vault-client",
+    feature = "vault-store"
+))]
 pub use vault::{
-    CredentialMetadata, CredentialOptions, ReferenceOptions, SecretReference, UnlockedVault, Vault,
-    VaultInfo,
+    DeviceKeyId, DocumentId, DocumentScope, NestedFactorKind, RequestId, SecretAddress,
+    UnsealFactor, UnsealedVault, Vault, VaultError, VaultId, VaultMetadata, VaultPlatform,
+    VaultResult,
 };
+
+#[cfg(feature = "vault-client")]
+pub use vault::{
+    VaultAction, VaultClient, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
+    VaultResponseErrorCode, WireSecret, WireSecretAddress,
+};
+
+#[cfg(feature = "vault-store")]
+pub use vault::{
+    CallerIdentity, CallerPlatform, GrantPermission, UnsealLeasePolicy, VaultService, VaultStore,
+};
+
+#[cfg(feature = "key-protection")]
+pub use vault::{HardwareBackend, KeyProtector, KeyProtectorFactory};
+
+#[cfg(all(feature = "vault-client", target_os = "linux"))]
+pub use vault::LinuxVaultClient;
+#[cfg(all(feature = "vault-client", target_os = "linux"))]
+pub type NativeVaultClient = LinuxVaultClient;
+
+#[cfg(all(feature = "vault", target_os = "linux"))]
+pub use vault::{LinuxVaultOptions, linux_caller_identity_for_executable, serve_linux_vault};
+
+#[cfg(all(feature = "vault-client", target_os = "macos"))]
+pub use vault::MacosVaultClient;
+#[cfg(all(feature = "vault-client", target_os = "macos"))]
+pub type NativeVaultClient = MacosVaultClient;
+
+#[cfg(all(feature = "vault", target_os = "macos"))]
+pub use vault::{MacosVaultOptions, macos_caller_identity_for_executable, serve_macos_vault};
+
+#[cfg(all(feature = "vault-client", target_os = "windows"))]
+pub use vault::WindowsVaultClient;
+#[cfg(all(feature = "vault-client", target_os = "windows"))]
+pub type NativeVaultClient = WindowsVaultClient;
+
+#[cfg(all(feature = "vault", target_os = "windows"))]
+pub use vault::{WindowsVaultOptions, serve_windows_vault, windows_caller_identity_for_executable};
 
 #[cfg(feature = "hardware")]
 mod hardware;
-
-#[cfg(feature = "keyring")]
-mod keyring;
-
-#[cfg(feature = "keyring")]
-pub use keyring::{
-    EVICT_AT_ATTRIBUTE, FactorSealStore, FactorSealStoreOptions, RETENTION_SECONDS_MODIFIER,
-};
-
-#[cfg(all(target_os = "linux", feature = "secret-service"))]
-mod secret_service;
-
-#[cfg(all(target_os = "linux", feature = "secret-service"))]
-pub use secret_service::{SecretServiceError, SecretServiceOptions, serve_secret_service};
-
-#[cfg(feature = "yubikey")]
-mod yubikey_factor;

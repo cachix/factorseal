@@ -1,0 +1,97 @@
+diff --git a/src/internal/linux_tpm/encrypt.rs b/src/internal/linux_tpm/encrypt.rs
+index 15e436c..aa028dc 100644
+--- a/src/internal/linux_tpm/encrypt.rs
++++ b/src/internal/linux_tpm/encrypt.rs
+@@ -87,8 +87,8 @@ impl LinuxTpmEncryptor {
+         })?;
+ 
+         let key_handle =
+-            ctx.load(primary_handle, private, public)
+-                .map_err(|e| Error::KeyOperation {
++            ctx.execute_with_nullauth_session(|ctx| ctx.load(primary_handle, private, public))
++                .map_err(|e| Error::KeyOperation {
+                     operation: "load_key".into(),
+                     detail: e.to_string(),
+                 })?;
+@@ -157,8 +157,10 @@ impl EnclaveKeyManager for LinuxTpmEncryptor {
+         let primary_handle = tpm::create_primary(&mut ctx)?;
+         let template = tpm::encryption_key_template()?;
+ 
+-        let result = ctx
+-            .create(primary_handle, template, None, None, None, None)
++        let result = ctx
++            .execute_with_nullauth_session(|ctx| {
++                ctx.create(primary_handle, template, None, None, None, None)
++            })
+             .map_err(|e| Error::GenerateFailed {
+                 detail: format!("TPM create: {e}"),
+             })?;
+@@ -336,9 +338,9 @@ impl EnclaveEncryptor for LinuxTpmEncryptor {
+         let eph_point = sec1_to_ecc_point(eph_pub_bytes)?;
+ 
+         // ECDH via TPM -- the private key never leaves the hardware
+-        let shared_point =
+-            ctx.ecdh_z_gen(key_handle, eph_point)
+-                .map_err(|e| Error::DecryptFailed {
++        let shared_point = ctx
++            .execute_with_nullauth_session(|ctx| ctx.ecdh_z_gen(key_handle, eph_point))
++            .map_err(|e| Error::DecryptFailed {
+                     detail: format!("TPM ECDH: {e}"),
+                 })?;
+ 
+diff --git a/src/internal/linux_tpm/sign.rs b/src/internal/linux_tpm/sign.rs
+index fe78d42..ce8a7bb 100644
+--- a/src/internal/linux_tpm/sign.rs
++++ b/src/internal/linux_tpm/sign.rs
+@@ -62,8 +62,8 @@ impl LinuxTpmSigner {
+         })?;
+ 
+         let key_handle =
+-            ctx.load(primary_handle, private, public)
+-                .map_err(|e| Error::KeyOperation {
++            ctx.execute_with_nullauth_session(|ctx| ctx.load(primary_handle, private, public))
++                .map_err(|e| Error::KeyOperation {
+                     operation: "load_key".into(),
+                     detail: e.to_string(),
+                 })?;
+@@ -92,8 +92,10 @@ impl EnclaveKeyManager for LinuxTpmSigner {
+         let primary_handle = tpm::create_primary(&mut ctx)?;
+         let template = tpm::signing_key_template()?;
+ 
+-        let result = ctx
+-            .create(primary_handle, template, None, None, None, None)
++        let result = ctx
++            .execute_with_nullauth_session(|ctx| {
++                ctx.create(primary_handle, template, None, None, None, None)
++            })
+             .map_err(|e| Error::GenerateFailed {
+                 detail: format!("TPM create: {e}"),
+             })?;
+@@ -331,7 +333,9 @@ impl EnclaveSigner for LinuxTpmSigner {
+             detail: format!("ticket: {e}"),
+         })?;
+         let signature = ctx
+-            .sign(key_handle, digest, SignatureScheme::Null, ticket)
++            .execute_with_nullauth_session(|ctx| {
++                ctx.sign(key_handle, digest, SignatureScheme::Null, ticket)
++            })
+             .map_err(|e| Error::SignFailed {
+                 detail: format!("TPM sign: {e}"),
+             })?;
+diff --git a/src/internal/linux_tpm/tpm.rs b/src/internal/linux_tpm/tpm.rs
+index 7297f54..a2c9bf0 100644
+--- a/src/internal/linux_tpm/tpm.rs
++++ b/src/internal/linux_tpm/tpm.rs
+@@ -102,9 +102,11 @@ pub fn primary_key_template() -> Result<Public> {
+ /// Create the primary storage key. Returns its handle.
+ pub fn create_primary(ctx: &mut Context) -> Result<tss_esapi::handles::KeyHandle> {
+     let template = primary_key_template()?;
+-    let result = ctx
+-        .create_primary(Hierarchy::Owner, template, None, None, None, None)
++    let result = ctx
++        .execute_with_nullauth_session(|ctx| {
++            ctx.create_primary(Hierarchy::Owner, template, None, None, None, None)
++        })
+         .map_err(|e| Error::KeyOperation {
+             operation: "create_primary".into(),
+             detail: e.to_string(),
