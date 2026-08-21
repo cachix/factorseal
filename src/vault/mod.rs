@@ -178,6 +178,9 @@ pub enum VaultError {
     #[error("the vault worker is unavailable")]
     WorkerUnavailable,
 
+    #[error("no vault agent is listening on `{0}`")]
+    AgentUnreachable(String),
+
     #[error("the vault is sealed")]
     Sealed,
 

@@ -443,8 +443,10 @@ impl VaultResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VaultResponseBody {
+    /// Only a live, unsealed vault answers this: `Status` is served behind the
+    /// live-state lock, which fails closed once the lease expires or the vault
+    /// seals.
     Status {
-        unsealed: bool,
         vault_id: String,
         device_key_id: String,
         hardware_backend: String,
@@ -909,7 +911,6 @@ impl VaultService {
         let (result, refresh_lease) = match action {
             VaultAction::Status => (
                 VaultResponseBody::Status {
-                    unsealed: true,
                     vault_id: state.store.device().vault_id().to_string(),
                     device_key_id: state.store.device().device_key_id().to_string(),
                     hardware_backend: state.store.device().hardware_backend().to_owned(),
@@ -1174,7 +1175,9 @@ fn response_error(error: &VaultError) -> VaultResponseError {
     let code = match error {
         VaultError::AuthorizationRequired => VaultResponseErrorCode::AuthorizationRequired,
         VaultError::Replay => VaultResponseErrorCode::Replay,
-        VaultError::Sealed | VaultError::WorkerUnavailable => VaultResponseErrorCode::Sealed,
+        VaultError::Sealed | VaultError::WorkerUnavailable | VaultError::AgentUnreachable(_) => {
+            VaultResponseErrorCode::Sealed
+        }
         VaultError::Conflict => VaultResponseErrorCode::Conflict,
         VaultError::EmptyAddress { .. }
         | VaultError::AddressTooLong { .. }

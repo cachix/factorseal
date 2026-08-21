@@ -27,7 +27,7 @@ impl UnixVaultClient {
 
     fn request_inner(&self, request: &VaultRequest) -> VaultResult<VaultResponse> {
         let mut stream = UnixStream::connect(&self.socket_path)
-            .map_err(|error| io_error(&self.socket_path, &error))?;
+            .map_err(|error| connect_error(&self.socket_path, &error))?;
         stream
             .set_nonblocking(true)
             .map_err(|error| io_error(&self.socket_path, &error))?;
@@ -54,6 +54,51 @@ impl VaultClient for UnixVaultClient {
     }
 }
 
+/// Distinguish "nothing is listening" from a genuine transport failure, so a
+/// caller can tell a sealed vault apart from a broken one.
+fn connect_error(path: &Path, error: &io::Error) -> VaultError {
+    match error.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+            VaultError::AgentUnreachable(path.display().to_string())
+        }
+        _ => io_error(path, error),
+    }
+}
+
 fn io_error(path: &Path, error: &io::Error) -> VaultError {
     VaultError::Protocol(format!("I/O error for `{}`: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::{VaultAction, VaultRequest};
+
+    #[test]
+    fn an_absent_socket_reports_that_no_agent_is_listening() {
+        let directory = tempfile::tempdir().unwrap();
+        let client = UnixVaultClient::new(directory.path().join("factorseal.sock"));
+        let request = VaultRequest::new(VaultAction::Status).unwrap();
+        let error = client.request(&request).unwrap_err();
+        assert!(
+            matches!(error, VaultError::AgentUnreachable(_)),
+            "an absent socket must not look like a transport failure, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_stale_socket_file_reports_that_no_agent_is_listening() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("factorseal.sock");
+        // A path that exists but has nothing bound to it is what a crashed
+        // agent leaves behind.
+        std::fs::write(&socket, b"").unwrap();
+        let client = UnixVaultClient::new(&socket);
+        let request = VaultRequest::new(VaultAction::Status).unwrap();
+        let error = client.request(&request).unwrap_err();
+        assert!(
+            matches!(error, VaultError::AgentUnreachable(_)),
+            "a stale socket file must not look like a transport failure, got: {error:?}"
+        );
+    }
 }

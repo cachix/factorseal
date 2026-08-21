@@ -11,7 +11,7 @@ use directories::ProjectDirs;
 use factorseal::{
     CallerIdentity, GrantPermission, Keyring, KeyringError, NativeVaultClient, UnsealFactor,
     UnsealLeasePolicy, Vault, VaultAction, VaultClient, VaultError, VaultMetadata, VaultRequest,
-    VaultResponseBody, VaultService, VaultStore, WireSecretAddress,
+    VaultResponseBody, VaultResponseErrorCode, VaultService, VaultStore, WireSecretAddress,
 };
 #[cfg(target_os = "linux")]
 use factorseal::{
@@ -290,29 +290,32 @@ fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Ask the running agent which state this vault is in.
+///
+/// A `Status` answer is itself the proof of an unsealed vault: the action is
+/// served behind the live-state lock, so a sealed vault answers with the
+/// `Sealed` code and a vault with no agent cannot be reached at all. Anything
+/// else, including an agent serving a different vault, stays `unknown`.
 fn live_state(root: &Path, socket: Option<&Path>, device: &VaultMetadata) -> &'static str {
     let Ok(request) = VaultRequest::new(VaultAction::Status) else {
         return "unknown";
     };
-    let Ok(response) = native_client(root, socket).request(&request) else {
-        return "unknown";
-    };
-    match response.result {
-        Ok(VaultResponseBody::Status {
-            unsealed,
-            vault_id,
-            device_key_id,
-            ..
-        }) if vault_id == device.vault_id().to_string()
-            && device_key_id == device.device_key_id().to_string() =>
-        {
-            if unsealed {
+    match native_client(root, socket).request(&request) {
+        Ok(response) => match response.result {
+            Ok(VaultResponseBody::Status {
+                vault_id,
+                device_key_id,
+                ..
+            }) if vault_id == device.vault_id().to_string()
+                && device_key_id == device.device_key_id().to_string() =>
+            {
                 "unsealed"
-            } else {
-                "sealed"
             }
-        }
-        _ => "unknown",
+            Err(error) if error.code == VaultResponseErrorCode::Sealed => "sealed",
+            _ => "unknown",
+        },
+        Err(VaultError::AgentUnreachable(_)) => "sealed",
+        Err(_) => "unknown",
     }
 }
 

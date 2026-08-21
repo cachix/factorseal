@@ -27,8 +27,18 @@ impl WindowsVaultClient {
 
     fn request_inner(&self, request: &VaultRequest) -> VaultResult<VaultResponse> {
         validate_pipe_name(&self.pipe_name)?;
-        let mut stream = BytePipe::connect_by_path(Path::new(&self.pipe_name))
-            .map_err(|error| io_error("connect to named pipe", &error))?;
+        let mut stream =
+            BytePipe::connect_by_path(Path::new(&self.pipe_name)).map_err(|error| {
+                // Distinguish "nothing is listening" from a genuine transport
+                // failure, so a caller can tell a sealed vault apart from a broken
+                // one.
+                match error.kind() {
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                        VaultError::AgentUnreachable(self.pipe_name.clone())
+                    }
+                    _ => io_error("connect to named pipe", &error),
+                }
+            })?;
         stream
             .set_nonblocking(true)
             .map_err(|error| io_error("bound named-pipe I/O", &error))?;
