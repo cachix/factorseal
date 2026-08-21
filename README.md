@@ -16,6 +16,12 @@ vault can be sealed or unsealed, implements a durable keyring interface for
 applications, provides the same operations through its CLI, and keeps a
 separate disposable SecretSpec cache. Each vault has its own stable keys.
 
+The reusable store and key-protection boundary also cross-compile for Android
+and iOS. Mobile applications embed the vault in-process and supply a native
+Android Keystore/StrongBox or iOS Secure Enclave adapter; the desktop daemon,
+IPC, and lifecycle integration are not used. See
+[Mobile embedding](docs/mobile.md).
+
 The project is intentionally narrower than a password manager and broader than
 an encrypted file:
 

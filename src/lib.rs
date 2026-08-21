@@ -7,33 +7,51 @@
 //! interface over authenticated local IPC and never open the database or
 //! receive its keys.
 //!
+#[cfg(feature = "key-protection")]
 mod crypto;
+#[cfg(feature = "key-protection")]
 mod error;
 
 #[cfg(feature = "vault-client")]
 pub mod keyring;
 
-#[cfg(any(feature = "vault", feature = "vault-client"))]
+#[cfg(any(
+    feature = "key-protection",
+    feature = "vault-client",
+    feature = "vault-store"
+))]
 pub mod vault;
 
+#[cfg(feature = "key-protection")]
 pub(crate) use error::{Error, Result};
 
 #[cfg(feature = "vault-client")]
 pub use keyring::{Keyring, KeyringError, KeyringResult};
 
-#[cfg(feature = "vault-client")]
+#[cfg(any(
+    feature = "key-protection",
+    feature = "vault-client",
+    feature = "vault-store"
+))]
 pub use vault::{
     DeviceKeyId, DocumentId, DocumentScope, NestedFactorKind, RequestId, SecretAddress,
-    UnsealFactor, Vault, VaultAction, VaultClient, VaultError, VaultId, VaultMetadata,
-    VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
-    VaultResult, WireSecret, WireSecretAddress,
+    UnsealFactor, UnsealedVault, Vault, VaultError, VaultId, VaultMetadata, VaultPlatform,
+    VaultResult,
 };
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-client")]
 pub use vault::{
-    CallerIdentity, CallerPlatform, GrantPermission, UnsealLeasePolicy, UnsealedVault,
-    VaultService, VaultStore,
+    VaultAction, VaultClient, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
+    VaultResponseErrorCode, WireSecret, WireSecretAddress,
 };
+
+#[cfg(feature = "vault-store")]
+pub use vault::{
+    CallerIdentity, CallerPlatform, GrantPermission, UnsealLeasePolicy, VaultService, VaultStore,
+};
+
+#[cfg(feature = "key-protection")]
+pub use vault::{HardwareBackend, KeyProtector, KeyProtectorFactory};
 
 #[cfg(all(feature = "vault-client", target_os = "linux"))]
 pub use vault::LinuxVaultClient;

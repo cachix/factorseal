@@ -1,35 +1,35 @@
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fmt;
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 use std::sync::Mutex;
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 use super::{DocumentScope, VaultStore};
 use super::{SecretAddress, VaultError, VaultResult};
 
 const PROTOCOL_VERSION: u8 = 1;
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 const GRANT_VERSION: u8 = 1;
 const REQUEST_ID_BYTES: usize = 16;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_NAMESPACE_BYTES: usize = 4 * 1024;
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 const MAX_REPLAY_IDS: usize = 4096;
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 const GRANT_DOCUMENT_NAMESPACE: &[u8] = b"factorseal/vault-grants/v1";
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 const CALLER_FINGERPRINT_DOMAIN: &[u8] = b"factorseal/caller-identity/v1\0";
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 const GRANT_TARGET_DOMAIN: &[u8] = b"factorseal/grant-target/v1\0";
 
 /// Platform that authenticated one local IPC caller.
@@ -37,6 +37,8 @@ const GRANT_TARGET_DOMAIN: &[u8] = b"factorseal/grant-target/v1\0";
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum CallerPlatform {
+    Android,
+    Ios,
     Linux,
     Macos,
     Windows,
@@ -98,11 +100,13 @@ impl CallerIdentity {
         self.signer_id.as_deref()
     }
 
-    #[cfg(feature = "vault")]
+    #[cfg(feature = "vault-store")]
     fn fingerprint(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
         digest.update(CALLER_FINGERPRINT_DOMAIN);
         digest.update([match self.platform {
+            CallerPlatform::Android => 4,
+            CallerPlatform::Ios => 5,
             CallerPlatform::Linux => 1,
             CallerPlatform::Macos => 2,
             CallerPlatform::Windows => 3,
@@ -362,7 +366,7 @@ impl VaultAction {
 }
 
 /// Permission persisted in one caller grant.
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GrantPermission {
@@ -485,14 +489,14 @@ pub enum VaultResponseErrorCode {
 }
 
 /// Bounded lifetime for one hardware-unsealed vault session.
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnsealLeasePolicy {
     pub idle_timeout: Duration,
     pub maximum_lifetime: Duration,
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 impl Default for UnsealLeasePolicy {
     fn default() -> Self {
         Self {
@@ -502,7 +506,7 @@ impl Default for UnsealLeasePolicy {
     }
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 impl UnsealLeasePolicy {
     fn validate(self) -> VaultResult<()> {
         if self.idle_timeout.is_zero()
@@ -517,7 +521,7 @@ impl UnsealLeasePolicy {
     }
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 struct UnsealLease {
     idle_timeout: Duration,
     idle_deadline: u64,
@@ -526,7 +530,7 @@ struct UnsealLease {
     absolute_expires_at: Instant,
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 impl UnsealLease {
     fn new(now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
         Self::new_at(now, Instant::now(), policy)
@@ -575,13 +579,13 @@ impl UnsealLease {
     }
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 struct ReplayWindow {
     set: HashSet<RequestId>,
     order: VecDeque<RequestId>,
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 impl ReplayWindow {
     fn new() -> Self {
         Self {
@@ -604,7 +608,7 @@ impl ReplayWindow {
     }
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccessGrant {
@@ -616,13 +620,13 @@ struct AccessGrant {
 }
 
 /// Shared request processor used behind every platform transport.
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 pub struct VaultService {
     state: Mutex<ServiceState>,
     seal_handle: VaultStore,
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 struct ServiceState {
     store: VaultStore,
     lease: UnsealLease,
@@ -636,7 +640,7 @@ struct ServiceState {
     purges: usize,
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 impl VaultService {
     pub fn new(store: VaultStore, now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
         let seal_handle = store.clone();
@@ -1020,7 +1024,7 @@ impl VaultService {
     }
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 #[derive(Clone, Copy)]
 enum GrantTarget<'a> {
     Namespace {
@@ -1034,7 +1038,7 @@ enum GrantTarget<'a> {
     },
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 fn store_grant(
     store: &VaultStore,
     caller: &CallerIdentity,
@@ -1074,7 +1078,7 @@ fn store_grant(
     )
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 fn require_grant(
     store: &VaultStore,
     caller: &CallerIdentity,
@@ -1121,7 +1125,7 @@ fn require_grant(
     Err(VaultError::AuthorizationRequired)
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 fn grant_target_digest(target: &GrantTarget<'_>) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(GRANT_TARGET_DOMAIN);
@@ -1155,7 +1159,7 @@ fn grant_target_digest(target: &GrantTarget<'_>) -> [u8; 32] {
     digest.finalize().into()
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 fn grant_address(
     caller_fingerprint: [u8; 32],
     target_digest: [u8; 32],
@@ -1170,7 +1174,7 @@ fn grant_address(
     )
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 fn response_error(error: &VaultError) -> VaultResponseError {
     let code = match error {
         VaultError::AuthorizationRequired => VaultResponseErrorCode::AuthorizationRequired,
@@ -1223,7 +1227,7 @@ fn validate_namespace(namespace: &[u8]) -> VaultResult<()> {
     Ok(())
 }
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 fn append_digest_bytes(digest: &mut Sha256, bytes: &[u8]) {
     digest.update((bytes.len() as u64).to_be_bytes());
     digest.update(bytes);
@@ -1267,7 +1271,7 @@ mod redaction_tests {
     }
 }
 
-#[cfg(all(test, feature = "vault", feature = "hardware"))]
+#[cfg(all(test, feature = "vault-store", feature = "hardware"))]
 mod tests {
     use super::*;
     use crate::Vault;

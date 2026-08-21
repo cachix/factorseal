@@ -1,12 +1,6 @@
-/// Internal errors produced by shared cryptographic and hardware adapters.
+/// Internal errors produced by shared cryptographic operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("no supported hardware security backend is available: {0}")]
-    HardwareUnavailable(String),
-
-    #[error("hardware security operation failed: {0}")]
-    Hardware(String),
-
     #[error("cryptographic authentication failed")]
     Authentication,
 

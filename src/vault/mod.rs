@@ -4,15 +4,20 @@
 //! callers use domain operations; raw Automerge mutation is deliberately not
 //! part of the public API.
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 mod document;
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 mod envelope;
+#[cfg(feature = "key-protection")]
+mod protection;
 mod protocol;
 mod seal;
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 mod store;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(all(
+    any(feature = "vault", feature = "vault-client"),
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 mod transport;
 
 #[cfg(all(feature = "vault", target_os = "linux"))]
@@ -48,24 +53,26 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 pub(crate) use document::{DocumentMutation, SecretDocument, SecretRead};
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 pub use envelope::{
     EncryptedSnapshot, SignatureAlgorithm, SignedChangeEnvelope, verify_and_decrypt_change,
     verify_and_decrypt_snapshot,
 };
+#[cfg(feature = "key-protection")]
+pub use protection::{HardwareBackend, KeyProtector, KeyProtectorFactory};
 pub use protocol::{
     CallerIdentity, CallerPlatform, RequestId, VaultAction, VaultClient, VaultRequest,
     VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret,
     WireSecretAddress,
 };
-#[cfg(feature = "vault")]
+#[cfg(feature = "vault-store")]
 pub use protocol::{GrantPermission, UnsealLeasePolicy, VaultService};
-#[cfg(feature = "vault")]
-pub use seal::UnsealedVault;
-pub use seal::{NestedFactorKind, UnsealFactor, Vault, VaultMetadata};
-#[cfg(feature = "vault")]
+pub use seal::{
+    NestedFactorKind, UnsealFactor, UnsealedVault, Vault, VaultMetadata, VaultPlatform,
+};
+#[cfg(feature = "vault-store")]
 pub use store::VaultStore;
 
 #[cfg(all(feature = "vault", target_os = "linux"))]
@@ -89,9 +96,9 @@ pub use windows_client::WindowsVaultClient;
 
 /// Files the store owns inside a vault root. The sealing layer needs their
 /// names to undo a half-finished initialization without the `vault` feature.
-#[cfg(any(feature = "vault", feature = "hardware"))]
+#[cfg(any(feature = "vault-store", all(test, feature = "key-protection")))]
 const DATABASE_FILE: &str = "factorseal.db";
-#[cfg(any(feature = "vault", feature = "hardware"))]
+#[cfg(any(feature = "vault-store", all(test, feature = "key-protection")))]
 const LOCK_FILE: &str = "factorseal.lock";
 
 const VAULT_ID_BYTES: usize = 16;
@@ -301,7 +308,7 @@ impl DocumentScope {
         }
     }
 
-    #[cfg(feature = "vault")]
+    #[cfg(feature = "vault-store")]
     pub(crate) fn parse(value: &str) -> VaultResult<Self> {
         match value {
             "device-cache" => Ok(Self::DeviceCache),
@@ -384,7 +391,7 @@ impl SecretAddress {
         self.field.as_deref()
     }
 
-    #[cfg(any(feature = "vault", test))]
+    #[cfg(any(feature = "vault-store", test))]
     pub(crate) fn storage_key(&self) -> String {
         let mut digest = Sha256::new();
         digest.update(b"factorseal/secret-address/v1\0");

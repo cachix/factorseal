@@ -38,7 +38,7 @@ jobs:
         run: devenv shell -- cargo test --all-targets --all-features
       - name: Check the feature combinations packagers and embedders build
         run: |
-          for features in vault-client vault-client,hardware hardware cli vault vault,cli,hardware; do
+          for features in vault-client key-protection vault-store vault-store,key-protection vault-client,hardware hardware cli vault vault,cli,hardware; do
             devenv shell -- cargo check --no-default-features --features "$features"
           done
       - name: Lint packaged shell scripts
@@ -117,3 +117,24 @@ jobs:
         with:
           name: factorseal-windows
           path: dist/*
+
+  mobile-core:
+    name: Mobile core (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-ios
+          - os: macos-latest
+            target: aarch64-apple-ios-sim
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Check the portable store and injected key-protection layers
+        run: cargo check --target "${{ matrix.target }}" --no-default-features --features vault-store,key-protection
