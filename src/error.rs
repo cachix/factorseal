@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 /// Internal errors produced by shared cryptographic and hardware adapters.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -11,13 +9,6 @@ pub enum Error {
 
     #[error("cryptographic authentication failed")]
     Authentication,
-
-    #[error("I/O error for `{path}`: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
 
     #[error("random-number generation failed: {0}")]
     Random(String),

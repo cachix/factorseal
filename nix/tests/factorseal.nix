@@ -87,6 +87,10 @@ pkgs.testers.runNixOSTest {
         )
         machine.succeed(f"rm -f {password_file}")
         as_alice(f"${package}/bin/factorseal --root={root} status | jq -e '.state == \"sealed\"'")
+        as_alice(
+            f"${package}/bin/factorseal --root={root} status "
+            "| jq -e '.hardware_backend == \"tpm\"'"
+        )
         machine.succeed(f"test $(stat -c %a {root}) = 700")
 
     with subtest("start the native socket"):

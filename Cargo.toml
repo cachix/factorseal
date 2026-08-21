@@ -105,3 +105,10 @@ missing_errors_doc = "allow"
 
 [profile.test]
 debug = 0
+
+# `create_encryptor` reported static platform detection instead of the backend
+# the storage initialized, so a Linux TPM key came back as `Keyring`. This is our
+# branch behind godaddy/hardware-enclave#208; Cargo.lock pins the exact commit.
+# Drop the patch once an upstream release carries the fix.
+[patch.crates-io]
+hardware-enclave = { git = "https://github.com/domenkozar/hardware-enclave", branch = "fix/encryptor-reports-initialized-backend" }

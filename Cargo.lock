@@ -1280,8 +1280,7 @@ dependencies = [
 [[package]]
 name = "hardware-enclave"
 version = "0.2.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53d400c6f49b846b3f9f2ea8318d8fbfc9fa71db3933d8bd510c25f23e893482"
+source = "git+https://github.com/domenkozar/hardware-enclave?branch=fix%2Fencryptor-reports-initialized-backend#accbeb4de0343e4718c75aa97a728e9389ab0f25"
 dependencies = [
  "aes-gcm",
  "anyhow",

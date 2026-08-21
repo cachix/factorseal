@@ -22,7 +22,15 @@ rustPlatform.buildRustPackage {
     ];
   };
 
-  cargoLock.lockFile = ../Cargo.lock;
+  cargoLock = {
+    lockFile = ../Cargo.lock;
+    # `[patch.crates-io]` in Cargo.toml points hardware-enclave at our branch
+    # behind godaddy/hardware-enclave#208. Cargo.lock pins the commit this hash
+    # covers, so both move together.
+    outputHashes = {
+      "hardware-enclave-0.2.10" = "sha256-8bvhRDkrDB9xICySrCbbWqMB2WDqN/tDqgtKYJ0soTQ=";
+    };
+  };
 
   # hardware-enclave 0.2.10 invokes authorized TPM commands without a
   # session, which current tss-esapi rejects before reaching the TPM. Keep

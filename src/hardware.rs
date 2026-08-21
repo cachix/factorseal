@@ -58,7 +58,7 @@ impl PlatformProtector {
     ) -> Result<Self> {
         let keys_dir = root.join(KEYS_DIRECTORY);
         let mut config = EnclaveConfig::new(APP_NAME, label);
-        config.keys_dir = Some(keys_dir.clone());
+        config.keys_dir = Some(keys_dir);
         config.access_policy = Some(if biometric {
             AccessPolicy::BiometricOnly
         } else {
@@ -71,7 +71,7 @@ impl PlatformProtector {
         // the hardware-enforced key-use policy and treats modern Hello prompt
         // behavior as a native release-acceptance requirement.
         let handle = create_encryptor(&config).map_err(map_hardware_error)?;
-        let backend = match verify_hardware_backend(&handle, &keys_dir, label) {
+        let backend = match verify_hardware_backend(&handle, label) {
             Ok(backend) => backend,
             Err(error) => {
                 // `create_encryptor` creates or opens the key eagerly. If
@@ -115,12 +115,16 @@ impl KeyProtector for PlatformProtector {
     }
 }
 
-#[allow(unused_variables)]
-fn verify_hardware_backend(
-    handle: &EncryptorHandle,
-    keys_dir: &Path,
-    label: &str,
-) -> Result<HardwareBackend> {
+/// Map the backend the platform actually initialized onto the ones Factorseal
+/// accepts as hardware.
+///
+/// `hardware-enclave` reports the backend its storage chose rather than static
+/// platform detection, so a native Linux TPM key arrives here as
+/// `BackendKind::Tpm` and the keyring fallback as `BackendKind::Keyring`. That
+/// holds only with the `[patch.crates-io]` pin in `Cargo.toml`
+/// (godaddy/hardware-enclave#208); without it every Linux key reports
+/// `Keyring` and a TPM-backed vault is rejected as software-backed.
+fn verify_hardware_backend(handle: &EncryptorHandle, label: &str) -> Result<HardwareBackend> {
     match handle.backend_kind() {
         BackendKind::SecureEnclave => Ok(HardwareBackend::SecureEnclave),
         BackendKind::Tpm => Ok(HardwareBackend::Tpm),
@@ -128,19 +132,11 @@ fn verify_hardware_backend(
         BackendKind::WindowsDpapi => {
             reject_fallback(handle, label, "Windows DPAPI is software-backed")
         }
-        BackendKind::Keyring => {
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            {
-                if is_native_linux_tpm_key(keys_dir, label)? {
-                    return Ok(HardwareBackend::Tpm);
-                }
-            }
-            reject_fallback(
-                handle,
-                label,
-                "Linux keyring fallback is not hardware-backed",
-            )
-        }
+        BackendKind::Keyring => reject_fallback(
+            handle,
+            label,
+            "Linux keyring fallback is not hardware-backed",
+        ),
     }
 }
 
@@ -149,25 +145,6 @@ fn reject_fallback<T>(handle: &EncryptorHandle, label: &str, reason: &str) -> Re
     // software fallback key behind after rejecting that backend.
     let _ = handle.delete_key(label);
     Err(Error::HardwareUnavailable(reason.to_owned()))
-}
-
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn is_native_linux_tpm_key(keys_dir: &Path, label: &str) -> Result<bool> {
-    let private = keys_dir.join(format!("{label}.tpm_priv"));
-    let public = keys_dir.join(format!("{label}.tpm_pub"));
-    Ok(is_regular_file(&private)? && is_regular_file(&public)?)
-}
-
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn is_regular_file(path: &Path) -> Result<bool> {
-    match path.symlink_metadata() {
-        Ok(metadata) => Ok(metadata.file_type().is_file()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(Error::Io {
-            path: path.to_owned(),
-            source,
-        }),
-    }
 }
 
 fn map_hardware_error(error: hardware_enclave::Error) -> Error {
