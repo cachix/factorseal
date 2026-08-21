@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use dbus::Path as DbusPath;
 use dbus::arg::OwnedFd;
-use dbus::blocking::Connection;
+use dbus::blocking::{Connection, Proxy};
 use dbus::message::MatchRule;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::getuid;
@@ -38,8 +38,9 @@ pub struct LinuxVaultOptions {
     /// Install SIGINT/SIGTERM handlers. Disable only when embedding the server
     /// in a process that owns signal handling itself.
     pub install_signal_handler: bool,
-    /// Require systemd-logind sleep, shutdown, and session-lock monitoring.
-    /// Disable only when an embedding process supplies equivalent hooks.
+    /// Require systemd-logind sleep and shutdown monitoring, plus session-lock
+    /// monitoring when this process belongs to a logind session. Disable only
+    /// when an embedding process supplies equivalent hooks.
     pub install_lifecycle_monitor: bool,
 }
 
@@ -150,25 +151,6 @@ impl LinuxLifecycleMonitor {
             "/org/freedesktop/login1",
             LIFECYCLE_DBUS_TIMEOUT,
         );
-        let session_id = SESSION_ID_ENVIRONMENT.iter().find_map(|name| {
-            std::env::var(name)
-                .ok()
-                .filter(|session_id| !session_id.is_empty())
-        });
-        let (session_path,): (DbusPath<'static>,) = if let Some(session_id) = session_id {
-            manager.method_call(
-                "org.freedesktop.login1.Manager",
-                "GetSession",
-                (session_id,),
-            )
-        } else {
-            manager.method_call(
-                "org.freedesktop.login1.Manager",
-                "GetSessionByPID",
-                (std::process::id(),),
-            )
-        }
-        .map_err(|error| lifecycle_error(&error))?;
         let (delay_inhibitor,): (OwnedFd,) = manager
             .method_call(
                 "org.freedesktop.login1.Manager",
@@ -198,22 +180,56 @@ impl LinuxLifecycleMonitor {
                 .map_err(|error| lifecycle_error(&error))?;
         }
 
-        let requested = Arc::clone(lock_requested);
-        connection
-            .add_match::<(), _>(
-                MatchRule::new_signal("org.freedesktop.login1.Session", "Lock")
-                    .with_path(session_path),
-                move |(), _, _| {
-                    requested.store(true, Ordering::Release);
-                    true
-                },
-            )
-            .map_err(|error| lifecycle_error(&error))?;
+        if let Some(session_path) = Self::session_path(&manager)? {
+            let requested = Arc::clone(lock_requested);
+            connection
+                .add_match::<(), _>(
+                    MatchRule::new_signal("org.freedesktop.login1.Session", "Lock")
+                        .with_path(session_path),
+                    move |(), _, _| {
+                        requested.store(true, Ordering::Release);
+                        true
+                    },
+                )
+                .map_err(|error| lifecycle_error(&error))?;
+        }
 
         Ok(Self {
             connection,
             _delay_inhibitor: delay_inhibitor,
         })
+    }
+
+    /// Resolve the logind session whose `Lock` signal seals this vault.
+    ///
+    /// A session named through the environment must exist: the caller asked
+    /// for that one, so a lookup failure is a misconfiguration. Inferring the
+    /// session from this process ID may legitimately come up empty, because a
+    /// lingering systemd user service belongs to no logind session at all.
+    /// Sleep and shutdown monitoring above cover that deployment; there is no
+    /// screen to lock, so it degrades instead of refusing to serve.
+    fn session_path(manager: &Proxy<'_, &Connection>) -> VaultResult<Option<DbusPath<'static>>> {
+        let session_id = SESSION_ID_ENVIRONMENT.iter().find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|session_id| !session_id.is_empty())
+        });
+        if let Some(session_id) = session_id {
+            let (session_path,): (DbusPath<'static>,) = manager
+                .method_call(
+                    "org.freedesktop.login1.Manager",
+                    "GetSession",
+                    (session_id,),
+                )
+                .map_err(|error| lifecycle_error(&error))?;
+            return Ok(Some(session_path));
+        }
+        let inferred: Result<(DbusPath<'static>,), dbus::Error> = manager.method_call(
+            "org.freedesktop.login1.Manager",
+            "GetSessionByPID",
+            (std::process::id(),),
+        );
+        Ok(inferred.ok().map(|(session_path,)| session_path))
     }
 
     fn process(&self) -> VaultResult<()> {
