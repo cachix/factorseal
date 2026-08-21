@@ -32,6 +32,7 @@ use zeroize::Zeroizing;
 
 const MAX_FACTOR_BYTES: u64 = 64 * 1024;
 const MAX_KEYRING_VALUE_BYTES: u64 = 64 * 1024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const DEFAULT_UNIX_SOCKET: &str = "factorseal.sock";
 const SECRETSPEC_CACHE_NAMESPACE: &[u8] = b"secretspec-cache/v1";
 const KEYRING_NAMESPACE: &[u8] = b"factorseal/keyring/v1";
