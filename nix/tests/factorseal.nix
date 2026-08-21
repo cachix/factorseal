@@ -49,7 +49,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    alice_prefix = "runuser -u alice -- env HOME=/home/alice XDG_RUNTIME_DIR=/run/user/1000"
+    alice_prefix = "runuser -u alice -- env HOME=/home/alice XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
     root = "/home/alice/.local/share/factorseal"
     runtime = "/run/user/1000/factorseal"
     password_file = f"{runtime}/session-password"
@@ -125,6 +125,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemd-inhibit --list | grep -F Factorseal")
         machine.succeed(f"test $(stat -c %a {socket}) = 600")
         machine.succeed(f"test $(stat -c %a {root}) = 700")
+        as_alice(
+            "busctl --user introspect org.freedesktop.secrets "
+            "/org/freedesktop/secrets org.freedesktop.Secret.Service "
+            "| grep -w OpenSession"
+        )
 
     with subtest("idle expiry seals the vault and removes the socket"):
         # The 5 s idle lease above is what ends this; wait for the outcome

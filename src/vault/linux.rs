@@ -42,6 +42,9 @@ pub struct LinuxVaultOptions {
     /// monitoring when this process belongs to a logind session. Disable only
     /// when an embedding process supplies equivalent hooks.
     pub install_lifecycle_monitor: bool,
+    /// Publish `org.freedesktop.secrets` on the session bus. Disable only for
+    /// embedded and socket-only test servers.
+    pub install_secret_service: bool,
 }
 
 impl LinuxVaultOptions {
@@ -52,6 +55,7 @@ impl LinuxVaultOptions {
             poll_interval: DEFAULT_POLL_INTERVAL,
             install_signal_handler: true,
             install_lifecycle_monitor: true,
+            install_secret_service: true,
         }
     }
 }
@@ -61,7 +65,10 @@ impl LinuxVaultOptions {
 /// Caller identity comes from `SO_PEERCRED` and `/proc/<pid>/exe`; no identity
 /// field from the request is trusted. This function blocks until explicit
 /// lock, lease expiry, session lock, suspend, shutdown, SIGINT, or SIGTERM.
-pub fn serve_linux_vault(service: &VaultService, options: &LinuxVaultOptions) -> VaultResult<()> {
+pub fn serve_linux_vault(
+    service: &Arc<VaultService>,
+    options: &LinuxVaultOptions,
+) -> VaultResult<()> {
     validate_socket_options("Linux", &options.socket_path, options.poll_interval)?;
     prepare_socket_path(&options.socket_path)?;
     let listener = UnixListener::bind(&options.socket_path)
@@ -89,14 +96,33 @@ pub fn serve_linux_vault(service: &VaultService, options: &LinuxVaultOptions) ->
     // Every exit from the loop discards the hardware-unwrapped keys, including
     // the error exits. Returning `?` straight out of the loop skipped the lock
     // and left them to whatever the caller did next.
-    let served = accept_until_sealed(
-        service,
-        options,
-        &listener,
-        &stopping,
-        &lifecycle_seal_requested,
-        lifecycle_monitor.as_ref(),
-    );
+    // A systemd user manager provides the session bus on desktop Linux. Keep
+    // headless CLI/acceptance runs functional when there is no user bus to
+    // publish the optional desktop compatibility interface on.
+    let has_session_bus =
+        options.install_secret_service && std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
+    let served = std::thread::scope(|scope| {
+        let secret_service = has_session_bus.then(|| {
+            let service = Arc::clone(service);
+            let stopping = Arc::clone(&stopping);
+            scope.spawn(move || super::secret_service::serve_secret_service(service, stopping))
+        });
+        let result = accept_until_sealed(
+            service,
+            options,
+            &listener,
+            &stopping,
+            &lifecycle_seal_requested,
+            lifecycle_monitor.as_ref(),
+        );
+        stopping.store(true, Ordering::Release);
+        if let Some(thread) = secret_service {
+            thread
+                .join()
+                .map_err(|_| VaultError::Protocol("Secret Service thread panicked".to_owned()))??;
+        }
+        result
+    });
     let sealed = service.seal();
     served.and(sealed)
 }
@@ -399,8 +425,9 @@ mod tests {
         let root = directory.path().join("factorseal");
         let unsealed = Vault::create_for_test(&root).unwrap();
         let store = VaultStore::open(&root, unsealed).unwrap();
-        let service =
-            VaultService::new(store, unix_time().unwrap(), UnsealLeasePolicy::default()).unwrap();
+        let service = Arc::new(
+            VaultService::new(store, unix_time().unwrap(), UnsealLeasePolicy::default()).unwrap(),
+        );
 
         // A panicking request poisons the request-state mutex, so the first
         // expire_if_needed of the loop fails rather than returning cleanly.
@@ -414,6 +441,7 @@ mod tests {
             poll_interval: Duration::from_millis(5),
             install_signal_handler: false,
             install_lifecycle_monitor: false,
+            install_secret_service: false,
         };
         assert!(serve_linux_vault(&service, &options).is_err());
         assert!(
@@ -428,6 +456,7 @@ mod tests {
         let options = LinuxVaultOptions::new("/run/user/1000/factorseal/factorseal.sock");
         assert!(options.install_signal_handler);
         assert!(options.install_lifecycle_monitor);
+        assert!(options.install_secret_service);
     }
 
     #[test]
@@ -473,6 +502,7 @@ mod tests {
             poll_interval: Duration::from_millis(5),
             install_signal_handler: false,
             install_lifecycle_monitor: false,
+            install_secret_service: false,
         };
         let server_service = Arc::clone(&service);
         let server = std::thread::spawn(move || serve_linux_vault(&server_service, &options));

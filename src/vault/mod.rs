@@ -24,6 +24,8 @@ mod transport;
 
 #[cfg(all(feature = "vault", target_os = "linux"))]
 mod linux;
+#[cfg(all(feature = "vault", target_os = "linux"))]
+mod secret_service;
 
 #[cfg(all(feature = "vault", target_os = "macos"))]
 mod macos;

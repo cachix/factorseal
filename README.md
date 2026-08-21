@@ -47,9 +47,12 @@ Factorseal is a broker backed by platform security hardware. It is not itself a
 Keychain or Windows Credential Manager API.
 
 In the Rust API, `Keyring` means the credential capability implemented by a
-`VaultClient`; it does not mean Linux's in-kernel `keyctl` keyrings. Native
-compatibility adapters such as the Linux Secret Service API, macOS Keychain,
-and Windows Credential Manager remain distinct platform interfaces.
+`VaultClient`; it does not mean Linux's in-kernel `keyctl` keyrings. On Linux,
+the unsealed service also exposes the standard `org.freedesktop.secrets`
+session-bus API, backed by the same encrypted vault. It is a single Secret
+Service provider, so do not run oo7, GNOME Keyring, or another provider that
+owns that name alongside it. macOS Keychain and Windows Credential Manager
+remain distinct platform interfaces.
 
 The first release is deliberately the user profile: a logged-in user, local
 application callers, interactive verification, and session-bound sealing. A
@@ -144,6 +147,12 @@ Still required before MVP release:
   physical hardware tests on every target, including verification of the
   OS-mediated Windows TPM prompt and modern Windows Hello UX.
 
+The opt-in physical-host runners and release-evidence procedure are in
+[`acceptance/`](acceptance/README.md). Passing a runner is evidence for one
+machine and event; release approval still needs the documented platform matrix.
+On NixOS/Linux, run the real-TPM suite with
+`nix run .#acceptance-linux -- --root /absolute/test/root --password-file /private/file`.
+
 No item in that list is implied complete merely because the shared Rust core
 builds on Linux.
 
@@ -186,6 +195,11 @@ bytes from standard input, or reads `--value-file`. `get` writes exact bytes
 without adding a newline. After replacing or upgrading the Factorseal binary,
 stop the service and run `factorseal grant-cli` to authorize the new executable
 digest.
+
+`factorseal destroy --yes-really-destroy` permanently deletes a **sealed**
+vault, including its TPM or Secure Enclave keys. It requires the nested factor
+and is intended for deliberate vault retirement and disposable native
+acceptance vaults; it is irreversible.
 
 ## Build and test
 

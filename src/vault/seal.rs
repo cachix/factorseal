@@ -192,6 +192,23 @@ impl Vault {
         discard_initialization_with_factory(root.as_ref(), &PlatformProtectorFactory, true)
     }
 
+    /// Permanently destroy a sealed vault after proving possession of its
+    /// nested factor.
+    ///
+    /// This deletes both native hardware keys and the local vault directory.
+    /// Callers must first stop any running vault service; destruction is an
+    /// explicit recovery or disposable-test operation, not a substitute for
+    /// sealing a live vault.
+    #[cfg(feature = "hardware")]
+    pub fn destroy(root: impl AsRef<Path>, factor: UnsealFactor<'_>) -> VaultResult<()> {
+        let root = root.as_ref();
+        // Do not let possession of the local vault directory alone destroy a
+        // user's TPM/Secure Enclave keys. A successful unseal also validates
+        // the recorded public device identity before anything is deleted.
+        let _verified = Self::unseal(root, factor)?;
+        Self::discard_initialization(root)
+    }
+
     /// Delete an incomplete vault and its platform keys through an injected
     /// platform adapter.
     #[cfg(feature = "key-protection")]
@@ -200,6 +217,21 @@ impl Vault {
         factory: &dyn KeyProtectorFactory,
     ) -> VaultResult<()> {
         discard_initialization_with_factory(root.as_ref(), factory, false)
+    }
+
+    /// Permanently destroy a vault created through an injected key protector.
+    ///
+    /// This is the portable counterpart of [`Self::destroy`]. The caller must
+    /// have stopped every live service using `root` before calling it.
+    #[cfg(feature = "key-protection")]
+    pub fn destroy_with_key_protector(
+        root: impl AsRef<Path>,
+        factor: UnsealFactor<'_>,
+        factory: &dyn KeyProtectorFactory,
+    ) -> VaultResult<()> {
+        let root = root.as_ref();
+        let _verified = Self::unseal_with_key_protector(root, factor, factory)?;
+        discard_initialization_with_factory(root, factory, false)
     }
 
     /// Create a vault with the native desktop hardware adapter.
@@ -1197,6 +1229,38 @@ mod tests {
         // failure path can call it without checking first.
         Vault::discard_initialization_with_key_protector(&root, &TestProtectorFactory).unwrap();
         Vault::create_for_test(&root).unwrap();
+    }
+
+    #[test]
+    fn destroy_requires_the_factor_and_removes_a_completed_vault() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("factorseal");
+        Vault::create_with_key_protector(
+            &root,
+            VaultPlatform::Android,
+            UnsealFactor::Password(b"acceptance-factor"),
+            false,
+            &TestProtectorFactory,
+        )
+        .unwrap();
+
+        assert!(
+            Vault::destroy_with_key_protector(
+                &root,
+                UnsealFactor::Password(b"wrong-factor"),
+                &TestProtectorFactory,
+            )
+            .is_err()
+        );
+        assert!(root.exists());
+
+        Vault::destroy_with_key_protector(
+            &root,
+            UnsealFactor::Password(b"acceptance-factor"),
+            &TestProtectorFactory,
+        )
+        .unwrap();
+        assert!(!root.exists());
     }
 
     #[test]

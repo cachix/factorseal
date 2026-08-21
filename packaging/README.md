@@ -29,6 +29,8 @@ requires glibc, D-Bus, and `tpm2-tss`; it is not a universal static binary and
 must not be published from a Nix development shell whose loader paths point
 into `/nix/store`. Physical TPM/Secure Enclave acceptance is separate from
 archive smoke testing.
+Use the release-candidate runners in [`acceptance/`](../acceptance/README.md)
+on physical hosts and attach their redacted output to the release approval.
 
 ## Obtaining the nested factor
 

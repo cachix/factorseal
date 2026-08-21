@@ -4,6 +4,7 @@ Documentation=https://github.com/factorseal/factorseal
 
 [Service]
 Type=simple
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
 ExecStart=@INSTALL_DIR@/factorseal --password-file=%t/factorseal/session-password unseal
 Restart=no
 UMask=0077

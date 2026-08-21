@@ -45,6 +45,10 @@ jobs:
         run: devenv shell -- shellcheck packaging/build-unix.sh packaging/linux/factorseal-start
       - name: Lint packaged POSIX helpers
         run: devenv shell -- shellcheck -s sh packaging/macos/factorseal-askpass
+      - name: Lint opt-in native acceptance runners
+        run: devenv shell -- shellcheck acceptance/linux.sh acceptance/macos.sh
+      - name: Evaluate the physical Linux acceptance app
+        run: nix --extra-experimental-features 'nix-command flakes' eval --raw .#apps.x86_64-linux.acceptance-linux.program
       - name: Run NixOS vault module VM test
         run: nix --extra-experimental-features 'nix-command flakes' build --print-build-logs .#checks.x86_64-linux.nixos-module
       - name: Build and inspect Linux package
@@ -96,12 +100,14 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test --all-targets --all-features
-      - name: Parse the Windows askpass helper
+      - name: Parse Windows helpers and acceptance runner
         shell: pwsh
         run: |
-          $errors = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path packaging/windows/factorseal-askpass.ps1), [ref]$null, [ref]$errors)
-          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output $_.ToString() }; throw 'askpass helper does not parse' }
+          foreach ($path in 'packaging/windows/factorseal-askpass.ps1', 'acceptance/windows.ps1') {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output $_.ToString() }; throw "$path does not parse" }
+          }
       - name: Build and inspect Windows package
         shell: pwsh
         run: |

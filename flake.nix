@@ -24,6 +24,35 @@
         }
       );
 
+      # This is intentionally an app rather than a flake check: it uses the
+      # host's real TPM and asks the operator to trigger a session-lock event.
+      # `nix run` builds the same patched Linux package that release artifacts
+      # use, then runs the opt-in physical acceptance suite against it.
+      apps = forLinuxSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          acceptance = pkgs.writeShellApplication {
+            name = "factorseal-acceptance-linux";
+            runtimeInputs = [
+              pkgs.coreutils
+              pkgs.gnugrep
+            ];
+            text = ''
+              exec ${pkgs.dash}/bin/dash ${./acceptance/linux.sh} \\
+                --factorseal ${self.packages.${system}.factorseal}/bin/factorseal \\
+                "$@"
+            '';
+          };
+        in
+        {
+          acceptance-linux = {
+            type = "app";
+            program = "${acceptance}/bin/factorseal-acceptance-linux";
+          };
+        }
+      );
+
       nixosModules = {
         default = import ./nix/modules/factorseal.nix;
         factorseal = self.nixosModules.default;
