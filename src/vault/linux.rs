@@ -42,6 +42,9 @@ pub struct LinuxVaultOptions {
     /// monitoring when this process belongs to a logind session. Disable only
     /// when an embedding process supplies equivalent hooks.
     pub install_lifecycle_monitor: bool,
+    /// Publish `org.freedesktop.secrets` on the session bus. Disable only for
+    /// embedded and socket-only test servers.
+    pub install_secret_service: bool,
 }
 
 impl LinuxVaultOptions {
@@ -52,6 +55,7 @@ impl LinuxVaultOptions {
             poll_interval: DEFAULT_POLL_INTERVAL,
             install_signal_handler: true,
             install_lifecycle_monitor: true,
+            install_secret_service: true,
         }
     }
 }
@@ -95,7 +99,8 @@ pub fn serve_linux_vault(
     // A systemd user manager provides the session bus on desktop Linux. Keep
     // headless CLI/acceptance runs functional when there is no user bus to
     // publish the optional desktop compatibility interface on.
-    let has_session_bus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
+    let has_session_bus =
+        options.install_secret_service && std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
     let served = std::thread::scope(|scope| {
         let secret_service = has_session_bus.then(|| {
             let service = Arc::clone(service);
@@ -436,6 +441,7 @@ mod tests {
             poll_interval: Duration::from_millis(5),
             install_signal_handler: false,
             install_lifecycle_monitor: false,
+            install_secret_service: false,
         };
         assert!(serve_linux_vault(&service, &options).is_err());
         assert!(
@@ -450,6 +456,7 @@ mod tests {
         let options = LinuxVaultOptions::new("/run/user/1000/factorseal/factorseal.sock");
         assert!(options.install_signal_handler);
         assert!(options.install_lifecycle_monitor);
+        assert!(options.install_secret_service);
     }
 
     #[test]
@@ -495,6 +502,7 @@ mod tests {
             poll_interval: Duration::from_millis(5),
             install_signal_handler: false,
             install_lifecycle_monitor: false,
+            install_secret_service: false,
         };
         let server_service = Arc::clone(&service);
         let server = std::thread::spawn(move || serve_linux_vault(&server_service, &options));
