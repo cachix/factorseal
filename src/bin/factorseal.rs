@@ -711,6 +711,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn live_endpoint_uses_the_factorseal_basename() {
         assert_eq!(DEFAULT_UNIX_SOCKET, "factorseal.sock");
     }
