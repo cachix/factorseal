@@ -5,6 +5,10 @@
 //! session bus already authenticates peers as the current desktop user, which
 //! is the same boundary provided by the other Secret Service implementations.
 
+#![allow(clippy::needless_pass_by_value, clippy::unused_self)]
+// zbus interface methods must own decoded D-Bus arguments, including headers
+// and object paths; changing these signatures to references breaks dispatch.
+
 use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
