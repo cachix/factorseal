@@ -12,6 +12,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use secret_service_protocol::{Session as ProtocolSession, SessionOutput};
 use serde::{Deserialize, Serialize};
 use zbus::object_server::ObjectServer;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
@@ -202,7 +203,7 @@ struct IndexItem {
 struct Agent {
     store: Store,
     index: Mutex<Index>,
-    sessions: Mutex<HashMap<String, String>>,
+    sessions: Mutex<HashMap<String, SessionState>>,
 }
 
 impl Agent {
@@ -325,19 +326,60 @@ impl Agent {
         self.save_index(&index)
     }
 
-    fn open_session(&self, path: String, owner: String) -> fdo::Result<()> {
-        self.sessions.lock().map_err(poisoned)?.insert(path, owner);
+    fn open_session(
+        &self,
+        path: String,
+        owner: String,
+        session: ProtocolSession,
+    ) -> fdo::Result<()> {
+        self.sessions
+            .lock()
+            .map_err(poisoned)?
+            .insert(path, SessionState { owner, session });
         Ok(())
     }
 
-    fn check_session(&self, path: &OwnedObjectPath, owner: &str) -> fdo::Result<()> {
+    fn session(&self, path: &OwnedObjectPath, owner: &str) -> fdo::Result<ProtocolSession> {
         match self.sessions.lock().map_err(poisoned)?.get(path.as_str()) {
-            Some(expected) if expected == owner => Ok(()),
+            Some(session) if session.owner == owner => Ok(session.session.clone()),
             _ => Err(fdo::Error::Failed(
                 "invalid Secret Service session".to_owned(),
             )),
         }
     }
+
+    fn decrypt_secret(&self, secret: Secret, owner: &str) -> fdo::Result<(Vec<u8>, String)> {
+        let value = self
+            .session(&secret.0, owner)?
+            .decrypt(&secret.1, &secret.2)
+            .map_err(failed)?;
+        Ok((value.to_vec(), secret.3))
+    }
+
+    fn encrypt_secret(
+        &self,
+        session: OwnedObjectPath,
+        owner: &str,
+        value: Vec<u8>,
+        content_type: String,
+    ) -> fdo::Result<Secret> {
+        let value = self
+            .session(&session, owner)?
+            .encrypt(&value)
+            .map_err(failed)?;
+        Ok((
+            session,
+            value.parameters,
+            value.value.to_vec(),
+            content_type,
+        ))
+    }
+}
+
+#[derive(Clone)]
+struct SessionState {
+    owner: String,
+    session: ProtocolSession,
 }
 
 struct Service {
@@ -362,19 +404,16 @@ impl Service {
     async fn open_session(
         &self,
         algorithm: String,
-        _input: OwnedValue,
+        input: OwnedValue,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
-        if algorithm != "plain" {
-            return Err(fdo::Error::Failed(
-                "Factorseal currently supports the plain Secret Service session algorithm"
-                    .to_owned(),
-            ));
-        }
+        let input = session_input(&algorithm, input)?;
+        let (session, output) = ProtocolSession::open(&algorithm, &input).map_err(failed)?;
         let owner = sender(&header)?;
         let path = format!("{SESSION_PREFIX}{}", random_id().map_err(failed)?);
-        self.agent.open_session(path.clone(), owner.clone())?;
+        self.agent
+            .open_session(path.clone(), owner.clone(), session)?;
         let object_path = object_path(&path)?;
         server
             .at(
@@ -387,9 +426,7 @@ impl Service {
             )
             .await
             .map_err(failed)?;
-        let output =
-            OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).map_err(failed)?;
-        Ok((output, object_path))
+        Ok((session_output(output)?, object_path))
     }
 
     #[zbus(out_args("unlocked", "locked"))]
@@ -435,7 +472,7 @@ impl Service {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<HashMap<OwnedObjectPath, Secret>> {
-        self.agent.check_session(&session, &sender(&header)?)?;
+        let owner = sender(&header)?;
         let mut result = HashMap::new();
         for path in items {
             let id = item_id(path.as_str())?;
@@ -448,7 +485,8 @@ impl Service {
                 .ok_or_else(|| no_item(id))?;
             result.insert(
                 path,
-                (session.clone(), Vec::new(), value, item.content_type),
+                self.agent
+                    .encrypt_secret(session.clone(), &owner, value, item.content_type)?,
             );
         }
         Ok(result)
@@ -497,17 +535,12 @@ impl Collection {
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
-        self.agent.check_session(&secret.0, &sender(&header)?)?;
-        if !secret.1.is_empty() {
-            return Err(fdo::Error::Failed(
-                "plain sessions do not use parameters".to_owned(),
-            ));
-        }
+        let (value, content_type) = self.agent.decrypt_secret(secret, &sender(&header)?)?;
         let label = property_string(&properties, "org.freedesktop.Secret.Item.Label")?;
         let attributes = property_map(&properties, "org.freedesktop.Secret.Item.Attributes")?;
-        let (item, created) = self
-            .agent
-            .create_or_replace(label, attributes, secret.2, secret.3, replace)?;
+        let (item, created) =
+            self.agent
+                .create_or_replace(label, attributes, value, content_type, replace)?;
         let path = item_path(&item.id)?;
         if created {
             server
@@ -550,7 +583,7 @@ impl Item {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<Secret> {
-        self.agent.check_session(&session, &sender(&header)?)?;
+        let owner = sender(&header)?;
         let item = self.agent.item(&self.id)?;
         let value = self
             .agent
@@ -558,7 +591,8 @@ impl Item {
             .get(secret_item(&self.id))
             .map_err(failed)?
             .ok_or_else(|| no_item(&self.id))?;
-        Ok((session, Vec::new(), value, item.content_type))
+        self.agent
+            .encrypt_secret(session, &owner, value, item.content_type)
     }
 
     fn set_secret(
@@ -566,13 +600,8 @@ impl Item {
         secret: Secret,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<()> {
-        self.agent.check_session(&secret.0, &sender(&header)?)?;
-        if !secret.1.is_empty() {
-            return Err(fdo::Error::Failed(
-                "plain sessions do not use parameters".to_owned(),
-            ));
-        }
-        self.agent.set_secret(&self.id, secret.2, secret.3)
+        let (value, content_type) = self.agent.decrypt_secret(secret, &sender(&header)?)?;
+        self.agent.set_secret(&self.id, value, content_type)
     }
 
     #[zbus(out_args("prompt",))]
@@ -624,6 +653,35 @@ impl Session {
             .map_err(poisoned)?
             .remove(&self.path);
         Ok(())
+    }
+}
+
+fn session_input(algorithm: &str, input: OwnedValue) -> fdo::Result<Vec<u8>> {
+    if algorithm == secret_service_protocol::ALGORITHM_PLAIN {
+        let plain = String::try_from(input).map_err(|_| {
+            fdo::Error::Failed("invalid plain Secret Service session input".to_owned())
+        })?;
+        if plain.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(fdo::Error::Failed(
+                "plain Secret Service session input must be empty".to_owned(),
+            ))
+        }
+    } else {
+        Vec::<u8>::try_from(input)
+            .map_err(|_| fdo::Error::Failed("invalid Secret Service DH public key".to_owned()))
+    }
+}
+
+fn session_output(output: SessionOutput) -> fdo::Result<OwnedValue> {
+    match output {
+        SessionOutput::Plain => {
+            OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).map_err(failed)
+        }
+        SessionOutput::DhPublicKey(value) => {
+            OwnedValue::try_from(zbus::zvariant::Value::from(value)).map_err(failed)
+        }
     }
 }
 

@@ -1,0 +1,27 @@
+[package]
+name = "secret-service-protocol"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "Apache-2.0"
+description = "Pure-Rust Secret Service session negotiation and payload protection"
+repository = "https://github.com/factorseal/factorseal"
+
+[dependencies]
+aes = "0.8.4"
+cbc = { version = "0.1.2", features = ["alloc"] }
+getrandom = "0.3.3"
+hkdf = "0.12.4"
+num-bigint = "0.4.6"
+sha2 = "0.10.9"
+thiserror = "2.0.12"
+zeroize = "1.8.1"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+missing_errors_doc = "allow"
