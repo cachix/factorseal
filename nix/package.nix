@@ -17,6 +17,7 @@ rustPlatform.buildRustPackage {
     fileset = lib.fileset.unions [
       ../Cargo.lock
       ../Cargo.toml
+      ../crates
       ../nix/patches/hardware-enclave-tpm-auth-sessions.patch
       ../src
     ];
