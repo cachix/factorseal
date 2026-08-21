@@ -75,6 +75,10 @@ in
     systemd.user.services.factorseal = {
       description = "Factorseal per-user vault service";
       documentation = [ "https://github.com/factorseal/factorseal" ];
+      # A user manager does not necessarily inherit the graphical session's
+      # environment. The broker needs this address to publish the standard
+      # org.freedesktop.secrets service on the per-user bus.
+      environment.DBUS_SESSION_BUS_ADDRESS = "unix:path=%t/bus";
 
       # Deliberately no wantedBy: Linux requires an interactive password for
       # every unseal session. factorseal-start performs that handoff.
