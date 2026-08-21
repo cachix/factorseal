@@ -90,9 +90,9 @@ mod tests {
     fn a_stale_socket_file_reports_that_no_agent_is_listening() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("factorseal.sock");
-        // A path that exists but has nothing bound to it is what a crashed
-        // agent leaves behind.
-        std::fs::write(&socket, b"").unwrap();
+        // What a crashed agent leaves behind: binding does not unlink on drop,
+        // so the socket outlives the listener with nothing accepting on it.
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
         let client = UnixVaultClient::new(&socket);
         let request = VaultRequest::new(VaultAction::Status).unwrap();
         let error = client.request(&request).unwrap_err();
