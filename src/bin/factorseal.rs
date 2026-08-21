@@ -124,6 +124,13 @@ enum Command {
         field: Option<String>,
     },
 
+    /// Permanently delete this vault and both of its hardware keys.
+    Destroy {
+        /// Required acknowledgement because this cannot be undone.
+        #[arg(long)]
+        yes_really_destroy: bool,
+    },
+
     /// Reauthorize this exact Factorseal executable after an upgrade.
     GrantCli,
 
@@ -162,6 +169,17 @@ enum CliError {
 
     #[error("keyring entry was not found")]
     KeyringEntryNotFound,
+
+    #[error("the vault is still unsealed; stop its service before destroying it")]
+    VaultIsLive,
+
+    #[error(
+        "could not prove the vault is sealed; pass the correct --socket after stopping its service"
+    )]
+    VaultStateUnknown,
+
+    #[error("refusing to destroy a vault without --yes-really-destroy")]
+    DestroyConfirmationRequired,
 
     #[error("could not identify the Factorseal executable: {0}")]
     CurrentExecutable(String),
@@ -231,6 +249,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
         } => set_keyring_value(&root, socket, item, field, value_file.as_deref()),
         Command::Get { item, field } => get_keyring_value(&root, socket, item, field),
         Command::Delete { item, field } => delete_keyring_value(&root, socket, item, field),
+        Command::Destroy { yes_really_destroy } => {
+            destroy_vault(&root, socket, factor, yes_really_destroy)
+        }
         Command::GrantCli => grant_cli(&root, factor),
         Command::GrantSecretspec {
             executable,
@@ -363,6 +384,27 @@ fn delete_keyring_value(
     if !existed {
         return Err(CliError::KeyringEntryNotFound);
     }
+    Ok(())
+}
+
+fn destroy_vault(
+    root: &Path,
+    socket: Option<&Path>,
+    factor: FactorSource<'_>,
+    confirmed: bool,
+) -> Result<(), CliError> {
+    if !confirmed {
+        return Err(CliError::DestroyConfirmationRequired);
+    }
+    let device = Vault::inspect(root)?;
+    match live_state(root, socket, &device) {
+        "sealed" => {}
+        "unsealed" => return Err(CliError::VaultIsLive),
+        _ => return Err(CliError::VaultStateUnknown),
+    }
+    let password = read_factor(factor, false)?;
+    Vault::destroy(root, UnsealFactor::Password(&password))?;
+    println!("Destroyed Factorseal vault at {}", root.display());
     Ok(())
 }
 
