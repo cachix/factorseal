@@ -88,7 +88,7 @@ resolution, so a reused process ID cannot inherit another process's grant.
   not the hardware crate's hookable application-level Hello convenience gate.
   Native acceptance must establish the supported Windows prompt behavior and
   modern Windows Hello path before the release gate can pass.
-- The current Ed25519 signing seed is hardware-wrapped and exists in zeroizing
+- The current ML-DSA-65 signing seed is hardware-wrapped and exists in zeroizing
   vault memory during an unseal lease. Signing is not yet performed by a non-exportable
   platform signing primitive.
 - Hardware binding cannot prevent an already authorized or compromised client

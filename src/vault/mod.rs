@@ -12,6 +12,8 @@ mod envelope;
 mod protection;
 mod protocol;
 mod seal;
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
+mod signature;
 #[cfg(feature = "vault-store")]
 mod store;
 #[cfg(all(

@@ -7,7 +7,7 @@ All notable changes to FactorSeal will be documented in this file.
 - Replace the legacy file format with the per-user Factorseal vault and make
   `factorseal` the sole product CLI.
 - Add the per-user vault: embedded Turso persistence, Automerge
-  documents, encrypted and Ed25519-signed change envelopes, scoped grants,
+  documents, encrypted and ML-DSA-65-signed change envelopes, scoped grants,
   bounded leases, and expiration.
 - Add authenticated Linux, macOS, and Windows local transports plus native
   developer packaging inputs, an unsigned macOS pkg builder, and CI package
@@ -25,6 +25,8 @@ All notable changes to FactorSeal will be documented in this file.
   or hybrid signature becomes a new `SignatureAlgorithm` variant rather than a
   format migration. Unknown or absent algorithms are refused rather than
   ignored. Envelope format version 2.
+- Make the unreleased vault format post-quantum: version 2 uses ML-DSA-65 for
+  vault identity, envelope signatures, and protected commit signatures.
 - Verify signed Turso commit metadata against SQL rows and detect missing
   history, rolled-back heads, a single document rewound behind its newest
   commit, orphaned changes, scope tamper, and signature tamper when opening

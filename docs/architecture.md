@@ -29,10 +29,10 @@ form the persisted vault; the socket is only the live service endpoint.
 bootstrap material:
 
 - random permanent `VaultId`;
-- `DeviceKeyId`, Ed25519 public key, and stable Automerge actor ID;
+- `DeviceKeyId`, ML-DSA-65 public key, and stable Automerge actor ID;
 - recorded TPM/Secure Enclave backend and biometric policy;
 - distinct platform labels for the wrapping and signing keys;
-- wrapped 256-bit DEK and wrapped Ed25519 seed;
+- wrapped 256-bit DEK and wrapped ML-DSA-65 seed;
 - platform identifier and, on Linux, Argon2id parameters and separate AEAD
   nonces for the mandatory password layer;
 - local key epoch and creation time.
@@ -47,9 +47,9 @@ checks the backend and policy, unwraps both values, applies the password layer
 where required, derives the public signing identity again, and rejects any
 mismatch before opening the database.
 
-The present signing seed is hardware-wrapped and lives in zeroizing vault
-memory during the lease. A later native adapter may implement signatures with a
-non-exportable platform key while keeping the `DeviceKeyId` and envelope
+The present ML-DSA-65 signing seed is hardware-wrapped and lives in zeroizing
+vault memory during the lease. A later native adapter may implement signatures
+with a non-exportable platform key while keeping the `DeviceKeyId` and envelope
 contract stable.
 
 ## Document scopes
@@ -73,7 +73,7 @@ display winner. Different visible values return `Conflict`.
 ## Encrypted change envelopes
 
 Every durable snapshot and change uses XChaCha20-Poly1305 with a fresh 192-bit
-nonce and the vault DEK. Ed25519 signatures cover a domain-separated
+nonce and ML-DSA-65 signatures cover a domain-separated
 transcript including:
 
 - envelope version;

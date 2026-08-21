@@ -10,8 +10,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "key-protection")]
 use argon2::{Algorithm, Argon2, Params, Version};
-#[cfg(feature = "key-protection")]
-use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -19,13 +17,17 @@ use zeroize::Zeroizing;
 #[cfg(feature = "hardware")]
 use crate::hardware::PlatformProtectorFactory;
 
+#[cfg(feature = "key-protection")]
+use super::signature::{SIGNING_SEED_BYTES, public_key_for_seed};
 use super::{DeviceKeyId, VaultError, VaultId, VaultResult};
 #[cfg(feature = "key-protection")]
 use super::{KeyProtector, KeyProtectorFactory};
 
 const VAULT_FILE: &str = "factorseal.json";
 const VAULT_FORMAT: &str = "factorseal-vault";
-const VAULT_VERSION: u32 = 1;
+// Version 2 replaces the quantum-vulnerable Ed25519 device identity with an
+// ML-DSA-65 identity. There are no released vaults to migrate.
+const VAULT_VERSION: u32 = 2;
 const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 const KEY_BYTES: usize = 32;
 const SALT_BYTES: usize = 16;
@@ -55,7 +57,7 @@ type UnsealedVaultKeys = (Zeroizing<[u8; KEY_BYTES]>, Zeroizing<[u8; KEY_BYTES]>
 pub struct VaultMetadata {
     vault_id: VaultId,
     device_key_id: DeviceKeyId,
-    public_signing_key: [u8; KEY_BYTES],
+    public_signing_key: Vec<u8>,
     actor_id: Vec<u8>,
     platform: VaultPlatform,
     hardware_backend: String,
@@ -76,7 +78,7 @@ impl VaultMetadata {
     }
 
     #[must_use]
-    pub const fn public_signing_key(&self) -> &[u8; KEY_BYTES] {
+    pub fn public_signing_key(&self) -> &[u8] {
         &self.public_signing_key
     }
 
@@ -547,7 +549,7 @@ struct VaultFile {
     version: u32,
     vault_id: VaultId,
     device_key_id: DeviceKeyId,
-    public_signing_key: [u8; KEY_BYTES],
+    public_signing_key: Vec<u8>,
     actor_id: Vec<u8>,
     platform: VaultPlatform,
     hardware_backend: String,
@@ -593,11 +595,10 @@ fn create_with_protectors(
         )));
     }
     let mut data_key = Zeroizing::new([0_u8; KEY_BYTES]);
-    let mut signing_seed = Zeroizing::new([0_u8; KEY_BYTES]);
+    let mut signing_seed = Zeroizing::new([0_u8; SIGNING_SEED_BYTES]);
     getrandom::fill(&mut *data_key)?;
     getrandom::fill(&mut *signing_seed)?;
-    let signing_key = SigningKey::from_bytes(&signing_seed);
-    let public_signing_key = signing_key.verifying_key().to_bytes();
+    let public_signing_key = public_key_for_seed(&signing_seed)?;
     let device_key_id = DeviceKeyId::for_public_key(&public_signing_key);
     let actor_id = actor_id_for_public_key(&public_signing_key).to_vec();
     let (data_key_payload, signing_seed_payload, nested_protection) =
@@ -658,8 +659,7 @@ fn unseal_with_protectors(
         .map_err(|error| VaultError::Protection(error.to_string()))?;
     let (data_key, signing_seed) =
         unprotect_with_factor(stored, &wrapped_data_key, &wrapped_signing_seed, factor)?;
-    let signing_key = SigningKey::from_bytes(&signing_seed);
-    let public_signing_key = signing_key.verifying_key().to_bytes();
+    let public_signing_key = public_key_for_seed(&signing_seed)?;
     if public_signing_key != stored.public_signing_key
         || DeviceKeyId::for_public_key(&public_signing_key) != stored.device_key_id
         || actor_id_for_public_key(&public_signing_key).as_slice() != stored.actor_id
@@ -681,7 +681,7 @@ impl VaultFile {
         VaultMetadata {
             vault_id: self.vault_id,
             device_key_id: self.device_key_id,
-            public_signing_key: self.public_signing_key,
+            public_signing_key: self.public_signing_key.clone(),
             actor_id: self.actor_id.clone(),
             platform: self.platform,
             hardware_backend: self.hardware_backend.clone(),
@@ -743,7 +743,7 @@ fn platform_accepts_backend(platform: VaultPlatform, backend: &str) -> bool {
 fn protect_with_factor(
     vault_id: VaultId,
     data_key: &[u8; KEY_BYTES],
-    signing_seed: &[u8; KEY_BYTES],
+    signing_seed: &[u8; SIGNING_SEED_BYTES],
     factor: UnsealFactor<'_>,
 ) -> VaultResult<ProtectedKeyPayloads> {
     let parameters = new_factor_parameters(factor)?;
@@ -815,8 +815,8 @@ fn unprotect_with_factor(
     )
     .map_err(|_| factor_incorrect_error(protection.factor.kind()))?;
     Ok((
-        decode_key(&data_key, "data-encryption key")?,
-        decode_key(&signing_seed, "device-signing seed")?,
+        decode_key::<KEY_BYTES>(&data_key, "data-encryption key")?,
+        decode_key::<SIGNING_SEED_BYTES>(&signing_seed, "device-signing seed")?,
     ))
 }
 
@@ -923,7 +923,7 @@ fn current_platform() -> VaultResult<VaultPlatform> {
     ))
 }
 
-fn actor_id_for_public_key(public_key: &[u8; KEY_BYTES]) -> [u8; KEY_BYTES] {
+fn actor_id_for_public_key(public_key: &[u8]) -> [u8; KEY_BYTES] {
     let mut digest = Sha256::new();
     digest.update(b"factorseal/automerge-actor/v1\0");
     digest.update(public_key);
@@ -931,12 +931,12 @@ fn actor_id_for_public_key(public_key: &[u8; KEY_BYTES]) -> [u8; KEY_BYTES] {
 }
 
 #[cfg(feature = "key-protection")]
-fn decode_key(
+fn decode_key<const LENGTH: usize>(
     plaintext: &Zeroizing<Vec<u8>>,
     name: &'static str,
-) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
+) -> VaultResult<Zeroizing<[u8; LENGTH]>> {
     let length = plaintext.len();
-    let bytes: [u8; KEY_BYTES] = plaintext
+    let bytes: [u8; LENGTH] = plaintext
         .as_slice()
         .try_into()
         .map_err(|_| VaultError::Protection(format!("unwrapped {name} has {length} bytes")))?;

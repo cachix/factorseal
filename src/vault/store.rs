@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,6 +13,7 @@ use turso::{Connection, Value, params};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::envelope::{EnvelopeContext, encrypt_changes, encrypt_snapshot};
+use super::signature;
 use super::{
     DATABASE_FILE, DeviceKeyId, DocumentId, DocumentScope, EncryptedSnapshot, LOCK_FILE,
     SecretAddress, SecretDocument, SecretRead, SignedChangeEnvelope, UnsealedVault, VaultError,
@@ -21,7 +21,7 @@ use super::{
 };
 
 const SCHEMA_VERSION: u32 = 1;
-const COMMIT_VERSION: u8 = 1;
+const COMMIT_VERSION: u8 = 2;
 const COMMAND_QUEUE: usize = 64;
 const MAX_COMMIT_CHAIN: usize = 1_000_000;
 /// Chain length that triggers compaction. Every mutation appends a whole
@@ -352,7 +352,7 @@ struct StoreWorker {
     connection: Connection,
     device: VaultMetadata,
     data_key: Zeroizing<[u8; 32]>,
-    signing_key: SigningKey,
+    signing_seed: Zeroizing<[u8; 32]>,
     lock_file: fs::File,
     chain_length: usize,
 }
@@ -397,13 +397,11 @@ impl StoreWorker {
             .await
             .map_err(database_error)?;
         let connection = database.connect().map_err(database_error)?;
-        let signing_key = SigningKey::from_bytes(&signing_seed);
-        drop(signing_seed);
         let mut worker = Self {
             connection,
             device,
             data_key,
-            signing_key,
+            signing_seed,
             lock_file: lock,
             chain_length: 0,
         };
@@ -780,13 +778,13 @@ impl StoreWorker {
             &mutation.heads,
             &mutation.snapshot,
             &self.data_key,
-            &self.signing_key,
+            &self.signing_seed,
         )?;
         let changes = encrypt_changes(
             &context,
             &mutation.changes,
             &self.data_key,
-            &self.signing_key,
+            &self.signing_seed,
         )?;
         let snapshot_bytes = serde_json::to_vec(&snapshot)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
@@ -807,8 +805,8 @@ impl StoreWorker {
             digest(&snapshot_bytes),
             digest_change_envelopes(&changes, &change_bytes),
             self.device.device_key_id(),
-            &self.signing_key,
-        );
+            &self.signing_seed,
+        )?;
         let protected_bytes = serde_json::to_vec(&protected_commit)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
 
@@ -1210,8 +1208,8 @@ impl StoreWorker {
                 digest(&snapshot),
                 digest_change_envelopes(&envelopes, &serialized),
                 self.device.device_key_id(),
-                &self.signing_key,
-            );
+                &self.signing_seed,
+            )?;
             previous_commit_id = Some(commit.commit_id);
             commits.push(commit);
         }
@@ -1337,8 +1335,8 @@ impl ProtectedCommit {
         snapshot_digest: [u8; 32],
         changes_digest: [u8; 32],
         device_key_id: DeviceKeyId,
-        signing_key: &SigningKey,
-    ) -> Self {
+        signing_seed: &[u8; 32],
+    ) -> VaultResult<Self> {
         let transcript = commit_transcript(
             previous_commit_id,
             document_id,
@@ -1350,11 +1348,8 @@ impl ProtectedCommit {
             device_key_id,
         );
         let commit_id = digest(&transcript);
-        let signature = signing_key
-            .sign(&commit_signature_payload(&commit_id))
-            .to_bytes()
-            .to_vec();
-        Self {
+        let signature = signature::sign(signing_seed, &commit_signature_payload(&commit_id))?;
+        Ok(Self {
             version: COMMIT_VERSION,
             commit_id,
             previous_commit_id,
@@ -1366,14 +1361,14 @@ impl ProtectedCommit {
             changes_digest,
             device_key_id,
             signature,
-        }
+        })
     }
 
     fn verify(
         &self,
         expected_commit_id: [u8; 32],
         expected_device_key_id: DeviceKeyId,
-        public_key: &[u8; 32],
+        public_key: &[u8],
     ) -> VaultResult<()> {
         if self.version != COMMIT_VERSION
             || self.commit_id != expected_commit_id
@@ -1394,13 +1389,11 @@ impl ProtectedCommit {
         if digest(&transcript) != self.commit_id {
             return Err(VaultError::Signature);
         }
-        let verifying_key =
-            VerifyingKey::from_bytes(public_key).map_err(|_| VaultError::Signature)?;
-        let signature =
-            Signature::from_slice(&self.signature).map_err(|_| VaultError::Signature)?;
-        verifying_key
-            .verify_strict(&commit_signature_payload(&self.commit_id), &signature)
-            .map_err(|_| VaultError::Signature)
+        signature::verify(
+            public_key,
+            &commit_signature_payload(&self.commit_id),
+            &self.signature,
+        )
     }
 }
 

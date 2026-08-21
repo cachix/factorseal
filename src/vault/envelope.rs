@@ -1,10 +1,10 @@
 use automerge::{Change, ChangeHash};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::signature;
 use super::{DeviceKeyId, DocumentId, DocumentScope, VaultError, VaultResult};
 
 const ENVELOPE_VERSION: u8 = 2;
@@ -12,7 +12,7 @@ const NONCE_BYTES: usize = 24;
 const DIGEST_BYTES: usize = 32;
 const SNAPSHOT_DOMAIN: &[u8] = b"factorseal/encrypted-snapshot/v1\0";
 const CHANGE_DOMAIN: &[u8] = b"factorseal/signed-change/v1\0";
-const CURRENT_SIGNATURE_ALGORITHM: SignatureAlgorithm = SignatureAlgorithm::Ed25519;
+const CURRENT_SIGNATURE_ALGORITHM: SignatureAlgorithm = SignatureAlgorithm::MlDsa65;
 
 /// Algorithm that authenticates an envelope's device signature.
 ///
@@ -22,21 +22,20 @@ const CURRENT_SIGNATURE_ALGORITHM: SignatureAlgorithm = SignatureAlgorithm::Ed25
 /// fails to deserialize instead of selecting a weaker algorithm, and there is
 /// no "none" variant to downgrade to.
 ///
-/// Ed25519 is the only variant today. Adding a post-quantum or hybrid
-/// algorithm is meant to be a new variant rather than a format migration,
-/// which is why the identifier exists before it is needed.
+/// ML-DSA-65 is the only variant today. The identifier is still explicit so a
+/// later algorithm migration cannot silently weaken verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum SignatureAlgorithm {
-    Ed25519,
+    MlDsa65,
 }
 
 impl SignatureAlgorithm {
     /// Stable byte written into signed payloads. Never reuse a code.
     const fn code(self) -> u8 {
         match self {
-            Self::Ed25519 => 1,
+            Self::MlDsa65 => 2,
         }
     }
 }
@@ -172,7 +171,7 @@ pub(crate) fn encrypt_snapshot(
     heads: &[ChangeHash],
     plaintext: &[u8],
     data_key: &[u8; 32],
-    signing_key: &SigningKey,
+    signing_seed: &[u8; 32],
 ) -> VaultResult<EncryptedSnapshot> {
     let heads: Vec<[u8; DIGEST_BYTES]> = heads.iter().map(|head| head.0).collect();
     let mut nonce = [0_u8; NONCE_BYTES];
@@ -180,15 +179,10 @@ pub(crate) fn encrypt_snapshot(
     let aad = snapshot_header(context, CURRENT_SIGNATURE_ALGORITHM, &heads);
     let ciphertext = encrypt(data_key, &nonce, &aad, plaintext)?;
     let ciphertext_digest = digest(&ciphertext);
-    let signature = signing_key
-        .sign(&signed_payload(
-            SNAPSHOT_DOMAIN,
-            &aad,
-            &nonce,
-            &ciphertext_digest,
-        ))
-        .to_bytes()
-        .to_vec();
+    let signature = signature::sign(
+        signing_seed,
+        &signed_payload(SNAPSHOT_DOMAIN, &aad, &nonce, &ciphertext_digest),
+    )?;
     Ok(EncryptedSnapshot {
         version: ENVELOPE_VERSION,
         signature_algorithm: CURRENT_SIGNATURE_ALGORITHM,
@@ -209,11 +203,11 @@ pub(crate) fn encrypt_changes(
     context: &EnvelopeContext<'_>,
     changes: &[Change],
     data_key: &[u8; 32],
-    signing_key: &SigningKey,
+    signing_seed: &[u8; 32],
 ) -> VaultResult<Vec<SignedChangeEnvelope>> {
     changes
         .iter()
-        .map(|change| encrypt_change(context, change, data_key, signing_key))
+        .map(|change| encrypt_change(context, change, data_key, signing_seed))
         .collect()
 }
 
@@ -221,7 +215,7 @@ fn encrypt_change(
     context: &EnvelopeContext<'_>,
     change: &Change,
     data_key: &[u8; 32],
-    signing_key: &SigningKey,
+    signing_seed: &[u8; 32],
 ) -> VaultResult<SignedChangeEnvelope> {
     if change.actor_id().to_bytes() != context.actor_id {
         return Err(VaultError::InvalidData(
@@ -244,15 +238,10 @@ fn encrypt_change(
     );
     let ciphertext = encrypt(data_key, &nonce, &aad, change.raw_bytes())?;
     let ciphertext_digest = digest(&ciphertext);
-    let signature = signing_key
-        .sign(&signed_payload(
-            CHANGE_DOMAIN,
-            &aad,
-            &nonce,
-            &ciphertext_digest,
-        ))
-        .to_bytes()
-        .to_vec();
+    let signature = signature::sign(
+        signing_seed,
+        &signed_payload(CHANGE_DOMAIN, &aad, &nonce, &ciphertext_digest),
+    )?;
     Ok(SignedChangeEnvelope {
         version: ENVELOPE_VERSION,
         signature_algorithm: CURRENT_SIGNATURE_ALGORITHM,
@@ -275,7 +264,7 @@ fn encrypt_change(
 pub fn verify_and_decrypt_snapshot(
     envelope: &EncryptedSnapshot,
     expected_device_key_id: DeviceKeyId,
-    public_key: &[u8; 32],
+    public_key: &[u8],
     data_key: &[u8; 32],
 ) -> VaultResult<Vec<u8>> {
     if envelope.version != ENVELOPE_VERSION || envelope.device_key_id != expected_device_key_id {
@@ -310,7 +299,7 @@ pub fn verify_and_decrypt_snapshot(
 pub fn verify_and_decrypt_change(
     envelope: &SignedChangeEnvelope,
     expected_device_key_id: DeviceKeyId,
-    public_key: &[u8; 32],
+    public_key: &[u8],
     data_key: &[u8; 32],
 ) -> VaultResult<Change> {
     if envelope.version != ENVELOPE_VERSION || envelope.device_key_id != expected_device_key_id {
@@ -404,19 +393,12 @@ fn verify_ciphertext_digest(ciphertext: &[u8], expected: &[u8; DIGEST_BYTES]) ->
 
 fn verify_signature(
     algorithm: SignatureAlgorithm,
-    public_key: &[u8; 32],
+    public_key: &[u8],
     payload: &[u8],
     bytes: &[u8],
 ) -> VaultResult<()> {
     match algorithm {
-        SignatureAlgorithm::Ed25519 => {
-            let verifying_key =
-                VerifyingKey::from_bytes(public_key).map_err(|_| VaultError::Signature)?;
-            let signature = Signature::from_slice(bytes).map_err(|_| VaultError::Signature)?;
-            verifying_key
-                .verify_strict(payload, &signature)
-                .map_err(|_| VaultError::Signature)
-        }
+        SignatureAlgorithm::MlDsa65 => signature::verify(public_key, payload, bytes),
     }
 }
 
@@ -496,8 +478,8 @@ mod tests {
 
     #[test]
     fn envelopes_declare_their_signature_algorithm() {
-        let signing = SigningKey::from_bytes(&[7; 32]);
-        let verifying = signing.verifying_key().to_bytes();
+        let signing = [7; 32];
+        let verifying = signature::public_key_for_seed(&signing).unwrap();
         let data_key = [9; 32];
         let context = context(b"device-a", &verifying);
         let envelope = encrypt_snapshot(
@@ -509,7 +491,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(envelope.signature_algorithm(), SignatureAlgorithm::Ed25519);
+        assert_eq!(envelope.signature_algorithm(), SignatureAlgorithm::MlDsa65);
     }
 
     /// An unrecognized algorithm must fail to load rather than be ignored or
@@ -517,8 +499,8 @@ mod tests {
     /// to prevent when a second algorithm is added.
     #[test]
     fn an_unknown_signature_algorithm_is_refused() {
-        let signing = SigningKey::from_bytes(&[8; 32]);
-        let verifying = signing.verifying_key().to_bytes();
+        let signing = [8; 32];
+        let verifying = signature::public_key_for_seed(&signing).unwrap();
         let data_key = [10; 32];
         let context = context(b"device-a", &verifying);
         let envelope = encrypt_snapshot(
@@ -531,7 +513,7 @@ mod tests {
         .unwrap();
 
         let mut json = serde_json::to_value(&envelope).unwrap();
-        json["signature_algorithm"] = serde_json::Value::String("ed25519-but-weaker".to_owned());
+        json["signature_algorithm"] = serde_json::Value::String("unknown-signature".to_owned());
         assert!(serde_json::from_value::<EncryptedSnapshot>(json).is_err());
 
         let mut absent = serde_json::to_value(&envelope).unwrap();
@@ -564,8 +546,8 @@ mod tests {
 
     #[test]
     fn snapshot_is_encrypted_signed_and_bound_to_metadata() {
-        let signing = SigningKey::from_bytes(&[9; 32]);
-        let verifying = signing.verifying_key().to_bytes();
+        let signing = [9; 32];
+        let verifying = signature::public_key_for_seed(&signing).unwrap();
         let data_key = [4; 32];
         let context = context(b"device-a", &verifying);
         let envelope = encrypt_snapshot(
@@ -604,8 +586,8 @@ mod tests {
 
     #[test]
     fn change_verification_checks_actor_hash_and_dependencies() {
-        let signing = SigningKey::from_bytes(&[8; 32]);
-        let verifying = signing.verifying_key().to_bytes();
+        let signing = [8; 32];
+        let verifying = signature::public_key_for_seed(&signing).unwrap();
         let data_key = [5; 32];
         let actor = ActorId::from(b"device-a".as_slice());
         let mut document = AutoCommit::new().with_actor(actor);

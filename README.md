@@ -28,8 +28,8 @@ an encrypted file:
 - TPM 2.0 on Linux and Windows, or Secure Enclave on macOS, wraps the local
   data-encryption key;
 - every platform nests one factor inside that wrapping, so neither the factor
-  nor the platform key unseals the vault alone, and because the nested factor is
-  hash-derived it is also the only layer that survives a quantum adversary;
+  nor the platform key unseals the vault alone; ML-DSA-65 provides
+  post-quantum authentication for durable vault state;
 - a separate hardware-wrapped signing key gives the vault a stable
   device identity and Automerge actor ID;
 - encrypted, device-signed Automerge snapshots and changes are persisted in an
@@ -109,7 +109,7 @@ The storage foundation currently implements:
   fallbacks through the existing `hardware-enclave` adapter;
 - `device-cache` and `device-local` document scopes;
 - an Automerge secret domain model with explicit conflict detection;
-- XChaCha20-Poly1305 encrypted and Ed25519-signed snapshots and changes;
+- XChaCha20-Poly1305 encrypted and ML-DSA-65-signed snapshots and changes;
 - signed linear protected commits, document generation compare-and-swap, and
   tamper verification at database open;
 - an embedded Turso schema owned by one sealed worker;
@@ -222,7 +222,7 @@ authorization, and proves idle lockout.
 - Grants, unseal lifetime, and secret storage lifetime are independent.
 - Hardware binding cannot stop an already authorized process from exfiltrating
   a secret returned to it.
-- Current Ed25519 device signing keys are hardware-wrapped rather than executed
+- Current ML-DSA-65 device signing keys are hardware-wrapped rather than executed
   inside a platform signing primitive; migrating to non-exportable native
   signing operations is tracked as platform hardening.
 - The signed commit chain detects content tamper, missing commits, divergent

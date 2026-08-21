@@ -13,8 +13,8 @@ vault-client = ["dep:interprocess"]
 vault-store = [
     "dep:automerge",
     "dep:chacha20poly1305",
-    "dep:ed25519-dalek",
     "dep:fs2",
+    "dep:ml-dsa",
     "dep:tokio",
     "dep:turso",
 ]
@@ -38,7 +38,7 @@ vault = [
 cli = ["dep:clap", "dep:directories", "dep:rpassword"]
 # Portable key nesting and injected key protection. This deliberately does not
 # select the desktop-only `hardware-enclave` adapter.
-key-protection = ["dep:argon2", "dep:chacha20poly1305", "dep:ed25519-dalek"]
+key-protection = ["dep:argon2", "dep:chacha20poly1305", "dep:ml-dsa"]
 hardware = ["key-protection", "dep:hardware-enclave"]
 
 [[bin]]
@@ -54,11 +54,11 @@ chacha20poly1305 = { version = "0.10.1", optional = true }
 clap = { version = "4.5.41", features = ["derive", "env"], optional = true }
 ctrlc = { version = "3.5.1", features = ["termination"], optional = true }
 directories = { version = "6.0.0", optional = true }
-ed25519-dalek = { version = "3.0.0", optional = true }
 getrandom = "0.3.3"
 fs2 = { version = "0.4.3", optional = true }
 hardware-enclave = { version = "0.2.10", default-features = false, features = ["encryption", "linux-tpm"], optional = true }
 hex = "0.4.3"
+ml-dsa = { version = "0.1.1", features = ["zeroize"], optional = true }
 rpassword = { version = "7.4.0", optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"
