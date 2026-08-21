@@ -549,7 +549,7 @@ mod tests {
     #[cfg(feature = "hardware")]
     use crate::{
         GrantPermission, UnsealLeasePolicy, Vault, VaultAction, VaultId, VaultResponseBody,
-        VaultStore, WireSecret, WireSecretAddress,
+        WireSecret, WireSecretAddress, vault::VaultStore,
     };
 
     #[test]

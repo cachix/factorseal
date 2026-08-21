@@ -30,6 +30,9 @@ an encrypted file:
 - every platform nests one factor inside that wrapping, so neither the factor
   nor the platform key unseals the vault alone; ML-DSA-65 provides
   post-quantum authentication for durable vault state;
+- the nested password factor is Argon2id-hardened but remains limited by the
+  password's entropy; it is not a substitute for a high-entropy recovery
+  secret against a post-quantum attacker;
 - a separate hardware-wrapped signing key gives the vault a stable
   device identity and Automerge actor ID;
 - encrypted, device-signed Automerge snapshots and changes are persisted in an

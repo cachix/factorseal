@@ -37,7 +37,7 @@ const COMMIT_SIGNATURE_DOMAIN: &[u8] = b"factorseal/protected-commit-signature/v
 /// Every clone talks to the same dedicated worker thread. Opening a second
 /// `VaultStore` for the vault fails while the first is alive.
 #[derive(Clone)]
-pub struct VaultStore {
+pub(crate) struct VaultStore {
     control: Arc<WorkerControl>,
     device: VaultMetadata,
 }
@@ -45,7 +45,7 @@ pub struct VaultStore {
 impl VaultStore {
     /// Open the vault's embedded Turso database and consume its
     /// hardware-unwrapped secrets into the worker.
-    pub fn open(root: impl AsRef<Path>, unsealed: UnsealedVault) -> VaultResult<Self> {
+    pub(crate) fn open(root: impl AsRef<Path>, unsealed: UnsealedVault) -> VaultResult<Self> {
         let root = root.as_ref().to_owned();
         let device = unsealed.public().clone();
         let (sender, receiver) = mpsc::sync_channel(COMMAND_QUEUE);
@@ -77,50 +77,23 @@ impl VaultStore {
     }
 
     #[must_use]
-    pub const fn device(&self) -> &VaultMetadata {
+    pub(crate) const fn device(&self) -> &VaultMetadata {
         &self.device
     }
 
     /// Stop the sole database worker and zeroize its unsealed key material.
     /// All clones become sealed.
-    pub fn seal(&self) {
+    pub(crate) fn seal(&self) {
         self.control.shutdown();
     }
 
     #[must_use]
-    pub fn is_sealed(&self) -> bool {
+    pub(crate) fn is_sealed(&self) -> bool {
         self.control.sealed.load(Ordering::Acquire)
     }
 
-    /// Retrieve one secret, deleting it first when its storage deadline has
-    /// passed.
-    pub fn get(
-        &self,
-        scope: DocumentScope,
-        namespace: &[u8],
-        address: &SecretAddress,
-    ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
-        self.get_at(scope, namespace, address, unix_time()?)
-    }
-
-    /// Store a secret with an optional absolute Unix eviction deadline.
-    pub fn put(
-        &self,
-        scope: DocumentScope,
-        namespace: &[u8],
-        address: &SecretAddress,
-        value: &[u8],
-        evict_at: Option<u64>,
-    ) -> VaultResult<()> {
-        let now = unix_time()?;
-        if evict_at.is_some_and(|deadline| deadline <= now) {
-            return Err(VaultError::Expired);
-        }
-        self.put_at(scope, namespace, address, value, evict_at)
-    }
-
     /// Delete one secret idempotently.
-    pub fn delete(
+    pub(crate) fn delete(
         &self,
         scope: DocumentScope,
         namespace: &[u8],
@@ -135,13 +108,8 @@ impl VaultStore {
         })
     }
 
-    /// Remove every expired entry from every device-cache document.
-    pub fn purge_expired(&self) -> VaultResult<usize> {
-        self.purge_expired_at(unix_time()?)
-    }
-
     /// Clear every secret from one scoped document.
-    pub fn clear(&self, scope: DocumentScope, namespace: &[u8]) -> VaultResult<usize> {
+    pub(crate) fn clear(&self, scope: DocumentScope, namespace: &[u8]) -> VaultResult<usize> {
         let document_id = self.document_id(scope, namespace);
         request(&self.control.sender, |response| Command::Clear {
             document_id,

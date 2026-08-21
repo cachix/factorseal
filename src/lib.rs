@@ -46,9 +46,7 @@ pub use vault::{
 };
 
 #[cfg(feature = "vault-store")]
-pub use vault::{
-    CallerIdentity, CallerPlatform, GrantPermission, UnsealLeasePolicy, VaultService, VaultStore,
-};
+pub use vault::{CallerIdentity, CallerPlatform, GrantPermission, UnsealLeasePolicy, VaultService};
 
 #[cfg(feature = "key-protection")]
 pub use vault::{HardwareBackend, KeyProtector, KeyProtectorFactory};

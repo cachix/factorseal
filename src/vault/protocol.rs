@@ -2,6 +2,8 @@
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fmt;
 #[cfg(feature = "vault-store")]
+use std::path::Path;
+#[cfg(feature = "vault-store")]
 use std::sync::Mutex;
 #[cfg(feature = "vault-store")]
 use std::time::{Duration, Instant};
@@ -642,7 +644,20 @@ struct ServiceState {
 
 #[cfg(feature = "vault-store")]
 impl VaultService {
-    pub fn new(store: VaultStore, now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
+    /// Open the encrypted store and create the sole request-processing service.
+    ///
+    /// The raw store deliberately remains internal so every application action
+    /// goes through grant checks, replay protection, and lease enforcement.
+    pub fn open(
+        root: impl AsRef<Path>,
+        unsealed: super::UnsealedVault,
+        now: u64,
+        policy: UnsealLeasePolicy,
+    ) -> VaultResult<Self> {
+        Self::new(VaultStore::open(root, unsealed)?, now, policy)
+    }
+
+    pub(crate) fn new(store: VaultStore, now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
         let seal_handle = store.clone();
         Ok(Self {
             state: Mutex::new(ServiceState {

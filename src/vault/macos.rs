@@ -330,8 +330,8 @@ mod tests {
     use super::*;
     #[cfg(feature = "hardware")]
     use crate::{
-        GrantPermission, UnsealLeasePolicy, Vault, VaultAction, VaultResponseBody, VaultStore,
-        WireSecret, WireSecretAddress,
+        GrantPermission, UnsealLeasePolicy, Vault, VaultAction, VaultResponseBody, WireSecret,
+        WireSecretAddress, vault::VaultStore,
     };
     #[test]
     fn peer_identity_comes_from_kernel_credentials_and_audit_token() {

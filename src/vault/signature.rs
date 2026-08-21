@@ -11,7 +11,7 @@ use core::convert::TryFrom;
 use ml_dsa::{KeyExport, Keypair};
 use ml_dsa::{KeyInit, MlDsa65, SigningKey};
 #[cfg(feature = "vault-store")]
-use ml_dsa::{Signature, SignatureEncoding, Signer, Verifier, VerifyingKey};
+use ml_dsa::{Signature, SignatureEncoding, Verifier, VerifyingKey};
 
 use super::{VaultError, VaultResult};
 
@@ -33,8 +33,11 @@ pub(crate) fn public_key_for_seed(seed: &[u8; SIGNING_SEED_BYTES]) -> VaultResul
 
 #[cfg(feature = "vault-store")]
 pub(crate) fn sign(seed: &[u8; SIGNING_SEED_BYTES], payload: &[u8]) -> VaultResult<Vec<u8>> {
+    let mut rng = getrandom_04::SysRng;
     Ok(signing_key_from_seed(seed)?
-        .sign(payload)
+        .expanded_key()
+        .sign_randomized(payload, b"", &mut rng)
+        .map_err(|_| VaultError::Crypto)?
         .to_bytes()
         .to_vec())
 }
@@ -61,6 +64,7 @@ fn signing_key_from_seed(seed: &[u8; SIGNING_SEED_BYTES]) -> VaultResult<DeviceS
 #[cfg(all(test, feature = "vault-store"))]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn mldsa_signatures_round_trip_and_reject_tampering() {
@@ -71,5 +75,59 @@ mod tests {
         verify(&public_key, b"Factorseal durable state", &signature).unwrap();
         signature[0] ^= 1;
         assert!(verify(&public_key, b"Factorseal durable state", &signature).is_err());
+    }
+
+    #[test]
+    fn mldsa_signatures_are_randomized() {
+        let seed = [0x2a; SIGNING_SEED_BYTES];
+        let public_key = public_key_for_seed(&seed).unwrap();
+        let first = sign(&seed, b"Factorseal durable state").unwrap();
+        let second = sign(&seed, b"Factorseal durable state").unwrap();
+
+        assert_ne!(first, second);
+        verify(&public_key, b"Factorseal durable state", &first).unwrap();
+        verify(&public_key, b"Factorseal durable state", &second).unwrap();
+    }
+
+    #[test]
+    fn mldsa65_matches_nist_acvp_key_generation_vector() {
+        // NIST ACVP ML-DSA-keyGen-FIPS204, commit 65370b8, ML-DSA-65,
+        // test case 26. The full 1,952-byte expected public key is committed
+        // by its SHA-256 digest to keep this test source reviewable.
+        let seed = hex::decode("70CEFB9AED5B68E018B079DA8284B9D5CAD5499ED9C265FF73588005D85C225C")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let public_key = public_key_for_seed(&seed).unwrap();
+
+        assert_eq!(public_key.len(), 1_952);
+        assert_eq!(
+            hex::encode(Sha256::digest(public_key)),
+            "646b26b8d09dbc9e865b6a006c693a3127b065e62fab5fbe8b159c416462feb6"
+        );
+    }
+
+    #[test]
+    fn malformed_mldsa_inputs_are_rejected() {
+        let seed = [0x7b; SIGNING_SEED_BYTES];
+        let public_key = public_key_for_seed(&seed).unwrap();
+        let signature = sign(&seed, b"Factorseal durable state").unwrap();
+
+        assert!(
+            verify(
+                &public_key[..public_key.len() - 1],
+                b"Factorseal durable state",
+                &signature
+            )
+            .is_err()
+        );
+        assert!(
+            verify(
+                &public_key,
+                b"Factorseal durable state",
+                &signature[..signature.len() - 1]
+            )
+            .is_err()
+        );
     }
 }

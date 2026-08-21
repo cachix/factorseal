@@ -26,7 +26,7 @@ mobile-safe layers are:
   in-process service/domain API;
 - `key-protection`: Argon2id nesting plus the `KeyProtectorFactory` boundary;
 - `vault-client`: the desktop local-IPC protocol and clients, not needed by an
-  app that embeds `VaultStore` directly.
+  app that embeds `VaultService` directly.
 
 ## Platform adapter contract
 
@@ -50,8 +50,9 @@ Accepted mobile combinations are deliberately fail-closed:
 Call `Vault::create_with_key_protector`,
 `Vault::unseal_with_key_protector`, and
 `Vault::discard_initialization_with_key_protector`. After unsealing, open
-`VaultStore` in the application process and expose only the app operations the
-Swift or Kotlin layer needs.
+`VaultService` in the application process with `VaultService::open`. Grant the
+app's authenticated caller identity only the operations it needs, then route
+all app actions through `VaultRequest`; the raw encrypted store is not public.
 
 The current Rust boundary is synchronous. A biometric adapter must run the
 Factorseal call on a background thread, dispatch native prompt presentation to
@@ -71,7 +72,7 @@ The host application must also:
 - handle native key invalidation and biometric cancellation as sealed/error
   states;
 - keep the vault in an OS backup-excluded application directory;
-- serialize access to one `VaultStore` per root;
+- serialize access to one `VaultService` per root;
 - benchmark the recorded Argon2id parameters on supported devices without
   silently weakening an existing vault;
 - test reboot, app upgrade, biometric enrollment changes, cancellation,

@@ -75,7 +75,7 @@ pub use seal::{
     NestedFactorKind, UnsealFactor, UnsealedVault, Vault, VaultMetadata, VaultPlatform,
 };
 #[cfg(feature = "vault-store")]
-pub use store::VaultStore;
+pub(crate) use store::VaultStore;
 
 #[cfg(all(feature = "vault", target_os = "linux"))]
 pub use linux::{LinuxVaultOptions, linux_caller_identity_for_executable, serve_linux_vault};

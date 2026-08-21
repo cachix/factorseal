@@ -11,7 +11,7 @@ use directories::ProjectDirs;
 use factorseal::{
     CallerIdentity, GrantPermission, Keyring, KeyringError, NativeVaultClient, UnsealFactor,
     UnsealLeasePolicy, Vault, VaultAction, VaultClient, VaultError, VaultMetadata, VaultRequest,
-    VaultResponseBody, VaultResponseErrorCode, VaultService, VaultStore, WireSecretAddress,
+    VaultResponseBody, VaultResponseErrorCode, VaultService, WireSecretAddress,
 };
 #[cfg(target_os = "linux")]
 use factorseal::{
@@ -246,8 +246,9 @@ fn initialize(root: &Path, biometric: bool, factor: FactorSource<'_>) -> Result<
     // The vault metadata is already on disk, and `create` refuses to run again while it
     // is there. Undo what this command wrote so `init` can simply be retried
     // rather than leaving a root nothing can finish or open.
-    let store = match VaultStore::open(root, unsealed) {
-        Ok(store) => store,
+    let now = unix_time()?;
+    let service = match VaultService::open(root, unsealed, now, UnsealLeasePolicy::default()) {
+        Ok(service) => service,
         Err(open_error) => {
             return match Vault::discard_initialization(root) {
                 Ok(()) => Err(open_error.into()),
@@ -258,8 +259,6 @@ fn initialize(root: &Path, biometric: bool, factor: FactorSource<'_>) -> Result<
             };
         }
     };
-    let now = unix_time()?;
-    let service = VaultService::new(store, now, UnsealLeasePolicy::default())?;
     authorize_cli(&service, now)?;
     service.seal()?;
     println!(
@@ -435,8 +434,7 @@ fn run_vault(
     let password = read_factor(factor, false)?;
     let device = Vault::inspect(root)?;
     let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
-    let store = VaultStore::open(root, unsealed)?;
-    let service = Arc::new(VaultService::new(store, unix_time()?, policy)?);
+    let service = Arc::new(VaultService::open(root, unsealed, unix_time()?, policy)?);
     serve_vault(&device, &service, root, socket)
 }
 
@@ -502,8 +500,7 @@ fn grant_secretspec(
     let caller = caller_identity_for_executable(executable)?;
     let password = read_factor(factor, false)?;
     let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
-    let store = VaultStore::open(root, unsealed)?;
-    let service = VaultService::new(store, now, UnsealLeasePolicy::default())?;
+    let service = VaultService::open(root, unsealed, now, UnsealLeasePolicy::default())?;
     service.authorize_cache_namespace(
         &caller,
         SECRETSPEC_CACHE_NAMESPACE,
@@ -528,8 +525,7 @@ fn grant_cli(root: &Path, factor: FactorSource<'_>) -> Result<(), CliError> {
     let now = unix_time()?;
     let password = read_factor(factor, false)?;
     let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
-    let store = VaultStore::open(root, unsealed)?;
-    let service = VaultService::new(store, now, UnsealLeasePolicy::default())?;
+    let service = VaultService::open(root, unsealed, now, UnsealLeasePolicy::default())?;
     authorize_cli(&service, now)?;
     service.seal()?;
     println!("Authorized this Factorseal CLI for the local keyring");
