@@ -23,7 +23,7 @@ use factorseal::{
 };
 #[cfg(target_os = "windows")]
 use factorseal::{
-    WindowsVaultClient, WindowsVaultOptions, serve_windows_vault,
+    WindowsVaultClient, WindowsVaultOptions, default_windows_pipe_name, serve_windows_vault,
     windows_caller_identity_for_executable,
 };
 use serde::Serialize;
@@ -321,7 +321,10 @@ fn live_state(root: &Path, socket: Option<&Path>, device: &VaultMetadata) -> &'s
     let Ok(request) = VaultRequest::new(VaultAction::Status) else {
         return "unknown";
     };
-    match native_client(root, socket).request(&request) {
+    let Ok(client) = native_client(root, socket) else {
+        return "unknown";
+    };
+    match client.request(&request) {
         Ok(response) => match response.result {
             Ok(VaultResponseBody::Status {
                 vault_id,
@@ -348,7 +351,7 @@ fn set_keyring_value(
     value_file: Option<&Path>,
 ) -> Result<(), CliError> {
     let value = read_keyring_value(value_file)?;
-    let client = native_client(root, socket);
+    let client = native_client(root, socket)?;
     client.set(
         KEYRING_NAMESPACE,
         &WireSecretAddress::new(item, field),
@@ -363,7 +366,7 @@ fn get_keyring_value(
     item: String,
     field: Option<String>,
 ) -> Result<(), CliError> {
-    let client = native_client(root, socket);
+    let client = native_client(root, socket)?;
     let value = client.get(KEYRING_NAMESPACE, &WireSecretAddress::new(item, field))?;
     let value = value.ok_or(CliError::KeyringEntryNotFound)?;
     let mut stdout = std::io::stdout().lock();
@@ -379,7 +382,7 @@ fn delete_keyring_value(
     item: String,
     field: Option<String>,
 ) -> Result<(), CliError> {
-    let client = native_client(root, socket);
+    let client = native_client(root, socket)?;
     let existed = client.delete(KEYRING_NAMESPACE, &WireSecretAddress::new(item, field))?;
     if !existed {
         return Err(CliError::KeyringEntryNotFound);
@@ -409,24 +412,34 @@ fn destroy_vault(
 }
 
 #[cfg(target_os = "linux")]
-fn native_client(root: &Path, socket: Option<&Path>) -> NativeVaultClient {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the Windows implementation must inspect vault metadata to derive its pipe"
+)]
+fn native_client(root: &Path, socket: Option<&Path>) -> Result<NativeVaultClient, CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    LinuxVaultClient::new(socket)
+    Ok(LinuxVaultClient::new(socket))
 }
 
 #[cfg(target_os = "macos")]
-fn native_client(root: &Path, socket: Option<&Path>) -> NativeVaultClient {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the Windows implementation must inspect vault metadata to derive its pipe"
+)]
+fn native_client(root: &Path, socket: Option<&Path>) -> Result<NativeVaultClient, CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    MacosVaultClient::new(socket)
+    Ok(MacosVaultClient::new(socket))
 }
 
 #[cfg(target_os = "windows")]
-fn native_client(_root: &Path, socket: Option<&Path>) -> NativeVaultClient {
-    let pipe_name = socket.map_or_else(
-        || r"\\.\pipe\factorseal".to_owned(),
-        |path| path.to_string_lossy().into_owned(),
-    );
-    WindowsVaultClient::new(pipe_name)
+fn native_client(root: &Path, socket: Option<&Path>) -> Result<NativeVaultClient, CliError> {
+    if let Some(pipe_name) = socket {
+        return Ok(WindowsVaultClient::new(
+            pipe_name.to_string_lossy().into_owned(),
+        ));
+    }
+    let device = Vault::inspect(root)?;
+    Ok(WindowsVaultClient::for_vault(device.vault_id()))
 }
 
 fn read_keyring_value(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliError> {
@@ -506,13 +519,13 @@ fn serve_vault(
 
 #[cfg(target_os = "windows")]
 fn serve_vault(
-    _device: &VaultMetadata,
+    device: &VaultMetadata,
     service: &Arc<VaultService>,
     _root: &Path,
     socket: Option<&Path>,
 ) -> Result<(), CliError> {
     let pipe_name = socket.map_or_else(
-        || r"\\.\pipe\factorseal".to_owned(),
+        || default_windows_pipe_name(device.vault_id()),
         |path| path.to_string_lossy().into_owned(),
     );
     serve_windows_vault(service, &WindowsVaultOptions::new(pipe_name))?;

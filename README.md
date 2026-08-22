@@ -14,7 +14,8 @@
 Factorseal is a hardware-bound local vault for Linux, macOS, and Windows. The
 vault can be sealed or unsealed, implements a durable keyring interface for
 applications, provides the same operations through its CLI, and keeps a
-separate disposable SecretSpec cache. Each vault has its own stable keys.
+separate disposable application-cache scope intended for SecretSpec. Each vault
+has its own stable keys.
 
 The reusable store and key-protection boundary also cross-compile for Android
 and iOS. Mobile applications embed the vault in-process and supply a native
@@ -63,7 +64,7 @@ passwordless mode of the user profile and is outside the MVP.
 ## Architecture
 
 ```text
-       Factorseal CLI / SecretSpec / aware application
+    Factorseal CLI / planned SecretSpec / aware application
                          |
               Factorseal `Keyring` interface
                          |
@@ -83,18 +84,22 @@ passwordless mode of the user profile and is outside the MVP.
           TPM 2.0 / Secure Enclave key wrapping
 ```
 
-The architecture has three protocol layers: SecretSpec's compiled provider or
-an application adapter owns the portable application contract, and Factorseal's
-lightweight `VaultClient` and native transport form the host-local trust
-boundary. The `Keyring` trait provides durable credential operations on top of
-that protocol. The local protocol is not a remote secret API.
+The architecture has three protocol layers: an application adapter owns the
+portable application contract, and Factorseal's lightweight `VaultClient` and
+native transport form the host-local trust boundary. The `Keyring` trait
+provides durable credential operations on top of that protocol. A planned
+SecretSpec provider will supply one such adapter. The local protocol is not a
+remote secret API.
 
 Turso is a persistence engine, not a trust boundary. Factorseal encrypts
 application data before Turso sees it. Turso Cloud Sync is not enabled and is
 not an authorization mechanism.
 
-The local Factorseal directory uses `factorseal.json`, `factorseal.db`,
-`factorseal.lock`, and the live Unix endpoint `factorseal.sock`.
+The local Factorseal directory contains `factorseal.json`, `factorseal.db`, and
+`factorseal.lock`. While the vault is unsealed, Linux and macOS also use
+`factorseal.sock` in that directory. Windows instead uses the vault-scoped named
+pipe `\\.\pipe\factorseal-<vault-id>`. `FACTORSEAL_SOCKET` overrides the native
+endpoint on every platform.
 
 Automerge is the document/change and convergence interface. Applications do
 not receive raw `AutoCommit` access. They call operations such as get, put,
@@ -126,9 +131,6 @@ The storage foundation currently implements:
 - a transport-neutral `VaultClient` implemented by the native platform
   clients, available separately through the lightweight `vault-client` crate
   feature, plus a `Keyring` trait implemented for every vault client;
-- a built-in provider in SecretSpec that maps `factorseal://` addresses,
-  reads, writes, expiry, and deletion directly into that authenticated Rust
-  client interface;
 - native authenticated transports on all three targets: Linux peer-credential
   sockets, macOS audit-token sockets, and same-user Windows named pipes;
 - native developer package builders and lifecycle manifests, exercised by each
@@ -141,8 +143,8 @@ The storage foundation currently implements:
 
 Still required before MVP release:
 
-- installed SecretSpec end-to-end conformance coverage for direct Factorseal
-  vault-backed keyring access on Linux, macOS, and Windows;
+- implementation and upstream integration of the SecretSpec provider, followed
+  by installed end-to-end conformance coverage on Linux, macOS, and Windows;
 - signed/notarized release artifacts, native lifecycle acceptance, and
   physical hardware tests on every target, including verification of the
   OS-mediated Windows TPM prompt and modern Windows Hello UX.
@@ -156,26 +158,19 @@ On NixOS/Linux, run the real-TPM suite with
 No item in that list is implied complete merely because the shared Rust core
 builds on Linux.
 
-## SecretSpec provider
+## Planned SecretSpec provider
 
-SecretSpec builds the `factorseal` provider into its Rust library. It accepts
-`factorseal://default` and `factorseal://default?namespace=cache` and calls the
-Factorseal Rust `Keyring` interface directly over the platform-native transport.
-There is no provider subprocess or registration file.
+SecretSpec does not currently ship a Factorseal provider. The intended
+integration will compile the provider into SecretSpec and connect directly over
+the platform-native transport, without a provider subprocess or registration
+file. Durable access will use Factorseal's `Keyring` interface; the disposable
+cache API and address mapping remain design work.
 
-Factorseal authenticates the process that actually opens the socket. Authorize
-the SecretSpec executable when using its CLI, or authorize the host application
-when SecretSpec is embedded as a library:
-
-```console
-factorseal grant-secretspec /absolute/path/to/secretspec
-```
-
-The provider uses the vault's default root and socket;
-`FACTORSEAL_ROOT` and `FACTORSEAL_SOCKET` provide explicit
-overrides. Replacing an authorized executable changes its digest and requires a
-new grant. Installed native lifecycle and end-to-end conformance remain release
-gates.
+The existing `factorseal grant-secretspec` command is integration scaffolding:
+it records a cache-scoped grant for an exact SecretSpec CLI or embedding
+application executable. It does not install a provider or authorize durable
+`Keyring` operations. Replacing a granted executable changes its digest and
+requires a new grant.
 
 ## Command-line keyring
 

@@ -96,7 +96,7 @@ pub use windows::{
     WindowsVaultOptions, serve_windows_vault, windows_caller_identity_for_executable,
 };
 #[cfg(all(feature = "vault-client", target_os = "windows"))]
-pub use windows_client::WindowsVaultClient;
+pub use windows_client::{WindowsVaultClient, default_windows_pipe_name};
 
 /// Files the store owns inside a vault root. The sealing layer needs their
 /// names to undo a half-finished initialization without the `vault` feature.

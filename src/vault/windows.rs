@@ -47,6 +47,7 @@ use super::transport::{
     IPC_FRAME_IO_TIMEOUT, IoBudget, hash_file, hash_open_file, pipe_io_error as io_error,
     read_frame, unix_time, write_frame,
 };
+use super::windows_client::validate_pipe_name;
 use super::{
     CallerIdentity, CallerIdentityCache, CallerPlatform, VaultError, VaultRequest, VaultResult,
     VaultService,
@@ -55,8 +56,6 @@ use super::{
 use super::{VaultClient, WindowsVaultClient};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const PIPE_PREFIX: &str = r"\\.\pipe\factorseal-";
-const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\factorseal";
 
 type BytePipe = DuplexPipeStream<pipe_mode::Bytes>;
 type ByteListener = PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>;
@@ -530,19 +529,6 @@ fn validate_options(options: &WindowsVaultOptions) -> VaultResult<()> {
     Ok(())
 }
 
-fn validate_pipe_name(pipe_name: &str) -> VaultResult<()> {
-    if pipe_name != DEFAULT_PIPE_NAME
-        && (!pipe_name.starts_with(PIPE_PREFIX)
-            || pipe_name.len() == PIPE_PREFIX.len()
-            || pipe_name[PIPE_PREFIX.len()..].contains(['\\', '/']))
-    {
-        return Err(VaultError::Protocol(
-            "Windows pipe must be a local Factorseal pipe name".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,7 +540,7 @@ mod tests {
 
     #[test]
     fn pipe_names_are_local_and_factorseal_scoped() {
-        assert!(validate_pipe_name(r"\\.\pipe\factorseal").is_ok());
+        assert!(validate_pipe_name(r"\\.\pipe\factorseal").is_err());
         assert!(validate_pipe_name(r"\\.\pipe\factorseal-device-id").is_ok());
         assert!(validate_pipe_name(r"\\server\pipe\factorseal-device-id").is_err());
         assert!(validate_pipe_name(r"\\.\pipe\other-device-id").is_err());

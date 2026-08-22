@@ -68,7 +68,7 @@ pub type NativeVaultClient = MacosVaultClient;
 pub use vault::{MacosVaultOptions, macos_caller_identity_for_executable, serve_macos_vault};
 
 #[cfg(all(feature = "vault-client", target_os = "windows"))]
-pub use vault::WindowsVaultClient;
+pub use vault::{WindowsVaultClient, default_windows_pipe_name};
 #[cfg(all(feature = "vault-client", target_os = "windows"))]
 pub type NativeVaultClient = WindowsVaultClient;
 
