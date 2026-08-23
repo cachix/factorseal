@@ -1,6 +1,6 @@
 [Unit]
 Description=Factorseal per-user vault service
-Documentation=https://github.com/factorseal/factorseal
+Documentation=https://github.com/domenkozar/factorseal
 
 [Service]
 Type=simple

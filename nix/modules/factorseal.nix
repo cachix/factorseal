@@ -74,7 +74,7 @@ in
 
     systemd.user.services.factorseal = {
       description = "Factorseal per-user vault service";
-      documentation = [ "https://github.com/factorseal/factorseal" ];
+      documentation = [ "https://github.com/domenkozar/factorseal" ];
       # A user manager does not necessarily inherit the graphical session's
       # environment. The broker needs this address to publish the standard
       # org.freedesktop.secrets service on the per-user bus.

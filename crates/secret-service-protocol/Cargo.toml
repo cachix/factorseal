@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
 description = "Pure-Rust Secret Service session negotiation and payload protection"
-repository = "https://github.com/factorseal/factorseal"
+repository = "https://github.com/domenkozar/factorseal"
 
 [dependencies]
 aes = "0.8.4"

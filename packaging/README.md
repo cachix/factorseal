@@ -1,9 +1,9 @@
 # Packaging
 
 Linux, macOS, and Windows are equal Factorseal targets. The packaging inputs in
-this directory contain the identity-ready `factorseal` vault CLI. The
-built-in `factorseal` provider ships with SecretSpec and connects to the
-background vault service through its keyring interface.
+this directory contain the identity-ready `factorseal` vault CLI. A planned
+SecretSpec `factorseal` provider will connect to the background vault service
+through its keyring interface; it does not ship in these packages.
 
 The archive builders are reproducible developer packaging, not a claim that an
 artifact is ready to release:

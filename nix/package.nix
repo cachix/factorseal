@@ -76,7 +76,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Hardware-bound Factorseal vault with a keyring interface";
-    homepage = "https://github.com/factorseal/factorseal";
+    homepage = "https://github.com/domenkozar/factorseal";
     license = lib.licenses.asl20;
     mainProgram = "factorseal";
     platforms = lib.platforms.linux;

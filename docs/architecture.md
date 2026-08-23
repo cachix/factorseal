@@ -162,10 +162,11 @@ is the `Keyring` trait. It is implemented for every `VaultClient`; the native
 platform clients send the same versioned Factorseal vault requests.
 
 The Factorseal crate exposes that seam through the lightweight `vault-client`
-feature. SecretSpec compiles a `factorseal://` provider against it and calls the
-keyring interface directly. The provider translates convention and native
-addresses plus get, set, expiring set, and delete operations; it never opens
-the embedded database or handles vault keys.
+feature. The planned SecretSpec integration will compile a `factorseal://`
+provider against it and call the keyring interface directly. That provider will
+translate convention and native addresses plus get, set, expiring set, and
+delete operations; it will never open the embedded database or handle vault
+keys.
 
 This keeps the trust boundary explicit and single-hop. The SecretSpec CLI or
 application embedding SecretSpec is the process authenticated by the Unix
