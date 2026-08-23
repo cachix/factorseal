@@ -12,7 +12,7 @@ members = ["crates/secret-service-protocol"]
 resolver = "2"
 
 [features]
-default = ["vault", "cli", "hardware"]
+default = ["vault", "cli", "hardware", "secretspec-provider"]
 vault-client = ["dep:interprocess"]
 vault-store = [
     "dep:automerge",
@@ -43,6 +43,13 @@ vault = [
     "dep:windows",
 ]
 cli = ["dep:clap", "dep:directories", "dep:rpassword"]
+secretspec-provider = [
+    "dep:async-trait",
+    "dep:percent-encoding",
+    "dep:secretspec-ipc",
+    "tokio/io-std",
+    "tokio/macros",
+]
 # Portable key nesting and injected key protection. This deliberately does not
 # select the desktop-only `hardware-enclave` adapter.
 key-protection = ["dep:argon2", "dep:chacha20poly1305", "dep:ml-dsa"]
@@ -55,6 +62,7 @@ required-features = ["vault", "cli", "hardware"]
 
 [dependencies]
 argon2 = { version = "0.5.3", optional = true }
+async-trait = { version = "0.1.89", optional = true }
 automerge = { version = "0.11.0", optional = true }
 base64 = "0.22.1"
 chacha20poly1305 = { version = "0.10.1", optional = true }
@@ -67,7 +75,9 @@ fs2 = { version = "0.4.3", optional = true }
 hardware-enclave = { version = "0.2.10", default-features = false, features = ["encryption", "linux-tpm"], optional = true }
 hex = "0.4.3"
 ml-dsa = { version = "0.1.1", features = ["zeroize"], optional = true }
+percent-encoding = { version = "2.3.2", optional = true }
 rpassword = { version = "7.4.0", optional = true }
+secretspec-ipc = { git = "https://github.com/cachix/secretspec.git", rev = "5f598c197531551a4365498224d1567cfd7247a7", package = "secretspec-ipc", optional = true }
 secret-service-protocol = { path = "crates/secret-service-protocol", optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"

@@ -156,24 +156,24 @@ the same vault-sealing path.
 
 ## SecretSpec seam
 
-SecretSpec owns provider addresses, operations, translation, and provider
-tests. Factorseal intentionally does not reproduce those types. Its stable seam
-is the `Keyring` trait. It is implemented for every `VaultClient`; the native
-platform clients send the same versioned Factorseal vault requests.
+SecretSpec owns provider discovery, address syntax, operation dispatch, and
+the typed IPC wire contract. Factorseal implements its `factorseal provider`
+subcommand against the Rust IPC crate, which is the external-provider endpoint
+SecretSpec launches over private stdin/stdout pipes.
 
-The Factorseal crate exposes that seam through the lightweight `vault-client`
-feature. The planned SecretSpec integration will compile a `factorseal://`
-provider against it and call the keyring interface directly. That provider will
-translate convention and native addresses plus get, set, expiring set, and
-delete operations; it will never open the embedded database or handle vault
-keys.
+The endpoint translates convention and native addresses into a versioned,
+percent-encoded Factorseal address and sends get, set, expiring set, and delete
+as `device-cache` requests in the `secretspec-cache/v1` namespace. It never
+opens the embedded database, handles vault keys, or performs durable `Keyring`
+operations. The `vault-client` feature remains the lightweight native seam for
+Factorseal-aware applications.
 
-This keeps the trust boundary explicit and single-hop. The SecretSpec CLI or
-application embedding SecretSpec is the process authenticated by the Unix
-socket or Windows named pipe and must receive the durable grant. There is no
-provider subprocess, provider registration, forwarded JSON identity, or
-delegation protocol. The remaining release proof is native end-to-end
-conformance on each platform.
+The endpoint executable, not the SecretSpec CLI or embedding application, is
+the principal authenticated by Factorseal's Unix socket or Windows named pipe.
+`factorseal grant-secretspec` therefore grants that exact executable cache-only
+permissions. No application-provided identity is accepted or forwarded across
+the boundary. The remaining release proof is publishing the IPC dependency and
+running installed end-to-end conformance on each platform.
 
 ## Platform adapters
 

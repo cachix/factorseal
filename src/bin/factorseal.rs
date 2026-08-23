@@ -18,6 +18,9 @@ use zeroize::Zeroizing;
 mod factor;
 #[path = "factorseal/platform.rs"]
 mod platform;
+#[cfg(feature = "secretspec-provider")]
+#[path = "factorseal/provider.rs"]
+mod provider;
 
 use factor::{FactorSource, read_factor};
 use platform::{caller_identity_for_executable, native_client, serve_vault};
@@ -126,14 +129,18 @@ enum Command {
     /// Reauthorize this exact Factorseal executable after an upgrade.
     GrantCli,
 
-    /// Authorize one exact SecretSpec or embedding application executable.
+    /// Authorize one exact SecretSpec provider-endpoint executable.
     GrantSecretspec {
         executable: PathBuf,
 
-        /// Optional lifetime for the durable grant.
+        /// Optional lifetime for the cache grant.
         #[arg(long)]
         expires_in_seconds: Option<u64>,
     },
+
+    /// Serve the SecretSpec external-provider protocol over standard I/O.
+    #[cfg(feature = "secretspec-provider")]
+    Provider,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -188,6 +195,10 @@ enum CliError {
 
     #[error("JSON serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[cfg(feature = "secretspec-provider")]
+    #[error("SecretSpec provider protocol failed: {0}")]
+    ProviderProtocol(String),
 }
 
 #[derive(Serialize)]
@@ -249,6 +260,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
             executable,
             expires_in_seconds,
         } => grant_secretspec(&root, &executable, expires_in_seconds, factor),
+        #[cfg(feature = "secretspec-provider")]
+        Command::Provider => provider::serve(&root, socket),
     }
 }
 
@@ -475,7 +488,6 @@ fn grant_secretspec(
             GrantPermission::Get,
             GrantPermission::Put,
             GrantPermission::Delete,
-            GrantPermission::Clear,
         ],
         expires_at,
         now,

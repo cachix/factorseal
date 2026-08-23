@@ -64,9 +64,9 @@ passwordless mode of the user profile and is outside the MVP.
 ## Architecture
 
 ```text
-    Factorseal CLI / planned SecretSpec / aware application
+    Factorseal CLI / SecretSpec endpoint / aware application
                          |
-              Factorseal `Keyring` interface
+       cache adapter or Factorseal `Keyring` interface
                          |
                   `VaultClient`
                          |
@@ -87,9 +87,10 @@ passwordless mode of the user profile and is outside the MVP.
 The architecture has three protocol layers: an application adapter owns the
 portable application contract, and Factorseal's lightweight `VaultClient` and
 native transport form the host-local trust boundary. The `Keyring` trait
-provides durable credential operations on top of that protocol. A planned
-SecretSpec provider will supply one such adapter. The local protocol is not a
-remote secret API.
+provides durable credential operations on top of that protocol. The
+`factorseal provider` endpoint implements SecretSpec's typed Rust IPC contract
+and maps its disposable cache operations to the native transport. The local
+protocol is not a remote secret API.
 
 Turso is a persistence engine, not a trust boundary. Factorseal encrypts
 application data before Turso sees it. Turso Cloud Sync is not enabled and is
@@ -140,11 +141,13 @@ The storage foundation currently implements:
   suspend/shutdown/session notifications.
 - durable `set`, `get`, and `delete` commands in the Factorseal CLI, using the
   same authenticated transport and caller grants as application clients.
+- a `factorseal provider` stdio endpoint for SecretSpec IPC, with typed-session
+  tests covering initialization and cache-backed get/set/expiring-set/delete.
 
 Still required before MVP release:
 
-- implementation and upstream integration of the SecretSpec provider, followed
-  by installed end-to-end conformance coverage on Linux, macOS, and Windows;
+- merging and releasing SecretSpec's IPC provider API, followed by installed
+  end-to-end conformance coverage on Linux, macOS, and Windows;
 - signed/notarized release artifacts, native lifecycle acceptance, and
   physical hardware tests on every target, including verification of the
   OS-mediated Windows TPM prompt and modern Windows Hello UX.
@@ -158,19 +161,46 @@ On NixOS/Linux, run the real-TPM suite with
 No item in that list is implied complete merely because the shared Rust core
 builds on Linux.
 
-## Planned SecretSpec provider
+## SecretSpec provider endpoint
 
-SecretSpec does not currently ship a Factorseal provider. The intended
-integration will compile the provider into SecretSpec and connect directly over
-the platform-native transport, without a provider subprocess or registration
-file. Durable access will use Factorseal's `Keyring` interface; the disposable
-cache API and address mapping remain design work.
+`factorseal provider` is a SecretSpec external-provider endpoint. SecretSpec
+launches it with private stdin/stdout pipes; the endpoint uses the committed
+typed Rust IPC API and then connects to the already-running Factorseal service
+over its native local transport. It never opens the vault database or receives
+the calling application's identity.
 
-The existing `factorseal grant-secretspec` command is integration scaffolding:
-it records a cache-scoped grant for an exact SecretSpec CLI or embedding
-application executable. It does not install a provider or authorize durable
-`Keyring` operations. Replacing a granted executable changes its digest and
-requires a new grant.
+Register the installed binary as the `factorseal` scheme (the executable path
+must be absolute):
+
+```json
+{
+  "schema_version": 1,
+  "scheme": "factorseal",
+  "executable": "/absolute/path/to/factorseal",
+  "arguments": ["provider"],
+  "credential_names": []
+}
+```
+
+Place that file at `factorseal.json` in SecretSpec's provider-registration
+directory. The URI is `factorseal://default`. Before SecretSpec can use it,
+authorize the endpoint binary itself and keep the Factorseal service unsealed
+in another terminal:
+
+```console
+$ factorseal grant-secretspec /absolute/path/to/factorseal
+$ factorseal unseal
+```
+
+The grant is cache-scoped only: convention and native addresses map to the
+`secretspec-cache/v1` disposable cache, and get/set/expiring-set/delete cannot
+read or change durable `Keyring` data. Replacing the endpoint executable
+changes its digest and requires a new grant. The endpoint cannot prompt on its
+stdio protocol streams, so a sealed service reports `interaction_required`.
+
+This endpoint follows the currently committed SecretSpec IPC API while that API
+is in its upstream PR; release packaging still waits for the corresponding
+published SecretSpec IPC crate and installed cross-platform conformance.
 
 ## Command-line keyring
 
