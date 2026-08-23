@@ -782,6 +782,9 @@ mod tests {
     use crate::vault::VaultStore;
     use crate::{CallerIdentity, CallerPlatform, UnsealLeasePolicy, Vault};
 
+    #[cfg(target_os = "linux")]
+    use zbus::Proxy;
+
     fn agent() -> (tempfile::TempDir, Agent) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
@@ -818,6 +821,7 @@ mod tests {
     #[test]
     fn item_metadata_and_secret_remain_in_sync_through_updates_and_delete() {
         let (_directory, agent) = agent();
+        let agent = Arc::new(agent);
         let attributes = HashMap::from([("service".to_owned(), "example.test".to_owned())]);
         let (item, created) = agent
             .create_or_replace(
@@ -862,5 +866,127 @@ mod tests {
         )
         .unwrap();
         assert!(index.items.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn session_bus_crud_uses_the_exported_secret_service_interfaces() {
+        // Developers outside a desktop session can still run the unit suite;
+        // Linux CI runs it under `dbus-run-session`, where this full exchange
+        // is mandatory.
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            return;
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (_directory, agent) = agent();
+            let agent = Arc::new(agent);
+            let server_connection = Connection::session().await.unwrap();
+            server_connection
+                .request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into())
+                .await
+                .unwrap();
+            let server = server_connection.object_server();
+            server
+                .at(
+                    SERVICE_PATH,
+                    Service {
+                        agent: Arc::clone(&agent),
+                    },
+                )
+                .await
+                .unwrap();
+            server
+                .at(COLLECTION_PATH, Collection { agent })
+                .await
+                .unwrap();
+
+            let client = Connection::session().await.unwrap();
+            let service = Proxy::new(
+                &client,
+                BUS_NAME,
+                SERVICE_PATH,
+                "org.freedesktop.Secret.Service",
+            )
+            .await
+            .unwrap();
+            let input = OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
+            let (_output, session): (OwnedValue, OwnedObjectPath) = service
+                .call("OpenSession", &("plain".to_owned(), input))
+                .await
+                .unwrap();
+
+            let properties = HashMap::from([
+                (
+                    "org.freedesktop.Secret.Item.Label".to_owned(),
+                    OwnedValue::try_from(zbus::zvariant::Value::from("Example")).unwrap(),
+                ),
+                (
+                    "org.freedesktop.Secret.Item.Attributes".to_owned(),
+                    OwnedValue::try_from(zbus::zvariant::Value::from(HashMap::from([(
+                        "service".to_owned(),
+                        "example.test".to_owned(),
+                    )])))
+                    .unwrap(),
+                ),
+            ]);
+            let collection = Proxy::new(
+                &client,
+                BUS_NAME,
+                COLLECTION_PATH,
+                "org.freedesktop.Secret.Collection",
+            )
+            .await
+            .unwrap();
+            let (item, _prompt): (OwnedObjectPath, OwnedObjectPath) = collection
+                .call(
+                    "CreateItem",
+                    &(
+                        properties,
+                        (
+                            session.clone(),
+                            Vec::<u8>::new(),
+                            b"first".to_vec(),
+                            "text/plain".to_owned(),
+                        ),
+                        false,
+                    ),
+                )
+                .await
+                .unwrap();
+            let item_proxy = Proxy::new(
+                &client,
+                BUS_NAME,
+                item.clone(),
+                "org.freedesktop.Secret.Item",
+            )
+            .await
+            .unwrap();
+            let secret: Secret = item_proxy
+                .call("GetSecret", &(session.clone(),))
+                .await
+                .unwrap();
+            assert_eq!(secret.2, b"first");
+            item_proxy
+                .call::<_, _, ()>(
+                    "SetSecret",
+                    &((
+                        session.clone(),
+                        Vec::<u8>::new(),
+                        b"second".to_vec(),
+                        "application/octet-stream".to_owned(),
+                    ),),
+                )
+                .await
+                .unwrap();
+            let secret: Secret = item_proxy.call("GetSecret", &(session,)).await.unwrap();
+            assert_eq!(secret.2, b"second");
+            let _prompt: OwnedObjectPath = item_proxy.call("Delete", &()).await.unwrap();
+        });
     }
 }
