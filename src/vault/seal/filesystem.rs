@@ -58,7 +58,7 @@ pub(super) fn validate_root(root: &Path) -> VaultResult<()> {
 
 pub(super) fn read_vault(root: &Path) -> VaultResult<VaultFile> {
     let path = root.join(VAULT_FILE);
-    let mut file = fs::File::open(&path).map_err(|error| path_error(&path, error))?;
+    let file = fs::File::open(&path).map_err(|error| path_error(&path, error))?;
     let metadata = file.metadata().map_err(|error| path_error(&path, error))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_VAULT_FILE_BYTES {
         return Err(VaultError::Protection(
@@ -68,8 +68,14 @@ pub(super) fn read_vault(root: &Path) -> VaultResult<VaultFile> {
     let capacity = usize::try_from(metadata.len())
         .map_err(|_| VaultError::Protection("vault metadata does not fit in memory".to_owned()))?;
     let mut bytes = Vec::with_capacity(capacity);
-    file.read_to_end(&mut bytes)
+    file.take(MAX_VAULT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| path_error(&path, error))?;
+    if bytes.len() as u64 > MAX_VAULT_FILE_BYTES {
+        return Err(VaultError::Protection(
+            "vault metadata is not a bounded regular file".to_owned(),
+        ));
+    }
     let stored: VaultFile = serde_json::from_slice(&bytes)
         .map_err(|error| VaultError::Protection(error.to_string()))?;
     stored.validate()?;

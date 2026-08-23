@@ -1,4 +1,6 @@
 use std::fmt;
+#[cfg(feature = "vault-store")]
+use std::io;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -243,12 +245,12 @@ impl VaultRequest {
         }
         let request: Self = serde_json::from_slice(bytes)
             .map_err(|error| VaultError::Protocol(error.to_string()))?;
-        request.validate()?;
+        request.validate_fields()?;
         Ok(request)
     }
 
     pub fn encode(&self) -> VaultResult<Zeroizing<Vec<u8>>> {
-        self.validate()?;
+        self.validate_fields()?;
         let bytes =
             serde_json::to_vec(self).map_err(|error| VaultError::Protocol(error.to_string()))?;
         if bytes.len() > MAX_MESSAGE_BYTES {
@@ -257,13 +259,52 @@ impl VaultRequest {
         Ok(Zeroizing::new(bytes))
     }
 
+    #[cfg(feature = "vault-store")]
     pub(super) fn validate(&self) -> VaultResult<()> {
+        self.validate_fields()?;
+        let mut writer = BoundedMessageWriter::new(MAX_MESSAGE_BYTES);
+        serde_json::to_writer(&mut writer, self)
+            .map_err(|_| VaultError::Protocol("request is too large".to_owned()))?;
+        Ok(())
+    }
+
+    fn validate_fields(&self) -> VaultResult<()> {
         if self.version != PROTOCOL_VERSION {
             return Err(VaultError::Protocol(
                 "unsupported request version".to_owned(),
             ));
         }
         self.action.validate()
+    }
+}
+
+/// Count serialized bytes without making a second secret-bearing allocation.
+/// Direct embedders call `VaultService::handle` without transport framing, so
+/// the service must enforce the same bound as `decode` itself.
+#[cfg(feature = "vault-store")]
+struct BoundedMessageWriter {
+    remaining: usize,
+}
+
+#[cfg(feature = "vault-store")]
+impl BoundedMessageWriter {
+    const fn new(maximum: usize) -> Self {
+        Self { remaining: maximum }
+    }
+}
+
+#[cfg(feature = "vault-store")]
+impl io::Write for BoundedMessageWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(io::Error::other("message exceeds configured bound"));
+        }
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

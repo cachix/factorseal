@@ -127,6 +127,9 @@ impl Session {
     }
 
     fn open_dh(input: &[u8]) -> Result<(Self, SessionOutput), ProtocolError> {
+        if input.is_empty() || input.len() > DH_BYTES {
+            return Err(ProtocolError::InvalidDhPublicKey);
+        }
         let prime = BigUint::from_bytes_be(&DH_PRIME_BYTES);
         let client_public = BigUint::from_bytes_be(input);
         let generator = BigUint::from(2_u8);
@@ -195,5 +198,17 @@ mod tests {
                 .as_slice(),
             b"secret"
         );
+    }
+
+    #[test]
+    fn dh_session_rejects_empty_and_oversized_public_keys() {
+        assert!(matches!(
+            Session::open(ALGORITHM_DH, &[]),
+            Err(ProtocolError::InvalidDhPublicKey)
+        ));
+        assert!(matches!(
+            Session::open(ALGORITHM_DH, &[2; DH_BYTES + 1]),
+            Err(ProtocolError::InvalidDhPublicKey)
+        ));
     }
 }

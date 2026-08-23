@@ -574,6 +574,27 @@ mod tests {
     }
 
     #[test]
+    fn direct_service_requests_obey_the_wire_size_bound() {
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
+        let request = VaultRequest::new(VaultAction::Put {
+            namespace: b"secretspec".to_vec(),
+            address: address(),
+            // JSON represents bytes as decimal array elements, so this is
+            // unambiguously larger than the one-MiB protocol message limit.
+            value: WireSecret::new(vec![0; MAX_MESSAGE_BYTES]),
+            evict_at: None,
+        })
+        .unwrap();
+
+        let response = service.handle(&caller(), request, 100);
+
+        assert_eq!(
+            response.result.unwrap_err().code,
+            VaultResponseErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
     fn wire_errors_never_echo_internal_or_secret_details() {
         let marker = "visible-project/API_TOKEN=needle-secret-value";
         for error in [

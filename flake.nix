@@ -49,6 +49,7 @@
           acceptance-linux = {
             type = "app";
             program = "${acceptance}/bin/factorseal-acceptance-linux";
+            meta.description = "Run Factorseal's opt-in Linux hardware acceptance suite";
           };
         }
       );

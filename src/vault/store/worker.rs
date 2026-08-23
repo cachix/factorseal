@@ -970,6 +970,21 @@ impl StoreWorker {
                 "database contains missing or uncommitted snapshots".to_owned(),
             ));
         }
+        let commits_without_documents = query_count(
+            &self.connection,
+            "SELECT COUNT(*) FROM protected_commits AS commits
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM documents
+                 WHERE documents.document_id = commits.document_id
+             )",
+            (),
+        )
+        .await?;
+        if commits_without_documents != 0 {
+            return Err(VaultError::InvalidData(
+                "protected commit refers to a missing document".to_owned(),
+            ));
+        }
         let orphan_changes = query_count(
             &self.connection,
             "SELECT COUNT(*) FROM document_changes AS changes
@@ -1524,6 +1539,36 @@ mod tests {
 
         let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
         assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+    }
+
+    #[test]
+    fn protected_chain_detects_a_missing_document_row() {
+        let (_directory, root, store) = store();
+        let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+        store
+            .put_at(
+                DocumentScope::DeviceCache,
+                b"secretspec",
+                &address,
+                b"value",
+                None,
+            )
+            .unwrap();
+        drop(store);
+
+        // An external SQLite writer need not enable foreign keys. Removing
+        // only the current document row used to leave a valid signed chain
+        // and snapshot behind while making the secret silently disappear.
+        execute_database_mutation(&root, "DELETE FROM documents");
+
+        let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+        let Err(VaultError::InvalidData(message)) = reopened else {
+            panic!("a missing current document must not open");
+        };
+        assert!(
+            message.contains("missing document"),
+            "unexpected rejection: {message}"
+        );
     }
 
     #[test]

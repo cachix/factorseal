@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use zbus::object_server::ObjectServer;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 use zbus::{Connection, fdo, interface};
+use zeroize::Zeroizing;
 
 use super::linux::linux_caller_identity_for_executable;
 use super::{
@@ -37,6 +38,7 @@ const SESSION_PREFIX: &str = "/org/freedesktop/secrets/session/";
 const NAMESPACE: &[u8] = b"factorseal/secret-service/v1";
 const INDEX_ITEM: &str = "secret-service-index";
 const INDEX_VERSION: u8 = 1;
+const MAX_SESSIONS: usize = 1024;
 
 type Secret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
 type Properties = HashMap<String, OwnedValue>;
@@ -148,13 +150,15 @@ impl Store {
             .map_err(|error| VaultError::Protocol(error.message))
     }
 
-    fn get(&self, item: impl Into<String>) -> VaultResult<Option<Vec<u8>>> {
+    fn get(&self, item: impl Into<String>) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
         let response = self.call(VaultAction::Get {
             namespace: NAMESPACE.to_vec(),
             address: WireSecretAddress::new(item, None),
         })?;
         match response {
-            VaultResponseBody::Secret { value } => Ok(value.map(|value| value.expose().to_vec())),
+            VaultResponseBody::Secret { value } => {
+                Ok(value.map(|value| Zeroizing::new(value.expose().to_vec())))
+            }
             _ => Err(VaultError::Protocol(
                 "unexpected Secret Service vault response".to_owned(),
             )),
@@ -249,7 +253,7 @@ impl Agent {
         &self,
         label: String,
         attributes: HashMap<String, String>,
-        value: Vec<u8>,
+        value: Zeroizing<Vec<u8>>,
         content_type: String,
         replace: bool,
     ) -> fdo::Result<(IndexItem, bool)> {
@@ -288,7 +292,7 @@ impl Agent {
             .mutate(vec![
                 VaultMutation::Put {
                     address: WireSecretAddress::new(secret_item(&id), None),
-                    value: WireSecret::new(value),
+                    value: WireSecret::new(value.to_vec()),
                     evict_at: None,
                 },
                 VaultMutation::Put {
@@ -302,7 +306,12 @@ impl Agent {
         Ok((item, created))
     }
 
-    fn set_secret(&self, id: &str, value: Vec<u8>, content_type: String) -> fdo::Result<()> {
+    fn set_secret(
+        &self,
+        id: &str,
+        value: Zeroizing<Vec<u8>>,
+        content_type: String,
+    ) -> fdo::Result<()> {
         let mut index = self.index.lock().map_err(poisoned)?;
         let mut next = index.clone();
         let item = next
@@ -317,7 +326,7 @@ impl Agent {
             .mutate(vec![
                 VaultMutation::Put {
                     address: WireSecretAddress::new(secret_item(id), None),
-                    value: WireSecret::new(value),
+                    value: WireSecret::new(value.to_vec()),
                     evict_at: None,
                 },
                 VaultMutation::Put {
@@ -361,11 +370,27 @@ impl Agent {
         owner: String,
         session: ProtocolSession,
     ) -> fdo::Result<()> {
-        self.sessions
-            .lock()
-            .map_err(poisoned)?
-            .insert(path, SessionState { owner, session });
+        let mut sessions = self.sessions.lock().map_err(poisoned)?;
+        if sessions.len() >= MAX_SESSIONS {
+            return Err(fdo::Error::LimitsExceeded(
+                "too many open Secret Service sessions".to_owned(),
+            ));
+        }
+        sessions.insert(path, SessionState { owner, session });
         Ok(())
+    }
+
+    fn close_session(&self, path: &str, owner: &str) -> fdo::Result<()> {
+        let mut sessions = self.sessions.lock().map_err(poisoned)?;
+        match sessions.get(path) {
+            Some(session) if session.owner == owner => {
+                sessions.remove(path);
+                Ok(())
+            }
+            _ => Err(fdo::Error::Failed(
+                "Secret Service session belongs to another client".to_owned(),
+            )),
+        }
     }
 
     fn session(&self, path: &OwnedObjectPath, owner: &str) -> fdo::Result<ProtocolSession> {
@@ -377,19 +402,27 @@ impl Agent {
         }
     }
 
-    fn decrypt_secret(&self, secret: Secret, owner: &str) -> fdo::Result<(Vec<u8>, String)> {
+    fn decrypt_secret(
+        &self,
+        secret: Secret,
+        owner: &str,
+    ) -> fdo::Result<(Zeroizing<Vec<u8>>, String)> {
+        let (session, parameters, value, content_type) = secret;
+        // In a plain Secret Service session `value` is plaintext. Take
+        // zeroizing ownership immediately after zbus hands it to us.
+        let value = Zeroizing::new(value);
         let value = self
-            .session(&secret.0, owner)?
-            .decrypt(&secret.1, &secret.2)
+            .session(&session, owner)?
+            .decrypt(&parameters, &value)
             .map_err(failed)?;
-        Ok((value.to_vec(), secret.3))
+        Ok((value, content_type))
     }
 
     fn encrypt_secret(
         &self,
         session: OwnedObjectPath,
         owner: &str,
-        value: Vec<u8>,
+        value: Zeroizing<Vec<u8>>,
         content_type: String,
     ) -> fdo::Result<Secret> {
         let value = self
@@ -423,7 +456,6 @@ struct Item {
 }
 struct Session {
     agent: Arc<Agent>,
-    owner: String,
     path: String,
 }
 
@@ -444,17 +476,21 @@ impl Service {
         self.agent
             .open_session(path.clone(), owner.clone(), session)?;
         let object_path = object_path(&path)?;
-        server
+        if let Err(error) = server
             .at(
                 path.clone(),
                 Session {
                     agent: Arc::clone(&self.agent),
-                    owner,
-                    path,
+                    path: path.clone(),
                 },
             )
             .await
-            .map_err(failed)?;
+        {
+            // Registration failed after the key entered the session map.
+            // Remove it immediately so failed opens cannot accumulate keys.
+            let _ = self.agent.close_session(&path, &owner);
+            return Err(failed(error));
+        }
         Ok((session_output(output)?, object_path))
     }
 
@@ -670,17 +706,16 @@ impl Item {
 
 #[interface(name = "org.freedesktop.Secret.Session")]
 impl Session {
-    fn close(&self, #[zbus(header)] header: zbus::message::Header<'_>) -> fdo::Result<()> {
-        if sender(&header)? != self.owner {
-            return Err(fdo::Error::Failed(
-                "Secret Service session belongs to another client".to_owned(),
-            ));
-        }
-        self.agent
-            .sessions
-            .lock()
-            .map_err(poisoned)?
-            .remove(&self.path);
+    async fn close(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(object_server)] server: &ObjectServer,
+    ) -> fdo::Result<()> {
+        self.agent.close_session(&self.path, &sender(&header)?)?;
+        server
+            .remove::<Session, _>(self.path.as_str())
+            .await
+            .map_err(failed)?;
         Ok(())
     }
 }
@@ -827,28 +862,38 @@ mod tests {
             .create_or_replace(
                 "Example".to_owned(),
                 attributes.clone(),
-                b"first".to_vec(),
+                Zeroizing::new(b"first".to_vec()),
                 "text/plain".to_owned(),
                 false,
             )
             .unwrap();
         assert!(created);
         assert_eq!(
-            agent.store.get(secret_item(&item.id)).unwrap(),
-            Some(b"first".to_vec())
+            agent
+                .store
+                .get(secret_item(&item.id))
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            b"first"
         );
         assert_eq!(agent.all_items().unwrap(), vec![item.clone()]);
 
         agent
             .set_secret(
                 &item.id,
-                b"second".to_vec(),
+                Zeroizing::new(b"second".to_vec()),
                 "application/octet-stream".to_owned(),
             )
             .unwrap();
         assert_eq!(
-            agent.store.get(secret_item(&item.id)).unwrap(),
-            Some(b"second".to_vec())
+            agent
+                .store
+                .get(secret_item(&item.id))
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            b"second"
         );
         let updated = agent.item(&item.id).unwrap();
         assert_eq!(updated.content_type, "application/octet-stream");
@@ -866,6 +911,36 @@ mod tests {
         )
         .unwrap();
         assert!(index.items.is_empty());
+    }
+
+    #[test]
+    fn sessions_are_owner_bound_and_bounded() {
+        let (_directory, agent) = agent();
+        for index in 0..MAX_SESSIONS {
+            let (session, _) =
+                ProtocolSession::open(secret_service_protocol::ALGORITHM_PLAIN, &[]).unwrap();
+            agent
+                .open_session(
+                    format!("{SESSION_PREFIX}{index}"),
+                    "owner".to_owned(),
+                    session,
+                )
+                .unwrap();
+        }
+        let (extra, _) =
+            ProtocolSession::open(secret_service_protocol::ALGORITHM_PLAIN, &[]).unwrap();
+        assert!(matches!(
+            agent.open_session("extra".to_owned(), "owner".to_owned(), extra),
+            Err(fdo::Error::LimitsExceeded(_))
+        ));
+        assert!(
+            agent
+                .close_session(&format!("{SESSION_PREFIX}0"), "other")
+                .is_err()
+        );
+        agent
+            .close_session(&format!("{SESSION_PREFIX}0"), "owner")
+            .unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -992,9 +1067,19 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let secret: Secret = item_proxy.call("GetSecret", &(session,)).await.unwrap();
+            let secret: Secret = item_proxy
+                .call("GetSecret", &(session.clone(),))
+                .await
+                .unwrap();
             assert_eq!(secret.2, b"second");
             let _prompt: OwnedObjectPath = item_proxy.call("Delete", &()).await.unwrap();
+
+            let session_proxy =
+                Proxy::new(&client, BUS_NAME, session, "org.freedesktop.Secret.Session")
+                    .await
+                    .unwrap();
+            session_proxy.call::<_, _, ()>("Close", &()).await.unwrap();
+            assert!(session_proxy.call::<_, _, ()>("Close", &()).await.is_err());
         });
     }
 }

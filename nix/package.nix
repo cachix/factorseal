@@ -30,6 +30,7 @@ rustPlatform.buildRustPackage {
     # covers, so both move together.
     outputHashes = {
       "hardware-enclave-0.2.10" = "sha256-8bvhRDkrDB9xICySrCbbWqMB2WDqN/tDqgtKYJ0soTQ=";
+      "secretspec-ipc-0.19.1" = "sha256-ufjmrWwfSY4PiDu/WDtz7Ncc8Z1MOnAYAiWZLBCAZh4=";
     };
   };
 

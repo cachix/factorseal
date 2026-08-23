@@ -417,8 +417,7 @@ fn destroy_vault(
 }
 
 fn read_keyring_value(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliError> {
-    let mut value = Zeroizing::new(Vec::new());
-    if let Some(path) = path {
+    let value = if let Some(path) = path {
         let metadata = fs::symlink_metadata(path)
             .map_err(|error| CliError::KeyringInput(format!("{}: {error}", path.display())))?;
         if !metadata.file_type().is_file() || metadata.len() > MAX_KEYRING_VALUE_BYTES {
@@ -427,20 +426,18 @@ fn read_keyring_value(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliErro
                 path.display()
             )));
         }
-        fs::File::open(path)
-            .and_then(|mut file| file.read_to_end(&mut value))
+        let file = fs::File::open(path)
             .map_err(|error| CliError::KeyringInput(format!("{}: {error}", path.display())))?;
+        read_bounded(file, MAX_KEYRING_VALUE_BYTES)
+            .map_err(|error| CliError::KeyringInput(format!("{}: {error}", path.display())))?
     } else if std::io::stdin().is_terminal() {
-        value = rpassword::prompt_password("Keyring value: ")
+        rpassword::prompt_password("Keyring value: ")
             .map(|secret| Zeroizing::new(secret.into_bytes()))
-            .map_err(|error| CliError::KeyringInput(error.to_string()))?;
+            .map_err(|error| CliError::KeyringInput(error.to_string()))?
     } else {
-        std::io::stdin()
-            .lock()
-            .take(MAX_KEYRING_VALUE_BYTES + 1)
-            .read_to_end(&mut value)
-            .map_err(|error| CliError::KeyringInput(error.to_string()))?;
-    }
+        read_bounded(std::io::stdin().lock(), MAX_KEYRING_VALUE_BYTES)
+            .map_err(|error| CliError::KeyringInput(error.to_string()))?
+    };
     if value.is_empty() {
         return Err(CliError::KeyringInput(
             "the keyring value must not be empty".to_owned(),
@@ -451,6 +448,14 @@ fn read_keyring_value(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliErro
             "the keyring value must not exceed 64 KiB".to_owned(),
         ));
     }
+    Ok(value)
+}
+
+fn read_bounded(reader: impl Read, maximum: u64) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let mut value = Zeroizing::new(Vec::new());
+    reader
+        .take(maximum.saturating_add(1))
+        .read_to_end(&mut value)?;
     Ok(value)
 }
 
@@ -635,6 +640,23 @@ mod tests {
         assert!(read_factor(source, false).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn oversized_askpass_output_is_rejected_instead_of_truncated() {
+        let _serialized = lock_helper_exec();
+        let directory = tempfile::tempdir().unwrap();
+        let helper = askpass_helper(directory.path(), "head -c 65537 /dev/zero");
+        let source = FactorSource {
+            password_file: None,
+            askpass: Some(&helper),
+        };
+
+        assert!(matches!(
+            read_factor(source, false),
+            Err(CliError::Askpass(message)) if message.contains("64 KiB")
+        ));
+    }
+
     #[test]
     fn an_explicit_file_takes_precedence_over_the_helper() {
         let directory = tempfile::tempdir().unwrap();
@@ -734,5 +756,13 @@ mod tests {
             read_keyring_value(Some(&path)).unwrap().as_slice(),
             b"secret\0with\nbytes"
         );
+    }
+
+    #[test]
+    fn bounded_reads_retain_one_byte_to_detect_overflow() {
+        let bytes = vec![7; 5];
+        let read = read_bounded(bytes.as_slice(), 4).unwrap();
+
+        assert_eq!(read.as_slice(), &[7; 5]);
     }
 }

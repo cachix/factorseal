@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{IsTerminal as _, Read};
+use std::io::IsTerminal as _;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -7,7 +7,7 @@ use std::process;
 
 use zeroize::Zeroizing;
 
-use super::{CliError, MAX_FACTOR_BYTES};
+use super::{CliError, MAX_FACTOR_BYTES, read_bounded};
 
 /// Where the vault obtains its nested factor.
 #[derive(Clone, Copy)]
@@ -54,6 +54,11 @@ pub(super) fn read_factor(
             "the Factorseal factor must not be empty".to_owned(),
         ));
     }
+    if secret.len() as u64 > MAX_FACTOR_BYTES {
+        return Err(CliError::Password(
+            "the Factorseal factor must not exceed 64 KiB".to_owned(),
+        ));
+    }
     Ok(secret)
 }
 
@@ -74,21 +79,23 @@ fn run_askpass(helper: &Path, label: &str) -> Result<Zeroizing<Vec<u8>>, CliErro
         .stdout(process::Stdio::piped())
         .spawn()
         .map_err(|error| CliError::Askpass(format!("{}: {error}", helper.display())))?;
-    let mut secret = Zeroizing::new(Vec::new());
     let read = child
         .stdout
         .take()
         .ok_or_else(|| CliError::Askpass("helper produced no output stream".to_owned()))
-        .and_then(|mut stdout| {
-            (&mut stdout)
-                .take(MAX_FACTOR_BYTES)
-                .read_to_end(&mut secret)
+        .and_then(|stdout| {
+            read_bounded(stdout, MAX_FACTOR_BYTES)
                 .map_err(|error| CliError::Askpass(error.to_string()))
         });
     let status = child
         .wait()
         .map_err(|error| CliError::Askpass(error.to_string()))?;
-    read?;
+    let mut secret = read?;
+    if secret.len() as u64 > MAX_FACTOR_BYTES {
+        return Err(CliError::Askpass(
+            "helper output must not exceed 64 KiB".to_owned(),
+        ));
+    }
     if !status.success() {
         return Err(CliError::Askpass(format!(
             "{} exited without providing a factor",
@@ -128,12 +135,16 @@ fn read_password_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, CliError> {
             )));
         }
     }
-    let mut bytes = Zeroizing::new(Vec::with_capacity(
-        usize::try_from(metadata.len()).unwrap_or(64 * 1024),
-    ));
-    fs::File::open(path)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
+    let file = fs::File::open(path)
         .map_err(|error| CliError::Password(format!("{}: {error}", path.display())))?;
+    let mut bytes = read_bounded(file, MAX_FACTOR_BYTES)
+        .map_err(|error| CliError::Password(format!("{}: {error}", path.display())))?;
+    if bytes.len() as u64 > MAX_FACTOR_BYTES {
+        return Err(CliError::Password(format!(
+            "{} must be a regular file no larger than 64 KiB",
+            path.display()
+        )));
+    }
     strip_one_line_ending(&mut bytes);
     Ok(bytes)
 }
