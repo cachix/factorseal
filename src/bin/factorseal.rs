@@ -6,22 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use factorseal::{
-    CallerIdentity, GrantPermission, Keyring, KeyringError, NativeVaultClient, UnsealFactor,
-    UnsealLeasePolicy, Vault, VaultAction, VaultClient, VaultError, VaultMetadata, VaultRequest,
-    VaultResponseBody, VaultResponseErrorCode, VaultService, WireSecretAddress,
-};
-#[cfg(target_os = "linux")]
-use factorseal::{
-    LinuxVaultClient, LinuxVaultOptions, linux_caller_identity_for_executable, serve_linux_vault,
-};
-#[cfg(target_os = "macos")]
-use factorseal::{
-    MacosVaultClient, MacosVaultOptions, macos_caller_identity_for_executable, serve_macos_vault,
-};
-#[cfg(target_os = "windows")]
-use factorseal::{
-    WindowsVaultClient, WindowsVaultOptions, default_windows_pipe_name, serve_windows_vault,
-    windows_caller_identity_for_executable,
+    GrantPermission, Keyring, KeyringError, UnsealFactor, UnsealLeasePolicy, Vault, VaultAction,
+    VaultClient, VaultError, VaultMetadata, VaultRequest, VaultResponseBody,
+    VaultResponseErrorCode, VaultService, WireSecretAddress,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -29,8 +16,11 @@ use zeroize::Zeroizing;
 
 #[path = "factorseal/factor.rs"]
 mod factor;
+#[path = "factorseal/platform.rs"]
+mod platform;
 
 use factor::{FactorSource, read_factor};
+use platform::{caller_identity_for_executable, native_client, serve_vault};
 
 const MAX_FACTOR_BYTES: u64 = 64 * 1024;
 const MAX_KEYRING_VALUE_BYTES: u64 = 64 * 1024;
@@ -413,37 +403,6 @@ fn destroy_vault(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the Windows implementation must inspect vault metadata to derive its pipe"
-)]
-fn native_client(root: &Path, socket: Option<&Path>) -> Result<NativeVaultClient, CliError> {
-    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    Ok(LinuxVaultClient::new(socket))
-}
-
-#[cfg(target_os = "macos")]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the Windows implementation must inspect vault metadata to derive its pipe"
-)]
-fn native_client(root: &Path, socket: Option<&Path>) -> Result<NativeVaultClient, CliError> {
-    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    Ok(MacosVaultClient::new(socket))
-}
-
-#[cfg(target_os = "windows")]
-fn native_client(root: &Path, socket: Option<&Path>) -> Result<NativeVaultClient, CliError> {
-    if let Some(pipe_name) = socket {
-        return Ok(WindowsVaultClient::new(
-            pipe_name.to_string_lossy().into_owned(),
-        ));
-    }
-    let device = Vault::inspect(root)?;
-    Ok(WindowsVaultClient::for_vault(device.vault_id()))
-}
-
 fn read_keyring_value(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliError> {
     let mut value = Zeroizing::new(Vec::new());
     if let Some(path) = path {
@@ -493,55 +452,6 @@ fn run_vault(
     let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
     let service = Arc::new(VaultService::open(root, unsealed, unix_time()?, policy)?);
     serve_vault(&device, &service, root, socket)
-}
-
-#[cfg(target_os = "linux")]
-fn serve_vault(
-    _device: &VaultMetadata,
-    service: &Arc<VaultService>,
-    root: &Path,
-    socket: Option<&Path>,
-) -> Result<(), CliError> {
-    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    serve_linux_vault(service, &LinuxVaultOptions::new(socket))?;
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn serve_vault(
-    _device: &VaultMetadata,
-    service: &Arc<VaultService>,
-    root: &Path,
-    socket: Option<&Path>,
-) -> Result<(), CliError> {
-    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    serve_macos_vault(service, &MacosVaultOptions::new(socket))?;
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn serve_vault(
-    device: &VaultMetadata,
-    service: &Arc<VaultService>,
-    _root: &Path,
-    socket: Option<&Path>,
-) -> Result<(), CliError> {
-    let pipe_name = socket.map_or_else(
-        || default_windows_pipe_name(device.vault_id()),
-        |path| path.to_string_lossy().into_owned(),
-    );
-    serve_windows_vault(service, &WindowsVaultOptions::new(pipe_name))?;
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn serve_vault(
-    _device: &VaultMetadata,
-    _service: &Arc<VaultService>,
-    _root: &Path,
-    _socket: Option<&Path>,
-) -> Result<(), CliError> {
-    Err(CliError::UnsupportedPlatform)
 }
 
 fn grant_secretspec(
@@ -595,26 +505,6 @@ fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
     let caller = caller_identity_for_executable(&executable)?;
     service.authorize_namespace(&caller, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, None, now)?;
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn caller_identity_for_executable(executable: &Path) -> Result<CallerIdentity, CliError> {
-    Ok(linux_caller_identity_for_executable(executable)?)
-}
-
-#[cfg(target_os = "macos")]
-fn caller_identity_for_executable(executable: &Path) -> Result<CallerIdentity, CliError> {
-    Ok(macos_caller_identity_for_executable(executable)?)
-}
-
-#[cfg(target_os = "windows")]
-fn caller_identity_for_executable(executable: &Path) -> Result<CallerIdentity, CliError> {
-    Ok(windows_caller_identity_for_executable(executable)?)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn caller_identity_for_executable(_executable: &Path) -> Result<CallerIdentity, CliError> {
-    Err(CliError::UnsupportedPlatform)
 }
 
 fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
