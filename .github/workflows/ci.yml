@@ -35,7 +35,7 @@ jobs:
       - name: Run Clippy
         run: devenv shell -- cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: devenv shell -- cargo test --all-targets --all-features
+        run: devenv shell -- dbus-run-session -- cargo test --all-targets --all-features
       - name: Check the feature combinations packagers and embedders build
         run: |
           for features in vault-client key-protection vault-store vault-store,key-protection vault-client,hardware hardware cli vault vault,cli,hardware; do
