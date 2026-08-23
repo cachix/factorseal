@@ -298,7 +298,6 @@ fn unix_time_ms() -> RpcResult<u64> {
 pub(super) fn serve(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
     let provider = FactorsealProvider::new(root, socket)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
         .enable_time()
         .build()
         .map_err(|error| CliError::ProviderProtocol(error.to_string()))?;
