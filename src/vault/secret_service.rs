@@ -872,9 +872,10 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn session_bus_crud_uses_the_exported_secret_service_interfaces() {
-        // Developers outside a desktop session can still run the unit suite;
-        // Linux CI runs it under `dbus-run-session`, where this full exchange
-        // is mandatory.
+        // Developers outside a desktop session, or with another Secret
+        // Service already registered, can still run the unit suite. Linux CI
+        // runs it under `dbus-run-session`, where this full exchange is
+        // mandatory on an isolated bus.
         if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
             return;
         }
@@ -886,11 +887,18 @@ mod tests {
         runtime.block_on(async {
             let (_directory, agent) = agent();
             let agent = Arc::new(agent);
-            let server_connection = Connection::session().await.unwrap();
-            server_connection
+            let Ok(server_connection) = Connection::session().await else {
+                return;
+            };
+            if let Err(error) = server_connection
                 .request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into())
                 .await
-                .unwrap();
+            {
+                if matches!(error, zbus::Error::NameTaken) {
+                    return;
+                }
+                panic!("could not register the Secret Service test name: {error}");
+            }
             let server = server_connection.object_server();
             server
                 .at(
