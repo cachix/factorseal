@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "vault-store")]
-pub(crate) use document::{DocumentMutation, SecretDocument, SecretRead};
+pub(crate) use document::{DocumentMutation, DocumentOperation, SecretDocument, SecretRead};
 #[cfg(feature = "vault-store")]
 pub use envelope::{
     EncryptedSnapshot, SignatureAlgorithm, SignedChangeEnvelope, verify_and_decrypt_change,
@@ -67,9 +67,9 @@ pub use envelope::{
 #[cfg(feature = "key-protection")]
 pub use protection::{HardwareBackend, KeyProtector, KeyProtectorFactory};
 pub use protocol::{
-    CallerIdentity, CallerPlatform, RequestId, VaultAction, VaultClient, VaultRequest,
-    VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret,
-    WireSecretAddress,
+    CallerIdentity, CallerPlatform, RequestId, VaultAction, VaultClient, VaultMutation,
+    VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
+    WireSecret, WireSecretAddress,
 };
 #[cfg(feature = "vault-store")]
 pub use protocol::{GrantPermission, UnsealLeasePolicy, VaultService};

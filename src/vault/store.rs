@@ -15,9 +15,9 @@ use zeroize::{Zeroize, Zeroizing};
 use super::envelope::{EnvelopeContext, encrypt_changes, encrypt_snapshot};
 use super::signature;
 use super::{
-    DATABASE_FILE, DeviceKeyId, DocumentId, DocumentScope, EncryptedSnapshot, LOCK_FILE,
-    SecretAddress, SecretDocument, SecretRead, SignedChangeEnvelope, UnsealedVault, VaultError,
-    VaultMetadata, VaultResult, verify_and_decrypt_snapshot,
+    DATABASE_FILE, DeviceKeyId, DocumentId, DocumentOperation, DocumentScope, EncryptedSnapshot,
+    LOCK_FILE, SecretAddress, SecretDocument, SecretRead, SignedChangeEnvelope, UnsealedVault,
+    VaultError, VaultMetadata, VaultResult, verify_and_decrypt_snapshot,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -154,6 +154,24 @@ impl VaultStore {
         })
     }
 
+    /// Apply several changes to one namespace as one encrypted and signed
+    /// document generation. This is used when a higher-level adapter owns
+    /// related records that must not become independently durable.
+    pub(crate) fn mutate(
+        &self,
+        scope: DocumentScope,
+        namespace: &[u8],
+        operations: Vec<DocumentOperation>,
+    ) -> VaultResult<()> {
+        let document_id = self.document_id(scope, namespace);
+        request(&self.control.sender, |response| Command::Mutate {
+            document_id,
+            scope,
+            operations,
+            response,
+        })
+    }
+
     pub(crate) fn purge_expired_at(&self, now: u64) -> VaultResult<usize> {
         request(&self.control.sender, |response| Command::PurgeExpired {
             now,
@@ -206,6 +224,12 @@ enum Command {
         address: SecretAddress,
         value: Zeroizing<Vec<u8>>,
         evict_at: Option<u64>,
+        response: mpsc::Sender<VaultResult<()>>,
+    },
+    Mutate {
+        document_id: DocumentId,
+        scope: DocumentScope,
+        operations: Vec<DocumentOperation>,
         response: mpsc::Sender<VaultResult<()>>,
     },
     Delete {
@@ -288,6 +312,15 @@ fn run_worker(
             } => {
                 let result =
                     runtime.block_on(worker.put(document_id, scope, &address, &value, evict_at));
+                let _ = response.send(result);
+            }
+            Command::Mutate {
+                document_id,
+                scope,
+                operations,
+                response,
+            } => {
+                let result = runtime.block_on(worker.mutate(document_id, scope, &operations));
                 let _ = response.send(result);
             }
             Command::Delete {
@@ -588,6 +621,34 @@ impl StoreWorker {
             ),
         };
         let mutation = document.put(address, value, evict_at)?;
+        self.commit_mutation(document_id, scope, expected_generation, key_epoch, mutation)
+            .await
+    }
+
+    async fn mutate(
+        &mut self,
+        document_id: DocumentId,
+        scope: DocumentScope,
+        operations: &[DocumentOperation],
+    ) -> VaultResult<()> {
+        let loaded = self.load_document(document_id, scope).await?;
+        let (mut document, expected_generation, key_epoch) = match loaded {
+            Some((document, generation, key_epoch)) => (document, Some(generation), key_epoch),
+            None if operations
+                .iter()
+                .any(|operation| matches!(operation, DocumentOperation::Put { .. })) =>
+            {
+                (
+                    SecretDocument::new(self.device.actor_id())?,
+                    None,
+                    self.device.key_epoch(),
+                )
+            }
+            None => return Ok(()),
+        };
+        let Some(mutation) = document.apply(operations)? else {
+            return Ok(());
+        };
         self.commit_mutation(document_id, scope, expected_generation, key_epoch, mutation)
             .await
     }
@@ -1689,6 +1750,52 @@ mod tests {
                 .delete(DocumentScope::DeviceCache, b"secretspec", &address)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn batch_mutation_commits_related_records_in_one_generation() {
+        let (_directory, root, store) = store();
+        let first = SecretAddress::new("secret-service/item/first", None).unwrap();
+        let index = SecretAddress::new("secret-service/index", None).unwrap();
+        store
+            .mutate(
+                DocumentScope::DeviceLocal,
+                b"secret-service",
+                vec![
+                    DocumentOperation::Put {
+                        address: first.clone(),
+                        value: Zeroizing::new(b"secret".to_vec()),
+                        evict_at: None,
+                    },
+                    DocumentOperation::Put {
+                        address: index.clone(),
+                        value: Zeroizing::new(b"index".to_vec()),
+                        evict_at: None,
+                    },
+                ],
+            )
+            .unwrap();
+        drop(store);
+
+        for table in ["documents", "document_snapshots", "protected_commits"] {
+            assert_eq!(
+                database_count(&root, &format!("SELECT COUNT(*) FROM {table}")),
+                1,
+                "a batch mutation wrote more than one {table} row"
+            );
+        }
+
+        let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
+        for (address, expected) in [(first, b"secret".as_slice()), (index, b"index")] {
+            assert_eq!(
+                store
+                    .get_at(DocumentScope::DeviceLocal, b"secret-service", &address, 10)
+                    .unwrap()
+                    .unwrap()
+                    .as_slice(),
+                expected
+            );
+        }
     }
 
     #[test]

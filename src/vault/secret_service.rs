@@ -24,8 +24,8 @@ use zbus::{Connection, fdo, interface};
 
 use super::linux::linux_caller_identity_for_executable;
 use super::{
-    GrantPermission, VaultAction, VaultError, VaultRequest, VaultResponseBody, VaultResult,
-    VaultService, WireSecret, WireSecretAddress,
+    GrantPermission, VaultAction, VaultError, VaultMutation, VaultRequest, VaultResponseBody,
+    VaultResult, VaultService, WireSecret, WireSecretAddress,
 };
 
 const BUS_NAME: &str = "org.freedesktop.secrets";
@@ -161,26 +161,12 @@ impl Store {
         }
     }
 
-    fn put(&self, item: impl Into<String>, value: Vec<u8>) -> VaultResult<()> {
-        match self.call(VaultAction::Put {
+    fn mutate(&self, mutations: Vec<VaultMutation>) -> VaultResult<()> {
+        match self.call(VaultAction::Mutate {
             namespace: NAMESPACE.to_vec(),
-            address: WireSecretAddress::new(item, None),
-            value: WireSecret::new(value),
-            evict_at: None,
+            mutations,
         })? {
-            VaultResponseBody::Stored => Ok(()),
-            _ => Err(VaultError::Protocol(
-                "unexpected Secret Service vault response".to_owned(),
-            )),
-        }
-    }
-
-    fn delete(&self, item: impl Into<String>) -> VaultResult<()> {
-        match self.call(VaultAction::Delete {
-            namespace: NAMESPACE.to_vec(),
-            address: WireSecretAddress::new(item, None),
-        })? {
-            VaultResponseBody::Deleted { .. } => Ok(()),
+            VaultResponseBody::Mutated => Ok(()),
             _ => Err(VaultError::Protocol(
                 "unexpected Secret Service vault response".to_owned(),
             )),
@@ -194,7 +180,7 @@ struct Index {
     items: Vec<IndexItem>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct IndexItem {
     id: String,
     label: String,
@@ -259,12 +245,6 @@ impl Agent {
         Ok(self.index.lock().map_err(poisoned)?.items.clone())
     }
 
-    fn save_index(&self, index: &Index) -> fdo::Result<()> {
-        self.store
-            .put(INDEX_ITEM, serde_json::to_vec(index).map_err(failed)?)
-            .map_err(failed)
-    }
-
     fn create_or_replace(
         &self,
         label: String,
@@ -296,38 +276,83 @@ impl Agent {
             created: existing.map_or(now, |position| index.items[position].created),
             modified: now,
         };
-        self.store.put(secret_item(&id), value).map_err(failed)?;
         let created = existing.is_none();
+        let mut next = index.clone();
         if let Some(position) = existing {
-            index.items[position] = item.clone();
+            next.items[position] = item.clone();
         } else {
-            index.items.push(item.clone());
+            next.items.push(item.clone());
         }
-        self.save_index(&index)?;
+        let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
+        self.store
+            .mutate(vec![
+                VaultMutation::Put {
+                    address: WireSecretAddress::new(secret_item(&id), None),
+                    value: WireSecret::new(value),
+                    evict_at: None,
+                },
+                VaultMutation::Put {
+                    address: WireSecretAddress::new(INDEX_ITEM, None),
+                    value: WireSecret::new(index_bytes),
+                    evict_at: None,
+                },
+            ])
+            .map_err(failed)?;
+        *index = next;
         Ok((item, created))
     }
 
     fn set_secret(&self, id: &str, value: Vec<u8>, content_type: String) -> fdo::Result<()> {
-        self.store.put(secret_item(id), value).map_err(failed)?;
         let mut index = self.index.lock().map_err(poisoned)?;
-        let item = index
+        let mut next = index.clone();
+        let item = next
             .items
             .iter_mut()
             .find(|item| item.id == id)
             .ok_or_else(|| no_item(id))?;
         item.content_type = content_type;
         item.modified = unix_time();
-        self.save_index(&index)
+        let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
+        self.store
+            .mutate(vec![
+                VaultMutation::Put {
+                    address: WireSecretAddress::new(secret_item(id), None),
+                    value: WireSecret::new(value),
+                    evict_at: None,
+                },
+                VaultMutation::Put {
+                    address: WireSecretAddress::new(INDEX_ITEM, None),
+                    value: WireSecret::new(index_bytes),
+                    evict_at: None,
+                },
+            ])
+            .map_err(failed)?;
+        *index = next;
+        Ok(())
     }
 
     fn delete_item(&self, id: &str) -> fdo::Result<()> {
-        self.store.delete(secret_item(id)).map_err(failed)?;
         let mut index = self.index.lock().map_err(poisoned)?;
-        let Some(position) = index.items.iter().position(|item| item.id == id) else {
+        let mut next = index.clone();
+        let Some(position) = next.items.iter().position(|item| item.id == id) else {
             return Err(no_item(id));
         };
-        index.items.remove(position);
-        self.save_index(&index)
+        next.items.remove(position);
+        let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
+        self.store
+            .mutate(vec![
+                VaultMutation::Delete {
+                    address: WireSecretAddress::new(secret_item(id), None),
+                },
+                VaultMutation::Put {
+                    address: WireSecretAddress::new(INDEX_ITEM, None),
+                    value: WireSecret::new(index_bytes),
+                    evict_at: None,
+                },
+            ])
+            .map_err(failed)?;
+        *index = next;
+        Ok(())
     }
 
     fn open_session(
@@ -749,4 +774,93 @@ fn property_map(properties: &Properties, key: &str) -> fdo::Result<HashMap<Strin
         .ok_or_else(|| fdo::Error::Failed(format!("missing {key}")))?;
     HashMap::<String, String>::try_from(value.try_clone().map_err(failed)?)
         .map_err(|_| fdo::Error::Failed(format!("invalid {key}")))
+}
+
+#[cfg(all(test, feature = "hardware"))]
+mod tests {
+    use super::*;
+    use crate::vault::VaultStore;
+    use crate::{CallerIdentity, CallerPlatform, UnsealLeasePolicy, Vault};
+
+    fn agent() -> (tempfile::TempDir, Agent) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("factorseal");
+        let unsealed = Vault::create_for_test(&root).unwrap();
+        let store = VaultStore::open(root, unsealed).unwrap();
+        let service =
+            Arc::new(VaultService::new(store, 100, UnsealLeasePolicy::default()).unwrap());
+        let caller = CallerIdentity::new(
+            CallerPlatform::Linux,
+            "uid:1000",
+            "factorseal-secret-service-test",
+            [0x33; 32],
+            None,
+        )
+        .unwrap();
+        service
+            .authorize_namespace(
+                &caller,
+                NAMESPACE,
+                [
+                    GrantPermission::Get,
+                    GrantPermission::Put,
+                    GrantPermission::Delete,
+                ],
+                None,
+                100,
+            )
+            .unwrap();
+        let store = Store { service, caller };
+        let agent = Agent::load(store).unwrap();
+        (directory, agent)
+    }
+
+    #[test]
+    fn item_metadata_and_secret_remain_in_sync_through_updates_and_delete() {
+        let (_directory, agent) = agent();
+        let attributes = HashMap::from([("service".to_owned(), "example.test".to_owned())]);
+        let (item, created) = agent
+            .create_or_replace(
+                "Example".to_owned(),
+                attributes.clone(),
+                b"first".to_vec(),
+                "text/plain".to_owned(),
+                false,
+            )
+            .unwrap();
+        assert!(created);
+        assert_eq!(
+            agent.store.get(secret_item(&item.id)).unwrap(),
+            Some(b"first".to_vec())
+        );
+        assert_eq!(agent.all_items().unwrap(), vec![item.clone()]);
+
+        agent
+            .set_secret(
+                &item.id,
+                b"second".to_vec(),
+                "application/octet-stream".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(
+            agent.store.get(secret_item(&item.id)).unwrap(),
+            Some(b"second".to_vec())
+        );
+        let updated = agent.item(&item.id).unwrap();
+        assert_eq!(updated.content_type, "application/octet-stream");
+        assert_eq!(updated.attributes, attributes);
+
+        agent.delete_item(&item.id).unwrap();
+        assert_eq!(agent.store.get(secret_item(&item.id)).unwrap(), None);
+        assert!(agent.all_items().unwrap().is_empty());
+        let index: Index = serde_json::from_slice(
+            &agent
+                .store
+                .get(INDEX_ITEM)
+                .unwrap()
+                .expect("index is retained"),
+        )
+        .unwrap();
+        assert!(index.items.is_empty());
+    }
 }

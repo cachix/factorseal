@@ -1,6 +1,7 @@
 use automerge::transaction::Transactable;
 use automerge::{ActorId, AutoCommit, Change, ChangeHash, ObjId, ObjType, ROOT, ReadDoc};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use super::{SecretAddress, VaultError, VaultResult};
 
@@ -28,6 +29,20 @@ pub(crate) struct DocumentMutation {
     pub(crate) snapshot: Vec<u8>,
     pub(crate) changes: Vec<Change>,
     pub(crate) heads: Vec<ChangeHash>,
+}
+
+/// One ordered mutation applied to a secret document as part of one durable
+/// generation. Values retain zeroizing ownership until the worker commits or
+/// drops the enclosing command.
+pub(crate) enum DocumentOperation {
+    Put {
+        address: SecretAddress,
+        value: Zeroizing<Vec<u8>>,
+        evict_at: Option<u64>,
+    },
+    Delete {
+        address: SecretAddress,
+    },
 }
 
 /// Domain wrapper around Automerge for secret records.
@@ -111,6 +126,42 @@ impl SecretDocument {
         value: &[u8],
         evict_at: Option<u64>,
     ) -> VaultResult<DocumentMutation> {
+        self.put_uncommitted(address, value, evict_at)?;
+        Ok(self.finish_mutation())
+    }
+
+    /// Apply an ordered group of mutations as one Automerge change set and
+    /// therefore one signed, encrypted document generation. An error before
+    /// this method returns leaves the altered in-memory document unpersisted.
+    pub(crate) fn apply(
+        &mut self,
+        operations: &[DocumentOperation],
+    ) -> VaultResult<Option<DocumentMutation>> {
+        let mut changed = false;
+        for operation in operations {
+            match operation {
+                DocumentOperation::Put {
+                    address,
+                    value,
+                    evict_at,
+                } => {
+                    self.put_uncommitted(address, value, *evict_at)?;
+                    changed = true;
+                }
+                DocumentOperation::Delete { address } => {
+                    changed |= self.delete_uncommitted(address)?;
+                }
+            }
+        }
+        Ok(changed.then(|| self.finish_mutation()))
+    }
+
+    fn put_uncommitted(
+        &mut self,
+        address: &SecretAddress,
+        value: &[u8],
+        evict_at: Option<u64>,
+    ) -> VaultResult<()> {
         let record = SecretRecord {
             version: RECORD_VERSION,
             item: address.item().to_owned(),
@@ -122,14 +173,20 @@ impl SecretDocument {
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
         self.document
             .put(&self.entries, address.storage_key(), bytes)
-            .map_err(automerge_error)?;
-        Ok(self.finish_mutation())
+            .map_err(automerge_error)
     }
 
     pub(crate) fn delete(
         &mut self,
         address: &SecretAddress,
     ) -> VaultResult<Option<DocumentMutation>> {
+        if !self.delete_uncommitted(address)? {
+            return Ok(None);
+        }
+        Ok(Some(self.finish_mutation()))
+    }
+
+    fn delete_uncommitted(&mut self, address: &SecretAddress) -> VaultResult<bool> {
         let key = address.storage_key();
         if self
             .document
@@ -137,12 +194,12 @@ impl SecretDocument {
             .map_err(automerge_error)?
             .is_empty()
         {
-            return Ok(None);
+            return Ok(false);
         }
         self.document
             .delete(&self.entries, key)
             .map_err(automerge_error)?;
-        Ok(Some(self.finish_mutation()))
+        Ok(true)
     }
 
     pub(crate) fn purge_expired(&mut self, now: u64) -> VaultResult<Option<DocumentMutation>> {

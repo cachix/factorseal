@@ -1,12 +1,12 @@
 #[cfg(feature = "vault-store")]
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::BTreeSet;
 use std::fmt;
 #[cfg(feature = "vault-store")]
 use std::path::Path;
 #[cfg(feature = "vault-store")]
 use std::sync::Mutex;
 #[cfg(feature = "vault-store")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,15 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(feature = "vault-store")]
-use super::{DocumentScope, VaultStore};
+use super::{DocumentOperation, DocumentScope, VaultStore};
 use super::{SecretAddress, VaultError, VaultResult};
+
+#[cfg(feature = "vault-store")]
+mod lease;
+#[cfg(feature = "vault-store")]
+pub use lease::UnsealLeasePolicy;
+#[cfg(feature = "vault-store")]
+use lease::{ReplayWindow, UnsealLease};
 
 const PROTOCOL_VERSION: u8 = 1;
 #[cfg(feature = "vault-store")]
@@ -25,8 +32,7 @@ const REQUEST_ID_BYTES: usize = 16;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_NAMESPACE_BYTES: usize = 4 * 1024;
-#[cfg(feature = "vault-store")]
-const MAX_REPLAY_IDS: usize = 4096;
+const MAX_MUTATIONS_PER_REQUEST: usize = 64;
 #[cfg(feature = "vault-store")]
 const GRANT_DOCUMENT_NAMESPACE: &[u8] = b"factorseal/vault-grants/v1";
 #[cfg(feature = "vault-store")]
@@ -302,6 +308,13 @@ pub enum VaultAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         evict_at: Option<u64>,
     },
+    /// Atomically apply ordered durable-keyring mutations to one namespace.
+    /// Each entry is authorized independently before the store receives any
+    /// mutation, and the store commits the entire group in one generation.
+    Mutate {
+        namespace: Vec<u8>,
+        mutations: Vec<VaultMutation>,
+    },
     /// Delete from the durable local keyring.
     Delete {
         namespace: Vec<u8>,
@@ -359,10 +372,48 @@ impl VaultAction {
                 validate_namespace(namespace)?;
                 address.resolve().map(|_| ())
             }
+            Self::Mutate {
+                namespace,
+                mutations,
+            } => {
+                validate_namespace(namespace)?;
+                if mutations.is_empty() || mutations.len() > MAX_MUTATIONS_PER_REQUEST {
+                    return Err(VaultError::Protocol(format!(
+                        "mutation request must contain between one and {MAX_MUTATIONS_PER_REQUEST} operations"
+                    )));
+                }
+                for mutation in mutations {
+                    mutation.validate()?;
+                }
+                Ok(())
+            }
             Self::Clear { namespace }
             | Self::ClearCache { namespace }
             | Self::Seal { namespace }
             | Self::SealCache { namespace } => validate_namespace(namespace),
+        }
+    }
+}
+
+/// One ordered change in a [`VaultAction::Mutate`] request.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum VaultMutation {
+    Put {
+        address: WireSecretAddress,
+        value: WireSecret,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evict_at: Option<u64>,
+    },
+    Delete {
+        address: WireSecretAddress,
+    },
+}
+
+impl VaultMutation {
+    fn validate(&self) -> VaultResult<()> {
+        match self {
+            Self::Put { address, .. } | Self::Delete { address } => address.resolve().map(|_| ()),
         }
     }
 }
@@ -463,6 +514,7 @@ pub enum VaultResponseBody {
         value: Option<WireSecret>,
     },
     Stored,
+    Mutated,
     Deleted {
         existed: bool,
     },
@@ -488,126 +540,6 @@ pub enum VaultResponseErrorCode {
     Sealed,
     Conflict,
     Internal,
-}
-
-/// Bounded lifetime for one hardware-unsealed vault session.
-#[cfg(feature = "vault-store")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UnsealLeasePolicy {
-    pub idle_timeout: Duration,
-    pub maximum_lifetime: Duration,
-}
-
-#[cfg(feature = "vault-store")]
-impl Default for UnsealLeasePolicy {
-    fn default() -> Self {
-        Self {
-            idle_timeout: Duration::from_mins(5),
-            maximum_lifetime: Duration::from_hours(8),
-        }
-    }
-}
-
-#[cfg(feature = "vault-store")]
-impl UnsealLeasePolicy {
-    fn validate(self) -> VaultResult<()> {
-        if self.idle_timeout.is_zero()
-            || self.maximum_lifetime.is_zero()
-            || self.idle_timeout > self.maximum_lifetime
-        {
-            return Err(VaultError::Protocol(
-                "unseal lease timeouts are invalid".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[cfg(feature = "vault-store")]
-struct UnsealLease {
-    idle_timeout: Duration,
-    idle_deadline: u64,
-    absolute_deadline: u64,
-    idle_expires_at: Instant,
-    absolute_expires_at: Instant,
-}
-
-#[cfg(feature = "vault-store")]
-impl UnsealLease {
-    fn new(now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
-        Self::new_at(now, Instant::now(), policy)
-    }
-
-    fn new_at(now: u64, monotonic_now: Instant, policy: UnsealLeasePolicy) -> VaultResult<Self> {
-        policy.validate()?;
-        let idle_timeout_seconds = policy.idle_timeout.as_secs();
-        let absolute_deadline = now
-            .checked_add(policy.maximum_lifetime.as_secs())
-            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?;
-        let idle_deadline = now
-            .checked_add(idle_timeout_seconds)
-            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
-            .min(absolute_deadline);
-        let absolute_expires_at = monotonic_now
-            .checked_add(policy.maximum_lifetime)
-            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?;
-        let idle_expires_at = monotonic_now
-            .checked_add(policy.idle_timeout)
-            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
-            .min(absolute_expires_at);
-        Ok(Self {
-            idle_timeout: policy.idle_timeout,
-            idle_deadline,
-            absolute_deadline,
-            idle_expires_at,
-            absolute_expires_at,
-        })
-    }
-
-    fn is_expired(&self, monotonic_now: Instant) -> bool {
-        monotonic_now >= self.idle_expires_at || monotonic_now >= self.absolute_expires_at
-    }
-
-    fn touch(&mut self, now: u64, monotonic_now: Instant) -> VaultResult<()> {
-        self.idle_deadline = now
-            .checked_add(self.idle_timeout.as_secs())
-            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
-            .min(self.absolute_deadline);
-        self.idle_expires_at = monotonic_now
-            .checked_add(self.idle_timeout)
-            .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
-            .min(self.absolute_expires_at);
-        Ok(())
-    }
-}
-
-#[cfg(feature = "vault-store")]
-struct ReplayWindow {
-    set: HashSet<RequestId>,
-    order: VecDeque<RequestId>,
-}
-
-#[cfg(feature = "vault-store")]
-impl ReplayWindow {
-    fn new() -> Self {
-        Self {
-            set: HashSet::with_capacity(MAX_REPLAY_IDS),
-            order: VecDeque::with_capacity(MAX_REPLAY_IDS),
-        }
-    }
-
-    fn consume(&mut self, request_id: RequestId) -> VaultResult<()> {
-        if !self.set.insert(request_id) {
-            return Err(VaultError::Replay);
-        }
-        self.order.push_back(request_id);
-        if self.order.len() > MAX_REPLAY_IDS
-            && let Some(expired) = self.order.pop_front()
-        {
-            self.set.remove(&expired);
-        }
-        Ok(())
-    }
 }
 
 #[cfg(feature = "vault-store")]
@@ -986,6 +918,58 @@ impl VaultService {
                 )?;
                 (VaultResponseBody::Stored, true)
             }
+            VaultAction::Mutate {
+                namespace,
+                mutations,
+            } => {
+                let mut operations = Vec::with_capacity(mutations.len());
+                for mutation in mutations {
+                    match mutation {
+                        VaultMutation::Put {
+                            address,
+                            value,
+                            evict_at,
+                        } => {
+                            let address = address.resolve()?;
+                            require_grant(
+                                &state.store,
+                                caller,
+                                document_scope,
+                                &namespace,
+                                Some(&address),
+                                GrantPermission::Put,
+                                now,
+                            )?;
+                            // As with an ordinary Put, allow an immediately
+                            // expired record but never accept a deadline that
+                            // predates the request's whole-second clock.
+                            if evict_at.is_some_and(|deadline| deadline < now) {
+                                return Err(VaultError::Expired);
+                            }
+                            operations.push(DocumentOperation::Put {
+                                address,
+                                value: Zeroizing::new(value.expose().to_vec()),
+                                evict_at,
+                            });
+                        }
+                        VaultMutation::Delete { address } => {
+                            let address = address.resolve()?;
+                            require_grant(
+                                &state.store,
+                                caller,
+                                document_scope,
+                                &namespace,
+                                Some(&address),
+                                GrantPermission::Delete,
+                                now,
+                            )?;
+                            operations.push(DocumentOperation::Delete { address });
+                        }
+                    }
+                }
+                state.store.mutate(document_scope, &namespace, operations)?;
+                (VaultResponseBody::Mutated, true)
+            }
             VaultAction::Delete { namespace, address } => {
                 let address = address.resolve()?;
                 require_grant(
@@ -1258,11 +1242,13 @@ mod redaction_tests {
     fn debug_output_never_carries_secret_bytes() {
         const NEEDLE: &[u8] = b"needle-secret-value";
 
-        let request = VaultRequest::new(VaultAction::Put {
+        let request = VaultRequest::new(VaultAction::Mutate {
             namespace: b"secretspec".to_vec(),
-            address: WireSecretAddress::new("demo/default/TOKEN", None),
-            value: WireSecret::new(NEEDLE.to_vec()),
-            evict_at: None,
+            mutations: vec![VaultMutation::Put {
+                address: WireSecretAddress::new("demo/default/TOKEN", None),
+                value: WireSecret::new(NEEDLE.to_vec()),
+                evict_at: None,
+            }],
         })
         .unwrap();
         let response = VaultResponse::success(
@@ -1288,6 +1274,8 @@ mod redaction_tests {
 
 #[cfg(all(test, feature = "vault-store", feature = "hardware"))]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::Vault;
 
@@ -1316,15 +1304,19 @@ mod tests {
 
     #[test]
     fn request_round_trip_is_versioned_and_bounded() {
-        let request = VaultRequest::new(VaultAction::Get {
+        let request = VaultRequest::new(VaultAction::Mutate {
             namespace: b"secretspec".to_vec(),
-            address: address(),
+            mutations: vec![VaultMutation::Put {
+                address: address(),
+                value: WireSecret::new(b"secret".to_vec()),
+                evict_at: None,
+            }],
         })
         .unwrap();
         let bytes = request.encode().unwrap();
         let decoded = VaultRequest::decode(&bytes).unwrap();
         assert_eq!(decoded.request_id(), request.request_id());
-        assert!(matches!(decoded.action, VaultAction::Get { .. }));
+        assert!(matches!(decoded.action, VaultAction::Mutate { .. }));
         assert!(VaultRequest::decode(&vec![0; MAX_MESSAGE_BYTES + 1]).is_err());
     }
 
@@ -1520,6 +1512,111 @@ mod tests {
             response.result.unwrap_err().code,
             VaultResponseErrorCode::AuthorizationRequired
         );
+    }
+
+    #[test]
+    fn batch_mutations_are_pre_authorized_and_commit_together() {
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
+        let caller = caller();
+        let first = WireSecretAddress::new("secretspec/demo/first", None);
+        let second = WireSecretAddress::new("secretspec/demo/second", None);
+        service
+            .authorize_entry(
+                &caller,
+                b"secretspec",
+                &first,
+                [GrantPermission::Get, GrantPermission::Put],
+                None,
+                100,
+            )
+            .unwrap();
+
+        let denied = service.handle(
+            &caller,
+            VaultRequest::new(VaultAction::Mutate {
+                namespace: b"secretspec".to_vec(),
+                mutations: vec![
+                    VaultMutation::Put {
+                        address: first.clone(),
+                        value: WireSecret::new(b"first".to_vec()),
+                        evict_at: None,
+                    },
+                    VaultMutation::Put {
+                        address: second.clone(),
+                        value: WireSecret::new(b"second".to_vec()),
+                        evict_at: None,
+                    },
+                ],
+            })
+            .unwrap(),
+            101,
+        );
+        assert_eq!(
+            denied.result.unwrap_err().code,
+            VaultResponseErrorCode::AuthorizationRequired
+        );
+
+        let absent = service.handle(
+            &caller,
+            VaultRequest::new(VaultAction::Get {
+                namespace: b"secretspec".to_vec(),
+                address: first.clone(),
+            })
+            .unwrap(),
+            102,
+        );
+        assert!(matches!(
+            absent.result,
+            Ok(VaultResponseBody::Secret { value: None })
+        ));
+
+        service
+            .authorize_entry(
+                &caller,
+                b"secretspec",
+                &second,
+                [GrantPermission::Get, GrantPermission::Put],
+                None,
+                102,
+            )
+            .unwrap();
+        let stored = service.handle(
+            &caller,
+            VaultRequest::new(VaultAction::Mutate {
+                namespace: b"secretspec".to_vec(),
+                mutations: vec![
+                    VaultMutation::Put {
+                        address: first.clone(),
+                        value: WireSecret::new(b"first".to_vec()),
+                        evict_at: None,
+                    },
+                    VaultMutation::Put {
+                        address: second.clone(),
+                        value: WireSecret::new(b"second".to_vec()),
+                        evict_at: None,
+                    },
+                ],
+            })
+            .unwrap(),
+            103,
+        );
+        assert!(matches!(stored.result, Ok(VaultResponseBody::Mutated)));
+
+        for (address, expected) in [(first, b"first".as_slice()), (second, b"second")] {
+            let response = service.handle(
+                &caller,
+                VaultRequest::new(VaultAction::Get {
+                    namespace: b"secretspec".to_vec(),
+                    address,
+                })
+                .unwrap(),
+                104,
+            );
+            let Ok(VaultResponseBody::Secret { value: Some(value) }) = response.result else {
+                panic!("expected a stored batch secret");
+            };
+            assert_eq!(value.expose(), expected);
+        }
     }
 
     #[test]
