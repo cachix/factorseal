@@ -11,11 +11,12 @@
 > [!WARNING]
 > Factorseal is an unaudited prototype. It is not ready for production secrets.
 
-Factorseal is a hardware-bound local secrets vault for Linux, macOS, and
-Windows. One per-user service owns the encrypted database and exposes narrowly
-scoped operations to local applications through authenticated native IPC.
-Applications never open the database or receive the vault's encryption and
-signing keys.
+Factorseal is an enclave-backed local secrets vault for Linux, macOS, and
+Windows. The platform enclave is TPM 2.0 on Linux and Windows, and Apple's
+Secure Enclave on macOS. One per-user service owns the encrypted database and
+exposes narrowly scoped operations to local applications through authenticated
+native IPC. Applications never open the database or receive the vault's
+encryption and signing keys.
 
 Factorseal provides:
 
@@ -24,13 +25,13 @@ Factorseal provides:
 - the standard `org.freedesktop.secrets` interface on Linux;
 - an embeddable store and key-protection boundary for Android and iOS.
 
-It is a local broker backed by platform security hardware. It is not a password
-manager, a remote secrets service, or itself a secure enclave. It also does not
-attempt to replace every Apple Keychain or Windows Credential Manager API.
+It is the local broker around that platform enclave, not a password manager or
+remote secrets service. It also does not attempt to replace every Apple
+Keychain or Windows Credential Manager API.
 
 ## Quick start
 
-Factorseal requires a supported hardware backend: TPM 2.0 on Linux and Windows,
+Factorseal requires a supported platform enclave: TPM 2.0 on Linux and Windows,
 or Secure Enclave on macOS. Software keyring and DPAPI-only fallbacks are
 rejected. Once the `factorseal` binary is installed, create a vault:
 
@@ -38,7 +39,7 @@ rejected. Once the `factorseal` binary is installed, create a vault:
 $ factorseal init
 ```
 
-Initialization prompts for a Factorseal password, creates the hardware-bound
+Initialization prompts for a Factorseal password, creates the enclave-protected
 vault, authorizes that exact CLI executable for the durable keyring, and leaves
 the vault sealed.
 
@@ -74,33 +75,35 @@ service and run `factorseal grant-cli` to authorize the new CLI executable.
 ## How it works
 
 ```text
-       TPM 2.0 / Secure Enclave       Factorseal password
+        Platform enclave                 Factorseal password
+  TPM 2.0 (Linux/Windows)              Argon2id nested factor
+     Secure Enclave (macOS)
                   \                       /
-                   \-- create/unseal ----/
-                            |
-                 DEK + device signing seed
-                            |
-                            v
- CLI / SecretSpec endpoint / aware application
-                            |
-                  Keyring or cache adapter
-                            |
-                       VaultClient
-                            |
-        authenticated, length-bounded native transport
-                            |
-                 per-user VaultService
-            caller grants | replay | lease | expiry
-                            |
-                scoped Automerge operations
-                            |
-          encrypted and device-signed envelopes
-                            |
-                   embedded Turso database
+                   +---- create/unseal ---+
+                              |
+                   DEK + device signing seed
+                              |
+                              v
+   CLI / SecretSpec endpoint / aware application
+                              |
+                    Keyring or cache adapter
+                              |
+                         VaultClient
+                              |
+          authenticated, length-bounded native transport
+                              |
+                   per-user VaultService
+              caller grants | replay | lease | expiry
+                              |
+                  scoped Automerge operations
+                              |
+            encrypted and device-signed envelopes
+                              |
+                     embedded Turso database
 ```
 
-The hardware and password protect vault bootstrap keys during creation and
-unsealing; the hardware backend is not in the database write path. Once
+The platform enclave and password protect vault bootstrap keys during creation
+and unsealing; enclave operations are not in the database write path. Once
 unsealed, the data-encryption key and signing seed exist only in zeroizing
 memory owned by the store worker until the vault seals.
 
@@ -111,8 +114,8 @@ ML-DSA-65 signing seed. The signing identity also determines the permanent
 `DeviceKeyId` and stable Automerge actor ID.
 
 The password is hardened with Argon2id and separately encrypts the data key and
-signing seed with XChaCha20-Poly1305. Two distinct platform keys then wrap those
-ciphertexts. Neither a copied vault plus its password nor the platform keys
+signing seed with XChaCha20-Poly1305. Two distinct enclave keys then wrap those
+ciphertexts. Neither a copied vault plus its password nor the enclave keys
 without the password can recover the vault keys.
 
 Unsealing reverses those layers, derives the public signing identity again, and
@@ -246,7 +249,7 @@ worker's data key and signing seed.
 The vault directory contains:
 
 - `factorseal.json`: public identity, key labels, factor parameters, and
-  hardware-wrapped bootstrap material;
+  enclave-wrapped bootstrap material;
 - `factorseal.db`: encrypted, signed vault state;
 - `factorseal.lock`: exclusive store ownership;
 - `factorseal.sock`: the live Linux/macOS endpoint, present only while served.
@@ -256,7 +259,7 @@ Windows uses `\\.\pipe\factorseal-<vault-id>` instead of a socket.
 overrides the native endpoint.
 
 `factorseal destroy --yes-really-destroy` permanently deletes a sealed vault,
-including its platform keys. It requires the nested factor and is irreversible.
+including its enclave keys. It requires the nested factor and is irreversible.
 
 ## Mobile embedding
 
@@ -277,7 +280,7 @@ Factorseal is designed so that:
 
 - the plaintext data-encryption key is never persisted;
 - copying `factorseal.db` and `factorseal.json` to another machine does not
-  recover secrets without the platform keys;
+  recover secrets without the enclave keys;
 - Turso receives no plaintext document content and is not an authorization
   boundary;
 - an application receives a secret only after its transport-derived identity
@@ -295,11 +298,11 @@ cost but cannot turn a human-memorable password into a high-entropy
 post-quantum recovery secret. ML-DSA-65 protects state authenticity, while the
 current platform wrapping mechanisms have their own cryptographic assumptions.
 
-The signing seed is hardware-wrapped but exists in zeroizing process memory
+The signing seed is enclave-wrapped but exists in zeroizing process memory
 while unsealed; signing is not yet performed by a non-exportable native signing
-primitive. Hardware binding also cannot stop an authorized or compromised
+primitive. Enclave binding also cannot stop an authorized or compromised
 client from exfiltrating a secret returned to it. Recovery is not implemented,
-so losing the platform keys loses the vault.
+so losing the enclave keys loses the vault.
 
 See [Security](SECURITY.md) for the complete threat model and vulnerability
 reporting instructions.
@@ -327,10 +330,10 @@ The feature split is intentional:
 - `vault-client`: lightweight native IPC protocol and clients;
 - `vault-store`: Automerge documents, encrypted envelopes, Turso, and
   `VaultService`;
-- `key-protection`: factor nesting and the injectable hardware boundary;
+- `key-protection`: factor nesting and the injectable enclave boundary;
 - `vault`: the full desktop service and platform adapters;
-- `hardware`, `cli`, and `secretspec-provider`: native hardware, product CLI,
-  and SecretSpec endpoint respectively.
+- `hardware`, `cli`, and `secretspec-provider`: native enclave adapter, product
+  CLI, and SecretSpec endpoint respectively.
 
 CI runs native Linux, macOS, and Windows jobs. Unit tests use deterministic mock
 protectors and never weaken production backend selection. The Nix flake also
@@ -350,7 +353,7 @@ runners are implemented. Before an MVP release, Factorseal still needs:
 - independent security review.
 
 The release-candidate procedures are in
-[Native hardware and lifecycle acceptance](acceptance/README.md). Passing one
+[Physical enclave and lifecycle acceptance](acceptance/README.md). Passing one
 runner proves only that machine and event; it does not approve the release
 matrix. On NixOS/Linux, the real-TPM suite can be run with:
 
