@@ -2,9 +2,7 @@ use std::path::Path;
 
 use interprocess::os::windows::named_pipe::{DuplexPipeStream, pipe_mode};
 
-use super::transport::{
-    IPC_RESPONSE_TIMEOUT, IoBudget, pipe_io_error as io_error, read_frame, write_frame,
-};
+use super::transport::{exchange_request, pipe_io_error as io_error};
 use super::{VaultClient, VaultError, VaultId, VaultRequest, VaultResponse, VaultResult};
 
 const PIPE_PREFIX: &str = r"\\.\pipe\factorseal-";
@@ -56,20 +54,7 @@ impl WindowsVaultClient {
         stream
             .set_nonblocking(true)
             .map_err(|error| io_error("bound named-pipe I/O", &error))?;
-        // One budget covers the whole exchange, including the server's
-        // first-use authentication of this executable.
-        let budget = IoBudget::new(IPC_RESPONSE_TIMEOUT);
-        let request_id = request.request_id();
-        let request = request.encode()?;
-        write_frame(&mut stream, &request, budget)?;
-        let response = read_frame(&mut stream, budget)?;
-        let response = VaultResponse::decode(&response)?;
-        if response.request_id() != request_id {
-            return Err(VaultError::Protocol(
-                "vault response request ID does not match".to_owned(),
-            ));
-        }
-        Ok(response)
+        exchange_request(&mut stream, request)
     }
 }
 

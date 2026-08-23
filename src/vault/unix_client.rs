@@ -8,7 +8,7 @@ use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use super::transport::{IPC_RESPONSE_TIMEOUT, IoBudget, read_frame, write_frame};
+use super::transport::exchange_request;
 use super::{VaultClient, VaultError, VaultRequest, VaultResponse, VaultResult};
 
 /// Lightweight native client for the Factorseal per-user vault.
@@ -31,20 +31,7 @@ impl UnixVaultClient {
         stream
             .set_nonblocking(true)
             .map_err(|error| io_error(&self.socket_path, &error))?;
-        // One budget covers the whole exchange, including the server's
-        // first-use authentication of this executable.
-        let budget = IoBudget::new(IPC_RESPONSE_TIMEOUT);
-        let request_id = request.request_id();
-        let request = request.encode()?;
-        write_frame(&mut stream, &request, budget)?;
-        let response = read_frame(&mut stream, budget)?;
-        let response = VaultResponse::decode(&response)?;
-        if response.request_id() != request_id {
-            return Err(VaultError::Protocol(
-                "vault response request ID does not match".to_owned(),
-            ));
-        }
-        Ok(response)
+        exchange_request(&mut stream, request)
     }
 }
 

@@ -17,6 +17,8 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use super::{VaultError, VaultResult};
+#[cfg(feature = "vault-client")]
+use super::{VaultRequest, VaultResponse};
 
 pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -64,6 +66,32 @@ impl IoBudget {
             format!("local IPC {operation} deadline exceeded"),
         )
     }
+}
+
+/// Send one authenticated-client request and validate its matching response.
+///
+/// Platform clients deliberately keep their native endpoint connection and
+/// caller authentication separate, but their framed request exchange must
+/// have identical timeout and response-binding behavior.
+#[cfg(feature = "vault-client")]
+pub(crate) fn exchange_request(
+    stream: &mut (impl Read + Write),
+    request: &VaultRequest,
+) -> VaultResult<VaultResponse> {
+    // One budget covers the whole exchange, including the server's first-use
+    // authentication of this executable.
+    let budget = IoBudget::new(IPC_RESPONSE_TIMEOUT);
+    let request_id = request.request_id();
+    let request = request.encode()?;
+    write_frame(stream, &request, budget)?;
+    let response = read_frame(stream, budget)?;
+    let response = VaultResponse::decode(&response)?;
+    if response.request_id() != request_id {
+        return Err(VaultError::Protocol(
+            "vault response request ID does not match".to_owned(),
+        ));
+    }
+    Ok(response)
 }
 
 /// Read one length-prefixed frame within `budget`.
@@ -305,6 +333,35 @@ pub(crate) mod unix_socket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "vault-client")]
+    use crate::vault::{VaultAction, VaultResponseBody};
+    #[cfg(feature = "vault-client")]
+    use std::io::Cursor;
+
+    #[cfg(feature = "vault-client")]
+    struct ScriptedStream {
+        received: Cursor<Vec<u8>>,
+        sent: Vec<u8>,
+    }
+
+    #[cfg(feature = "vault-client")]
+    impl Read for ScriptedStream {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            self.received.read(bytes)
+        }
+    }
+
+    #[cfg(feature = "vault-client")]
+    impl Write for ScriptedStream {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.sent.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     /// The server hashes a previously unseen executable before it answers,
     /// which is why the client budget is not the frame budget.
@@ -349,5 +406,36 @@ mod tests {
         assert!(write_frame(&mut Vec::new(), b"", budget).is_err());
         let oversized = (u32::try_from(MAX_FRAME_BYTES).unwrap() + 1).to_be_bytes();
         assert!(read_frame(&mut oversized.as_slice(), budget).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "vault-client")]
+    fn shared_exchange_preserves_the_request_response_binding() {
+        let request = VaultRequest::new(VaultAction::Status).unwrap();
+        let response = VaultResponse::success(request.request_id(), VaultResponseBody::Stored);
+        let mut received = Vec::new();
+        write_frame(
+            &mut received,
+            &response.encode().unwrap(),
+            IoBudget::new(Duration::from_secs(1)),
+        )
+        .unwrap();
+        let mut stream = ScriptedStream {
+            received: Cursor::new(received),
+            sent: Vec::new(),
+        };
+
+        let response = exchange_request(&mut stream, &request).unwrap();
+
+        assert_eq!(response.request_id(), request.request_id());
+        let request_bytes = read_frame(
+            &mut stream.sent.as_slice(),
+            IoBudget::new(Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert_eq!(
+            VaultRequest::decode(&request_bytes).unwrap().request_id(),
+            request.request_id()
+        );
     }
 }
