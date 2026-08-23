@@ -1,3 +1,4 @@
+#[cfg(feature = "key-protection")]
 use std::fs;
 use std::path::Path;
 
@@ -16,9 +17,11 @@ use super::{KeyProtector, KeyProtectorFactory};
 
 mod filesystem;
 
-use filesystem::{path_error, read_vault, validate_root};
+#[cfg(feature = "key-protection")]
+use filesystem::path_error;
 #[cfg(feature = "key-protection")]
 use filesystem::{prepare_root, unix_time, write_vault};
+use filesystem::{read_vault, validate_root};
 
 const VAULT_FILE: &str = "factorseal.json";
 const VAULT_FORMAT: &str = "factorseal-vault";

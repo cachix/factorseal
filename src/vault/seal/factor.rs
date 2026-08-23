@@ -7,9 +7,12 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 #[cfg(feature = "key-protection")]
+use super::super::VaultId;
+#[cfg(feature = "key-protection")]
 use super::super::signature::SIGNING_SEED_BYTES;
-use super::super::{VaultError, VaultId, VaultResult};
+use super::super::{VaultError, VaultResult};
 
+#[cfg(feature = "key-protection")]
 const KEY_BYTES: usize = 32;
 const SALT_BYTES: usize = 16;
 const FACTOR_NONCE_BYTES: usize = 24;
