@@ -30,7 +30,10 @@ let
         maximumSeconds = idleSeconds * 12;
       };
 
-      environment.systemPackages = [ pkgs.jq ];
+      environment.systemPackages = [
+        pkgs.jq
+        pkgs.util-linux
+      ];
       system.stateVersion = "26.05";
     };
 in
@@ -49,42 +52,41 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import shlex
+
     alice_prefix = "runuser -u alice -- env HOME=/home/alice XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
     root = "/home/alice/.local/share/factorseal"
-    runtime = "/run/user/1000/factorseal"
-    password_file = f"{runtime}/session-password"
     socket = f"{root}/factorseal.sock"
 
     def as_user(node, command):
-        return node.succeed(f"{alice_prefix} {command}")
+        return node.succeed(f"{alice_prefix} sh -c {shlex.quote(command)}")
 
-    def write_password_on(node):
-        node.succeed(
-            f"install -d -m 0700 -o alice -g users {runtime} && "
-            f"printf '%s\\n' factorseal-nixos-test > {password_file} && "
-            f"chown alice:users {password_file} && chmod 0600 {password_file}"
+    def with_password(node, command, confirm=False):
+        answers = "factorseal-nixos-test\n" * (2 if confirm else 1)
+        return as_user(
+            node,
+            f"printf %s {shlex.quote(answers)} | "
+            f"script -qec {shlex.quote(command)} /dev/null",
         )
 
     def initialize_on(node):
-        write_password_on(node)
-        as_user(
+        with_password(
             node,
-            f"${package}/bin/factorseal --root={root} "
-            f"--password-file={password_file} init",
+            f"${package}/bin/factorseal --root={root} init",
+            confirm=True,
         )
-        node.succeed(f"rm -f {password_file}")
 
     def as_alice(command):
         return as_user(machine, command)
 
-    def write_password():
-        write_password_on(machine)
-
     def start_vault():
-        write_password()
-        as_alice("systemctl --user start factorseal.service")
+        with_password(
+            machine,
+            "systemctl --user start --no-block factorseal.service; "
+            "while [ -z \"$(systemd-tty-ask-password-agent --list)\" ]; do sleep 0.05; done; "
+            "systemd-tty-ask-password-agent --query",
+        )
         machine.wait_until_succeeds(f"test -S {socket}")
-        machine.succeed(f"rm -f {password_file}")
 
     machine.start()
     machine.wait_for_unit("multi-user.target")
@@ -103,13 +105,13 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test -x ${package}/bin/factorseal-start")
         machine.succeed("test -x ${package}/bin/factorseal")
 
-    with subtest("service fails closed without a runtime password"):
-        as_alice("systemctl --user start factorseal.service")
+    with subtest("service stays sealed while its password request is unanswered"):
+        as_alice("systemctl --user start --no-block factorseal.service")
         machine.wait_until_succeeds(
-            f"{alice_prefix} systemctl --user is-failed factorseal.service"
+            f"{alice_prefix} systemctl --user is-active factorseal.service"
         )
         machine.fail(f"test -S {socket}")
-        as_alice("systemctl --user reset-failed factorseal.service")
+        as_alice("systemctl --user stop factorseal.service")
 
     with subtest("initialize a real device through the virtual TPM"):
         initialize_on(machine)
@@ -139,12 +141,13 @@ pkgs.testers.runNixOSTest {
             f"{alice_prefix} systemctl --user is-active factorseal.service"
         )
 
-    with subtest("a stopped service cannot be restarted without a new handoff"):
-        as_alice("systemctl --user start factorseal.service")
+    with subtest("a stopped service requires a fresh password request"):
+        as_alice("systemctl --user start --no-block factorseal.service")
         machine.wait_until_succeeds(
-            f"{alice_prefix} systemctl --user is-failed factorseal.service"
+            f"{alice_prefix} systemctl --user is-active factorseal.service"
         )
         machine.fail(f"test -S {socket}")
+        as_alice("systemctl --user stop factorseal.service")
 
     with subtest("a logind session-lock event seals the vault"):
         locked.start()
@@ -164,11 +167,11 @@ pkgs.testers.runNixOSTest {
             "loginctl show-user alice --property=Sessions --value | awk '{ print $1 }'"
         ).strip()
 
-        write_password_on(locked)
-        as_user(locked, f"systemctl --user set-environment FACTORSEAL_SESSION_ID={session}")
-        as_user(locked, "systemctl --user start factorseal.service")
+        with_password(
+            locked,
+            f"XDG_SESSION_ID={session} ${package}/bin/factorseal-start",
+        )
         locked.wait_until_succeeds(f"test -S {socket}")
-        locked.succeed(f"rm -f {password_file}")
 
         # This node's lease is an hour, so expiry cannot be what ends it below.
         locked.succeed(f"loginctl lock-session {session}")

@@ -5,15 +5,13 @@ Documentation=https://github.com/domenkozar/factorseal
 [Service]
 Type=simple
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
-ExecStart=@INSTALL_DIR@/factorseal --password-file=%t/factorseal/session-password unseal
+ExecStart=@INSTALL_DIR@/factorseal --askpass=systemd-ask-password unseal
 Restart=no
 UMask=0077
 NoNewPrivileges=yes
 # Do not add filesystem mount-namespace options here. Caller authentication
 # reads /proc/<SO_PEERCRED pid>/exe, which becomes inaccessible from a
 # namespaced systemd user service on common Linux configurations.
-RuntimeDirectory=factorseal
-RuntimeDirectoryMode=0700
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictAddressFamilies=AF_UNIX
@@ -23,4 +21,5 @@ SystemCallArchitectures=native
 
 [Install]
 # Deliberately no WantedBy: Linux requires an interactive Factorseal password
-# for each unsealed vault session. Start it through factorseal-start.
+# for each unsealed vault session. Start it through factorseal-start so its
+# terminal agent can answer the service's prompt.

@@ -81,12 +81,13 @@ in
       environment.DBUS_SESSION_BUS_ADDRESS = "unix:path=%t/bus";
 
       # Deliberately no wantedBy: Linux requires an interactive password for
-      # every unseal session. factorseal-start performs that handoff.
+      # every unseal session. systemd's password agent passes it to Factorseal
+      # over a pipe; it is never staged in the runtime directory.
       serviceConfig = {
         Type = "simple";
         ExecStart = lib.concatStringsSep " " [
           "${cfg.package}/bin/factorseal"
-          "--password-file=%t/factorseal/session-password"
+          "--askpass=${pkgs.systemd}/bin/systemd-ask-password"
           "unseal"
           "--idle-seconds=${toString cfg.idleSeconds}"
           "--maximum-seconds=${toString cfg.maximumSeconds}"
@@ -97,8 +98,6 @@ in
         # Do not add options which create a filesystem mount namespace here.
         # Linux authenticates clients by reading /proc/<SO_PEERCRED pid>/exe;
         # user-service mount namespaces make that ptrace-gated link unreadable.
-        RuntimeDirectory = "factorseal";
-        RuntimeDirectoryMode = "0700";
         LockPersonality = true;
         MemoryDenyWriteExecute = true;
         RestrictAddressFamilies = [ "AF_UNIX" ];

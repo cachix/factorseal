@@ -104,39 +104,23 @@ fn the_linux_unit_and_packager_agree_on_the_install_directory() {
 }
 
 #[test]
-fn the_linux_unit_and_starter_agree_on_the_password_handoff() {
+fn the_linux_unit_uses_askpass_without_a_password_file() {
     let unit = packaging("linux/factorseal.service.in");
     let starter = packaging("linux/factorseal-start");
 
-    // The starter writes the factor into the unit's RuntimeDirectory and the
-    // unit reads it back from `%t`. If either name moves, unlock fails at
-    // login with nothing to point at.
-    let runtime_directory = unit_setting(&unit, "RuntimeDirectory");
     let exec_start = unit_setting(&unit, "ExecStart");
     assert!(
-        exec_start.contains(&format!(
-            "--password-file=%t/{runtime_directory}/session-password"
-        )),
-        "the unit does not read the factor the starter writes: {exec_start}"
+        exec_start.contains("--askpass=systemd-ask-password"),
+        "the unit does not obtain its factor from systemd askpass: {exec_start}"
     );
     assert!(
-        starter.contains(&format!(
-            "runtime_dir=${{XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}}/{runtime_directory}"
-        )) && starter.contains("password_file=$runtime_dir/session-password"),
-        "the starter does not write the factor where the unit reads it"
+        !exec_start.contains("--password-file") && !starter.contains("password_file"),
+        "the Linux service still stages its factor in a file"
     );
-
-    // A signal between writing the plaintext factor and installing the trap
-    // would leave it on disk, so the trap has to come first.
-    let trap = starter
-        .find("trap cleanup")
-        .expect("the starter installs no cleanup trap");
-    let write = starter
-        .find("systemd-ask-password")
-        .expect("the starter never prompts for the factor");
     assert!(
-        trap < write,
-        "the cleanup trap is installed after the prompt"
+        starter.contains("systemctl --user start --no-block factorseal.service")
+            && starter.contains("systemd-tty-ask-password-agent --query"),
+        "the starter does not answer the service's password request"
     );
 }
 

@@ -52,13 +52,18 @@ secret crosses a pipe and is never written beside the vault it protects. macOS
 and Windows packages ship their own helper and pass `--askpass` for exactly
 this reason, which is why both can keep unsealing the vault at login.
 
+Linux uses `systemd-ask-password` as its askpass helper. The service publishes
+a per-user password request, and the terminal agent run by `factorseal-start`
+(or a desktop agent) answers it without staging the password in a file.
+
 The shipped helpers are `factorseal-askpass` inside the macOS app bundle, which
 prompts through `osascript`, and `factorseal-askpass.cmd` with its PowerShell
 companion on Windows, which shows a masked dialog. Neither has been exercised
 on a native host yet.
 
-These helpers are interim. Prompting and asking are planned to move into the
-vault itself, which removes the shell scripts and the pipe the secret crosses.
+The macOS and Windows helpers are interim. Prompting and asking are planned to
+move into the vault itself, which removes the shell scripts and the pipe the
+secret crosses.
 Treat `--askpass` as a mechanism that unblocked login start on macOS and
 Windows, not as the settled design, and do not build further packaging on top
 of it.
@@ -73,11 +78,12 @@ search path, and put
 the packaged unit is generated from `factorseal.service.in` for that one
 prefix. Unpacking the tarball anywhere else means substituting `@INSTALL_DIR@`
 in the shipped template again; leaving the generated unit unchanged makes every
-start fail with `status=203/EXEC`. Running the helper prompts
-through `systemd-ask-password`, places the password briefly in the user's
-private runtime directory, starts the service, waits for `factorseal.sock`, and
-removes the runtime file. Logout, service stop, termination, or the lease
-deadline seals the vault.
+start fail with `status=203/EXEC`. Running the helper starts the service,
+attaches systemd's terminal password agent while Factorseal asks for its nested
+factor, and then waits for `factorseal.sock`. The password travels through
+systemd's agent protocol and the askpass pipe; it is never written to the
+runtime directory. Logout, service stop, termination, or the lease deadline
+seals the vault.
 
 ## NixOS module
 
@@ -97,10 +103,11 @@ is:
 
 Listed users are added to the TPM resource-manager group. The module installs a
 global systemd user unit but deliberately does not enable it at login, because
-each unseal session requires an ephemeral password handoff through
-`factorseal-start`. It also enables polkit so the unprivileged vault can
-obtain logind's default-permitted delay inhibitor before holding unwrapped
-keys; without that inhibitor the vault fails closed.
+each unseal session requires an interactive password request. `factorseal-start`
+supplies the invoking logind session and waits for the socket. The module also
+enables polkit so the unprivileged vault can obtain logind's default-permitted
+delay inhibitor before holding unwrapped keys; without that inhibitor the vault
+fails closed.
 
 `nix build .#checks.x86_64-linux.nixos-module` runs the installed module in a
 NixOS VM with a virtual TPM. It covers initialization, service startup, the

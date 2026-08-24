@@ -1,31 +1,20 @@
 #!/bin/sh
 set -eu
 
-runtime_dir=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/factorseal
-password_file=$runtime_dir/session-password
 default_socket=${XDG_DATA_HOME:-$HOME/.local/share}/factorseal/factorseal.sock
 socket=${FACTORSEAL_SOCKET:-$default_socket}
 session_id=${XDG_SESSION_ID:?XDG_SESSION_ID is required}
 
 cleanup() {
-    rm -f "$password_file"
-    # Leave nothing behind for units started later in this session; the
-    # already-unsealed vault keeps the value it was given.
+    # Leave invocation-specific routing out of starts later in this session.
     if [ -n "${FACTORSEAL_SOCKET:-}" ]; then
         systemctl --user unset-environment FACTORSEAL_SOCKET || true
     fi
     systemctl --user unset-environment FACTORSEAL_SESSION_ID || true
 }
-# Installed before the prompt writes anything: a signal in that window would
-# otherwise leave the plaintext password in the runtime directory.
 trap cleanup EXIT HUP INT TERM
 
-# Stop first: systemd removes RuntimeDirectory on stop, so writing the handoff
-# file before a restart could erase it between the stop and start phases.
 systemctl --user stop factorseal.service || true
-install -d -m 0700 "$runtime_dir"
-umask 077
-systemd-ask-password "Factorseal password" > "$password_file"
 
 # Hand the unit the values that belong to this invocation. In particular, a
 # systemd user service is outside every logind session and cannot infer which
@@ -34,7 +23,23 @@ if [ -n "${FACTORSEAL_SOCKET:-}" ]; then
     systemctl --user set-environment "FACTORSEAL_SOCKET=$FACTORSEAL_SOCKET"
 fi
 systemctl --user set-environment "FACTORSEAL_SESSION_ID=$session_id"
-systemctl --user start factorseal.service
+
+# A Type=simple start job completes before Factorseal's child askpass process
+# publishes its request, so start without waiting and attach the terminal agent
+# explicitly. The response travels through systemd's password-agent socket and
+# Factorseal's askpass stdout pipe; no plaintext handoff file is involved.
+systemctl --user start --no-block factorseal.service
+attempt=0
+while [ ! -S "$socket" ] &&
+    [ -z "$(systemd-tty-ask-password-agent --list)" ] &&
+    [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    sleep 0.05
+done
+if [ ! -S "$socket" ]; then
+    systemd-tty-ask-password-agent --query
+fi
+
 attempt=0
 while [ ! -S "$socket" ] && [ "$attempt" -lt 100 ]; do
     attempt=$((attempt + 1))
