@@ -123,3 +123,75 @@ impl ReplayWindow {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_id(value: u128) -> RequestId {
+        RequestId::from_bytes(value.to_be_bytes())
+    }
+
+    #[test]
+    fn replay_window_rejects_duplicates_but_evicts_the_oldest_ids() {
+        let mut window = ReplayWindow::new();
+        window.consume(request_id(0)).unwrap();
+        assert!(matches!(
+            window.consume(request_id(0)),
+            Err(VaultError::Replay)
+        ));
+
+        for value in 1..=MAX_REPLAY_IDS {
+            window.consume(request_id(value as u128)).unwrap();
+        }
+
+        // The window stays bounded, so the first identifier is eventually
+        // forgotten while recently consumed identifiers remain protected.
+        window.consume(request_id(0)).unwrap();
+        assert!(matches!(
+            window.consume(request_id(MAX_REPLAY_IDS as u128)),
+            Err(VaultError::Replay)
+        ));
+    }
+
+    #[test]
+    fn lease_touch_never_extends_past_the_absolute_deadline() {
+        let start = Instant::now();
+        let policy = UnsealLeasePolicy {
+            idle_timeout: Duration::from_secs(5),
+            maximum_lifetime: Duration::from_secs(10),
+        };
+        let mut lease = UnsealLease::new_at(100, start, policy).unwrap();
+
+        lease.touch(107, start + Duration::from_secs(7)).unwrap();
+        assert_eq!(lease.idle_deadline, 110);
+        assert!(lease.is_expired(start + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn lease_rejects_invalid_policies_and_clock_overflow() {
+        let start = Instant::now();
+        assert!(
+            UnsealLease::new_at(
+                100,
+                start,
+                UnsealLeasePolicy {
+                    idle_timeout: Duration::ZERO,
+                    maximum_lifetime: Duration::from_secs(1),
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            UnsealLease::new_at(
+                u64::MAX,
+                start,
+                UnsealLeasePolicy {
+                    idle_timeout: Duration::from_secs(1),
+                    maximum_lifetime: Duration::from_secs(1),
+                },
+            )
+            .is_err()
+        );
+    }
+}

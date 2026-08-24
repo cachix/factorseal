@@ -320,3 +320,84 @@ fn decode_key<const LENGTH: usize>(
         .map_err(|_| VaultError::Protection(format!("unwrapped {name} has {length} bytes")))?;
     Ok(Zeroizing::new(bytes))
 }
+
+#[cfg(all(test, feature = "key-protection"))]
+mod tests {
+    use super::*;
+
+    const VAULT_ID: VaultId = VaultId::from_bytes([7; 16]);
+    const DATA_KEY: [u8; KEY_BYTES] = [3; KEY_BYTES];
+    const SIGNING_SEED: [u8; SIGNING_SEED_BYTES] = [9; SIGNING_SEED_BYTES];
+
+    #[test]
+    fn protected_keys_require_the_original_factor_and_vault() {
+        let (data_payload, signing_payload, protection) = protect_with_factor(
+            VAULT_ID,
+            &DATA_KEY,
+            &SIGNING_SEED,
+            UnsealFactor::Password(b"correct horse"),
+        )
+        .unwrap();
+
+        let (data_key, signing_seed) = unprotect_with_factor(
+            VAULT_ID,
+            &protection,
+            &data_payload,
+            &signing_payload,
+            UnsealFactor::Password(b"correct horse"),
+        )
+        .unwrap();
+        assert_eq!(*data_key, DATA_KEY);
+        assert_eq!(*signing_seed, SIGNING_SEED);
+
+        assert!(matches!(
+            unprotect_with_factor(
+                VAULT_ID,
+                &protection,
+                &data_payload,
+                &signing_payload,
+                UnsealFactor::Password(b"wrong factor"),
+            ),
+            Err(VaultError::Protection(_))
+        ));
+        assert!(matches!(
+            unprotect_with_factor(
+                VaultId::from_bytes([8; 16]),
+                &protection,
+                &data_payload,
+                &signing_payload,
+                UnsealFactor::Password(b"correct horse"),
+            ),
+            Err(VaultError::Protection(_))
+        ));
+    }
+
+    #[test]
+    fn empty_factors_and_unsafe_parameters_are_rejected() {
+        assert!(matches!(
+            protect_with_factor(
+                VAULT_ID,
+                &DATA_KEY,
+                &SIGNING_SEED,
+                UnsealFactor::Password(b"")
+            ),
+            Err(VaultError::Protection(_))
+        ));
+
+        let protection = NestedProtection {
+            factor: FactorParameters::Argon2id {
+                version: 0x13,
+                memory_kib: 8 * 1024 - 1,
+                iterations: 1,
+                parallelism: 1,
+                salt: [0; SALT_BYTES],
+            },
+            data_key_nonce: [0; FACTOR_NONCE_BYTES],
+            signing_seed_nonce: [0; FACTOR_NONCE_BYTES],
+        };
+        assert!(matches!(
+            protection.validate(),
+            Err(VaultError::Protection(_))
+        ));
+    }
+}
