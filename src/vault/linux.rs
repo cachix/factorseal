@@ -1,7 +1,8 @@
 use std::fs::{self, File};
-use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::MetadataExt;
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,17 +15,17 @@ use dbus::message::MatchRule;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::getuid;
 
-use super::transport::unix_socket::{SocketGuard, prepare_socket_path, validate_socket_options};
-use super::transport::{
-    IPC_FRAME_IO_TIMEOUT, IoBudget, hash_file, hash_open_file, path_io_error, read_frame,
-    unix_time, write_frame,
+use super::transport::unix_socket::{
+    accept_until_sealed, bind_listener, install_shutdown_signal_handler, validate_socket_options,
 };
+#[cfg(test)]
+use super::transport::unix_time;
+use super::transport::{hash_file, hash_open_file, path_io_error};
 use super::{
-    CallerIdentity, CallerIdentityCache, CallerPlatform, VaultError, VaultRequest, VaultResult,
-    VaultService,
+    CallerIdentity, CallerIdentityCache, CallerPlatform, VaultError, VaultResult, VaultService,
 };
 #[cfg(all(test, feature = "hardware"))]
-use super::{LinuxVaultClient, VaultClient};
+use super::{LinuxVaultClient, VaultClient, VaultRequest};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIFECYCLE_DBUS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -70,15 +71,7 @@ pub fn serve_linux_vault(
     options: &LinuxVaultOptions,
 ) -> VaultResult<()> {
     validate_socket_options("Linux", &options.socket_path, options.poll_interval)?;
-    prepare_socket_path(&options.socket_path)?;
-    let listener = UnixListener::bind(&options.socket_path)
-        .map_err(|error| path_io_error(&options.socket_path, &error))?;
-    fs::set_permissions(&options.socket_path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| path_io_error(&options.socket_path, &error))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| path_io_error(&options.socket_path, &error))?;
-    let _socket_guard = SocketGuard::new(options.socket_path.clone());
+    let (listener, _socket_guard) = bind_listener(&options.socket_path)?;
 
     let stopping = Arc::new(AtomicBool::new(false));
     let lifecycle_seal_requested = Arc::new(AtomicBool::new(false));
@@ -87,10 +80,7 @@ pub fn serve_linux_vault(
         .then(|| LinuxLifecycleMonitor::new(&lifecycle_seal_requested))
         .transpose()?;
     if options.install_signal_handler {
-        let signal_stopping = Arc::clone(&stopping);
-        ctrlc::set_handler(move || signal_stopping.store(true, Ordering::Release)).map_err(
-            |error| VaultError::Protocol(format!("could not install signal handler: {error}")),
-        )?;
+        install_shutdown_signal_handler(&stopping)?;
     }
 
     // Every exit from the loop discards the hardware-unwrapped keys, including
@@ -107,13 +97,20 @@ pub fn serve_linux_vault(
             let stopping = Arc::clone(&stopping);
             scope.spawn(move || super::secret_service::serve_secret_service(service, stopping))
         });
+        let caller_cache = CallerIdentityCache::default();
         let result = accept_until_sealed(
             service,
-            options,
             &listener,
             &stopping,
-            &lifecycle_seal_requested,
-            lifecycle_monitor.as_ref(),
+            &options.socket_path,
+            options.poll_interval,
+            || {
+                if let Some(monitor) = lifecycle_monitor.as_ref() {
+                    monitor.process()?;
+                }
+                Ok(lifecycle_seal_requested.load(Ordering::Acquire))
+            },
+            |stream| caller_identity(stream, &caller_cache),
         );
         stopping.store(true, Ordering::Release);
         if let Some(thread) = secret_service {
@@ -125,41 +122,6 @@ pub fn serve_linux_vault(
     });
     let sealed = service.seal();
     served.and(sealed)
-}
-
-fn accept_until_sealed(
-    service: &VaultService,
-    options: &LinuxVaultOptions,
-    listener: &UnixListener,
-    stopping: &AtomicBool,
-    lifecycle_seal_requested: &AtomicBool,
-    lifecycle_monitor: Option<&LinuxLifecycleMonitor>,
-) -> VaultResult<()> {
-    let caller_cache = CallerIdentityCache::default();
-    while !stopping.load(Ordering::Acquire) {
-        if let Some(monitor) = lifecycle_monitor {
-            monitor.process()?;
-        }
-        if lifecycle_seal_requested.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        if service.expire_if_needed(unix_time()?)? {
-            return Ok(());
-        }
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                // A malformed or disconnected client must not terminate the
-                // per-user vault. Protocol responses intentionally contain no
-                // request details when a frame cannot be authenticated.
-                let _ = handle_connection(service, &caller_cache, &mut stream);
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(options.poll_interval);
-            }
-            Err(error) => return Err(path_io_error(&options.socket_path, &error)),
-        }
-    }
-    Ok(())
 }
 
 /// Owns logind's delay inhibitor until the store has sealed. Dropping the
@@ -289,24 +251,6 @@ pub fn linux_caller_identity_for_executable(
         executable_digest,
         None,
     )
-}
-
-fn handle_connection(
-    service: &VaultService,
-    caller_cache: &CallerIdentityCache,
-    stream: &mut UnixStream,
-) -> VaultResult<()> {
-    stream
-        .set_nonblocking(true)
-        .map_err(|error| VaultError::Protocol(format!("could not bound client I/O: {error}")))?;
-    let caller = caller_identity(stream, caller_cache)?;
-    let bytes = read_frame(stream, IoBudget::new(IPC_FRAME_IO_TIMEOUT))?;
-    let request = VaultRequest::decode(&bytes)?;
-    let response = service.handle(&caller, request, unix_time()?);
-    let bytes = response.encode()?;
-    // The response gets its own budget so a slow store operation cannot make
-    // the vault drop a reply it has already committed.
-    write_frame(stream, &bytes, IoBudget::new(IPC_FRAME_IO_TIMEOUT))
 }
 
 fn caller_identity(

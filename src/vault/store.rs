@@ -8,6 +8,7 @@ use super::{
     VaultResult,
 };
 
+mod bootstrap;
 mod chain;
 mod database;
 mod worker;

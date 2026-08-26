@@ -8,9 +8,10 @@
 #![allow(unsafe_code)]
 
 use std::fs::{self, File};
-use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::MetadataExt;
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -32,17 +33,17 @@ use objc2_app_kit::{
 use objc2_foundation::{NSDate, NSNotification, NSNotificationCenter, NSRunLoop};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-use super::transport::unix_socket::{SocketGuard, prepare_socket_path, validate_socket_options};
-use super::transport::{
-    IPC_FRAME_IO_TIMEOUT, IoBudget, hash_file, hash_open_file, path_io_error, read_frame,
-    unix_time, write_frame,
-};
-use super::{
-    CallerIdentity, CallerIdentityCache, CallerPlatform, VaultError, VaultRequest, VaultResult,
-    VaultService,
+use super::transport::unix_socket::{
+    accept_until_sealed, bind_listener, install_shutdown_signal_handler, validate_socket_options,
 };
 #[cfg(test)]
-use super::{MacosVaultClient, VaultClient};
+use super::transport::unix_time;
+use super::transport::{hash_file, hash_open_file, path_io_error};
+use super::{
+    CallerIdentity, CallerIdentityCache, CallerPlatform, VaultError, VaultResult, VaultService,
+};
+#[cfg(test)]
+use super::{MacosVaultClient, VaultClient, VaultRequest};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -78,69 +79,36 @@ pub fn serve_macos_vault(
     options: &MacosVaultOptions,
 ) -> VaultResult<()> {
     validate_socket_options("macOS", &options.socket_path, options.poll_interval)?;
-    prepare_socket_path(&options.socket_path)?;
-    let listener = UnixListener::bind(&options.socket_path)
-        .map_err(|error| path_io_error(&options.socket_path, &error))?;
-    fs::set_permissions(&options.socket_path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| path_io_error(&options.socket_path, &error))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| path_io_error(&options.socket_path, &error))?;
-    let _socket_guard = SocketGuard::new(options.socket_path.clone());
+    let (listener, _socket_guard) = bind_listener(&options.socket_path)?;
 
     let stopping = Arc::new(AtomicBool::new(false));
     let lifecycle_monitor = options
         .install_lifecycle_monitor
         .then(|| MacosLifecycleMonitor::new(service, &stopping));
     if options.install_signal_handler {
-        let signal_stopping = Arc::clone(&stopping);
-        ctrlc::set_handler(move || signal_stopping.store(true, Ordering::Release)).map_err(
-            |error| VaultError::Protocol(format!("could not install signal handler: {error}")),
-        )?;
+        install_shutdown_signal_handler(&stopping)?;
     }
 
     // Every exit from the loop discards the hardware-unwrapped keys, including
     // the error exits. Returning `?` straight out of the loop skipped the lock
     // and left them to whatever the caller did next.
+    let caller_cache = CallerIdentityCache::default();
     let served = accept_until_sealed(
         service,
-        options,
         &listener,
         &stopping,
-        lifecycle_monitor.as_ref(),
+        &options.socket_path,
+        options.poll_interval,
+        || {
+            if let Some(monitor) = lifecycle_monitor.as_ref() {
+                monitor.process();
+            }
+            Ok(false)
+        },
+        |stream| caller_identity(stream, &caller_cache),
     );
     let sealed = service.seal();
     served.and(sealed)
-}
-
-fn accept_until_sealed(
-    service: &VaultService,
-    options: &MacosVaultOptions,
-    listener: &UnixListener,
-    stopping: &AtomicBool,
-    lifecycle_monitor: Option<&MacosLifecycleMonitor>,
-) -> VaultResult<()> {
-    let caller_cache = CallerIdentityCache::default();
-    while !stopping.load(Ordering::Acquire) {
-        if let Some(monitor) = lifecycle_monitor {
-            monitor.process();
-        }
-        if service.expire_if_needed(unix_time()?)? {
-            return Ok(());
-        }
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                // A malformed or disconnected client must not terminate the
-                // per-user vault.
-                let _ = handle_connection(service, &caller_cache, &mut stream);
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(options.poll_interval);
-            }
-            Err(error) => return Err(path_io_error(&options.socket_path, &error)),
-        }
-    }
-    Ok(())
 }
 
 struct MacosLifecycleMonitor {
@@ -222,24 +190,6 @@ pub fn macos_caller_identity_for_executable(
         hash_file(&executable_path)?,
         None,
     )
-}
-
-fn handle_connection(
-    service: &VaultService,
-    caller_cache: &CallerIdentityCache,
-    stream: &mut UnixStream,
-) -> VaultResult<()> {
-    stream
-        .set_nonblocking(true)
-        .map_err(|error| VaultError::Protocol(format!("could not bound client I/O: {error}")))?;
-    let caller = caller_identity(stream, caller_cache)?;
-    let bytes = read_frame(stream, IoBudget::new(IPC_FRAME_IO_TIMEOUT))?;
-    let request = VaultRequest::decode(&bytes)?;
-    let response = service.handle(&caller, request, unix_time()?);
-    let bytes = response.encode()?;
-    // The response gets its own budget so a slow store operation cannot make
-    // the vault drop a reply it has already committed.
-    write_frame(stream, &bytes, IoBudget::new(IPC_FRAME_IO_TIMEOUT))
 }
 
 fn caller_identity(

@@ -251,14 +251,88 @@ pub(crate) mod unix_socket {
     use std::fs;
     use std::io;
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use nix::unistd::getuid;
 
-    use super::path_io_error;
-    use crate::vault::{VaultError, VaultResult};
+    use super::{
+        IPC_FRAME_IO_TIMEOUT, IoBudget, path_io_error, read_frame, unix_time, write_frame,
+    };
+    use crate::vault::{CallerIdentity, VaultError, VaultRequest, VaultResult, VaultService};
+
+    /// Bind a private nonblocking listener and retain ownership of removing
+    /// its socket path when the server exits.
+    pub(crate) fn bind_listener(path: &Path) -> VaultResult<(UnixListener, SocketGuard)> {
+        prepare_socket_path(path)?;
+        let listener = UnixListener::bind(path).map_err(|error| path_io_error(path, &error))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| path_io_error(path, &error))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| path_io_error(path, &error))?;
+        Ok((listener, SocketGuard::new(path.to_owned())))
+    }
+
+    pub(crate) fn install_shutdown_signal_handler(stopping: &Arc<AtomicBool>) -> VaultResult<()> {
+        let signal_stopping = Arc::clone(stopping);
+        ctrlc::set_handler(move || signal_stopping.store(true, Ordering::Release)).map_err(
+            |error| VaultError::Protocol(format!("could not install signal handler: {error}")),
+        )
+    }
+
+    /// Poll one nonblocking Unix listener until shutdown, lifecycle policy, or
+    /// lease expiry asks the platform server to stop.
+    pub(crate) fn accept_until_sealed(
+        service: &VaultService,
+        listener: &UnixListener,
+        stopping: &AtomicBool,
+        socket_path: &Path,
+        poll_interval: Duration,
+        mut poll_lifecycle: impl FnMut() -> VaultResult<bool>,
+        authenticate: impl Fn(&UnixStream) -> VaultResult<CallerIdentity>,
+    ) -> VaultResult<()> {
+        while !stopping.load(Ordering::Acquire) {
+            if poll_lifecycle()? || service.expire_if_needed(unix_time()?)? {
+                return Ok(());
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    // A malformed or disconnected client must not terminate
+                    // the per-user vault.
+                    let _ = handle_connection(service, &mut stream, &authenticate);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(poll_interval);
+                }
+                Err(error) => return Err(path_io_error(socket_path, &error)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Exchange one request with an accepted Unix peer after platform-native
+    /// authentication supplies its caller identity.
+    pub(crate) fn handle_connection(
+        service: &VaultService,
+        stream: &mut UnixStream,
+        authenticate: impl FnOnce(&UnixStream) -> VaultResult<CallerIdentity>,
+    ) -> VaultResult<()> {
+        stream.set_nonblocking(true).map_err(|error| {
+            VaultError::Protocol(format!("could not bound client I/O: {error}"))
+        })?;
+        let caller = authenticate(stream)?;
+        let bytes = read_frame(stream, IoBudget::new(IPC_FRAME_IO_TIMEOUT))?;
+        let request = VaultRequest::decode(&bytes)?;
+        let response = service.handle(&caller, request, unix_time()?);
+        let bytes = response.encode()?;
+        // The response gets its own budget so a slow store operation cannot
+        // make the vault drop a reply it has already committed.
+        write_frame(stream, &bytes, IoBudget::new(IPC_FRAME_IO_TIMEOUT))
+    }
 
     /// Reject a configuration the transport cannot make private before it
     /// binds anything.
@@ -291,7 +365,7 @@ pub(crate) mod unix_socket {
 
     /// Remove a stale socket left by a previous vault, refusing to replace a
     /// live vault or a path this user does not own.
-    pub(crate) fn prepare_socket_path(path: &Path) -> VaultResult<()> {
+    fn prepare_socket_path(path: &Path) -> VaultResult<()> {
         match UnixStream::connect(path) {
             Ok(_) => Err(VaultError::Protocol(
                 "another Factorseal vault is already accepting connections".to_owned(),
@@ -313,7 +387,7 @@ pub(crate) mod unix_socket {
     pub(crate) struct SocketGuard(PathBuf);
 
     impl SocketGuard {
-        pub(crate) const fn new(path: PathBuf) -> Self {
+        const fn new(path: PathBuf) -> Self {
             Self(path)
         }
     }

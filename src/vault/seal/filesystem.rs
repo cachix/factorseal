@@ -1,7 +1,6 @@
 use std::fs;
 #[cfg(feature = "key-protection")]
 use std::fs::OpenOptions;
-use std::io::Read;
 #[cfg(feature = "key-protection")]
 use std::io::Write;
 use std::path::Path;
@@ -9,8 +8,6 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::vault::{VaultError, VaultResult};
-
-use super::{MAX_VAULT_FILE_BYTES, VAULT_FILE, VaultFile};
 
 #[cfg(feature = "key-protection")]
 pub(super) fn prepare_root(root: &Path) -> VaultResult<()> {
@@ -54,41 +51,6 @@ pub(super) fn validate_root(root: &Path) -> VaultResult<()> {
         )));
     }
     validate_private_permissions(root, &metadata)
-}
-
-pub(super) fn read_vault(root: &Path) -> VaultResult<VaultFile> {
-    let path = root.join(VAULT_FILE);
-    let file = fs::File::open(&path).map_err(|error| path_error(&path, error))?;
-    let metadata = file.metadata().map_err(|error| path_error(&path, error))?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_VAULT_FILE_BYTES {
-        return Err(VaultError::Protection(
-            "vault metadata is not a bounded regular file".to_owned(),
-        ));
-    }
-    let capacity = usize::try_from(metadata.len())
-        .map_err(|_| VaultError::Protection("vault metadata does not fit in memory".to_owned()))?;
-    let mut bytes = Vec::with_capacity(capacity);
-    file.take(MAX_VAULT_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| path_error(&path, error))?;
-    if bytes.len() as u64 > MAX_VAULT_FILE_BYTES {
-        return Err(VaultError::Protection(
-            "vault metadata is not a bounded regular file".to_owned(),
-        ));
-    }
-    let stored: VaultFile = serde_json::from_slice(&bytes)
-        .map_err(|error| VaultError::Protection(error.to_string()))?;
-    stored.validate()?;
-    Ok(stored)
-}
-
-#[cfg(feature = "key-protection")]
-pub(super) fn write_vault(root: &Path, stored: &VaultFile) -> VaultResult<()> {
-    stored.validate()?;
-    let path = root.join(VAULT_FILE);
-    let bytes = serde_json::to_vec_pretty(stored)
-        .map_err(|error| VaultError::Protection(error.to_string()))?;
-    write_new_private_file(&path, &bytes)
 }
 
 #[cfg(all(feature = "key-protection", unix))]

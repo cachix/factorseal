@@ -5,29 +5,31 @@
 //! session bus already authenticates peers as the current desktop user, which
 //! is the same boundary provided by the other Secret Service implementations.
 
-#![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 // zbus interface methods must own decoded D-Bus arguments, including headers
 // and object paths; changing these signatures to references breaks dispatch.
 
 use std::collections::HashMap;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use secret_service_protocol::{Session as ProtocolSession, SessionOutput};
-use serde::{Deserialize, Serialize};
-use zbus::object_server::ObjectServer;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
-use zbus::{Connection, fdo, interface};
+use zbus::{Connection, fdo};
 use zeroize::Zeroizing;
 
 use super::linux::linux_caller_identity_for_executable;
-use super::{
-    GrantPermission, VaultAction, VaultError, VaultMutation, VaultRequest, VaultResponseBody,
-    VaultResult, VaultService, WireSecret, WireSecretAddress,
-};
+use super::{GrantPermission, VaultError, VaultResult, VaultService};
+
+mod agent;
+mod interfaces;
+
+use agent::{Agent, NAMESPACE, Store};
+#[cfg(test)]
+use agent::{INDEX_ITEM, Index};
+use interfaces::{Collection, Item, Service};
 
 const BUS_NAME: &str = "org.freedesktop.secrets";
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
@@ -35,9 +37,6 @@ const COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/factorseal";
 const DEFAULT_ALIAS_PATH: &str = "/org/freedesktop/secrets/aliases/default";
 const ITEM_PREFIX: &str = "/org/freedesktop/secrets/collection/factorseal/";
 const SESSION_PREFIX: &str = "/org/freedesktop/secrets/session/";
-const NAMESPACE: &[u8] = b"factorseal/secret-service/v1";
-const INDEX_ITEM: &str = "secret-service-index";
-const INDEX_VERSION: u8 = 1;
 const MAX_SESSIONS: usize = 1024;
 
 type Secret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
@@ -135,235 +134,7 @@ pub(crate) fn serve_secret_service(
     })
 }
 
-#[derive(Clone)]
-struct Store {
-    service: Arc<VaultService>,
-    caller: super::CallerIdentity,
-}
-
-impl Store {
-    fn call(&self, action: VaultAction) -> VaultResult<VaultResponseBody> {
-        let request = VaultRequest::new(action)?;
-        self.service
-            .handle(&self.caller, request, unix_time())
-            .result
-            .map_err(|error| VaultError::Protocol(error.message))
-    }
-
-    fn get(&self, item: impl Into<String>) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
-        let response = self.call(VaultAction::Get {
-            namespace: NAMESPACE.to_vec(),
-            address: WireSecretAddress::new(item, None),
-        })?;
-        match response {
-            VaultResponseBody::Secret { value } => {
-                Ok(value.map(|value| Zeroizing::new(value.expose().to_vec())))
-            }
-            _ => Err(VaultError::Protocol(
-                "unexpected Secret Service vault response".to_owned(),
-            )),
-        }
-    }
-
-    fn mutate(&self, mutations: Vec<VaultMutation>) -> VaultResult<()> {
-        match self.call(VaultAction::Mutate {
-            namespace: NAMESPACE.to_vec(),
-            mutations,
-        })? {
-            VaultResponseBody::Mutated => Ok(()),
-            _ => Err(VaultError::Protocol(
-                "unexpected Secret Service vault response".to_owned(),
-            )),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct Index {
-    version: u8,
-    items: Vec<IndexItem>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct IndexItem {
-    id: String,
-    label: String,
-    attributes: HashMap<String, String>,
-    content_type: String,
-    created: u64,
-    modified: u64,
-}
-
-struct Agent {
-    store: Store,
-    index: Mutex<Index>,
-    sessions: Mutex<HashMap<String, SessionState>>,
-}
-
 impl Agent {
-    fn load(store: Store) -> VaultResult<Self> {
-        let index = match store.get(INDEX_ITEM)? {
-            Some(bytes) => serde_json::from_slice::<Index>(&bytes).map_err(|error| {
-                VaultError::InvalidData(format!("invalid Secret Service index: {error}"))
-            })?,
-            None => Index {
-                version: INDEX_VERSION,
-                items: Vec::new(),
-            },
-        };
-        if index.version != INDEX_VERSION {
-            return Err(VaultError::InvalidData(
-                "unsupported Secret Service index version".to_owned(),
-            ));
-        }
-        Ok(Self {
-            store,
-            index: Mutex::new(index),
-            sessions: Mutex::new(HashMap::new()),
-        })
-    }
-
-    fn item_ids(&self) -> VaultResult<Vec<String>> {
-        Ok(self
-            .index
-            .lock()
-            .map_err(|_| VaultError::WorkerUnavailable)?
-            .items
-            .iter()
-            .map(|item| item.id.clone())
-            .collect())
-    }
-
-    fn item(&self, id: &str) -> fdo::Result<IndexItem> {
-        self.index
-            .lock()
-            .map_err(poisoned)?
-            .items
-            .iter()
-            .find(|item| item.id == id)
-            .cloned()
-            .ok_or_else(|| no_item(id))
-    }
-
-    fn all_items(&self) -> fdo::Result<Vec<IndexItem>> {
-        Ok(self.index.lock().map_err(poisoned)?.items.clone())
-    }
-
-    fn create_or_replace(
-        &self,
-        label: String,
-        attributes: HashMap<String, String>,
-        value: Zeroizing<Vec<u8>>,
-        content_type: String,
-        replace: bool,
-    ) -> fdo::Result<(IndexItem, bool)> {
-        let mut index = self.index.lock().map_err(poisoned)?;
-        let existing = index
-            .items
-            .iter()
-            .position(|item| item.attributes == attributes);
-        let id = match (existing, replace) {
-            (Some(position), true) => index.items[position].id.clone(),
-            (Some(_), false) => {
-                return Err(fdo::Error::Failed(
-                    "an item with these attributes already exists".to_owned(),
-                ));
-            }
-            (None, _) => random_id().map_err(failed)?,
-        };
-        let now = unix_time();
-        let item = IndexItem {
-            id: id.clone(),
-            label,
-            attributes,
-            content_type,
-            created: existing.map_or(now, |position| index.items[position].created),
-            modified: now,
-        };
-        let created = existing.is_none();
-        let mut next = index.clone();
-        if let Some(position) = existing {
-            next.items[position] = item.clone();
-        } else {
-            next.items.push(item.clone());
-        }
-        let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
-        self.store
-            .mutate(vec![
-                VaultMutation::Put {
-                    address: WireSecretAddress::new(secret_item(&id), None),
-                    value: WireSecret::new(value.to_vec()),
-                    evict_at: None,
-                },
-                VaultMutation::Put {
-                    address: WireSecretAddress::new(INDEX_ITEM, None),
-                    value: WireSecret::new(index_bytes),
-                    evict_at: None,
-                },
-            ])
-            .map_err(failed)?;
-        *index = next;
-        Ok((item, created))
-    }
-
-    fn set_secret(
-        &self,
-        id: &str,
-        value: Zeroizing<Vec<u8>>,
-        content_type: String,
-    ) -> fdo::Result<()> {
-        let mut index = self.index.lock().map_err(poisoned)?;
-        let mut next = index.clone();
-        let item = next
-            .items
-            .iter_mut()
-            .find(|item| item.id == id)
-            .ok_or_else(|| no_item(id))?;
-        item.content_type = content_type;
-        item.modified = unix_time();
-        let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
-        self.store
-            .mutate(vec![
-                VaultMutation::Put {
-                    address: WireSecretAddress::new(secret_item(id), None),
-                    value: WireSecret::new(value.to_vec()),
-                    evict_at: None,
-                },
-                VaultMutation::Put {
-                    address: WireSecretAddress::new(INDEX_ITEM, None),
-                    value: WireSecret::new(index_bytes),
-                    evict_at: None,
-                },
-            ])
-            .map_err(failed)?;
-        *index = next;
-        Ok(())
-    }
-
-    fn delete_item(&self, id: &str) -> fdo::Result<()> {
-        let mut index = self.index.lock().map_err(poisoned)?;
-        let mut next = index.clone();
-        let Some(position) = next.items.iter().position(|item| item.id == id) else {
-            return Err(no_item(id));
-        };
-        next.items.remove(position);
-        let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
-        self.store
-            .mutate(vec![
-                VaultMutation::Delete {
-                    address: WireSecretAddress::new(secret_item(id), None),
-                },
-                VaultMutation::Put {
-                    address: WireSecretAddress::new(INDEX_ITEM, None),
-                    value: WireSecret::new(index_bytes),
-                    evict_at: None,
-                },
-            ])
-            .map_err(failed)?;
-        *index = next;
-        Ok(())
-    }
-
     fn open_session(
         &self,
         path: String,
@@ -422,12 +193,12 @@ impl Agent {
         &self,
         session: OwnedObjectPath,
         owner: &str,
-        value: Zeroizing<Vec<u8>>,
+        value: &Zeroizing<Vec<u8>>,
         content_type: String,
     ) -> fdo::Result<Secret> {
         let value = self
             .session(&session, owner)?
-            .encrypt(&value)
+            .encrypt(value)
             .map_err(failed)?;
         Ok((
             session,
@@ -442,282 +213,6 @@ impl Agent {
 struct SessionState {
     owner: String,
     session: ProtocolSession,
-}
-
-struct Service {
-    agent: Arc<Agent>,
-}
-struct Collection {
-    agent: Arc<Agent>,
-}
-struct Item {
-    agent: Arc<Agent>,
-    id: String,
-}
-struct Session {
-    agent: Arc<Agent>,
-    path: String,
-}
-
-#[interface(name = "org.freedesktop.Secret.Service")]
-impl Service {
-    #[zbus(out_args("output", "result"))]
-    async fn open_session(
-        &self,
-        algorithm: String,
-        input: OwnedValue,
-        #[zbus(header)] header: zbus::message::Header<'_>,
-        #[zbus(object_server)] server: &ObjectServer,
-    ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
-        let input = session_input(&algorithm, input)?;
-        let (session, output) = ProtocolSession::open(&algorithm, &input).map_err(failed)?;
-        let owner = sender(&header)?;
-        let path = format!("{SESSION_PREFIX}{}", random_id().map_err(failed)?);
-        self.agent
-            .open_session(path.clone(), owner.clone(), session)?;
-        let object_path = object_path(&path)?;
-        if let Err(error) = server
-            .at(
-                path.clone(),
-                Session {
-                    agent: Arc::clone(&self.agent),
-                    path: path.clone(),
-                },
-            )
-            .await
-        {
-            // Registration failed after the key entered the session map.
-            // Remove it immediately so failed opens cannot accumulate keys.
-            let _ = self.agent.close_session(&path, &owner);
-            return Err(failed(error));
-        }
-        Ok((session_output(output)?, object_path))
-    }
-
-    #[zbus(out_args("unlocked", "locked"))]
-    fn search_items(
-        &self,
-        attributes: HashMap<String, String>,
-    ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
-        let paths = self
-            .agent
-            .all_items()?
-            .into_iter()
-            .filter(|item| {
-                attributes
-                    .iter()
-                    .all(|(key, value)| item.attributes.get(key) == Some(value))
-            })
-            .map(|item| item_path(&item.id))
-            .collect::<fdo::Result<Vec<_>>>()?;
-        Ok((paths, Vec::new()))
-    }
-
-    #[zbus(out_args("unlocked", "prompt"))]
-    fn unlock(
-        &self,
-        objects: Vec<OwnedObjectPath>,
-    ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
-        Ok((objects, root_path()?))
-    }
-
-    #[zbus(out_args("locked", "prompt"))]
-    fn lock(
-        &self,
-        objects: Vec<OwnedObjectPath>,
-    ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
-        self.agent.store.service.seal().map_err(failed)?;
-        Ok((objects, root_path()?))
-    }
-
-    #[zbus(out_args("secrets",))]
-    fn get_secrets(
-        &self,
-        items: Vec<OwnedObjectPath>,
-        session: OwnedObjectPath,
-        #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> fdo::Result<HashMap<OwnedObjectPath, Secret>> {
-        let owner = sender(&header)?;
-        let mut result = HashMap::new();
-        for path in items {
-            let id = item_id(path.as_str())?;
-            let item = self.agent.item(id)?;
-            let value = self
-                .agent
-                .store
-                .get(secret_item(id))
-                .map_err(failed)?
-                .ok_or_else(|| no_item(id))?;
-            result.insert(
-                path,
-                self.agent
-                    .encrypt_secret(session.clone(), &owner, value, item.content_type)?,
-            );
-        }
-        Ok(result)
-    }
-
-    #[zbus(out_args("collection",))]
-    fn read_alias(&self, name: String) -> fdo::Result<OwnedObjectPath> {
-        if name == "default" {
-            object_path(DEFAULT_ALIAS_PATH)
-        } else {
-            root_path()
-        }
-    }
-
-    #[zbus(property)]
-    fn collections(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
-        Ok(vec![object_path(COLLECTION_PATH)?])
-    }
-}
-
-#[interface(name = "org.freedesktop.Secret.Collection")]
-impl Collection {
-    #[zbus(out_args("results",))]
-    fn search_items(
-        &self,
-        attributes: HashMap<String, String>,
-    ) -> fdo::Result<Vec<OwnedObjectPath>> {
-        self.agent
-            .all_items()?
-            .into_iter()
-            .filter(|item| {
-                attributes
-                    .iter()
-                    .all(|(key, value)| item.attributes.get(key) == Some(value))
-            })
-            .map(|item| item_path(&item.id))
-            .collect()
-    }
-
-    #[zbus(out_args("item", "prompt"))]
-    async fn create_item(
-        &self,
-        properties: Properties,
-        secret: Secret,
-        replace: bool,
-        #[zbus(header)] header: zbus::message::Header<'_>,
-        #[zbus(object_server)] server: &ObjectServer,
-    ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
-        let (value, content_type) = self.agent.decrypt_secret(secret, &sender(&header)?)?;
-        let label = property_string(&properties, "org.freedesktop.Secret.Item.Label")?;
-        let attributes = property_map(&properties, "org.freedesktop.Secret.Item.Attributes")?;
-        let (item, created) =
-            self.agent
-                .create_or_replace(label, attributes, value, content_type, replace)?;
-        let path = item_path(&item.id)?;
-        if created {
-            server
-                .at(
-                    path.clone(),
-                    Item {
-                        agent: Arc::clone(&self.agent),
-                        id: item.id,
-                    },
-                )
-                .await
-                .map_err(failed)?;
-        }
-        Ok((path, root_path()?))
-    }
-
-    #[zbus(property)]
-    fn items(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
-        self.agent
-            .all_items()?
-            .into_iter()
-            .map(|item| item_path(&item.id))
-            .collect()
-    }
-    #[zbus(property)]
-    fn label(&self) -> String {
-        "Factorseal".to_owned()
-    }
-    #[zbus(property)]
-    fn locked(&self) -> bool {
-        false
-    }
-}
-
-#[interface(name = "org.freedesktop.Secret.Item")]
-impl Item {
-    #[zbus(out_args("secret",))]
-    fn get_secret(
-        &self,
-        session: OwnedObjectPath,
-        #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> fdo::Result<Secret> {
-        let owner = sender(&header)?;
-        let item = self.agent.item(&self.id)?;
-        let value = self
-            .agent
-            .store
-            .get(secret_item(&self.id))
-            .map_err(failed)?
-            .ok_or_else(|| no_item(&self.id))?;
-        self.agent
-            .encrypt_secret(session, &owner, value, item.content_type)
-    }
-
-    fn set_secret(
-        &self,
-        secret: Secret,
-        #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> fdo::Result<()> {
-        let (value, content_type) = self.agent.decrypt_secret(secret, &sender(&header)?)?;
-        self.agent.set_secret(&self.id, value, content_type)
-    }
-
-    #[zbus(out_args("prompt",))]
-    async fn delete(
-        &self,
-        #[zbus(object_server)] server: &ObjectServer,
-    ) -> fdo::Result<OwnedObjectPath> {
-        self.agent.delete_item(&self.id)?;
-        server
-            .remove::<Item, _>(item_path(&self.id)?)
-            .await
-            .map_err(failed)?;
-        root_path()
-    }
-
-    #[zbus(property)]
-    fn label(&self) -> fdo::Result<String> {
-        Ok(self.agent.item(&self.id)?.label)
-    }
-    #[zbus(property)]
-    fn attributes(&self) -> fdo::Result<HashMap<String, String>> {
-        Ok(self.agent.item(&self.id)?.attributes)
-    }
-    #[zbus(property)]
-    fn locked(&self) -> bool {
-        false
-    }
-    #[zbus(property)]
-    fn created(&self) -> fdo::Result<u64> {
-        Ok(self.agent.item(&self.id)?.created)
-    }
-    #[zbus(property)]
-    fn modified(&self) -> fdo::Result<u64> {
-        Ok(self.agent.item(&self.id)?.modified)
-    }
-}
-
-#[interface(name = "org.freedesktop.Secret.Session")]
-impl Session {
-    async fn close(
-        &self,
-        #[zbus(header)] header: zbus::message::Header<'_>,
-        #[zbus(object_server)] server: &ObjectServer,
-    ) -> fdo::Result<()> {
-        self.agent.close_session(&self.path, &sender(&header)?)?;
-        server
-            .remove::<Session, _>(self.path.as_str())
-            .await
-            .map_err(failed)?;
-        Ok(())
-    }
 }
 
 fn session_input(algorithm: &str, input: OwnedValue) -> fdo::Result<Vec<u8>> {
@@ -783,6 +278,7 @@ fn unix_time() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+#[allow(clippy::needless_pass_by_value)]
 fn dbus_error(error: zbus::Error) -> VaultError {
     VaultError::Protocol(format!("Secret Service D-Bus error: {error}"))
 }
@@ -862,7 +358,7 @@ mod tests {
             .create_or_replace(
                 "Example".to_owned(),
                 attributes.clone(),
-                Zeroizing::new(b"first".to_vec()),
+                &Zeroizing::new(b"first".to_vec()),
                 "text/plain".to_owned(),
                 false,
             )
@@ -882,7 +378,7 @@ mod tests {
         agent
             .set_secret(
                 &item.id,
-                Zeroizing::new(b"second".to_vec()),
+                &Zeroizing::new(b"second".to_vec()),
                 "application/octet-stream".to_owned(),
             )
             .unwrap();

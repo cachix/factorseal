@@ -3,42 +3,40 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 #[cfg(feature = "hardware")]
 use crate::hardware::PlatformProtectorFactory;
 
-#[cfg(feature = "key-protection")]
-use super::signature::{SIGNING_SEED_BYTES, public_key_for_seed};
 use super::{DeviceKeyId, VaultError, VaultId, VaultResult};
 #[cfg(feature = "key-protection")]
 use super::{KeyProtector, KeyProtectorFactory};
 
 mod filesystem;
+mod metadata;
+#[cfg(feature = "key-protection")]
+mod protectors;
 
 #[cfg(feature = "key-protection")]
 use filesystem::path_error;
+use filesystem::validate_root;
 #[cfg(feature = "key-protection")]
-use filesystem::{prepare_root, unix_time, write_vault};
-use filesystem::{read_vault, validate_root};
+use filesystem::{prepare_root, unix_time};
+#[cfg(feature = "key-protection")]
+use metadata::VAULT_FILE;
+use metadata::read_vault;
+#[cfg(feature = "key-protection")]
+use protectors::{
+    LabeledProtector, ProtectorPair, VaultCreation, create_with_protectors, unseal_with_protectors,
+};
 
-const VAULT_FILE: &str = "factorseal.json";
-const VAULT_FORMAT: &str = "factorseal-vault";
-// Version 2 replaces the quantum-vulnerable Ed25519 device identity with an
-// ML-DSA-65 identity. There are no released vaults to migrate.
-const VAULT_VERSION: u32 = 2;
-const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 const KEY_BYTES: usize = 32;
 #[cfg(all(test, feature = "key-protection"))]
 const TEST_PASSWORD: &[u8] = b"factorseal-test-password";
 
 mod factor;
 
-use factor::NestedProtection;
 pub use factor::{NestedFactorKind, UnsealFactor};
-#[cfg(feature = "key-protection")]
-use factor::{protect_with_factor, unprotect_with_factor};
 
 /// Public, stable identity of this vault.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -262,14 +260,22 @@ impl Vault {
             protectors.push(factory.create(root, &signing_label, biometric)?);
             create_with_protectors(
                 root,
-                vault_id,
-                &wrapping_label,
-                &signing_label,
-                protectors[0].as_ref(),
-                protectors[1].as_ref(),
-                biometric,
-                unix_time()?,
-                platform,
+                VaultCreation {
+                    vault_id,
+                    biometric,
+                    created_at: unix_time()?,
+                    platform,
+                },
+                ProtectorPair {
+                    wrapping: LabeledProtector {
+                        label: &wrapping_label,
+                        key: protectors[0].as_ref(),
+                    },
+                    signing: LabeledProtector {
+                        label: &signing_label,
+                        key: protectors[1].as_ref(),
+                    },
+                },
                 factor,
             )
         })();
@@ -354,14 +360,22 @@ impl Vault {
         let signing = TestProtector::new([0x97; KEY_BYTES]);
         create_with_protectors(
             root,
-            VaultId::random()?,
-            "test-vault-wrap",
-            "test-vault-sign",
-            &wrapping,
-            &signing,
-            false,
-            1_700_000_000,
-            VaultPlatform::Test,
+            VaultCreation {
+                vault_id: VaultId::random()?,
+                biometric: false,
+                created_at: 1_700_000_000,
+                platform: VaultPlatform::Test,
+            },
+            ProtectorPair {
+                wrapping: LabeledProtector {
+                    label: "test-vault-wrap",
+                    key: &wrapping,
+                },
+                signing: LabeledProtector {
+                    label: "test-vault-sign",
+                    key: &signing,
+                },
+            },
             UnsealFactor::Password(TEST_PASSWORD),
         )
     }
@@ -472,208 +486,6 @@ impl VaultPlatform {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct VaultFile {
-    format: String,
-    version: u32,
-    vault_id: VaultId,
-    device_key_id: DeviceKeyId,
-    public_signing_key: Vec<u8>,
-    actor_id: Vec<u8>,
-    platform: VaultPlatform,
-    hardware_backend: String,
-    wrapping_key_label: String,
-    signing_key_label: String,
-    wrapped_data_key: Vec<u8>,
-    wrapped_signing_seed: Vec<u8>,
-    nested_protection: NestedProtection,
-    biometric: bool,
-    key_epoch: u64,
-    created_at: u64,
-}
-
-#[cfg(feature = "key-protection")]
-#[allow(clippy::too_many_arguments)]
-fn create_with_protectors(
-    root: &Path,
-    vault_id: VaultId,
-    wrapping_key_label: &str,
-    signing_key_label: &str,
-    wrapping: &dyn KeyProtector,
-    signing: &dyn KeyProtector,
-    biometric: bool,
-    created_at: u64,
-    platform: VaultPlatform,
-    factor: UnsealFactor<'_>,
-) -> VaultResult<UnsealedVault> {
-    if wrapping_key_label == signing_key_label {
-        return Err(VaultError::Protection(
-            "wrapping and signing key labels must be distinct".to_owned(),
-        ));
-    }
-    if wrapping.backend() != signing.backend() {
-        return Err(VaultError::Protection(
-            "wrapping and signing keys use different hardware backends".to_owned(),
-        ));
-    }
-    if !platform_accepts_backend(platform, wrapping.backend().as_str()) {
-        return Err(VaultError::Protection(format!(
-            "the {} backend is not valid for {} vaults",
-            wrapping.backend().as_str(),
-            platform.as_str()
-        )));
-    }
-    let mut data_key = Zeroizing::new([0_u8; KEY_BYTES]);
-    let mut signing_seed = Zeroizing::new([0_u8; SIGNING_SEED_BYTES]);
-    getrandom::fill(&mut *data_key)?;
-    getrandom::fill(&mut *signing_seed)?;
-    let public_signing_key = public_key_for_seed(&signing_seed)?;
-    let device_key_id = DeviceKeyId::for_public_key(&public_signing_key);
-    let actor_id = actor_id_for_public_key(&public_signing_key).to_vec();
-    let (data_key_payload, signing_seed_payload, nested_protection) =
-        protect_with_factor(vault_id, &data_key, &signing_seed, factor)?;
-    let wrapped_data_key = wrapping
-        .wrap(&data_key_payload)
-        .map_err(|error| VaultError::Protection(error.to_string()))?;
-    let wrapped_signing_seed = signing
-        .wrap(&signing_seed_payload)
-        .map_err(|error| VaultError::Protection(error.to_string()))?;
-    let stored = VaultFile {
-        format: VAULT_FORMAT.to_owned(),
-        version: VAULT_VERSION,
-        vault_id,
-        device_key_id,
-        public_signing_key,
-        actor_id,
-        platform,
-        hardware_backend: wrapping.backend().as_str().to_owned(),
-        wrapping_key_label: wrapping_key_label.to_owned(),
-        signing_key_label: signing_key_label.to_owned(),
-        wrapped_data_key,
-        wrapped_signing_seed,
-        nested_protection,
-        biometric,
-        key_epoch: 0,
-        created_at,
-    };
-    write_vault(root, &stored)?;
-    Ok(UnsealedVault {
-        public: stored.public(),
-        data_key,
-        signing_seed,
-        initialize_store: true,
-    })
-}
-
-#[cfg(feature = "key-protection")]
-fn unseal_with_protectors(
-    stored: &VaultFile,
-    wrapping: &dyn KeyProtector,
-    signing: &dyn KeyProtector,
-    factor: UnsealFactor<'_>,
-) -> VaultResult<UnsealedVault> {
-    stored.validate()?;
-    if wrapping.backend().as_str() != stored.hardware_backend
-        || signing.backend().as_str() != stored.hardware_backend
-    {
-        return Err(VaultError::Protection(
-            "vault hardware backend does not match its metadata".to_owned(),
-        ));
-    }
-    let wrapped_data_key = wrapping
-        .unwrap(&stored.wrapped_data_key)
-        .map_err(|error| VaultError::Protection(error.to_string()))?;
-    let wrapped_signing_seed = signing
-        .unwrap(&stored.wrapped_signing_seed)
-        .map_err(|error| VaultError::Protection(error.to_string()))?;
-    let (data_key, signing_seed) = unprotect_with_factor(
-        stored.vault_id,
-        &stored.nested_protection,
-        &wrapped_data_key,
-        &wrapped_signing_seed,
-        factor,
-    )?;
-    let public_signing_key = public_key_for_seed(&signing_seed)?;
-    if public_signing_key != stored.public_signing_key
-        || DeviceKeyId::for_public_key(&public_signing_key) != stored.device_key_id
-        || actor_id_for_public_key(&public_signing_key).as_slice() != stored.actor_id
-    {
-        return Err(VaultError::Protection(
-            "device-signing key does not match vault identity".to_owned(),
-        ));
-    }
-    Ok(UnsealedVault {
-        public: stored.public(),
-        data_key,
-        signing_seed,
-        initialize_store: false,
-    })
-}
-
-impl VaultFile {
-    fn public(&self) -> VaultMetadata {
-        VaultMetadata {
-            vault_id: self.vault_id,
-            device_key_id: self.device_key_id,
-            public_signing_key: self.public_signing_key.clone(),
-            actor_id: self.actor_id.clone(),
-            platform: self.platform,
-            hardware_backend: self.hardware_backend.clone(),
-            nested_factor: self.nested_protection.kind(),
-            key_epoch: self.key_epoch,
-            created_at: self.created_at,
-        }
-    }
-
-    fn validate(&self) -> VaultResult<()> {
-        if self.format != VAULT_FORMAT || self.version != VAULT_VERSION {
-            return Err(VaultError::Protection(
-                "unsupported vault metadata format or version".to_owned(),
-            ));
-        }
-        if !platform_accepts_backend(self.platform, &self.hardware_backend)
-            || self.wrapping_key_label.is_empty()
-            || self.signing_key_label.is_empty()
-            || self.wrapping_key_label == self.signing_key_label
-            || self.actor_id.is_empty()
-            || self.wrapped_data_key.is_empty()
-            || self.wrapped_signing_seed.is_empty()
-            || DeviceKeyId::for_public_key(&self.public_signing_key) != self.device_key_id
-            || actor_id_for_public_key(&self.public_signing_key).as_slice() != self.actor_id
-        {
-            return Err(VaultError::Protection(
-                "vault metadata is inconsistent".to_owned(),
-            ));
-        }
-        self.nested_protection.validate()?;
-        Ok(())
-    }
-}
-
-fn platform_accepts_backend(platform: VaultPlatform, backend: &str) -> bool {
-    match platform {
-        VaultPlatform::Android => {
-            matches!(backend, "android-strongbox" | "android-trusted-environment")
-        }
-        VaultPlatform::Ios | VaultPlatform::Macos => backend == "secure-enclave",
-        VaultPlatform::Linux | VaultPlatform::Windows => {
-            matches!(backend, "tpm" | "tpm-bridge")
-        }
-        #[cfg(test)]
-        VaultPlatform::Test => {
-            matches!(
-                backend,
-                "secure-enclave"
-                    | "android-strongbox"
-                    | "android-trusted-environment"
-                    | "tpm"
-                    | "tpm-bridge"
-            )
-        }
-    }
-}
-
 #[cfg(feature = "hardware")]
 fn current_platform() -> VaultResult<VaultPlatform> {
     #[cfg(target_os = "linux")]
@@ -688,294 +500,5 @@ fn current_platform() -> VaultResult<VaultPlatform> {
     ))
 }
 
-fn actor_id_for_public_key(public_key: &[u8]) -> [u8; KEY_BYTES] {
-    let mut digest = Sha256::new();
-    digest.update(b"factorseal/automerge-actor/v1\0");
-    digest.update(public_key);
-    digest.finalize().into()
-}
-
 #[cfg(all(test, feature = "key-protection"))]
-mod tests {
-    use super::super::protection::TestProtector;
-    use super::*;
-
-    struct TestProtectorFactory;
-
-    impl KeyProtectorFactory for TestProtectorFactory {
-        fn create(
-            &self,
-            root: &Path,
-            label: &str,
-            biometric: bool,
-        ) -> VaultResult<Box<dyn KeyProtector>> {
-            self.open(root, label, biometric)
-        }
-
-        fn open(
-            &self,
-            _root: &Path,
-            label: &str,
-            _biometric: bool,
-        ) -> VaultResult<Box<dyn KeyProtector>> {
-            let key = if label.starts_with("vault-wrap-") {
-                [0x35; KEY_BYTES]
-            } else {
-                [0x97; KEY_BYTES]
-            };
-            Ok(Box::new(TestProtector::with_backend(
-                key,
-                super::super::HardwareBackend::AndroidTrustedEnvironment,
-            )))
-        }
-    }
-
-    #[test]
-    fn persisted_vault_artifacts_use_the_factorseal_basename() {
-        assert_eq!(VAULT_FILE, "factorseal.json");
-        assert_eq!(super::super::DATABASE_FILE, "factorseal.db");
-        assert_eq!(super::super::LOCK_FILE, "factorseal.lock");
-    }
-
-    #[test]
-    fn injected_mobile_protector_creates_unseals_and_discards() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("factorseal");
-        let created = Vault::create_with_key_protector(
-            &root,
-            VaultPlatform::Android,
-            UnsealFactor::Password(TEST_PASSWORD),
-            true,
-            &TestProtectorFactory,
-        )
-        .unwrap();
-        assert_eq!(created.public().platform(), "android");
-        assert_eq!(
-            created.public().hardware_backend(),
-            "android-trusted-environment"
-        );
-        let expected = created.public().clone();
-        drop(created);
-
-        let reopened = Vault::unseal_with_key_protector(
-            &root,
-            UnsealFactor::Password(TEST_PASSWORD),
-            &TestProtectorFactory,
-        )
-        .unwrap();
-        assert_eq!(reopened.public(), &expected);
-        drop(reopened);
-
-        Vault::discard_initialization_with_key_protector(&root, &TestProtectorFactory).unwrap();
-        assert!(!root.exists());
-    }
-
-    #[test]
-    fn mobile_vault_rejects_a_backend_from_another_platform() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("factorseal");
-        prepare_root(&root).unwrap();
-        let wrapping = TestProtector::new([0x35; KEY_BYTES]);
-        let signing = TestProtector::new([0x97; KEY_BYTES]);
-
-        let error = create_with_protectors(
-            &root,
-            VaultId::random().unwrap(),
-            "platform-test-wrap",
-            "platform-test-sign",
-            &wrapping,
-            &signing,
-            false,
-            1_700_000_000,
-            VaultPlatform::Ios,
-            UnsealFactor::Password(TEST_PASSWORD),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("not valid for ios vaults"));
-        assert!(!root.join(VAULT_FILE).exists());
-    }
-
-    #[test]
-    fn a_discarded_initialization_can_be_retried() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("factorseal");
-        Vault::create_for_test(&root).unwrap();
-        // This is what a failed store open leaves behind: a vault that
-        // `create` will not write over.
-        assert!(Vault::create_for_test(&root).is_err());
-
-        let hardware = root.join("hardware");
-        fs::create_dir(&hardware).unwrap();
-        fs::write(hardware.join("key-metadata"), b"temporary key").unwrap();
-
-        Vault::discard_initialization_with_key_protector(&root, &TestProtectorFactory).unwrap();
-        assert!(!root.exists());
-        // Discarding an already discarded root is not an error, so the
-        // failure path can call it without checking first.
-        Vault::discard_initialization_with_key_protector(&root, &TestProtectorFactory).unwrap();
-        Vault::create_for_test(&root).unwrap();
-    }
-
-    #[test]
-    fn destroy_requires_the_factor_and_removes_a_completed_vault() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("factorseal");
-        Vault::create_with_key_protector(
-            &root,
-            VaultPlatform::Android,
-            UnsealFactor::Password(b"acceptance-factor"),
-            false,
-            &TestProtectorFactory,
-        )
-        .unwrap();
-
-        assert!(
-            Vault::destroy_with_key_protector(
-                &root,
-                UnsealFactor::Password(b"wrong-factor"),
-                &TestProtectorFactory,
-            )
-            .is_err()
-        );
-        assert!(root.exists());
-
-        Vault::destroy_with_key_protector(
-            &root,
-            UnsealFactor::Password(b"acceptance-factor"),
-            &TestProtectorFactory,
-        )
-        .unwrap();
-        assert!(!root.exists());
-    }
-
-    #[test]
-    fn initialization_refuses_a_preexisting_root_without_mutating_it() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("factorseal");
-        fs::create_dir(&root).unwrap();
-        let database = root.join(super::super::DATABASE_FILE);
-        let lock = root.join(super::super::LOCK_FILE);
-        fs::write(&database, b"existing database").unwrap();
-        fs::write(&lock, b"existing lock").unwrap();
-
-        let error = Vault::create_for_test(&root).unwrap_err();
-        assert!(error.to_string().contains("pre-existing vault root"));
-        assert_eq!(fs::read(database).unwrap(), b"existing database");
-        assert_eq!(fs::read(lock).unwrap(), b"existing lock");
-        assert!(!root.join(VAULT_FILE).exists());
-    }
-
-    #[test]
-    fn installation_identity_and_actor_survive_unseal() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("factorseal");
-        let created = Vault::create_for_test(&root).unwrap();
-        let expected = created.public().clone();
-        drop(created);
-
-        let unsealed = Vault::unseal_for_test(&root).unwrap();
-        assert_eq!(unsealed.public(), &expected);
-        assert_ne!(
-            unsealed.public().device_key_id().as_bytes()[..16],
-            unsealed.public().vault_id().as_bytes()[..]
-        );
-    }
-
-    #[test]
-    fn installation_uses_distinct_wrapping_and_signing_material() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("factorseal");
-        Vault::create_for_test(&root).unwrap();
-        let stored = read_vault(&root).unwrap();
-
-        assert_ne!(stored.wrapping_key_label, stored.signing_key_label);
-        assert_ne!(stored.wrapped_data_key, stored.wrapped_signing_seed);
-    }
-
-    #[test]
-    fn tampered_public_identity_is_rejected_before_unseal() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("factorseal");
-        Vault::create_for_test(&root).unwrap();
-        let mut stored = read_vault(&root).unwrap();
-        stored.actor_id[0] ^= 1;
-
-        assert!(stored.validate().is_err());
-    }
-
-    #[test]
-    fn every_platform_requires_a_nested_factor_and_hardware() {
-        for platform in [
-            VaultPlatform::Android,
-            VaultPlatform::Ios,
-            VaultPlatform::Linux,
-            VaultPlatform::Macos,
-            VaultPlatform::Windows,
-        ] {
-            let directory = tempfile::tempdir().unwrap();
-            let root = directory.path().join("factorseal");
-            prepare_root(&root).unwrap();
-            let backend = match platform {
-                VaultPlatform::Android => super::super::HardwareBackend::AndroidTrustedEnvironment,
-                VaultPlatform::Ios | VaultPlatform::Macos => {
-                    super::super::HardwareBackend::SecureEnclave
-                }
-                VaultPlatform::Linux | VaultPlatform::Windows => super::super::HardwareBackend::Tpm,
-                VaultPlatform::Test => unreachable!(),
-            };
-            let wrapping = TestProtector::with_backend([0x35; KEY_BYTES], backend);
-            let signing = TestProtector::with_backend([0x97; KEY_BYTES], backend);
-            let created = create_with_protectors(
-                &root,
-                VaultId::random().unwrap(),
-                "platform-test-wrap",
-                "platform-test-sign",
-                &wrapping,
-                &signing,
-                false,
-                1_700_000_000,
-                platform,
-                UnsealFactor::Password(b"correct horse battery staple"),
-            )
-            .unwrap();
-            let expected = created.public().clone();
-            assert_eq!(expected.nested_factor(), NestedFactorKind::Argon2idPassword);
-            drop(created);
-
-            let stored = read_vault(&root).unwrap();
-            assert!(
-                unseal_with_protectors(&stored, &wrapping, &signing, UnsealFactor::Password(b""))
-                    .is_err()
-            );
-            assert!(
-                unseal_with_protectors(
-                    &stored,
-                    &wrapping,
-                    &signing,
-                    UnsealFactor::Password(b"wrong password")
-                )
-                .is_err()
-            );
-
-            let wrong_hardware = TestProtector::new([0x36; KEY_BYTES]);
-            assert!(
-                unseal_with_protectors(
-                    &stored,
-                    &wrong_hardware,
-                    &signing,
-                    UnsealFactor::Password(b"correct horse battery staple"),
-                )
-                .is_err()
-            );
-            let unsealed = unseal_with_protectors(
-                &stored,
-                &wrapping,
-                &signing,
-                UnsealFactor::Password(b"correct horse battery staple"),
-            )
-            .unwrap();
-            assert_eq!(unsealed.public(), &expected);
-        }
-    }
-}
+mod tests;
