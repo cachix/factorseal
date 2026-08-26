@@ -7,7 +7,8 @@ use std::process;
 
 use zeroize::Zeroizing;
 
-use super::{CliError, MAX_FACTOR_BYTES, read_bounded};
+use super::commands::read_bounded;
+use super::{CliError, MAX_FACTOR_BYTES};
 
 /// Where the vault obtains its nested factor.
 #[derive(Clone, Copy)]
