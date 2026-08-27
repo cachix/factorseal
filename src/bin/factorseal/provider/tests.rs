@@ -201,6 +201,7 @@ async fn provider_uses_cache_actions_for_crud_and_expiry() {
                 profile: Some("default".to_owned()),
                 base_dir: application_context().base_dir,
                 reason: Some("test".to_owned()),
+                requested_authorization_duration_ms: None,
             },
             credentials: BTreeMap::new(),
         },
@@ -438,6 +439,7 @@ fn approval_initialize() -> InitializeParams<InitializeApplication> {
                 profile: Some("production".to_owned()),
                 base_dir: None,
                 reason: Some("deploy".to_owned()),
+                requested_authorization_duration_ms: Some(8 * 60 * 60 * 1_000),
             },
             credentials: BTreeMap::new(),
         },
@@ -491,6 +493,12 @@ async fn secretspec_request_can_be_approved_and_retried() {
     assert_eq!(approvals[0].id, interaction.id);
     assert_eq!(approvals[0].application.project.as_deref(), Some("demo"));
     assert_eq!(approvals[0].application.reason.as_deref(), Some("deploy"));
+    assert_eq!(
+        approvals[0]
+            .application
+            .requested_authorization_duration_seconds,
+        Some(8 * 60 * 60)
+    );
 
     let unsealed = Vault::unseal_with_key_protector_group(
         &fixture.root,
@@ -500,13 +508,14 @@ async fn secretspec_request_can_be_approved_and_retried() {
     )
     .unwrap();
     let signature = unsealed
-        .sign_approval_challenge(&approvals[0].id, &approvals[0].challenge)
+        .sign_approval_challenge(&approvals[0].id, &approvals[0].challenge, Some(8 * 60 * 60))
         .unwrap();
     let approved = fixture.service.handle(
         &fixture.manager,
         VaultRequest::new(VaultAction::Approve {
             id: approvals[0].id.clone(),
             signature,
+            grant_duration_seconds: Some(8 * 60 * 60),
         })
         .unwrap(),
         fixture.now + 3,

@@ -138,10 +138,15 @@ impl UnsealedVault {
     /// Sign one agent-issued approval challenge after this vault has been
     /// unsealed with a configured unlock group.
     #[cfg(feature = "vault-store")]
-    pub fn sign_approval_challenge(&self, id: &str, challenge: &[u8; 32]) -> VaultResult<Vec<u8>> {
+    pub fn sign_approval_challenge(
+        &self,
+        id: &str,
+        challenge: &[u8; 32],
+        grant_duration_seconds: Option<u64>,
+    ) -> VaultResult<Vec<u8>> {
         super::signature::sign(
             &self.signing_seed,
-            &super::signature::approval_payload(id, challenge),
+            &super::signature::approval_payload(id, challenge, grant_duration_seconds),
         )
     }
 

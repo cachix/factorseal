@@ -1,7 +1,8 @@
 use super::cli::{ApprovalCommand, Cli, Command};
 use super::commands::{
-    ApprovalDecision, read_approval_decision, read_bounded, read_keyring_value,
-    read_password_for_groups, read_unlock_group_choice, require_prompt_terminal,
+    ApprovalDecision, ParsedGrantDuration, parse_grant_duration, read_approval_decision,
+    read_bounded, read_grant_duration, read_keyring_value, read_password_for_groups,
+    read_unlock_group_choice, require_prompt_terminal,
 };
 use super::factor::read_factor;
 use super::*;
@@ -370,4 +371,39 @@ fn approval_prompt_requires_a_terminal_and_explicit_decision() {
     let mut choice = std::io::Cursor::new(b"invalid\n2\n");
     let selected = read_unlock_group_choice(&groups, &mut choice, &mut Vec::new()).unwrap();
     assert_eq!(selected, groups[1]);
+}
+
+#[test]
+fn approval_grant_duration_uses_app_default_and_accepts_overrides() {
+    assert_eq!(
+        parse_grant_duration("30m"),
+        Some(ParsedGrantDuration::Seconds(30 * 60))
+    );
+    assert_eq!(
+        parse_grant_duration("1d"),
+        Some(ParsedGrantDuration::Seconds(24 * 60 * 60))
+    );
+    assert_eq!(
+        parse_grant_duration("forever"),
+        Some(ParsedGrantDuration::Forever)
+    );
+    assert_eq!(parse_grant_duration("0h"), None);
+    assert_eq!(parse_grant_duration("later"), None);
+
+    let mut accept_default = std::io::Cursor::new(b"\n");
+    assert_eq!(
+        read_grant_duration(&mut accept_default, &mut Vec::new(), Some(8 * 60 * 60)).unwrap(),
+        Some(8 * 60 * 60)
+    );
+
+    let mut retry_then_forever = std::io::Cursor::new(b"later\nforever\n");
+    let mut output = Vec::new();
+    assert_eq!(
+        read_grant_duration(&mut retry_then_forever, &mut output, None).unwrap(),
+        None
+    );
+    assert!(String::from_utf8(output).unwrap().contains("30m"));
+
+    let mut closed = std::io::Cursor::new(Vec::<u8>::new());
+    assert!(read_grant_duration(&mut closed, &mut Vec::new(), None).is_err());
 }

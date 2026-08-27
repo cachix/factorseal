@@ -101,12 +101,19 @@ impl ProviderHandler for FactorsealProvider {
         {
             return Err(RpcError::new(ErrorKind::InvalidParams));
         }
+        let requested_duration_seconds = application
+            .context
+            .requested_authorization_duration_ms
+            .map(|milliseconds| milliseconds.div_ceil(1_000));
         let application_context = VaultApplicationContext::new(
             application.context.project,
             application.context.profile,
             application.context.base_dir,
             application.context.reason,
         )
+        .and_then(|context| {
+            context.with_requested_authorization_duration_seconds(requested_duration_seconds)
+        })
         .map_err(|error| map_vault_error(&error))?;
         if application_context.project.is_none() {
             return Err(RpcError::new(ErrorKind::InvalidParams));

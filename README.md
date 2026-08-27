@@ -254,7 +254,11 @@ $ factorseal approvals deny apr_7K3M
 ```
 
 Approval requires one configured unlock group and creates only the requested
-permission for the declared project. Factorseal derives a project-specific
+permission for the declared project. Before asking for the factor, Factorseal
+prompts for the grant lifetime; Enter accepts the app-requested default (or one
+hour when the app supplied none), and values such as `30m`, `8h`, `7d`, and
+`forever` override it. The chosen lifetime is bound into the vault signature,
+so it cannot be changed after factor confirmation. Factorseal derives a project-specific
 cache address and verifies it before accepting the project grant, so declaring
 an approved project cannot reach another project's secrets. Interactive
 prompts distinguish the transport-authenticated executable identity and digest

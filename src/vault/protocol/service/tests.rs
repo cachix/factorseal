@@ -127,6 +127,7 @@ fn application_context_is_bounded_and_requires_an_absolute_base_directory() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn approval_is_project_scoped_and_requires_a_vault_signature() {
     let (directory, service) = service(100, UnsealLeasePolicy::default());
     let provider = caller();
@@ -192,35 +193,47 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     let root = directory.path().join("factorseal");
     let unsealed = Vault::unseal_for_test(&root).unwrap();
     let signature = unsealed
-        .sign_approval_challenge(&approvals[0].id, &approvals[0].challenge)
+        .sign_approval_challenge(&approvals[0].id, &approvals[0].challenge, Some(60 * 60))
         .unwrap();
+    let duration_tampered = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::Approve {
+            id: approvals[0].id.clone(),
+            signature: signature.clone(),
+            grant_duration_seconds: None,
+        })
+        .unwrap(),
+        203,
+    );
+    assert!(duration_tampered.result.is_err());
     let approved = service.handle(
         &manager,
         VaultRequest::new(VaultAction::Approve {
             id: approvals[0].id.clone(),
             signature,
+            grant_duration_seconds: Some(60 * 60),
         })
         .unwrap(),
-        203,
+        204,
     );
     assert!(matches!(
         approved.result,
         Ok(VaultResponseBody::ApprovalResolved { approved: true })
     ));
     assert!(matches!(
-        service.handle(&provider, get("demo"), 204).result,
+        service.handle(&provider, get("demo"), 205).result,
         Ok(VaultResponseBody::Secret { value: None })
     ));
     assert!(
         service
-            .handle(&provider, get("other-project"), 205)
+            .handle(&provider, get("other-project"), 206)
             .result
             .unwrap_err()
             .interaction
             .is_some()
     );
     let mismatched = service
-        .handle(&provider, get_scoped("demo", "other-project"), 206)
+        .handle(&provider, get_scoped("demo", "other-project"), 207)
         .result
         .unwrap_err();
     assert_eq!(
@@ -230,6 +243,15 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     assert!(
         mismatched.interaction.is_none(),
         "a mismatched project address must not even create an approvable request"
+    );
+    assert!(
+        service
+            .handle(&provider, get("demo"), 204 + 60 * 60)
+            .result
+            .unwrap_err()
+            .interaction
+            .is_some(),
+        "the project grant must expire after the user-selected duration"
     );
 }
 

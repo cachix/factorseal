@@ -4,8 +4,9 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
-- Bump the native protocol to version 3 and forward SecretSpec's declared
-  project, profile, base directory, and access reason through each provider
+- Bump the native protocol to version 4 and forward SecretSpec's declared
+  project, profile, base directory, access reason, and requested authorization
+  duration through each provider
   request, supporting contextual audit and approval surfaces without treating
   caller-provided metadata as identity.
 - Add bounded project-scoped approval requests, structured SecretSpec
@@ -16,8 +17,10 @@ All notable changes to FactorSeal will be documented in this file.
   Interactive watch mode shows the authenticated provider principal and
   requires an explicit terminal decision, prompting for an unlock-group choice
   only when multiple alternatives exist; approval commands expose no factor
-  selection flag. SecretSpec cache addresses are project-derived and checked
-  before project grants are accepted.
+  selection flag. Approval prompts let the user accept the app-requested grant
+  duration or choose another duration, including `forever`; the signed approval
+  binds that choice and the project grant expires accordingly. SecretSpec cache
+  addresses are project-derived and checked before project grants are accepted.
 - Replace the password-plus-biometric boolean with versioned unlock policies:
   comma-separated factors are AND requirements and repeated `--unlock` groups
   are independently hardware-wrapped OR alternatives. Support password,

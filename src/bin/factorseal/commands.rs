@@ -456,6 +456,20 @@ fn write_approval(output: &mut impl Write, approval: &PendingApproval) -> Result
                 approval.created_at, approval.expires_at
             )
         })
+        .and_then(|()| {
+            if let Some(duration) = approval
+                .application
+                .requested_authorization_duration_seconds
+            {
+                writeln!(
+                    output,
+                    "  requested grant duration: {}",
+                    format_grant_duration(duration)
+                )
+            } else {
+                Ok(())
+            }
+        })
         .map_err(|error| CliError::ApprovalPrompt(error.to_string()))
 }
 
@@ -464,6 +478,85 @@ pub(super) enum ApprovalDecision {
     Approve,
     Deny,
     Ignore,
+}
+
+const DEFAULT_GRANT_DURATION_SECONDS: u64 = 60 * 60;
+
+fn format_grant_duration(seconds: u64) -> String {
+    for (unit, size) in [
+        ("w", 7 * 24 * 60 * 60),
+        ("d", 24 * 60 * 60),
+        ("h", 60 * 60),
+        ("m", 60),
+    ] {
+        if seconds.is_multiple_of(size) {
+            return format!("{}{unit}", seconds / size);
+        }
+    }
+    format!("{seconds}s")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ParsedGrantDuration {
+    Forever,
+    Seconds(u64),
+}
+
+pub(super) fn parse_grant_duration(value: &str) -> Option<ParsedGrantDuration> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "forever" {
+        return Some(ParsedGrantDuration::Forever);
+    }
+    let (number, multiplier) = match value.as_bytes().last().copied() {
+        Some(b's') => (&value[..value.len() - 1], 1),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b'h') => (&value[..value.len() - 1], 60 * 60),
+        Some(b'd') => (&value[..value.len() - 1], 24 * 60 * 60),
+        Some(b'w') => (&value[..value.len() - 1], 7 * 24 * 60 * 60),
+        _ => return None,
+    };
+    number
+        .parse::<u64>()
+        .ok()
+        .filter(|number| *number > 0)
+        .and_then(|number| number.checked_mul(multiplier))
+        .map(ParsedGrantDuration::Seconds)
+}
+
+pub(super) fn read_grant_duration(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    requested_default: Option<u64>,
+) -> Result<Option<u64>, CliError> {
+    let default = requested_default.unwrap_or(DEFAULT_GRANT_DURATION_SECONDS);
+    loop {
+        write!(
+            output,
+            "Grant access for [{}]: ",
+            format_grant_duration(default)
+        )
+        .and_then(|()| output.flush())
+        .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
+        let mut answer = String::new();
+        if input
+            .read_line(&mut answer)
+            .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?
+            == 0
+        {
+            return Err(CliError::ApprovalPrompt("input was closed".to_owned()));
+        }
+        if answer.trim().is_empty() {
+            return Ok(Some(default));
+        }
+        if let Some(duration) = parse_grant_duration(&answer) {
+            return Ok(match duration {
+                ParsedGrantDuration::Forever => None,
+                ParsedGrantDuration::Seconds(seconds) => Some(seconds),
+            });
+        }
+        writeln!(output, "Enter a duration such as 30m, 8h, 7d, or forever.")
+            .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
+    }
 }
 
 pub(super) fn require_prompt_terminal(input: bool, output: bool) -> Result<(), CliError> {
@@ -576,12 +669,27 @@ fn prompt_approvals(
                 handled.insert(approval.id.clone());
                 match decision {
                     ApprovalDecision::Approve => {
-                        let group = {
+                        let (grant_duration_seconds, group) = {
                             let mut input = stdin.lock();
                             let mut output = stderr.lock();
-                            prompt_unlock_group(root, &mut input, &mut output)?
+                            let duration = read_grant_duration(
+                                &mut input,
+                                &mut output,
+                                approval
+                                    .application
+                                    .requested_authorization_duration_seconds,
+                            )?;
+                            let group = prompt_unlock_group(root, &mut input, &mut output)?;
+                            (duration, group)
                         };
-                        approve(root, socket, factor, &approval.id, Some(&group))?;
+                        approve(
+                            root,
+                            socket,
+                            factor,
+                            &approval.id,
+                            grant_duration_seconds,
+                            Some(&group),
+                        )?;
                     }
                     ApprovalDecision::Deny => resolve_approval(
                         root,
@@ -606,17 +714,40 @@ fn approve_with_prompted_group(
     factor: FactorSource<'_>,
     id: &str,
 ) -> Result<(), CliError> {
+    let stdin = std::io::stdin();
+    let stderr = std::io::stderr();
+    require_prompt_terminal(stdin.is_terminal(), stderr.is_terminal())?;
+    let client = native_client(root, socket)?;
+    let (_, pending) = approvals(&client)?;
+    let approval = pending
+        .iter()
+        .find(|approval| approval.id == id)
+        .ok_or_else(|| VaultError::Protocol("approval is missing or expired".to_owned()))?;
     let device = Vault::inspect(root)?;
-    let group = match device.unlock_policy().groups() {
-        [group] => group.clone(),
-        groups => {
-            let stdin = std::io::stdin();
-            let stderr = std::io::stderr();
-            require_prompt_terminal(stdin.is_terminal(), stderr.is_terminal())?;
-            read_unlock_group_choice(groups, &mut stdin.lock(), &mut stderr.lock())?
-        }
+    let (grant_duration_seconds, group) = {
+        let mut input = stdin.lock();
+        let mut output = stderr.lock();
+        let duration = read_grant_duration(
+            &mut input,
+            &mut output,
+            approval
+                .application
+                .requested_authorization_duration_seconds,
+        )?;
+        let group = match device.unlock_policy().groups() {
+            [group] => group.clone(),
+            groups => read_unlock_group_choice(groups, &mut input, &mut output)?,
+        };
+        (duration, group)
     };
-    approve(root, socket, factor, id, Some(&group))
+    approve(
+        root,
+        socket,
+        factor,
+        id,
+        grant_duration_seconds,
+        Some(&group),
+    )
 }
 
 fn approve(
@@ -624,6 +755,7 @@ fn approve(
     socket: Option<&Path>,
     factor: FactorSource<'_>,
     id: &str,
+    grant_duration_seconds: Option<u64>,
     requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
     let client = native_client(root, socket)?;
@@ -634,7 +766,11 @@ fn approve(
         .ok_or_else(|| VaultError::Protocol("approval is missing or expired".to_owned()))?;
     let device = Vault::inspect(root)?;
     let unsealed = unseal_selected(root, &device, requested_group, factor)?;
-    let signature = unsealed.sign_approval_challenge(&approval.id, &approval.challenge)?;
+    let signature = unsealed.sign_approval_challenge(
+        &approval.id,
+        &approval.challenge,
+        grant_duration_seconds,
+    )?;
     drop(unsealed);
     resolve_approval(
         root,
@@ -642,6 +778,7 @@ fn approve(
         VaultAction::Approve {
             id: id.to_owned(),
             signature,
+            grant_duration_seconds,
         },
         true,
     )

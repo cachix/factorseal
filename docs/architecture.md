@@ -175,8 +175,9 @@ The endpoint executable, not the SecretSpec CLI or embedding application, is
 the principal authenticated by Factorseal's Unix socket or Windows named pipe.
 Project approval therefore grants that exact executable cache-only permission
 for the declared project. The endpoint forwards SecretSpec's project, profile,
-base directory, and reason with every native request for future approval,
-notification, and audit presentation. That context is metadata only: it does
+base directory, reason, and optional requested authorization duration with
+every native request for future approval, notification, and audit presentation.
+That context is metadata only: it does
 not replace the transport-authenticated executable identity and is never grant
 authority. The remaining release proof is publishing the IPC dependency and
 running installed end-to-end conformance on each platform.
@@ -192,7 +193,9 @@ Factorseal CLI executable. `factorseal approvals --watch --prompt` displays
 that trusted principal separately from declared application context and
 requires an explicit terminal choice of approve, deny, or ignore. It selects a
 sole configured unlock group automatically and asks when multiple alternatives
-exist. Approval state disappears on expiry or sealing.
+exist. Approval asks for the final grant lifetime before satisfying a factor;
+the app request is only the prompt default, and the resulting project grant
+expires at the signed duration. Approval state disappears on expiry or sealing.
 
 ## Platform adapters
 

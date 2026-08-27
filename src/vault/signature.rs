@@ -16,7 +16,7 @@ use ml_dsa::{Signature, SignatureEncoding, Verifier, VerifyingKey};
 use super::{VaultError, VaultResult};
 
 pub(crate) const SIGNING_SEED_BYTES: usize = 32;
-const APPROVAL_SIGNATURE_DOMAIN: &[u8] = b"factorseal/approval/v1\0";
+const APPROVAL_SIGNATURE_DOMAIN: &[u8] = b"factorseal/approval/v2\0";
 
 type DeviceSigningKey = SigningKey<MlDsa65>;
 #[cfg(feature = "vault-store")]
@@ -53,12 +53,23 @@ pub(crate) fn verify(public_key: &[u8], payload: &[u8], signature: &[u8]) -> Vau
         .map_err(|_| VaultError::Signature)
 }
 
-pub(crate) fn approval_payload(id: &str, challenge: &[u8; 32]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(APPROVAL_SIGNATURE_DOMAIN.len() + 8 + id.len() + 32);
+pub(crate) fn approval_payload(
+    id: &str,
+    challenge: &[u8; 32],
+    grant_duration_seconds: Option<u64>,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(APPROVAL_SIGNATURE_DOMAIN.len() + 8 + id.len() + 32 + 9);
     payload.extend_from_slice(APPROVAL_SIGNATURE_DOMAIN);
     payload.extend_from_slice(&(id.len() as u64).to_be_bytes());
     payload.extend_from_slice(id.as_bytes());
     payload.extend_from_slice(challenge);
+    match grant_duration_seconds {
+        Some(duration) => {
+            payload.push(1);
+            payload.extend_from_slice(&duration.to_be_bytes());
+        }
+        None => payload.push(0),
+    }
     payload
 }
 

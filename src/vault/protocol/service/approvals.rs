@@ -181,6 +181,7 @@ impl PendingApprovals {
         store: &VaultStore,
         id: &str,
         signature: &[u8],
+        grant_duration_seconds: Option<u64>,
         now: u64,
     ) -> VaultResult<()> {
         self.purge_expired(now);
@@ -192,9 +193,16 @@ impl PendingApprovals {
         let record = &self.records[index];
         verify(
             store.device().public_signing_key(),
-            &approval_payload(&record.summary.id, &record.summary.challenge),
+            &approval_payload(
+                &record.summary.id,
+                &record.summary.challenge,
+                grant_duration_seconds,
+            ),
             signature,
         )?;
+        let grant_expires_at = grant_duration_seconds
+            .map(|duration| now.checked_add(duration).ok_or(VaultError::Expired))
+            .transpose()?;
         let project = record
             .summary
             .application
@@ -210,7 +218,7 @@ impl PendingApprovals {
                 project,
             },
             [record.permission],
-            None,
+            grant_expires_at,
             now,
         )?;
         self.records.remove(index);

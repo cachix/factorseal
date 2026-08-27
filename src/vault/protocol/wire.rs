@@ -9,7 +9,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::vault::{SecretAddress, VaultError, VaultResult};
 
-pub(super) const PROTOCOL_VERSION: u8 = 3;
+pub(super) const PROTOCOL_VERSION: u8 = 4;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
@@ -263,6 +263,10 @@ pub struct VaultApplicationContext {
     pub profile: Option<String>,
     pub base_dir: Option<String>,
     pub reason: Option<String>,
+    /// Caller-requested default for the authorization grant. This remains
+    /// display context until the user chooses and signs the actual duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_authorization_duration_seconds: Option<u64>,
 }
 
 impl VaultApplicationContext {
@@ -277,9 +281,19 @@ impl VaultApplicationContext {
             profile,
             base_dir,
             reason,
+            requested_authorization_duration_seconds: None,
         };
         context.validate()?;
         Ok(context)
+    }
+
+    pub fn with_requested_authorization_duration_seconds(
+        mut self,
+        duration: Option<u64>,
+    ) -> VaultResult<Self> {
+        self.requested_authorization_duration_seconds = duration;
+        self.validate()?;
+        Ok(self)
     }
 
     fn validate(&self) -> VaultResult<()> {
@@ -318,6 +332,11 @@ impl VaultApplicationContext {
         {
             return Err(VaultError::Protocol(
                 "application reason is too long".to_owned(),
+            ));
+        }
+        if self.requested_authorization_duration_seconds == Some(0) {
+            return Err(VaultError::Protocol(
+                "requested authorization duration must be positive".to_owned(),
             ));
         }
         Ok(())
@@ -506,6 +525,9 @@ pub enum VaultAction {
     Approve {
         id: String,
         signature: Vec<u8>,
+        /// User-selected grant lifetime. `None` means no expiry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant_duration_seconds: Option<u64>,
     },
     Deny {
         id: String,
@@ -516,11 +538,20 @@ impl VaultAction {
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
             Self::Status | Self::ListApprovals => Ok(()),
-            Self::Approve { id, signature } => {
+            Self::Approve {
+                id,
+                signature,
+                grant_duration_seconds,
+            } => {
                 validate_approval_id(id)?;
                 if signature.is_empty() || signature.len() > 16 * 1024 {
                     return Err(VaultError::Protocol(
                         "approval signature is empty or too long".to_owned(),
+                    ));
+                }
+                if *grant_duration_seconds == Some(0) {
+                    return Err(VaultError::Protocol(
+                        "approval grant duration must be positive".to_owned(),
                     ));
                 }
                 Ok(())

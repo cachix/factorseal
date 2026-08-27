@@ -198,7 +198,11 @@ impl VaultService {
                 state.deny_approval(&id, now)?;
                 return Ok(VaultResponseBody::ApprovalResolved { approved: false });
             }
-            VaultAction::Approve { id, signature } => {
+            VaultAction::Approve {
+                id,
+                signature,
+                grant_duration_seconds,
+            } => {
                 require_grant(
                     state.store(),
                     caller,
@@ -211,7 +215,7 @@ impl VaultService {
                     },
                     now,
                 )?;
-                state.approve(&id, &signature, now)?;
+                state.approve(&id, &signature, grant_duration_seconds, now)?;
                 state.touch(now, monotonic_now)?;
                 return Ok(VaultResponseBody::ApprovalResolved { approved: true });
             }

@@ -139,9 +139,16 @@ impl LiveStateGuard<'_> {
         self.0.approvals.deny(id, now)
     }
 
-    pub(super) fn approve(&mut self, id: &str, signature: &[u8], now: u64) -> VaultResult<()> {
+    pub(super) fn approve(
+        &mut self,
+        id: &str,
+        signature: &[u8],
+        grant_duration_seconds: Option<u64>,
+        now: u64,
+    ) -> VaultResult<()> {
         let live = &mut *self.0;
-        live.approvals.approve(&live.store, id, signature, now)
+        live.approvals
+            .approve(&live.store, id, signature, grant_duration_seconds, now)
     }
 
     pub(super) fn consume(&mut self, request_id: RequestId) -> VaultResult<()> {
