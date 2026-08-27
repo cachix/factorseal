@@ -13,7 +13,7 @@ use super::super::{
 };
 use crate::vault::signature::{approval_payload, verify};
 
-const APPROVAL_TTL_SECONDS: u64 = 5 * 60;
+const APPROVAL_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_PENDING_APPROVALS: usize = 128;
 
 pub(super) const APPROVAL_CONTROL_NAMESPACE: &[u8] = b"factorseal/approvals/v1";
@@ -103,15 +103,20 @@ impl PendingApprovals {
         now: u64,
     ) -> VaultResult<VaultInteractionReference> {
         self.purge_expired(now);
-        if let Some(existing) = self.records.iter().find(|record| {
+        let expires_at = now
+            .checked_add(APPROVAL_TTL_SECONDS)
+            .ok_or(VaultError::Expired)?;
+        if let Some(existing) = self.records.iter_mut().find(|record| {
             record.caller.fingerprint() == candidate.caller.fingerprint()
                 && record.summary.application == candidate.application
                 && record.namespace == candidate.namespace
                 && record.permission == candidate.permission
         }) {
+            existing.summary.expires_at = expires_at;
+            self.revision = self.revision.wrapping_add(1);
             return Ok(VaultInteractionReference {
                 id: existing.summary.id.clone(),
-                expires_at: existing.summary.expires_at,
+                expires_at,
             });
         }
         if self.records.len() == MAX_PENDING_APPROVALS {
@@ -122,9 +127,6 @@ impl PendingApprovals {
         getrandom::fill(&mut id_bytes)?;
         getrandom::fill(&mut challenge)?;
         let id = format!("apr_{}", URL_SAFE_NO_PAD.encode(id_bytes));
-        let expires_at = now
-            .checked_add(APPROVAL_TTL_SECONDS)
-            .ok_or(VaultError::Expired)?;
         let summary = PendingApproval {
             id: id.clone(),
             created_at: now,

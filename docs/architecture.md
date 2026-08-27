@@ -178,9 +178,10 @@ not replace the transport-authenticated executable identity and is never grant
 authority. The remaining release proof is publishing the IPC dependency and
 running installed end-to-end conformance on each platform.
 
-Missing project permissions create bounded in-memory approvals. The agent
-deduplicates equivalent requests and returns an opaque, expiring correlation
-ID; it does not accept that ID as authority. `factorseal approvals approve`
+Missing project permissions create bounded in-memory approvals with a
+seven-day retention window. The agent deduplicates equivalent requests,
+refreshes their expiry, and returns an opaque correlation ID; it does not
+accept that ID as authority. `factorseal approvals approve`
 must satisfy one configured unlock group and sign the agent's one-time
 challenge with the vault identity before the agent stores a project-scoped
 grant. Denial needs no factor but is restricted to the separately authorized

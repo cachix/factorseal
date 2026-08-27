@@ -153,6 +153,12 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     let denied = service.handle(&provider, get("demo"), 101);
     let interaction = denied.result.unwrap_err().interaction.unwrap();
     assert!(interaction.id.starts_with("apr_"));
+    assert_eq!(interaction.expires_at, 101 + 7 * 24 * 60 * 60);
+
+    let repeated = service.handle(&provider, get("demo"), 201);
+    let refreshed = repeated.result.unwrap_err().interaction.unwrap();
+    assert_eq!(refreshed.id, interaction.id);
+    assert_eq!(refreshed.expires_at, 201 + 7 * 24 * 60 * 60);
 
     let manager = CallerIdentity::new(
         CallerPlatform::Linux,
@@ -166,7 +172,7 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     let listed = service.handle(
         &manager,
         VaultRequest::new(VaultAction::ListApprovals).unwrap(),
-        102,
+        202,
     );
     let Ok(VaultResponseBody::Approvals { approvals, .. }) = listed.result else {
         panic!("expected pending approvals");
@@ -186,19 +192,19 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
             signature,
         })
         .unwrap(),
-        103,
+        203,
     );
     assert!(matches!(
         approved.result,
         Ok(VaultResponseBody::ApprovalResolved { approved: true })
     ));
     assert!(matches!(
-        service.handle(&provider, get("demo"), 104).result,
+        service.handle(&provider, get("demo"), 204).result,
         Ok(VaultResponseBody::Secret { value: None })
     ));
     assert!(
         service
-            .handle(&provider, get("other-project"), 105)
+            .handle(&provider, get("other-project"), 205)
             .result
             .unwrap_err()
             .interaction

@@ -239,8 +239,9 @@ Start the service with `factorseal unseal`. Because the endpoint cannot prompt
 on its protocol streams, a sealed service is reported to SecretSpec as
 `interaction_required`.
 
-When a project lacks a cache grant, Factorseal retains a bounded five-minute
-approval and returns its opaque ID to SecretSpec. Inspect or follow pending
+When a project lacks a cache grant, Factorseal retains a bounded in-memory
+approval for seven days and returns its opaque ID to SecretSpec. Equivalent
+requests reuse the ID and refresh its expiry. Inspect or follow pending
 requests, then approve or deny one explicitly:
 
 ```console

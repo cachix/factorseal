@@ -11,7 +11,8 @@ All notable changes to FactorSeal will be documented in this file.
 - Add bounded project-scoped approval requests, structured SecretSpec
   interaction IDs, and `factorseal approvals`, `approvals --watch`, `approvals
   approve`, and `approvals deny`. Approval requires a vault-signed challenge
-  produced after satisfying one configured unlock group.
+  produced after satisfying one configured unlock group. Pending requests stay
+  in memory for seven days, with equivalent requests refreshing the same ID.
 - Replace the password-plus-biometric boolean with versioned unlock policies:
   comma-separated factors are AND requirements and repeated `--unlock` groups
   are independently hardware-wrapped OR alternatives. Support password,
