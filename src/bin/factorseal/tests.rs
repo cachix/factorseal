@@ -1,7 +1,7 @@
 use super::cli::{ApprovalCommand, Cli, Command};
 use super::commands::{
     ApprovalDecision, read_approval_decision, read_bounded, read_keyring_value,
-    read_password_for_groups, require_prompt_terminal,
+    read_password_for_groups, read_unlock_group_choice, require_prompt_terminal,
 };
 use super::factor::read_factor;
 use super::*;
@@ -369,4 +369,12 @@ fn approval_prompt_requires_a_terminal_and_explicit_decision() {
 
     let mut closed = std::io::Cursor::new(Vec::<u8>::new());
     assert!(read_approval_decision(&mut closed, &mut Vec::new()).is_err());
+
+    let groups = [
+        UnlockGroup::new([UnlockFactorKind::Password]).unwrap(),
+        UnlockGroup::new([UnlockFactorKind::Biometric]).unwrap(),
+    ];
+    let mut choice = std::io::Cursor::new(b"invalid\n2\n");
+    let selected = read_unlock_group_choice(&groups, &mut choice, &mut Vec::new()).unwrap();
+    assert_eq!(selected, groups[1]);
 }

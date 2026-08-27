@@ -126,7 +126,7 @@ pub(super) enum Command {
         #[arg(long)]
         json: bool,
 
-        /// Exact unlock group for interactive or explicit approval.
+        /// Override the unlock group; interactive mode asks when ambiguous.
         #[arg(long, value_name = "FACTORS", global = true)]
         unlock: Option<UnlockGroup>,
 

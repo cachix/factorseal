@@ -248,7 +248,7 @@ requests, then approve or deny one explicitly:
 ```console
 $ factorseal approvals
 $ factorseal approvals --watch
-$ factorseal approvals --watch --prompt --unlock biometric
+$ factorseal approvals --watch --prompt
 $ factorseal approvals approve apr_7K3M --unlock biometric
 $ factorseal approvals deny apr_7K3M
 ```
@@ -259,7 +259,9 @@ cache address and verifies it before accepting the project grant, so declaring
 an approved project cannot reach another project's secrets. Interactive
 prompts distinguish the transport-authenticated executable identity and digest
 from caller-declared project, profile, base directory, and reason. They require
-a terminal and never approve by default.
+a terminal and never approve by default. A vault with multiple unlock groups
+asks which one to use after the user chooses Approve; `--unlock` is an optional
+override.
 
 Factorseal currently follows the SecretSpec IPC API from the sibling
 `../secretspec` checkout. Release packaging still depends on publishing and

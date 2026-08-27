@@ -14,7 +14,8 @@ All notable changes to FactorSeal will be documented in this file.
   produced after satisfying one configured unlock group. Pending requests stay
   in memory for seven days, with equivalent requests refreshing the same ID.
   Interactive watch mode shows the authenticated provider principal and
-  requires an explicit terminal decision. SecretSpec cache addresses are
+  requires an explicit terminal decision, prompting for an unlock-group choice
+  only when multiple alternatives exist. SecretSpec cache addresses are
   project-derived and checked before project grants are accepted.
 - Replace the password-plus-biometric boolean with versioned unlock policies:
   comma-separated factors are AND requirements and repeated `--unlock` groups

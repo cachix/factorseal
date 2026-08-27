@@ -190,8 +190,10 @@ challenge with the vault identity before the agent stores a project-scoped
 grant. Denial needs no factor but is restricted to the separately authorized
 Factorseal CLI executable. `factorseal approvals --watch --prompt` displays
 that trusted principal separately from declared application context and
-requires an explicit terminal choice of approve, deny, or ignore. Approval
-state disappears on expiry or sealing.
+requires an explicit terminal choice of approve, deny, or ignore. It selects a
+sole configured unlock group automatically and asks when multiple alternatives
+exist; `--unlock` only overrides that choice. Approval state disappears on
+expiry or sealing.
 
 ## Platform adapters
 

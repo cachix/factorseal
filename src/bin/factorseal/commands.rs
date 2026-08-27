@@ -506,6 +506,56 @@ pub(super) fn read_approval_decision(
     }
 }
 
+pub(super) fn read_unlock_group_choice(
+    groups: &[UnlockGroup],
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<UnlockGroup, CliError> {
+    if groups.is_empty() {
+        return Err(VaultError::Protocol("vault has no unlock groups".to_owned()).into());
+    }
+    writeln!(output, "Choose how to authorize this approval:")
+        .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
+    for (index, group) in groups.iter().enumerate() {
+        writeln!(output, "  {}. {group}", index + 1)
+            .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
+    }
+    loop {
+        write!(output, "Factor [1-{}]: ", groups.len())
+            .and_then(|()| output.flush())
+            .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
+        let mut answer = String::new();
+        if input
+            .read_line(&mut answer)
+            .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?
+            == 0
+        {
+            return Err(CliError::ApprovalPrompt("input was closed".to_owned()));
+        }
+        if let Ok(index) = answer.trim().parse::<usize>()
+            && let Some(group) = index.checked_sub(1).and_then(|index| groups.get(index))
+        {
+            return Ok(group.clone());
+        }
+        writeln!(output, "Enter a number from 1 to {}.", groups.len())
+            .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
+    }
+}
+
+fn prompt_unlock_group(
+    root: &Path,
+    requested: Option<&UnlockGroup>,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<UnlockGroup, CliError> {
+    let device = Vault::inspect(root)?;
+    if requested.is_some() || device.unlock_policy().groups().len() == 1 {
+        select_unlock_group(&device, requested)
+    } else {
+        read_unlock_group_choice(device.unlock_policy().groups(), input, output)
+    }
+}
+
 fn prompt_approvals(
     root: &Path,
     socket: Option<&Path>,
@@ -533,7 +583,8 @@ fn prompt_approvals(
                 handled.insert(approval.id.clone());
                 match decision {
                     ApprovalDecision::Approve => {
-                        approve(root, socket, factor, &approval.id, unlock)?;
+                        let group = prompt_unlock_group(root, unlock, &mut input, &mut output)?;
+                        approve(root, socket, factor, &approval.id, Some(&group))?;
                     }
                     ApprovalDecision::Deny => resolve_approval(
                         root,
