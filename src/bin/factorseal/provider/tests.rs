@@ -1,6 +1,12 @@
 use super::*;
-use factorseal::{VaultInteractionReference, VaultResponse, VaultResponseError, WireSecretAddress};
+use factorseal::{
+    CallerIdentity, CallerPlatform, HardwareBackend, KeyProtector, KeyProtectorFactory,
+    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealLeasePolicy, Vault,
+    VaultInteractionReference, VaultPlatform, VaultResponse, VaultResponseError, VaultService,
+    WireSecretAddress,
+};
 use secretspec_ipc::client::Client;
+use secretspec_ipc::error::Error as IpcError;
 use secretspec_ipc::protocol::provider::{
     AddressParams, ApplicationContext, Coordinates, DeletedResult, GetResult,
     InitializeApplication, InitializedApplication, SetExpiringParams, SetParams, StoredResult,
@@ -9,7 +15,10 @@ use secretspec_ipc::protocol::{
     InitializeParams, Limits, PROTOCOL_VERSION, PROVIDER_PROTOCOL, Product,
 };
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use zeroize::Zeroizing;
 
 type CacheKey = (String, Option<String>);
 
@@ -278,4 +287,245 @@ fn provider_maps_pending_approval_to_structured_interaction() {
     let interaction = error.data.interaction.unwrap();
     assert_eq!(interaction.id, "apr_provider_test");
     assert_eq!(interaction.expires_at_unix_ms, Some(1_800_000_000_000));
+}
+
+struct IntegrationProtector {
+    key: u8,
+}
+
+impl KeyProtector for IntegrationProtector {
+    fn backend(&self) -> HardwareBackend {
+        HardwareBackend::AndroidTrustedEnvironment
+    }
+
+    fn wrap(&self, plaintext: &[u8]) -> factorseal::VaultResult<Vec<u8>> {
+        Ok(plaintext.iter().map(|byte| byte ^ self.key).collect())
+    }
+
+    fn unwrap(&self, ciphertext: &[u8]) -> factorseal::VaultResult<Zeroizing<Vec<u8>>> {
+        Ok(Zeroizing::new(
+            ciphertext.iter().map(|byte| byte ^ self.key).collect(),
+        ))
+    }
+
+    fn delete(&self) -> factorseal::VaultResult<()> {
+        Ok(())
+    }
+}
+
+struct IntegrationProtectorFactory;
+
+impl KeyProtectorFactory for IntegrationProtectorFactory {
+    fn create(
+        &self,
+        root: &Path,
+        label: &str,
+        biometric: bool,
+    ) -> factorseal::VaultResult<Box<dyn KeyProtector>> {
+        self.open(root, label, biometric)
+    }
+
+    fn open(
+        &self,
+        _root: &Path,
+        label: &str,
+        _biometric: bool,
+    ) -> factorseal::VaultResult<Box<dyn KeyProtector>> {
+        let key = if label.contains("-wrap-") { 0x35 } else { 0x97 };
+        Ok(Box::new(IntegrationProtector { key }))
+    }
+}
+
+struct ServiceVaultClient {
+    service: Arc<VaultService>,
+    caller: CallerIdentity,
+    now: AtomicU64,
+}
+
+impl VaultClient for ServiceVaultClient {
+    fn request(&self, request: &VaultRequest) -> factorseal::VaultResult<VaultResponse> {
+        // Exercise the native protocol codec as a transport would, rather than
+        // handing the service the provider's in-memory request directly.
+        let request = VaultRequest::decode(&request.encode()?)?;
+        Ok(self.service.handle(
+            &self.caller,
+            request,
+            self.now.fetch_add(1, Ordering::Relaxed),
+        ))
+    }
+}
+
+struct ApprovalIntegrationFixture {
+    _directory: tempfile::TempDir,
+    root: PathBuf,
+    unlock_group: UnlockGroup,
+    service: Arc<VaultService>,
+    manager: CallerIdentity,
+    now: u64,
+}
+
+impl ApprovalIntegrationFixture {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("factorseal");
+        let unlock_group = UnlockGroup::new([UnlockFactorKind::Biometric]).unwrap();
+        let policy = UnlockPolicy::new([unlock_group.clone()]).unwrap();
+        let unsealed = Vault::create_with_key_protector_policy(
+            &root,
+            VaultPlatform::Android,
+            &policy,
+            UnlockCredentials::none(),
+            &IntegrationProtectorFactory,
+        )
+        .unwrap();
+        let now = unix_time_ms().unwrap() / 1_000;
+        let service = Arc::new(
+            VaultService::open(&root, unsealed, now, UnsealLeasePolicy::default()).unwrap(),
+        );
+        let manager = CallerIdentity::new(
+            CallerPlatform::Linux,
+            "uid:1000",
+            "dev.factorseal.cli",
+            [9; 32],
+            None,
+        )
+        .unwrap();
+        service.authorize_approval_manager(&manager, now).unwrap();
+        Self {
+            _directory: directory,
+            root,
+            unlock_group,
+            service,
+            manager,
+            now,
+        }
+    }
+
+    fn provider(&self) -> FactorsealProvider {
+        FactorsealProvider::with_client(Arc::new(ServiceVaultClient {
+            service: Arc::clone(&self.service),
+            caller: CallerIdentity::new(
+                CallerPlatform::Linux,
+                "uid:1000",
+                "dev.factorseal.provider",
+                [7; 32],
+                None,
+            )
+            .unwrap(),
+            now: AtomicU64::new(self.now + 1),
+        }))
+    }
+}
+
+fn approval_initialize() -> InitializeParams<InitializeApplication> {
+    InitializeParams {
+        protocol: PROVIDER_PROTOCOL.to_owned(),
+        versions: vec![PROTOCOL_VERSION],
+        client: Product {
+            name: "approval-integration-test".to_owned(),
+            version: "1".to_owned(),
+        },
+        limits: Limits {
+            max_frame_bytes: 32 * 1024,
+            max_in_flight: 8,
+        },
+        client_methods: Vec::new(),
+        application: InitializeApplication {
+            scheme: "factorseal".to_owned(),
+            uri: PROVIDER_URI.to_owned(),
+            context: ApplicationContext {
+                project: Some("demo".to_owned()),
+                profile: Some("production".to_owned()),
+                base_dir: None,
+                reason: Some("deploy".to_owned()),
+            },
+            credentials: BTreeMap::new(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn secretspec_request_can_be_approved_and_retried() {
+    let fixture = ApprovalIntegrationFixture::new();
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    let server = tokio::spawn(serve_provider(
+        server_read,
+        server_write,
+        fixture.provider(),
+        ServerConfig::default(),
+    ));
+    let (client, _) = Client::connect::<_, _, _, InitializedApplication>(
+        client_read,
+        client_write,
+        approval_initialize(),
+        deadline(),
+    )
+    .await
+    .unwrap();
+
+    let first = client
+        .call::<_, GetResult>(
+            wire::method::GET,
+            &AddressParams { address: address() },
+            deadline(),
+        )
+        .await
+        .unwrap_err();
+    let IpcError::Remote(error) = first else {
+        panic!("expected a structured provider refusal");
+    };
+    assert_eq!(error.data.kind, ErrorKind::InteractionRequired);
+    let interaction = error.data.interaction.unwrap();
+
+    let listed = fixture.service.handle(
+        &fixture.manager,
+        VaultRequest::new(VaultAction::ListApprovals).unwrap(),
+        fixture.now + 2,
+    );
+    let Ok(VaultResponseBody::Approvals { approvals, .. }) = listed.result else {
+        panic!("expected one pending approval");
+    };
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].id, interaction.id);
+    assert_eq!(approvals[0].application.project.as_deref(), Some("demo"));
+    assert_eq!(approvals[0].application.reason.as_deref(), Some("deploy"));
+
+    let unsealed = Vault::unseal_with_key_protector_group(
+        &fixture.root,
+        &fixture.unlock_group,
+        UnlockCredentials::none(),
+        &IntegrationProtectorFactory,
+    )
+    .unwrap();
+    let signature = unsealed
+        .sign_approval_challenge(&approvals[0].id, &approvals[0].challenge)
+        .unwrap();
+    let approved = fixture.service.handle(
+        &fixture.manager,
+        VaultRequest::new(VaultAction::Approve {
+            id: approvals[0].id.clone(),
+            signature,
+        })
+        .unwrap(),
+        fixture.now + 3,
+    );
+    assert!(matches!(
+        approved.result,
+        Ok(VaultResponseBody::ApprovalResolved { approved: true })
+    ));
+
+    let retried: GetResult = client
+        .call(
+            wire::method::GET,
+            &AddressParams { address: address() },
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried, GetResult::Missing);
+
+    client.close(deadline()).await.unwrap();
+    server.await.unwrap().unwrap();
 }
