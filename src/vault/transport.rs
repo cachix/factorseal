@@ -21,6 +21,8 @@ use super::{VaultError, VaultResult};
 use super::{VaultRequest, VaultResponse};
 
 pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
+#[cfg(feature = "vault")]
+pub(crate) const MAX_ACTIVE_CONNECTIONS: usize = 8;
 
 /// Bounds one frame exchanged with a peer that has already been accepted.
 /// This is deliberately short so a connected client cannot pin the
@@ -254,15 +256,24 @@ pub(crate) mod unix_socket {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use nix::unistd::getuid;
 
     use super::{
-        IPC_FRAME_IO_TIMEOUT, IoBudget, path_io_error, read_frame, unix_time, write_frame,
+        IPC_FRAME_IO_TIMEOUT, IoBudget, MAX_ACTIVE_CONNECTIONS, path_io_error, read_frame,
+        unix_time, write_frame,
     };
     use crate::vault::{CallerIdentity, VaultError, VaultRequest, VaultResult, VaultService};
+
+    struct ActiveConnection<'a>(&'a AtomicUsize);
+
+    impl Drop for ActiveConnection<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 
     /// Bind a private nonblocking listener and retain ownership of removing
     /// its socket path when the server exits.
@@ -293,25 +304,48 @@ pub(crate) mod unix_socket {
         socket_path: &Path,
         poll_interval: Duration,
         mut poll_lifecycle: impl FnMut() -> VaultResult<bool>,
-        authenticate: impl Fn(&UnixStream) -> VaultResult<CallerIdentity>,
+        authenticate: impl Fn(&UnixStream) -> VaultResult<CallerIdentity> + Sync,
     ) -> VaultResult<()> {
-        while !stopping.load(Ordering::Acquire) {
-            if poll_lifecycle()? || service.expire_if_needed(unix_time()?)? {
-                return Ok(());
-            }
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    // A malformed or disconnected client must not terminate
-                    // the per-user vault.
-                    let _ = handle_connection(service, &mut stream, &authenticate);
+        let active = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            while !stopping.load(Ordering::Acquire) {
+                if poll_lifecycle()? || service.expire_if_needed(unix_time()?)? {
+                    service.seal()?;
+                    return Ok(());
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if active.load(Ordering::Acquire) >= MAX_ACTIVE_CONNECTIONS {
                     std::thread::sleep(poll_interval);
+                    continue;
                 }
-                Err(error) => return Err(path_io_error(socket_path, &error)),
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        active.fetch_add(1, Ordering::AcqRel);
+                        let active = &active;
+                        let authenticate = &authenticate;
+                        if let Err(error) = std::thread::Builder::new()
+                            .name("factorseal-ipc".to_owned())
+                            .spawn_scoped(scope, move || {
+                                let _active = ActiveConnection(active);
+                                // A malformed or disconnected client must not
+                                // terminate the per-user vault.
+                                let _ = handle_connection(service, &mut stream, authenticate);
+                            })
+                        {
+                            active.fetch_sub(1, Ordering::AcqRel);
+                            return Err(VaultError::Protocol(format!(
+                                "could not start bounded IPC worker: {error}"
+                            )));
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(poll_interval);
+                    }
+                    Err(error) => return Err(path_io_error(socket_path, &error)),
+                }
             }
-        }
-        Ok(())
+            service.seal()?;
+            Ok(())
+        })
     }
 
     /// Exchange one request with an accepted Unix peer after platform-native
@@ -408,7 +442,7 @@ pub(crate) mod unix_socket {
 mod tests {
     use super::*;
     #[cfg(feature = "vault-client")]
-    use crate::vault::{VaultAction, VaultResponseBody};
+    use crate::vault::{MAX_APPROVAL_WAIT_MS, VaultAction, VaultResponseBody};
     #[cfg(feature = "vault-client")]
     use std::io::Cursor;
 
@@ -443,6 +477,7 @@ mod tests {
     #[cfg(all(feature = "vault", feature = "vault-client"))]
     fn a_client_deadline_outlasts_first_use_caller_authentication() {
         assert!(IPC_RESPONSE_TIMEOUT >= IPC_FRAME_IO_TIMEOUT * 4);
+        assert!(IPC_RESPONSE_TIMEOUT > Duration::from_millis(MAX_APPROVAL_WAIT_MS));
     }
 
     #[test]

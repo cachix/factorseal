@@ -196,6 +196,10 @@ sole configured unlock group automatically and asks when multiple alternatives
 exist. Approval asks for the final grant lifetime before satisfying a factor;
 the app request is only the prompt default, and the resulting project grant
 expires at the signed duration. Approval state disappears on expiry or sealing.
+Watchers use a bounded native long-poll keyed by the approval revision. Local
+transports accept at most eight concurrent requests, so a waiting CLI or GUI
+listener releases the approval-state mutex and cannot block a provider request
+that creates or refreshes an approval.
 
 ## Platform adapters
 

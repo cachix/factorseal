@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::vault::{DocumentScope, UnsealedVault, VaultError, VaultResult, VaultStore};
 
@@ -34,7 +34,7 @@ use actions::{ScopedAction, scope_action, validate_evict_at};
 #[cfg(feature = "vault-store")]
 use approvals::{APPROVAL_CONTROL_NAMESPACE, ApprovalCandidate};
 #[cfg(feature = "vault-store")]
-use state::ServiceState;
+use state::{LiveStateGuard, ServiceState};
 
 #[cfg(feature = "vault-store")]
 struct RequestFailure {
@@ -116,7 +116,10 @@ impl VaultService {
                 response_error_with_interaction(&failure.error, failure.interaction)
             });
         let result = match result {
-            Ok(VaultResponseBody::Sealed) => Ok(VaultResponseBody::Sealed),
+            Ok(VaultResponseBody::Sealed) => {
+                self.state.seal();
+                Ok(VaultResponseBody::Sealed)
+            }
             _ if self.state.is_sealed() => Err(response_error(&VaultError::Sealed)),
             result => result,
         };
@@ -164,37 +167,30 @@ impl VaultService {
         state.consume(request.request_id())?;
         let result = match request.action {
             VaultAction::ListApprovals => {
-                require_grant(
-                    state.store(),
-                    caller,
-                    GrantRequirement {
-                        scope: DocumentScope::DeviceLocal,
-                        namespace: APPROVAL_CONTROL_NAMESPACE,
-                        address: None,
-                        project: None,
-                        permission: GrantPermission::ManageApprovals,
-                    },
-                    now,
-                )?;
+                require_approval_manager(&state, caller, now)?;
                 let (revision, approvals) = state.list_approvals(now);
                 return Ok(VaultResponseBody::Approvals {
                     revision,
                     approvals,
                 });
             }
-            VaultAction::Deny { id } => {
-                require_grant(
-                    state.store(),
-                    caller,
-                    GrantRequirement {
-                        scope: DocumentScope::DeviceLocal,
-                        namespace: APPROVAL_CONTROL_NAMESPACE,
-                        address: None,
-                        project: None,
-                        permission: GrantPermission::ManageApprovals,
-                    },
+            VaultAction::WaitApprovals {
+                after_revision,
+                timeout_ms,
+            } => {
+                require_approval_manager(&state, caller, now)?;
+                let (revision, approvals) = state.wait_for_approvals(
+                    after_revision,
+                    Duration::from_millis(timeout_ms),
                     now,
                 )?;
+                return Ok(VaultResponseBody::Approvals {
+                    revision,
+                    approvals,
+                });
+            }
+            VaultAction::Deny { id } => {
+                require_approval_manager(&state, caller, now)?;
                 state.deny_approval(&id, now)?;
                 return Ok(VaultResponseBody::ApprovalResolved { approved: false });
             }
@@ -203,18 +199,7 @@ impl VaultService {
                 signature,
                 grant_duration_seconds,
             } => {
-                require_grant(
-                    state.store(),
-                    caller,
-                    GrantRequirement {
-                        scope: DocumentScope::DeviceLocal,
-                        namespace: APPROVAL_CONTROL_NAMESPACE,
-                        address: None,
-                        project: None,
-                        permission: GrantPermission::ManageApprovals,
-                    },
-                    now,
-                )?;
+                require_approval_manager(&state, caller, now)?;
                 state.approve(&id, &signature, grant_duration_seconds, now)?;
                 state.touch(now, monotonic_now)?;
                 return Ok(VaultResponseBody::ApprovalResolved { approved: true });
@@ -244,6 +229,26 @@ impl VaultService {
         }
         Ok(result)
     }
+}
+
+#[cfg(feature = "vault-store")]
+fn require_approval_manager(
+    state: &LiveStateGuard<'_>,
+    caller: &CallerIdentity,
+    now: u64,
+) -> VaultResult<()> {
+    require_grant(
+        state.store(),
+        caller,
+        GrantRequirement {
+            scope: DocumentScope::DeviceLocal,
+            namespace: APPROVAL_CONTROL_NAMESPACE,
+            address: None,
+            project: None,
+            permission: GrantPermission::ManageApprovals,
+        },
+        now,
+    )
 }
 
 #[cfg(feature = "vault-store")]

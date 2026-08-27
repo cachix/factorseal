@@ -256,6 +256,93 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
 }
 
 #[test]
+fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
+    for timeout_ms in [0, super::super::MAX_APPROVAL_WAIT_MS + 1] {
+        assert!(
+            VaultRequest::new(VaultAction::WaitApprovals {
+                after_revision: 0,
+                timeout_ms,
+            })
+            .unwrap()
+            .validate()
+            .is_err()
+        );
+    }
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let service = std::sync::Arc::new(service);
+    let manager = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.cli",
+        [9; 32],
+        None,
+    )
+    .unwrap();
+    service.authorize_approval_manager(&manager, 100).unwrap();
+
+    let timed_out = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::WaitApprovals {
+            after_revision: 0,
+            timeout_ms: 10,
+        })
+        .unwrap(),
+        101,
+    );
+    assert!(matches!(
+        timed_out.result,
+        Ok(VaultResponseBody::Approvals {
+            revision: 0,
+            approvals
+        }) if approvals.is_empty()
+    ));
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let waiter_service = std::sync::Arc::clone(&service);
+    let waiter_manager = manager.clone();
+    let waiter_barrier = std::sync::Arc::clone(&barrier);
+    let waiter = std::thread::spawn(move || {
+        waiter_barrier.wait();
+        waiter_service.handle(
+            &waiter_manager,
+            VaultRequest::new(VaultAction::WaitApprovals {
+                after_revision: 0,
+                timeout_ms: 1_000,
+            })
+            .unwrap(),
+            102,
+        )
+    });
+    barrier.wait();
+
+    let provider = caller();
+    let request = VaultRequest::new_with_application(
+        VaultAction::GetCache {
+            namespace: b"secretspec-cache/v1".to_vec(),
+            address: address().scope_to_project("demo").unwrap(),
+        },
+        VaultApplicationContext::new(
+            Some("demo".to_owned()),
+            Some("default".to_owned()),
+            None,
+            Some("test notification".to_owned()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(service.handle(&provider, request, 103).result.is_err());
+
+    let changed = waiter.join().unwrap();
+    assert!(matches!(
+        changed.result,
+        Ok(VaultResponseBody::Approvals {
+            revision,
+            approvals
+        }) if revision > 0 && approvals.len() == 1
+    ));
+}
+
+#[test]
 fn direct_service_requests_obey_the_wire_size_bound() {
     let (_directory, service) = service(100, UnsealLeasePolicy::default());
     let request = VaultRequest::new(VaultAction::Put {

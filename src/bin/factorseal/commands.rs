@@ -9,9 +9,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
-    Keyring, PendingApproval, UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy,
-    UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient, VaultError, VaultMetadata,
-    VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService, WireSecretAddress,
+    Keyring, MAX_APPROVAL_WAIT_MS, PendingApproval, UnlockCredentials, UnlockFactorKind,
+    UnlockGroup, UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient,
+    VaultError, VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode,
+    VaultService, WireSecretAddress,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -353,8 +354,17 @@ pub(super) fn manage_approvals(
     }
 }
 
-fn approvals(client: &dyn VaultClient) -> Result<(u64, Vec<PendingApproval>), CliError> {
-    let request = VaultRequest::new(VaultAction::ListApprovals)?;
+fn approvals(
+    client: &dyn VaultClient,
+    after_revision: Option<u64>,
+) -> Result<(u64, Vec<PendingApproval>), CliError> {
+    let action = after_revision.map_or(VaultAction::ListApprovals, |after_revision| {
+        VaultAction::WaitApprovals {
+            after_revision,
+            timeout_ms: MAX_APPROVAL_WAIT_MS,
+        }
+    });
+    let request = VaultRequest::new(action)?;
     let response = client.request(&request)?;
     match response.result {
         Ok(VaultResponseBody::Approvals {
@@ -381,7 +391,7 @@ fn list_approvals(
     let client = native_client(root, socket)?;
     let mut last_revision = None;
     loop {
-        let (revision, pending) = approvals(&client)?;
+        let (revision, pending) = approvals(&client, last_revision)?;
         if last_revision != Some(revision) {
             print_approvals(&pending, json)?;
             last_revision = Some(revision);
@@ -389,7 +399,6 @@ fn list_approvals(
         if !watch {
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 
@@ -653,7 +662,7 @@ fn prompt_approvals(
     let mut last_revision = None;
     let mut handled = HashSet::new();
     loop {
-        let (revision, pending) = approvals(&client)?;
+        let (revision, pending) = approvals(&client, last_revision)?;
         if last_revision != Some(revision) {
             handled.retain(|id| pending.iter().any(|approval| &approval.id == id));
             for approval in &pending {
@@ -704,7 +713,6 @@ fn prompt_approvals(
             }
             last_revision = Some(revision);
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 
@@ -718,7 +726,7 @@ fn approve_with_prompted_group(
     let stderr = std::io::stderr();
     require_prompt_terminal(stdin.is_terminal(), stderr.is_terminal())?;
     let client = native_client(root, socket)?;
-    let (_, pending) = approvals(&client)?;
+    let (_, pending) = approvals(&client, None)?;
     let approval = pending
         .iter()
         .find(|approval| approval.id == id)
@@ -759,7 +767,7 @@ fn approve(
     requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
     let client = native_client(root, socket)?;
-    let (_, pending) = approvals(&client)?;
+    let (_, pending) = approvals(&client, None)?;
     let approval = pending
         .iter()
         .find(|approval| approval.id == id)

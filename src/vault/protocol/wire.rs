@@ -9,9 +9,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::vault::{SecretAddress, VaultError, VaultResult};
 
-pub(super) const PROTOCOL_VERSION: u8 = 4;
+pub(super) const PROTOCOL_VERSION: u8 = 5;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+/// Maximum bounded wait accepted by [`VaultAction::WaitApprovals`].
+pub const MAX_APPROVAL_WAIT_MS: u64 = 5_000;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_APPLICATION_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_APPLICATION_BASE_DIR_BYTES: usize = 32 * 1024;
@@ -522,6 +524,11 @@ pub enum VaultAction {
         namespace: Vec<u8>,
     },
     ListApprovals,
+    /// Wait until the approval revision changes or the bounded timeout elapses.
+    WaitApprovals {
+        after_revision: u64,
+        timeout_ms: u64,
+    },
     Approve {
         id: String,
         signature: Vec<u8>,
@@ -538,6 +545,14 @@ impl VaultAction {
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
             Self::Status | Self::ListApprovals => Ok(()),
+            Self::WaitApprovals { timeout_ms, .. } => {
+                if !(1..=MAX_APPROVAL_WAIT_MS).contains(timeout_ms) {
+                    return Err(VaultError::Protocol(
+                        "approval wait timeout is outside the supported range".to_owned(),
+                    ));
+                }
+                Ok(())
+            }
             Self::Approve {
                 id,
                 signature,

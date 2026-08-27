@@ -11,7 +11,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, UNIX_EPOCH};
@@ -44,8 +44,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 use super::transport::{
-    IPC_FRAME_IO_TIMEOUT, IoBudget, hash_file, hash_open_file, pipe_io_error as io_error,
-    read_frame, unix_time, write_frame,
+    IPC_FRAME_IO_TIMEOUT, IoBudget, MAX_ACTIVE_CONNECTIONS, hash_file, hash_open_file,
+    pipe_io_error as io_error, read_frame, unix_time, write_frame,
 };
 use super::windows_client::validate_pipe_name;
 use super::{
@@ -131,28 +131,54 @@ fn accept_until_sealed(
     stopping: &AtomicBool,
 ) -> VaultResult<()> {
     let caller_cache = CallerIdentityCache::default();
-    while !stopping.load(Ordering::Acquire) {
-        if service.expire_if_needed(unix_time()?)? {
-            return Ok(());
-        }
-        match listener.accept() {
-            Ok(mut stream) => {
-                // Keep one bounded connection in the event loop. This avoids
-                // an unbounded thread-per-client denial of service while the
-                // nonblocking frame helpers cap lifecycle-lock latency.
-                //
-                // A client that disconnects between accept and configuration
-                // must not terminate the per-user vault, which is why this
-                // error is swallowed like every other per-connection one.
-                let _ = handle_connection(service, &caller_cache, &mut stream);
+    let active = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        while !stopping.load(Ordering::Acquire) {
+            if service.expire_if_needed(unix_time()?)? {
+                service.seal()?;
+                return Ok(());
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            if active.load(Ordering::Acquire) >= MAX_ACTIVE_CONNECTIONS {
                 std::thread::sleep(options.poll_interval);
+                continue;
             }
-            Err(error) => return Err(io_error("accept named-pipe client", &error)),
+            match listener.accept() {
+                Ok(mut stream) => {
+                    active.fetch_add(1, Ordering::AcqRel);
+                    let active = &active;
+                    let caller_cache = &caller_cache;
+                    if let Err(error) = std::thread::Builder::new()
+                        .name("factorseal-ipc".to_owned())
+                        .spawn_scoped(scope, move || {
+                            let _active = ActiveConnection(active);
+                            // A malformed or disconnected client must not
+                            // terminate the per-user vault.
+                            let _ = handle_connection(service, caller_cache, &mut stream);
+                        })
+                    {
+                        active.fetch_sub(1, Ordering::AcqRel);
+                        return Err(VaultError::Protocol(format!(
+                            "could not start bounded IPC worker: {error}"
+                        )));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(options.poll_interval);
+                }
+                Err(error) => return Err(io_error("accept named-pipe client", &error)),
+            }
         }
+        service.seal()?;
+        Ok(())
+    })
+}
+
+struct ActiveConnection<'a>(&'a AtomicUsize);
+
+impl Drop for ActiveConnection<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
-    Ok(())
 }
 
 struct WindowsLifecycleMonitor {

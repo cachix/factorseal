@@ -1,7 +1,7 @@
 //! Synchronized replay, lease, purge, and fail-closed sealing state.
 
-use std::sync::{Mutex, MutexGuard};
-use std::time::Instant;
+use std::sync::{Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::vault::{VaultError, VaultResult, VaultStore};
 
@@ -12,6 +12,7 @@ use super::approvals::{ApprovalCandidate, PendingApprovals};
 
 pub(super) struct ServiceState {
     live: Mutex<LiveState>,
+    approval_changed: Condvar,
     // Kept outside `live` so lifecycle events can seal even after a request
     // panics while holding and poisoning the state mutex.
     seal_handle: VaultStore,
@@ -30,7 +31,10 @@ struct LiveState {
     purges: usize,
 }
 
-pub(super) struct LiveStateGuard<'a>(MutexGuard<'a, LiveState>);
+pub(super) struct LiveStateGuard<'a> {
+    live: MutexGuard<'a, LiveState>,
+    approval_changed: &'a Condvar,
+}
 
 impl ServiceState {
     pub(super) fn new(store: VaultStore, now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
@@ -46,6 +50,7 @@ impl ServiceState {
                 #[cfg(all(test, feature = "hardware"))]
                 purges: 0,
             }),
+            approval_changed: Condvar::new(),
             seal_handle,
         })
     }
@@ -56,6 +61,7 @@ impl ServiceState {
 
     pub(super) fn seal(&self) {
         self.seal_handle.seal();
+        self.approval_changed.notify_all();
     }
 
     pub(super) fn lock_live(&self, now: Instant) -> VaultResult<LiveStateGuard<'_>> {
@@ -70,11 +76,15 @@ impl ServiceState {
             live.store.seal();
             return Err(VaultError::Sealed);
         }
-        Ok(LiveStateGuard(live))
+        Ok(LiveStateGuard {
+            live,
+            approval_changed: &self.approval_changed,
+        })
     }
 
     pub(super) fn expire_if_needed(&self, now: u64, monotonic_now: Instant) -> VaultResult<bool> {
         if self.seal_handle.is_sealed() {
+            self.approval_changed.notify_all();
             return Ok(true);
         }
         let mut live = self
@@ -86,6 +96,7 @@ impl ServiceState {
         }
         if live.lease.is_expired(monotonic_now) {
             live.store.seal();
+            self.approval_changed.notify_all();
             return Ok(true);
         }
         if live.last_purge_at != now {
@@ -120,7 +131,7 @@ impl ServiceState {
 
 impl LiveStateGuard<'_> {
     pub(super) fn store(&self) -> &VaultStore {
-        &self.0.store
+        &self.live.store
     }
 
     pub(super) fn create_approval(
@@ -128,15 +139,19 @@ impl LiveStateGuard<'_> {
         candidate: ApprovalCandidate,
         now: u64,
     ) -> VaultResult<VaultInteractionReference> {
-        self.0.approvals.create(candidate, now)
+        let interaction = self.live.approvals.create(candidate, now)?;
+        self.approval_changed.notify_all();
+        Ok(interaction)
     }
 
     pub(super) fn list_approvals(&mut self, now: u64) -> (u64, Vec<PendingApproval>) {
-        self.0.approvals.list(now)
+        self.live.approvals.list(now)
     }
 
     pub(super) fn deny_approval(&mut self, id: &str, now: u64) -> VaultResult<()> {
-        self.0.approvals.deny(id, now)
+        self.live.approvals.deny(id, now)?;
+        self.approval_changed.notify_all();
+        Ok(())
     }
 
     pub(super) fn approve(
@@ -146,20 +161,60 @@ impl LiveStateGuard<'_> {
         grant_duration_seconds: Option<u64>,
         now: u64,
     ) -> VaultResult<()> {
-        let live = &mut *self.0;
-        live.approvals
-            .approve(&live.store, id, signature, grant_duration_seconds, now)
+        let LiveState {
+            store, approvals, ..
+        } = &mut *self.live;
+        approvals.approve(store, id, signature, grant_duration_seconds, now)?;
+        self.approval_changed.notify_all();
+        Ok(())
     }
 
     pub(super) fn consume(&mut self, request_id: RequestId) -> VaultResult<()> {
-        self.0.replay.consume(request_id)
+        self.live.replay.consume(request_id)
     }
 
     pub(super) fn lease_deadlines(&self) -> (u64, u64) {
-        (self.0.lease.idle_deadline, self.0.lease.absolute_deadline)
+        (
+            self.live.lease.idle_deadline,
+            self.live.lease.absolute_deadline,
+        )
     }
 
     pub(super) fn touch(&mut self, now: u64, monotonic_now: Instant) -> VaultResult<()> {
-        self.0.lease.touch(now, monotonic_now)
+        self.live.lease.touch(now, monotonic_now)
+    }
+}
+
+impl LiveStateGuard<'_> {
+    pub(super) fn wait_for_approvals(
+        mut self,
+        after_revision: u64,
+        timeout: Duration,
+        now: u64,
+    ) -> VaultResult<(u64, Vec<PendingApproval>)> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| VaultError::Protocol("approval wait timeout overflows".to_owned()))?;
+        loop {
+            if self.live.store.is_sealed() || self.live.lease.is_expired(Instant::now()) {
+                self.live.store.seal();
+                return Err(VaultError::Sealed);
+            }
+            let current = self.live.approvals.list(now);
+            if current.0 != after_revision {
+                return Ok(current);
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Ok(current);
+            };
+            let (live, result) = self
+                .approval_changed
+                .wait_timeout(self.live, remaining)
+                .map_err(|_| VaultError::WorkerUnavailable)?;
+            self.live = live;
+            if result.timed_out() {
+                return Ok(self.live.approvals.list(now));
+            }
+        }
     }
 }

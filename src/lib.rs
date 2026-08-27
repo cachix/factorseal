@@ -41,9 +41,10 @@ pub use vault::{
 
 #[cfg(feature = "vault-client")]
 pub use vault::{
-    ApprovalOperation, ApprovalPrincipal, PendingApproval, VaultAction, VaultApplicationContext,
-    VaultClient, VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse,
-    VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    ApprovalOperation, ApprovalPrincipal, MAX_APPROVAL_WAIT_MS, PendingApproval, VaultAction,
+    VaultApplicationContext, VaultClient, VaultInteractionReference, VaultMutation, VaultRequest,
+    VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret,
+    WireSecretAddress,
 };
 
 #[cfg(feature = "vault-store")]

@@ -331,8 +331,8 @@ mod tests {
     use super::*;
     #[cfg(feature = "hardware")]
     use crate::{
-        GrantPermission, UnsealLeasePolicy, Vault, VaultAction, VaultResponseBody, WireSecret,
-        WireSecretAddress, vault::VaultStore,
+        GrantPermission, UnsealLeasePolicy, Vault, VaultAction, VaultApplicationContext,
+        VaultResponseBody, WireSecret, WireSecretAddress, vault::VaultStore,
     };
     #[test]
     fn peer_identity_comes_from_socket_credentials() {
@@ -452,6 +452,7 @@ mod tests {
         let server = std::thread::spawn(move || serve_linux_vault(&server_service, &options));
         let client = LinuxVaultClient::new(socket);
         wait_until_ready(&client, &server);
+        assert_approval_wait_allows_concurrent_request(&service, &caller, &client, now);
 
         let address = WireSecretAddress::new("project/default/TOKEN", None);
         let stored = client
@@ -491,6 +492,66 @@ mod tests {
             .unwrap();
         assert!(matches!(sealed.result, Ok(VaultResponseBody::Sealed)));
         server.join().unwrap().unwrap();
+    }
+
+    #[cfg(feature = "hardware")]
+    fn assert_approval_wait_allows_concurrent_request(
+        service: &VaultService,
+        caller: &CallerIdentity,
+        client: &LinuxVaultClient,
+        now: u64,
+    ) {
+        service.authorize_approval_manager(caller, now).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let wait_barrier = Arc::clone(&barrier);
+        let wait_client = client.clone();
+        let wait = std::thread::spawn(move || {
+            wait_barrier.wait();
+            wait_client
+                .request(
+                    &VaultRequest::new(VaultAction::WaitApprovals {
+                        after_revision: 0,
+                        timeout_ms: 2_000,
+                    })
+                    .unwrap(),
+                )
+                .unwrap()
+        });
+        barrier.wait();
+        // Give the watcher time to enter its bounded wait. With a serial
+        // accept loop, the provider request below cannot then create the
+        // approval that wakes it.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let application = VaultApplicationContext::new(
+            Some("transport-project".to_owned()),
+            Some("default".to_owned()),
+            None,
+            Some("test native notification".to_owned()),
+        )
+        .unwrap();
+        let denied = client
+            .request(
+                &VaultRequest::new_with_application(
+                    VaultAction::GetCache {
+                        namespace: b"approval-transport-test".to_vec(),
+                        address: WireSecretAddress::new("TOKEN", None)
+                            .scope_to_project("transport-project")
+                            .unwrap(),
+                    },
+                    application,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(denied.result.unwrap_err().interaction.is_some());
+        assert!(matches!(
+            wait.join().unwrap().result,
+            Ok(VaultResponseBody::Approvals {
+                revision,
+                approvals
+            }) if revision > 0 && approvals.len() == 1
+        ));
     }
 
     /// Wait for the server thread to reach its accept loop.

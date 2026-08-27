@@ -78,6 +78,7 @@ pub(super) fn execute_action(
         | VaultAction::ClearCache { .. }
         | VaultAction::SealCache { .. }
         | VaultAction::ListApprovals
+        | VaultAction::WaitApprovals { .. }
         | VaultAction::Approve { .. }
         | VaultAction::Deny { .. } => unreachable!("action was handled before execution"),
     }

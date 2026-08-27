@@ -4,10 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
-- Bump the native protocol to version 4 and forward SecretSpec's declared
+- Bump the native protocol to version 5 and forward SecretSpec's declared
   project, profile, base directory, access reason, and requested authorization
-  duration through each provider
-  request, supporting contextual audit and approval surfaces without treating
+  duration through each provider request, supporting contextual audit and
+  approval surfaces without treating
   caller-provided metadata as identity.
 - Add bounded project-scoped approval requests, structured SecretSpec
   interaction IDs, and `factorseal approvals`, `approvals --watch`, `approvals
@@ -21,6 +21,10 @@ All notable changes to FactorSeal will be documented in this file.
   duration or choose another duration, including `forever`; the signed approval
   binds that choice and the project grant expires accordingly. SecretSpec cache
   addresses are project-derived and checked before project grants are accepted.
+  Approval watches now block on a bounded native revision wait instead of
+  polling once per second. The local transports serve a bounded number of
+  concurrent connections so a watcher cannot prevent providers from creating
+  new approval requests.
 - Replace the password-plus-biometric boolean with versioned unlock policies:
   comma-separated factors are AND requirements and repeated `--unlock` groups
   are independently hardware-wrapped OR alternatives. Support password,

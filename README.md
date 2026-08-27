@@ -253,18 +253,23 @@ $ factorseal approvals approve apr_7K3M
 $ factorseal approvals deny apr_7K3M
 ```
 
+Watch mode uses a bounded native revision wait: it wakes immediately when the
+approval set changes without polling once per second. The agent permits a small
+bounded set of concurrent local connections, allowing provider requests to
+create approvals while CLI and future GUI notification listeners wait.
+
 Approval requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal
 prompts for the grant lifetime; Enter accepts the app-requested default (or one
 hour when the app supplied none), and values such as `30m`, `8h`, `7d`, and
 `forever` override it. The chosen lifetime is bound into the vault signature,
-so it cannot be changed after factor confirmation. Factorseal derives a project-specific
-cache address and verifies it before accepting the project grant, so declaring
-an approved project cannot reach another project's secrets. Interactive
-prompts distinguish the transport-authenticated executable identity and digest
-from caller-declared project, profile, base directory, and reason. They require
-a terminal and never approve by default. A vault with multiple unlock groups
-asks which one to use only after the user chooses Approve.
+so it cannot be changed after factor confirmation. Factorseal derives a
+project-specific cache address and verifies it before accepting the project
+grant, so declaring an approved project cannot reach another project's secrets.
+Interactive prompts distinguish the transport-authenticated executable identity
+and digest from caller-declared project, profile, base directory, and reason.
+They require a terminal and never approve by default. A vault with multiple
+unlock groups asks which one to use only after the user chooses Approve.
 
 Factorseal currently follows the SecretSpec IPC API from the sibling
 `../secretspec` checkout. Release packaging still depends on publishing and
