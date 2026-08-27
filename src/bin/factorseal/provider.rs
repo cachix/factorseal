@@ -1,13 +1,13 @@
 //! Factorseal implementation of the SecretSpec external-provider protocol.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use factorseal::{
-    VaultAction, VaultClient, VaultError, VaultRequest, VaultResponseBody, VaultResponseErrorCode,
-    WireSecret,
+    VaultAction, VaultApplicationContext, VaultClient, VaultError, VaultRequest, VaultResponseBody,
+    VaultResponseErrorCode, WireSecret,
 };
 use secretspec_ipc::error::{ErrorKind, RpcError};
 use secretspec_ipc::protocol::provider::{
@@ -28,23 +28,33 @@ const PROVIDER_URI: &str = "factorseal://default";
 /// One Factorseal process acting as a SecretSpec provider endpoint.
 pub(super) struct FactorsealProvider {
     client: Arc<dyn VaultClient>,
+    application: OnceLock<VaultApplicationContext>,
 }
 
 impl FactorsealProvider {
     fn new(root: &Path, socket: Option<&Path>) -> Result<Self, CliError> {
         Ok(Self {
             client: Arc::new(super::platform::native_client(root, socket)?),
+            application: OnceLock::new(),
         })
     }
 
     #[cfg(test)]
     fn with_client(client: Arc<dyn VaultClient>) -> Self {
-        Self { client }
+        Self {
+            client,
+            application: OnceLock::new(),
+        }
     }
 
     async fn request(&self, action: VaultAction) -> RpcResult<VaultResponseBody> {
         let client = Arc::clone(&self.client);
-        tokio::task::spawn_blocking(move || request(client.as_ref(), action))
+        let application = self
+            .application
+            .get()
+            .cloned()
+            .ok_or_else(|| RpcError::new(ErrorKind::Internal))?;
+        tokio::task::spawn_blocking(move || request(client.as_ref(), action, application))
             .await
             .map_err(|_| RpcError::new(ErrorKind::Internal))?
     }
@@ -80,6 +90,16 @@ impl ProviderHandler for FactorsealProvider {
         {
             return Err(RpcError::new(ErrorKind::InvalidParams));
         }
+        let application_context = VaultApplicationContext::new(
+            application.context.project,
+            application.context.profile,
+            application.context.base_dir,
+            application.context.reason,
+        )
+        .map_err(|error| map_vault_error(&error))?;
+        self.application
+            .set(application_context)
+            .map_err(|_| RpcError::new(ErrorKind::Conflict))?;
         Ok(Metadata {
             name: "factorseal".to_owned(),
             display_uri: PROVIDER_URI.to_owned(),
@@ -208,8 +228,13 @@ impl ProviderHandler for FactorsealProvider {
     }
 }
 
-fn request(client: &dyn VaultClient, action: VaultAction) -> RpcResult<VaultResponseBody> {
-    let request = VaultRequest::new(action).map_err(|error| map_vault_error(&error))?;
+fn request(
+    client: &dyn VaultClient,
+    action: VaultAction,
+    application: VaultApplicationContext,
+) -> RpcResult<VaultResponseBody> {
+    let request = VaultRequest::new_with_application(action, application)
+        .map_err(|error| map_vault_error(&error))?;
     let response = client
         .request(&request)
         .map_err(|error| map_vault_error(&error))?;

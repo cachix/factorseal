@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Bump the native protocol to version 2 and forward SecretSpec's declared
+  project, profile, base directory, and access reason through each provider
+  request, supporting contextual audit and approval surfaces without treating
+  caller-provided metadata as identity.
 - Replace the password-plus-biometric boolean with versioned unlock policies:
   comma-separated factors are AND requirements and repeated `--unlock` groups
   are independently hardware-wrapped OR alternatives. Support password,

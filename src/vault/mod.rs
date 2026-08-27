@@ -67,9 +67,9 @@ pub use envelope::{
 #[cfg(feature = "key-protection")]
 pub use protection::{HardwareBackend, KeyProtector, KeyProtectorFactory};
 pub use protocol::{
-    CallerIdentity, CallerPlatform, RequestId, VaultAction, VaultClient, VaultMutation,
-    VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
-    WireSecret, WireSecretAddress,
+    CallerIdentity, CallerPlatform, RequestId, VaultAction, VaultApplicationContext, VaultClient,
+    VaultMutation, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
+    VaultResponseErrorCode, WireSecret, WireSecretAddress,
 };
 #[cfg(feature = "vault-store")]
 pub use protocol::{GrantPermission, UnsealLeasePolicy, VaultService};

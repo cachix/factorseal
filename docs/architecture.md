@@ -171,8 +171,11 @@ Factorseal-aware applications.
 The endpoint executable, not the SecretSpec CLI or embedding application, is
 the principal authenticated by Factorseal's Unix socket or Windows named pipe.
 `factorseal grant-secretspec` therefore grants that exact executable cache-only
-permissions. No application-provided identity is accepted or forwarded across
-the boundary. The remaining release proof is publishing the IPC dependency and
+permissions. The endpoint forwards SecretSpec's declared project, profile,
+base directory, and reason with every native request for future approval,
+notification, and audit presentation. That context is metadata only: it does
+not replace the transport-authenticated executable identity and is never grant
+authority. The remaining release proof is publishing the IPC dependency and
 running installed end-to-end conformance on each platform.
 
 ## Platform adapters

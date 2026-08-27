@@ -13,6 +13,21 @@ use std::sync::Mutex;
 
 type CacheKey = (String, Option<String>);
 
+fn application_context() -> VaultApplicationContext {
+    VaultApplicationContext::new(
+        Some("demo".to_owned()),
+        Some("default".to_owned()),
+        Some(
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        Some("test".to_owned()),
+    )
+    .unwrap()
+}
+
 #[derive(Default)]
 struct MemoryVault {
     values: Mutex<HashMap<CacheKey, Vec<u8>>>,
@@ -21,6 +36,7 @@ struct MemoryVault {
 
 impl VaultClient for MemoryVault {
     fn request(&self, request: &VaultRequest) -> factorseal::VaultResult<VaultResponse> {
+        assert_eq!(request.application(), Some(&application_context()));
         let body = match &request.action {
             VaultAction::GetCache { namespace, address } => {
                 assert_eq!(namespace, SECRETSPEC_CACHE_NAMESPACE);
@@ -174,7 +190,7 @@ async fn provider_uses_cache_actions_for_crud_and_expiry() {
             context: ApplicationContext {
                 project: Some("demo".to_owned()),
                 profile: Some("default".to_owned()),
-                base_dir: None,
+                base_dir: application_context().base_dir,
                 reason: Some("test".to_owned()),
             },
             credentials: BTreeMap::new(),

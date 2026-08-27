@@ -10,10 +10,12 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::vault::{SecretAddress, VaultError, VaultResult};
 
-pub(super) const PROTOCOL_VERSION: u8 = 1;
+pub(super) const PROTOCOL_VERSION: u8 = 2;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
+const MAX_APPLICATION_COMPONENT_BYTES: usize = 4 * 1024;
+const MAX_APPLICATION_BASE_DIR_BYTES: usize = 32 * 1024;
 const MAX_NAMESPACE_BYTES: usize = 4 * 1024;
 const MAX_MUTATIONS_PER_REQUEST: usize = 64;
 #[cfg(feature = "vault-store")]
@@ -213,7 +215,82 @@ impl Drop for WireSecret {
 pub struct VaultRequest {
     version: u8,
     request_id: RequestId,
+    /// Caller-declared application metadata for display and audit. This is
+    /// never transport-authenticated identity or authorization input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    application: Option<VaultApplicationContext>,
     pub action: VaultAction,
+}
+
+/// Caller-declared application metadata forwarded by integrations such as
+/// SecretSpec. The transport-authenticated [`CallerIdentity`] remains the only
+/// application principal used for grants.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultApplicationContext {
+    pub project: Option<String>,
+    pub profile: Option<String>,
+    pub base_dir: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl VaultApplicationContext {
+    pub fn new(
+        project: Option<String>,
+        profile: Option<String>,
+        base_dir: Option<String>,
+        reason: Option<String>,
+    ) -> VaultResult<Self> {
+        let context = Self {
+            project,
+            profile,
+            base_dir,
+            reason,
+        };
+        context.validate()?;
+        Ok(context)
+    }
+
+    fn validate(&self) -> VaultResult<()> {
+        for (name, value) in [
+            ("project", self.project.as_deref()),
+            ("profile", self.profile.as_deref()),
+        ] {
+            if let Some(value) = value
+                && (value.is_empty() || value.len() > MAX_APPLICATION_COMPONENT_BYTES)
+            {
+                return Err(VaultError::Protocol(format!(
+                    "application {name} is empty or too long"
+                )));
+            }
+        }
+        if self
+            .base_dir
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_APPLICATION_BASE_DIR_BYTES)
+        {
+            return Err(VaultError::Protocol(
+                "application base directory is too long".to_owned(),
+            ));
+        }
+        if let Some(base_dir) = &self.base_dir
+            && !std::path::Path::new(base_dir).is_absolute()
+        {
+            return Err(VaultError::Protocol(
+                "application base directory must be absolute".to_owned(),
+            ));
+        }
+        if self
+            .reason
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_APPLICATION_COMPONENT_BYTES)
+        {
+            return Err(VaultError::Protocol(
+                "application reason is too long".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl VaultRequest {
@@ -221,6 +298,20 @@ impl VaultRequest {
         Ok(Self {
             version: PROTOCOL_VERSION,
             request_id: RequestId::random()?,
+            application: None,
+            action,
+        })
+    }
+
+    pub fn new_with_application(
+        action: VaultAction,
+        application: VaultApplicationContext,
+    ) -> VaultResult<Self> {
+        application.validate()?;
+        Ok(Self {
+            version: PROTOCOL_VERSION,
+            request_id: RequestId::random()?,
+            application: Some(application),
             action,
         })
     }
@@ -230,6 +321,7 @@ impl VaultRequest {
         Self {
             version: PROTOCOL_VERSION,
             request_id,
+            application: None,
             action,
         }
     }
@@ -237,6 +329,11 @@ impl VaultRequest {
     #[must_use]
     pub const fn request_id(&self) -> RequestId {
         self.request_id
+    }
+
+    #[must_use]
+    pub const fn application(&self) -> Option<&VaultApplicationContext> {
+        self.application.as_ref()
     }
 
     pub fn decode(bytes: &[u8]) -> VaultResult<Self> {
@@ -273,6 +370,9 @@ impl VaultRequest {
             return Err(VaultError::Protocol(
                 "unsupported request version".to_owned(),
             ));
+        }
+        if let Some(application) = &self.application {
+            application.validate()?;
         }
         self.action.validate()
     }

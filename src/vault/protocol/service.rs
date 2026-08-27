@@ -14,8 +14,8 @@ use super::{
 };
 #[cfg(all(test, feature = "hardware"))]
 use super::{
-    CallerPlatform, GrantPermission, RequestId, VaultAction, VaultMutation, WireSecret,
-    WireSecretAddress,
+    CallerPlatform, GrantPermission, RequestId, VaultAction, VaultApplicationContext,
+    VaultMutation, WireSecret, WireSecretAddress,
 };
 
 #[cfg(feature = "vault-store")]

@@ -77,20 +77,53 @@ fn eviction_deadline_may_be_immediate_but_not_in_the_past() {
 
 #[test]
 fn request_round_trip_is_versioned_and_bounded() {
-    let request = VaultRequest::new(VaultAction::Mutate {
-        namespace: b"secretspec".to_vec(),
-        mutations: vec![VaultMutation::Put {
-            address: address(),
-            value: WireSecret::new(b"secret".to_vec()),
-            evict_at: None,
-        }],
-    })
+    let application = VaultApplicationContext::new(
+        Some("demo".to_owned()),
+        Some("production".to_owned()),
+        Some(
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        Some("deploy".to_owned()),
+    )
+    .unwrap();
+    let request = VaultRequest::new_with_application(
+        VaultAction::Mutate {
+            namespace: b"secretspec".to_vec(),
+            mutations: vec![VaultMutation::Put {
+                address: address(),
+                value: WireSecret::new(b"secret".to_vec()),
+                evict_at: None,
+            }],
+        },
+        application.clone(),
+    )
     .unwrap();
     let bytes = request.encode().unwrap();
     let decoded = VaultRequest::decode(&bytes).unwrap();
     assert_eq!(decoded.request_id(), request.request_id());
+    assert_eq!(decoded.application(), Some(&application));
     assert!(matches!(decoded.action, VaultAction::Mutate { .. }));
     assert!(VaultRequest::decode(&vec![0; MAX_MESSAGE_BYTES + 1]).is_err());
+}
+
+#[test]
+fn application_context_is_bounded_and_requires_an_absolute_base_directory() {
+    assert!(
+        VaultApplicationContext::new(Some(String::new()), Some("default".to_owned()), None, None,)
+            .is_err()
+    );
+    assert!(
+        VaultApplicationContext::new(
+            Some("demo".to_owned()),
+            Some("default".to_owned()),
+            Some("relative/path".to_owned()),
+            None,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -205,10 +238,19 @@ fn caller_identity_is_part_of_grant_authority() {
     .unwrap();
     let response = service.handle(
         &other,
-        VaultRequest::new(VaultAction::Get {
-            namespace: b"secretspec".to_vec(),
-            address: address(),
-        })
+        VaultRequest::new_with_application(
+            VaultAction::Get {
+                namespace: b"secretspec".to_vec(),
+                address: address(),
+            },
+            VaultApplicationContext::new(
+                Some("authorized-project".to_owned()),
+                Some("default".to_owned()),
+                None,
+                Some("declared reason".to_owned()),
+            )
+            .unwrap(),
+        )
         .unwrap(),
         101,
     );
