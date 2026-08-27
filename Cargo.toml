@@ -77,7 +77,7 @@ hex = "0.4.3"
 ml-dsa = { version = "0.1.1", features = ["zeroize"], optional = true }
 percent-encoding = { version = "2.3.2", optional = true }
 rpassword = { version = "7.4.0", optional = true }
-secretspec-ipc = { git = "https://github.com/cachix/secretspec.git", rev = "5f598c197531551a4365498224d1567cfd7247a7", package = "secretspec-ipc", optional = true }
+secretspec-ipc = { path = "../secretspec/secretspec-ipc", optional = true }
 secret-service-protocol = { path = "crates/secret-service-protocol", optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"

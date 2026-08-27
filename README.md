@@ -244,9 +244,10 @@ The endpoint itself is the caller seen by Factorseal. Replacing it requires a
 new grant. Because it cannot prompt on its protocol streams, a sealed service
 is reported to SecretSpec as `interaction_required`.
 
-Factorseal currently follows the committed SecretSpec IPC API from its pinned
-Git revision. Release packaging still depends on publishing that API and
-passing installed end-to-end conformance on Linux, macOS, and Windows.
+Factorseal currently follows the SecretSpec IPC API from the sibling
+`../secretspec` checkout. Release packaging still depends on publishing and
+pinning that API, then passing installed end-to-end conformance on Linux,
+macOS, and Windows.
 
 ### Linux Secret Service
 

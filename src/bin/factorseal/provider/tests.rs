@@ -2,8 +2,8 @@ use super::*;
 use factorseal::VaultResponse;
 use secretspec_ipc::client::Client;
 use secretspec_ipc::protocol::provider::{
-    AddressParams, Coordinates, DeletedResult, GetResult, InitializeApplication,
-    InitializedApplication, SetExpiringParams, SetParams, StoredResult,
+    AddressParams, ApplicationContext, Coordinates, DeletedResult, GetResult,
+    InitializeApplication, InitializedApplication, SetExpiringParams, SetParams, StoredResult,
 };
 use secretspec_ipc::protocol::{
     InitializeParams, Limits, PROTOCOL_VERSION, PROVIDER_PROTOCOL, Product,
@@ -171,9 +171,13 @@ async fn provider_uses_cache_actions_for_crud_and_expiry() {
         application: InitializeApplication {
             scheme: "factorseal".to_owned(),
             uri: PROVIDER_URI.to_owned(),
-            base_dir: None,
+            context: ApplicationContext {
+                project: Some("demo".to_owned()),
+                profile: Some("default".to_owned()),
+                base_dir: None,
+                reason: Some("test".to_owned()),
+            },
             credentials: BTreeMap::new(),
-            reason: Some("test".to_owned()),
         },
     };
     let (client, initialized) = Client::connect::<_, _, _, InitializedApplication>(
@@ -190,7 +194,8 @@ async fn provider_uses_cache_actions_for_crud_and_expiry() {
     assert_eq!(
         get(&client, address()).await,
         GetResult::Found {
-            value: "secret".to_owned()
+            value: "secret".to_owned(),
+            expires_at_unix_ms: None,
         }
     );
 

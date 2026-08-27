@@ -14,7 +14,7 @@ use secretspec_ipc::protocol::provider::{
     self as wire, Address, CoordinateName, InitializeApplication, Metadata, Persistence,
     ResolveAddressResult,
 };
-use secretspec_ipc::provider::{ProviderHandler, SecretValue, serve_provider};
+use secretspec_ipc::provider::{ProvidedSecret, ProviderHandler, SecretValue, serve_provider};
 use secretspec_ipc::server::{RequestContext, RpcResult, ServerConfig};
 use zeroize::Zeroizing;
 
@@ -106,7 +106,7 @@ impl ProviderHandler for FactorsealProvider {
         &self,
         _context: RequestContext,
         address: Address,
-    ) -> RpcResult<Option<SecretValue>> {
+    ) -> RpcResult<Option<ProvidedSecret>> {
         match self
             .request(VaultAction::GetCache {
                 namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
@@ -118,7 +118,7 @@ impl ProviderHandler for FactorsealProvider {
                 let bytes = Zeroizing::new(value.expose().to_vec());
                 let value = std::str::from_utf8(&bytes)
                     .map_err(|_| RpcError::new(ErrorKind::OperationFailed))?;
-                Ok(Some(SecretValue::new(value.to_owned())))
+                Ok(Some(ProvidedSecret::new(value.to_owned(), None)))
             }
             VaultResponseBody::Secret { value: None } => Ok(None),
             _ => Err(RpcError::new(ErrorKind::OperationFailed)),
@@ -219,7 +219,9 @@ fn request(client: &dyn VaultClient, action: VaultAction) -> RpcResult<VaultResp
             VaultResponseErrorCode::Replay | VaultResponseErrorCode::Conflict => {
                 ErrorKind::Conflict
             }
-            VaultResponseErrorCode::Sealed => ErrorKind::InteractionRequired,
+            VaultResponseErrorCode::Sealed => {
+                return RpcError::interaction_required(None);
+            }
             VaultResponseErrorCode::InvalidRequest => ErrorKind::InvalidParams,
             VaultResponseErrorCode::Internal => ErrorKind::OperationFailed,
         })
@@ -232,7 +234,7 @@ fn map_vault_error(error: &VaultError) -> RpcError {
             ErrorKind::InvalidParams
         }
         VaultError::AuthorizationRequired => ErrorKind::PermissionDenied,
-        VaultError::Sealed => ErrorKind::InteractionRequired,
+        VaultError::Sealed => return RpcError::interaction_required(None),
         VaultError::WorkerUnavailable | VaultError::AgentUnreachable(_) => ErrorKind::Unavailable,
         VaultError::Conflict | VaultError::Replay => ErrorKind::Conflict,
         VaultError::Expired
