@@ -314,7 +314,6 @@ pub(super) struct ApprovalOptions<'a> {
     pub(super) watch: bool,
     pub(super) prompt: bool,
     pub(super) json: bool,
-    pub(super) unlock: Option<&'a UnlockGroup>,
     pub(super) action: Option<&'a ApprovalCommand>,
 }
 
@@ -328,7 +327,6 @@ pub(super) fn manage_approvals(
         watch,
         prompt,
         json,
-        unlock,
         action,
     } = options;
     match action {
@@ -339,22 +337,18 @@ pub(super) fn manage_approvals(
                 )
                 .into());
             }
-            approve(root, socket, factor, id, unlock)
+            approve_with_prompted_group(root, socket, factor, id)
         }
         Some(ApprovalCommand::Deny { id }) => {
-            if watch || prompt || json || unlock.is_some() {
+            if watch || prompt || json {
                 return Err(VaultError::Protocol(
-                    "listing and unlock flags cannot be combined with approvals deny".to_owned(),
+                    "listing flags cannot be combined with approvals deny".to_owned(),
                 )
                 .into());
             }
             resolve_approval(root, socket, VaultAction::Deny { id: id.clone() }, false)
         }
-        None if prompt => prompt_approvals(root, socket, factor, unlock),
-        None if unlock.is_some() => Err(VaultError::Protocol(
-            "--unlock requires approvals approve or --prompt".to_owned(),
-        )
-        .into()),
+        None if prompt => prompt_approvals(root, socket, factor),
         None => list_approvals(root, socket, watch, json),
     }
 }
@@ -544,15 +538,13 @@ pub(super) fn read_unlock_group_choice(
 
 fn prompt_unlock_group(
     root: &Path,
-    requested: Option<&UnlockGroup>,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<UnlockGroup, CliError> {
     let device = Vault::inspect(root)?;
-    if requested.is_some() || device.unlock_policy().groups().len() == 1 {
-        select_unlock_group(&device, requested)
-    } else {
-        read_unlock_group_choice(device.unlock_policy().groups(), input, output)
+    match device.unlock_policy().groups() {
+        [group] => Ok(group.clone()),
+        groups => read_unlock_group_choice(groups, input, output),
     }
 }
 
@@ -560,13 +552,10 @@ fn prompt_approvals(
     root: &Path,
     socket: Option<&Path>,
     factor: FactorSource<'_>,
-    unlock: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
     let stdin = std::io::stdin();
     let stderr = std::io::stderr();
     require_prompt_terminal(stdin.is_terminal(), stderr.is_terminal())?;
-    let mut input = stdin.lock();
-    let mut output = stderr.lock();
     let client = native_client(root, socket)?;
     let mut last_revision = None;
     let mut handled = HashSet::new();
@@ -578,12 +567,20 @@ fn prompt_approvals(
                 if handled.contains(&approval.id) {
                     continue;
                 }
-                write_approval(&mut output, approval)?;
-                let decision = read_approval_decision(&mut input, &mut output)?;
+                let decision = {
+                    let mut input = stdin.lock();
+                    let mut output = stderr.lock();
+                    write_approval(&mut output, approval)?;
+                    read_approval_decision(&mut input, &mut output)?
+                };
                 handled.insert(approval.id.clone());
                 match decision {
                     ApprovalDecision::Approve => {
-                        let group = prompt_unlock_group(root, unlock, &mut input, &mut output)?;
+                        let group = {
+                            let mut input = stdin.lock();
+                            let mut output = stderr.lock();
+                            prompt_unlock_group(root, &mut input, &mut output)?
+                        };
                         approve(root, socket, factor, &approval.id, Some(&group))?;
                     }
                     ApprovalDecision::Deny => resolve_approval(
@@ -601,6 +598,25 @@ fn prompt_approvals(
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
+}
+
+fn approve_with_prompted_group(
+    root: &Path,
+    socket: Option<&Path>,
+    factor: FactorSource<'_>,
+    id: &str,
+) -> Result<(), CliError> {
+    let device = Vault::inspect(root)?;
+    let group = match device.unlock_policy().groups() {
+        [group] => group.clone(),
+        groups => {
+            let stdin = std::io::stdin();
+            let stderr = std::io::stderr();
+            require_prompt_terminal(stdin.is_terminal(), stderr.is_terminal())?;
+            read_unlock_group_choice(groups, &mut stdin.lock(), &mut stderr.lock())?
+        }
+    };
+    approve(root, socket, factor, id, Some(&group))
 }
 
 fn approve(

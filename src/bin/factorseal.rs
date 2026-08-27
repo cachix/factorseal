@@ -158,7 +158,6 @@ fn run(cli: Cli) -> Result<(), CliError> {
             watch,
             prompt,
             json,
-            unlock,
             action,
         } => manage_approvals(
             &root,
@@ -168,7 +167,6 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 watch,
                 prompt,
                 json,
-                unlock: unlock.as_ref(),
                 action: action.as_ref(),
             },
         ),

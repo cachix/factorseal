@@ -299,22 +299,13 @@ fn approvals_use_listing_flags_and_explicit_action_subcommands() {
         }
     ));
 
-    let cli = Cli::try_parse_from([
-        "factorseal",
-        "approvals",
-        "approve",
-        "apr_demo",
-        "--unlock",
-        "biometric",
-    ])
-    .unwrap();
+    let cli = Cli::try_parse_from(["factorseal", "approvals", "approve", "apr_demo"]).unwrap();
     assert!(matches!(
         cli.command,
         Command::Approvals {
-            unlock: Some(group),
             action: Some(ApprovalCommand::Approve { id }),
             ..
-        } if id == "apr_demo" && group.to_string() == "biometric"
+        } if id == "apr_demo"
     ));
 
     let cli = Cli::try_parse_from(["factorseal", "approvals", "deny", "apr_demo"]).unwrap();
@@ -326,26 +317,28 @@ fn approvals_use_listing_flags_and_explicit_action_subcommands() {
         } if id == "apr_demo"
     ));
 
-    let cli = Cli::try_parse_from([
-        "factorseal",
-        "approvals",
-        "--watch",
-        "--prompt",
-        "--unlock",
-        "biometric",
-    ])
-    .unwrap();
+    let cli = Cli::try_parse_from(["factorseal", "approvals", "--watch", "--prompt"]).unwrap();
     assert!(matches!(
         cli.command,
         Command::Approvals {
             watch: true,
             prompt: true,
-            unlock: Some(group),
             action: None,
             ..
-        } if group.to_string() == "biometric"
+        }
     ));
     assert!(Cli::try_parse_from(["factorseal", "approvals", "--prompt"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "factorseal",
+            "approvals",
+            "approve",
+            "apr_demo",
+            "--unlock",
+            "biometric",
+        ])
+        .is_err()
+    );
 }
 
 #[test]
