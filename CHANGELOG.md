@@ -4,6 +4,12 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Replace the password-plus-biometric boolean with versioned unlock policies:
+  comma-separated factors are AND requirements and repeated `--unlock` groups
+  are independently hardware-wrapped OR alternatives. Support password,
+  biometric-only, and combined groups.
+- Add `factorseal seal` so users and scripts can immediately seal the running
+  vault through the authenticated local protocol.
 - Replace the legacy file format with the per-user Factorseal vault and make
   `factorseal` the sole product CLI.
 - Add the per-user vault: embedded Turso persistence, Automerge
@@ -36,12 +42,9 @@ All notable changes to FactorSeal will be documented in this file.
   whole encrypted document snapshot, so an unpruned chain grew both the
   database and unseal latency without bound in the number of writes. The chain
   is a tamper check, not an audit log.
-- Require one nested factor inside platform key wrapping on every target, so
-  Linux, macOS, and Windows share a single create/unseal path. The factor is
-  modelled as `UnsealFactor`/`NestedFactorKind` with an Argon2id password as
-  the first variant; a variant qualifies only if it derives its key from a
-  hash or symmetric primitive, since TPM 2.0 and the Secure Enclave both wrap
-  with P-256.
+- Add the Argon2id password factor used by password-containing unlock groups.
+  Nested secret factors must derive their keys from hash or symmetric
+  primitives, since TPM 2.0 and the Secure Enclave both wrap with P-256.
 - Expose the native transport through a lightweight Rust `vault-client`
   feature as the seam for a planned SecretSpec-compiled `factorseal://`
   provider. The future consuming SecretSpec CLI or embedding application will

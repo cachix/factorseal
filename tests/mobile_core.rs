@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use factorseal::{
-    HardwareBackend, KeyProtector, KeyProtectorFactory, UnsealFactor, Vault, VaultPlatform,
-    VaultResult,
+    HardwareBackend, KeyProtector, KeyProtectorFactory, UnlockCredentials, UnlockFactorKind,
+    UnlockGroup, UnlockPolicy, Vault, VaultPlatform, VaultResult,
 };
 use zeroize::Zeroizing;
 
@@ -50,7 +50,7 @@ impl KeyProtectorFactory for MobileTestFactory {
         label: &str,
         _biometric: bool,
     ) -> VaultResult<Box<dyn KeyProtector>> {
-        let key = if label.starts_with("vault-wrap-") {
+        let key = if label.contains("-wrap-") || label.ends_with("-wrap") {
             0x35
         } else {
             0x97
@@ -64,12 +64,16 @@ fn public_mobile_adapter_api_round_trips_a_vault() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("factorseal");
     let password = b"correct horse battery staple";
+    let password_and_biometric =
+        UnlockGroup::new([UnlockFactorKind::Password, UnlockFactorKind::Biometric]).unwrap();
+    let biometric = UnlockGroup::new([UnlockFactorKind::Biometric]).unwrap();
+    let policy = UnlockPolicy::new([password_and_biometric, biometric.clone()]).unwrap();
 
-    let created = Vault::create_with_key_protector(
+    let created = Vault::create_with_key_protector_policy(
         &root,
         VaultPlatform::Android,
-        UnsealFactor::Password(password),
-        true,
+        &policy,
+        UnlockCredentials::with_password(password),
         &MobileTestFactory,
     )
     .unwrap();
@@ -81,9 +85,10 @@ fn public_mobile_adapter_api_round_trips_a_vault() {
     );
     drop(created);
 
-    let reopened = Vault::unseal_with_key_protector(
+    let reopened = Vault::unseal_with_key_protector_group(
         &root,
-        UnsealFactor::Password(password),
+        &biometric,
+        UnlockCredentials::none(),
         &MobileTestFactory,
     )
     .unwrap();

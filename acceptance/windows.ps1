@@ -32,7 +32,7 @@ function Wait-ForState([string]$Expected) {
 }
 
 try {
-& $Factorseal --root $Root --password-file $PasswordFile init --biometric
+& $Factorseal --root $Root --password-file $PasswordFile init --unlock password,biometric
 if ($LASTEXITCODE -ne 0) { throw 'factorseal init failed' }
 $metadata = Get-Status
 if ($metadata.hardware_backend -notin @('tpm', 'tpm-bridge')) {

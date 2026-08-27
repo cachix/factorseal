@@ -19,7 +19,41 @@ impl KeyProtectorFactory for TestProtectorFactory {
         label: &str,
         _biometric: bool,
     ) -> VaultResult<Box<dyn KeyProtector>> {
-        let key = if label.starts_with("vault-wrap-") {
+        let key = if label.contains("-wrap-") || label.ends_with("-wrap") {
+            [0x35; KEY_BYTES]
+        } else {
+            [0x97; KEY_BYTES]
+        };
+        Ok(Box::new(TestProtector::with_backend(
+            key,
+            super::super::HardwareBackend::AndroidTrustedEnvironment,
+        )))
+    }
+}
+
+#[derive(Default)]
+struct RecordingProtectorFactory {
+    biometric_policies: std::sync::Mutex<Vec<bool>>,
+}
+
+impl KeyProtectorFactory for RecordingProtectorFactory {
+    fn create(
+        &self,
+        root: &Path,
+        label: &str,
+        biometric: bool,
+    ) -> VaultResult<Box<dyn KeyProtector>> {
+        self.open(root, label, biometric)
+    }
+
+    fn open(
+        &self,
+        _root: &Path,
+        label: &str,
+        biometric: bool,
+    ) -> VaultResult<Box<dyn KeyProtector>> {
+        self.biometric_policies.lock().unwrap().push(biometric);
+        let key = if label.contains("-wrap-") {
             [0x35; KEY_BYTES]
         } else {
             [0x97; KEY_BYTES]
@@ -72,22 +106,99 @@ fn injected_mobile_protector_creates_unseals_and_discards() {
 }
 
 #[test]
+fn unlock_groups_are_independent_or_slots_with_and_factors() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    let password_and_biometric =
+        UnlockGroup::new([UnlockFactorKind::Password, UnlockFactorKind::Biometric]).unwrap();
+    let password = UnlockGroup::new([UnlockFactorKind::Password]).unwrap();
+    let biometric = UnlockGroup::new([UnlockFactorKind::Biometric]).unwrap();
+    let policy =
+        UnlockPolicy::new([password, biometric.clone(), password_and_biometric.clone()]).unwrap();
+    let factory = RecordingProtectorFactory::default();
+
+    let created = Vault::create_with_key_protector_policy(
+        &root,
+        VaultPlatform::Android,
+        &policy,
+        UnlockCredentials::with_password(b"correct horse"),
+        &factory,
+    )
+    .unwrap();
+    let expected = created.public().clone();
+    assert_eq!(expected.unlock_policy(), &policy);
+    drop(created);
+
+    let stored = read_vault(&root).unwrap();
+    assert_eq!(stored.unlock_slots.len(), 3);
+    assert!(stored.unlock_slots[0].password_protection.is_some());
+    assert!(stored.unlock_slots[1].password_protection.is_none());
+    assert!(stored.unlock_slots[2].password_protection.is_some());
+    assert_eq!(
+        *factory.biometric_policies.lock().unwrap(),
+        [false, false, true, true, true, true]
+    );
+
+    assert!(
+        Vault::unseal_with_key_protector_group(
+            &root,
+            &password_and_biometric,
+            UnlockCredentials::none(),
+            &factory,
+        )
+        .is_err()
+    );
+    let via_biometric = Vault::unseal_with_key_protector_group(
+        &root,
+        &biometric,
+        UnlockCredentials::none(),
+        &factory,
+    )
+    .unwrap();
+    assert_eq!(via_biometric.public(), &expected);
+    drop(via_biometric);
+
+    let via_both = Vault::unseal_with_key_protector_group(
+        &root,
+        &password_and_biometric,
+        UnlockCredentials::with_password(b"correct horse"),
+        &factory,
+    )
+    .unwrap();
+    assert_eq!(via_both.public(), &expected);
+}
+
+#[test]
+fn older_single_factor_metadata_versions_are_rejected_cleanly() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    Vault::create_for_test(&root).unwrap();
+    let mut stored = read_vault(&root).unwrap();
+    stored.version = 2;
+
+    let error = stored.validate().unwrap_err();
+    assert!(error.to_string().contains("unsupported vault metadata"));
+}
+
+#[test]
 fn mobile_vault_rejects_a_backend_from_another_platform() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("factorseal");
     prepare_root(&root).unwrap();
     let wrapping = TestProtector::new([0x35; KEY_BYTES]);
     let signing = TestProtector::new([0x97; KEY_BYTES]);
+    let group = UnlockGroup::new([UnlockFactorKind::Password]).unwrap();
 
     let error = create_with_protectors(
         &root,
         VaultCreation {
             vault_id: VaultId::random().unwrap(),
-            biometric: false,
             created_at: 1_700_000_000,
             platform: VaultPlatform::Ios,
         },
-        ProtectorPair {
+        UnlockPolicy::new([group.clone()]).unwrap(),
+        &[SlotProtectors {
+            group: &group,
             wrapping: LabeledProtector {
                 label: "platform-test-wrap",
                 key: &wrapping,
@@ -96,8 +207,8 @@ fn mobile_vault_rejects_a_backend_from_another_platform() {
                 label: "platform-test-sign",
                 key: &signing,
             },
-        },
-        UnsealFactor::Password(TEST_PASSWORD),
+        }],
+        UnlockCredentials::with_password(TEST_PASSWORD),
     )
     .unwrap_err();
 
@@ -197,9 +308,10 @@ fn installation_uses_distinct_wrapping_and_signing_material() {
     let root = directory.path().join("factorseal");
     Vault::create_for_test(&root).unwrap();
     let stored = read_vault(&root).unwrap();
+    let slot = &stored.unlock_slots[0];
 
-    assert_ne!(stored.wrapping_key_label, stored.signing_key_label);
-    assert_ne!(stored.wrapped_data_key, stored.wrapped_signing_seed);
+    assert_ne!(slot.wrapping_key_label, slot.signing_key_label);
+    assert_ne!(slot.wrapped_data_key, slot.wrapped_signing_seed);
 }
 
 #[test]
@@ -235,15 +347,17 @@ fn every_platform_requires_a_nested_factor_and_hardware() {
         };
         let wrapping = TestProtector::with_backend([0x35; KEY_BYTES], backend);
         let signing = TestProtector::with_backend([0x97; KEY_BYTES], backend);
+        let group = UnlockGroup::new([UnlockFactorKind::Password]).unwrap();
         let created = create_with_protectors(
             &root,
             VaultCreation {
                 vault_id: VaultId::random().unwrap(),
-                biometric: false,
                 created_at: 1_700_000_000,
                 platform,
             },
-            ProtectorPair {
+            UnlockPolicy::new([group.clone()]).unwrap(),
+            &[SlotProtectors {
+                group: &group,
                 wrapping: LabeledProtector {
                     label: "platform-test-wrap",
                     key: &wrapping,
@@ -252,25 +366,36 @@ fn every_platform_requires_a_nested_factor_and_hardware() {
                     label: "platform-test-sign",
                     key: &signing,
                 },
-            },
-            UnsealFactor::Password(b"correct horse battery staple"),
+            }],
+            UnlockCredentials::with_password(b"correct horse battery staple"),
         )
         .unwrap();
         let expected = created.public().clone();
-        assert_eq!(expected.nested_factor(), NestedFactorKind::Argon2idPassword);
+        assert_eq!(
+            expected.unlock_policy().groups(),
+            std::slice::from_ref(&group)
+        );
         drop(created);
 
         let stored = read_vault(&root).unwrap();
+        let slot = &stored.unlock_slots[0];
         assert!(
-            unseal_with_protectors(&stored, &wrapping, &signing, UnsealFactor::Password(b""))
-                .is_err()
+            unseal_with_protectors(
+                &stored,
+                slot,
+                &wrapping,
+                &signing,
+                UnlockCredentials::with_password(b"")
+            )
+            .is_err()
         );
         assert!(
             unseal_with_protectors(
                 &stored,
+                slot,
                 &wrapping,
                 &signing,
-                UnsealFactor::Password(b"wrong password")
+                UnlockCredentials::with_password(b"wrong password")
             )
             .is_err()
         );
@@ -279,17 +404,19 @@ fn every_platform_requires_a_nested_factor_and_hardware() {
         assert!(
             unseal_with_protectors(
                 &stored,
+                slot,
                 &wrong_hardware,
                 &signing,
-                UnsealFactor::Password(b"correct horse battery staple"),
+                UnlockCredentials::with_password(b"correct horse battery staple"),
             )
             .is_err()
         );
         let unsealed = unseal_with_protectors(
             &stored,
+            slot,
             &wrapping,
             &signing,
-            UnsealFactor::Password(b"correct horse battery staple"),
+            UnlockCredentials::with_password(b"correct horse battery staple"),
         )
         .unwrap();
         assert_eq!(unsealed.public(), &expected);

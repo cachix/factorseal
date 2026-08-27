@@ -32,11 +32,11 @@ archive smoke testing.
 Use the release-candidate runners in [`acceptance/`](../acceptance/README.md)
 on physical hosts and attach their redacted output to the release approval.
 
-## Obtaining the nested factor
+## Obtaining a password factor
 
-Every vault requires one nested factor in addition to its platform key, so the
-vault needs a way to obtain that factor when unsealing. It accepts three sources, in
-order:
+The default unlock policy contains a password in addition to its platform key,
+so the service needs a way to obtain that password when unsealing. Biometric-only
+groups skip this input. Password groups accept three sources, in order:
 
 1. `--password-file`, an explicit private regular file;
 2. `--askpass <helper>` (or `FACTORSEAL_ASKPASS`), a helper run with the prompt
@@ -70,7 +70,7 @@ of it.
 
 ## Linux session password
 
-The Linux installation requires the TPM and a Factorseal password. The systemd
+The default Linux workflow uses the TPM and a Factorseal password. The systemd
 unit therefore does not persist that password or automatically unseal at login. Install
 `factorseal` under `/usr/local/bin`, install the unit under the user unit
 search path, and put
@@ -103,7 +103,7 @@ is:
 
 Listed users are added to the TPM resource-manager group. The module installs a
 global systemd user unit but deliberately does not enable it at login, because
-each unseal session requires an interactive password request. `factorseal-start`
+the default unlock group requires an interactive password request. `factorseal-start`
 supplies the invoking logind session and waits for the socket. The module also
 enables polkit so the unprivileged vault can obtain logind's default-permitted
 delay inhibitor before holding unwrapped keys; without that inhibitor the vault

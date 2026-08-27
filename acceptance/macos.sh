@@ -63,7 +63,7 @@ wait_for_vault_exit() {
     vault_pid=
 }
 
-"$factorseal" --root "$root" --password-file "$password_file" init --biometric
+"$factorseal" --root "$root" --password-file "$password_file" init --unlock password,biometric
 status | grep -q '"hardware_backend": "secure-enclave"'
 
 "$factorseal" --root "$root" --password-file "$password_file" \

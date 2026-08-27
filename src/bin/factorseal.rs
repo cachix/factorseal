@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use clap::Parser;
-use factorseal::{GrantPermission, KeyringError, UnsealLeasePolicy, VaultError};
+use factorseal::{
+    GrantPermission, KeyringError, UnsealLeasePolicy, VaultError, VaultResponseErrorCode,
+};
 
 #[path = "factorseal/cli.rs"]
 mod cli;
@@ -18,7 +20,7 @@ mod provider;
 use cli::{Cli, Command};
 use commands::{
     delete_keyring_value, destroy_vault, get_keyring_value, grant_cli, grant_secretspec,
-    initialize, resolve_root, run_vault, set_keyring_value, show_status,
+    initialize, resolve_root, run_vault, seal_vault, set_keyring_value, show_status,
 };
 use factor::FactorSource;
 
@@ -28,10 +30,11 @@ const MAX_KEYRING_VALUE_BYTES: u64 = 64 * 1024;
 const DEFAULT_UNIX_SOCKET: &str = "factorseal.sock";
 const SECRETSPEC_CACHE_NAMESPACE: &[u8] = b"secretspec-cache/v1";
 const KEYRING_NAMESPACE: &[u8] = b"factorseal/keyring/v1";
-const KEYRING_PERMISSIONS: [GrantPermission; 3] = [
+const KEYRING_PERMISSIONS: [GrantPermission; 4] = [
     GrantPermission::Get,
     GrantPermission::Put,
     GrantPermission::Delete,
+    GrantPermission::Seal,
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +62,18 @@ enum CliError {
 
     #[error("keyring entry was not found")]
     KeyringEntryNotFound,
+
+    #[error("select an unlock group with --unlock; configured groups: {0:?}")]
+    UnlockGroupRequired(Vec<String>),
+
+    #[error("unlock group `{0}` is not configured for this vault")]
+    UnlockGroupNotConfigured(String),
+
+    #[error("vault request failed ({code:?}): {message}")]
+    VaultRequest {
+        code: VaultResponseErrorCode,
+        message: String,
+    },
 
     #[error("the vault is still unsealed; stop its service before destroying it")]
     VaultIsLive,
@@ -107,8 +122,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
         askpass: cli.askpass.as_deref(),
     };
     match cli.command {
-        Command::Init { biometric } => initialize(&root, biometric, factor),
+        Command::Init { unlock } => initialize(&root, unlock, factor),
         Command::Unseal {
+            unlock,
             idle_seconds,
             maximum_seconds,
         } => run_vault(
@@ -119,8 +135,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 idle_timeout: Duration::from_secs(idle_seconds),
                 maximum_lifetime: Duration::from_secs(maximum_seconds),
             },
+            unlock.as_ref(),
         ),
         Command::Status => show_status(&root, socket),
+        Command::Seal => seal_vault(&root, socket),
         Command::Set {
             item,
             field,
@@ -128,14 +146,22 @@ fn run(cli: Cli) -> Result<(), CliError> {
         } => set_keyring_value(&root, socket, item, field, value_file.as_deref()),
         Command::Get { item, field } => get_keyring_value(&root, socket, item, field),
         Command::Delete { item, field } => delete_keyring_value(&root, socket, item, field),
-        Command::Destroy { yes_really_destroy } => {
-            destroy_vault(&root, socket, factor, yes_really_destroy)
-        }
-        Command::GrantCli => grant_cli(&root, factor),
+        Command::Destroy {
+            yes_really_destroy,
+            unlock,
+        } => destroy_vault(&root, socket, factor, yes_really_destroy, unlock.as_ref()),
+        Command::GrantCli { unlock } => grant_cli(&root, factor, unlock.as_ref()),
         Command::GrantSecretspec {
             executable,
             expires_in_seconds,
-        } => grant_secretspec(&root, &executable, expires_in_seconds, factor),
+            unlock,
+        } => grant_secretspec(
+            &root,
+            &executable,
+            expires_in_seconds,
+            factor,
+            unlock.as_ref(),
+        ),
         #[cfg(feature = "secretspec-provider")]
         Command::Provider => provider::serve(&root, socket),
     }

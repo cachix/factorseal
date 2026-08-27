@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use factorseal::UnlockGroup;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,11 +20,11 @@ pub(super) struct Cli {
     #[arg(long, global = true, env = "FACTORSEAL_SOCKET")]
     pub(super) socket: Option<PathBuf>,
 
-    /// Read the nested factor from a private regular file.
+    /// Read the password factor from a private regular file.
     #[arg(long, global = true)]
     pub(super) password_file: Option<PathBuf>,
 
-    /// Run this helper to obtain the nested factor and read it from the
+    /// Run this helper to obtain the password factor and read it from the
     /// helper's standard output. Packages use it to prompt without a
     /// controlling terminal; the prompt text is passed as the one argument.
     #[arg(long, global = true, env = "FACTORSEAL_ASKPASS")]
@@ -37,13 +38,17 @@ pub(super) struct Cli {
 pub(super) enum Command {
     /// Create and seal a hardware-bound vault.
     Init {
-        /// Require platform biometric verification when supported by key use.
-        #[arg(long)]
-        biometric: bool,
+        /// AND-separated factors in one unlock group; repeat for OR alternatives.
+        #[arg(long, value_name = "FACTORS", default_value = "password")]
+        unlock: Vec<UnlockGroup>,
     },
 
     /// Unseal the vault service until its lease ends.
     Unseal {
+        /// Exact unlock group to use; required when more than one is configured.
+        #[arg(long, value_name = "FACTORS")]
+        unlock: Option<UnlockGroup>,
+
         /// Idle seconds before hardware-unwrapped keys are discarded.
         #[arg(long, default_value_t = 300)]
         idle_seconds: u64,
@@ -55,6 +60,9 @@ pub(super) enum Command {
 
     /// Print validated non-secret vault metadata without unsealing.
     Status,
+
+    /// Seal the running vault service immediately.
+    Seal,
 
     /// Store or replace one value in the durable local keyring.
     Set {
@@ -86,15 +94,23 @@ pub(super) enum Command {
         field: Option<String>,
     },
 
-    /// Permanently delete this vault and both of its hardware keys.
+    /// Permanently delete this vault and all of its hardware keys.
     Destroy {
         /// Required acknowledgement because this cannot be undone.
         #[arg(long)]
         yes_really_destroy: bool,
+
+        /// Exact unlock group to use; required when more than one is configured.
+        #[arg(long, value_name = "FACTORS")]
+        unlock: Option<UnlockGroup>,
     },
 
     /// Reauthorize this exact Factorseal executable after an upgrade.
-    GrantCli,
+    GrantCli {
+        /// Exact unlock group to use; required when more than one is configured.
+        #[arg(long, value_name = "FACTORS")]
+        unlock: Option<UnlockGroup>,
+    },
 
     /// Authorize one exact SecretSpec provider-endpoint executable.
     GrantSecretspec {
@@ -103,6 +119,10 @@ pub(super) enum Command {
         /// Optional lifetime for the cache grant.
         #[arg(long)]
         expires_in_seconds: Option<u64>,
+
+        /// Exact unlock group to use; required when more than one is configured.
+        #[arg(long, value_name = "FACTORS")]
+        unlock: Option<UnlockGroup>,
     },
 
     /// Serve the SecretSpec external-provider protocol over standard I/O.

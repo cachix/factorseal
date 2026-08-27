@@ -30,22 +30,22 @@ bootstrap material:
 
 - random permanent `VaultId`;
 - `DeviceKeyId`, ML-DSA-65 public key, and stable Automerge actor ID;
-- recorded TPM/Secure Enclave backend and biometric policy;
-- distinct platform labels for the wrapping and signing keys;
-- wrapped 256-bit DEK and wrapped ML-DSA-65 seed;
-- platform identifier and, on Linux, Argon2id parameters and separate AEAD
-  nonces for the mandatory password layer;
+- recorded TPM/Secure Enclave backend and a versioned unlock policy;
+- one independently labeled wrapping/signing key pair for each OR group;
+- one wrapped 256-bit DEK and ML-DSA-65 seed payload per group;
+- Argon2id parameters and separate AEAD nonces for groups containing password;
 - local key epoch and creation time.
 
-Creation opens two distinct `hardware-enclave` keys. The platform wrapper
-rejects DPAPI-only and Linux software-keyring fallback backends. On Linux,
-Argon2id derives a password key which encrypts the DEK and signing seed with
-separate XChaCha20-Poly1305 nonces before those ciphertexts are TPM-wrapped;
-neither factor can recover a vault key alone. Every platform requires
-the platform user-verification policy. Unsealing reopens the recorded labels,
-checks the backend and policy, unwraps both values, applies the password layer
-where required, derives the public signing identity again, and rejects any
-mismatch before opening the database.
+Factors inside one unlock group are AND requirements; groups are OR
+alternatives. Hardware binding is implicit in every group. Creation opens two
+distinct `hardware-enclave` keys per group and rejects DPAPI-only and Linux
+software-keyring fallbacks. Password groups apply Argon2id and separate
+XChaCha20-Poly1305 layers before hardware wrapping. Biometric groups create
+their pair with the platform biometric policy; biometric-only groups have no
+password layer. Unsealing opens only the selected group's labels, checks its
+backend and policy, unwraps both values, applies its password layer when
+required, derives the public signing identity again, and rejects any mismatch
+before opening the database.
 
 The present ML-DSA-65 signing seed is hardware-wrapped and lives in zeroizing
 vault memory during the lease. A later native adapter may implement signatures
@@ -179,7 +179,7 @@ running installed end-to-end conformance on each platform.
 
 The shared core implements the following native adapters:
 
-- Linux: TPM 2.0 plus a Factorseal password, a private Unix socket authenticated
+- Linux: TPM 2.0 plus the configured unlock group, a private Unix socket authenticated
   with `SO_PEERCRED`, executable digest grants, and a systemd user unit;
 - macOS: Secure Enclave user verification, a private Unix socket authenticated
   with kernel peer credentials, peer PID, and audit token, plus a LaunchAgent;

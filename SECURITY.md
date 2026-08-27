@@ -26,16 +26,14 @@ is one authorized way to retrieve and update credentials:
   cleanup, native suspend/shutdown/session notifications, and live expiration
   all converge on the same store shutdown path.
 
-Every vault requires two nested factors. Argon2id uses 64 MiB and three
-iterations to derive a password key; that key separately encrypts the DEK and
-device-signing seed, and the TPM then wraps both ciphertexts. Neither a copied
-vault files plus their password nor the TPM material without the password can
-recover the keys. Password files are accepted only as private bounded regular
-files and are intended for short-lived session launch handoff.
-
-New macOS and Windows vaults may additionally require platform user verification
-when opening their Secure Enclave or TPM-backed keys. Software keyring and
-DPAPI-only fallbacks are rejected.
+Every unlock group is hardware-bound. Factors inside a group are AND
+requirements and independently wrapped groups are OR alternatives. Password
+groups use Argon2id with 64 MiB and three iterations, then separately encrypt
+the DEK and device-signing seed before hardware wrapping. Biometric groups gate
+their hardware keys with the platform biometric policy; biometric-only groups
+do not contain a password layer. Password files are accepted only as private
+bounded regular files and are intended for short-lived session launch handoff.
+Software keyring and DPAPI-only fallbacks are rejected.
 
 ## Authenticated transports
 
@@ -54,6 +52,10 @@ same image, and the peer's process start time is compared before and after
 resolution, so a reused process ID cannot inherit another process's grant.
 
 ## Honest limitations
+
+- An OR policy is bounded by its weakest unlock group. Biometric-only access
+  has no independent recovery secret and can be lost after hardware reset,
+  biometric enrollment changes, or platform-key invalidation.
 
 - Native lifecycle monitors are implemented on all targets, but packaged
   artifacts remain development-only until suspend, shutdown, logout, and

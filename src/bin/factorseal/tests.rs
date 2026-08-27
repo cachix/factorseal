@@ -1,5 +1,5 @@
 use super::cli::{Cli, Command};
-use super::commands::{read_bounded, read_keyring_value};
+use super::commands::{read_bounded, read_keyring_value, read_password_for_groups};
 use super::factor::read_factor;
 use super::*;
 
@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use factorseal::{UnlockFactorKind, UnlockGroup};
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -175,6 +176,52 @@ fn unseal_policy_and_root_are_explicitly_configurable() {
 }
 
 #[test]
+fn unlock_cli_uses_and_inside_groups_and_or_between_repetitions() {
+    let default = Cli::try_parse_from(["factorseal", "init"]).unwrap();
+    assert!(matches!(
+        default.command,
+        Command::Init { unlock } if unlock.len() == 1 && unlock[0].to_string() == "password"
+    ));
+
+    let cli = Cli::try_parse_from([
+        "factorseal",
+        "init",
+        "--unlock",
+        "password,biometric",
+        "--unlock",
+        "biometric",
+    ])
+    .unwrap();
+    let Command::Init { unlock } = cli.command else {
+        panic!("expected init command");
+    };
+    assert_eq!(unlock.len(), 2);
+    assert!(unlock[0].requires(UnlockFactorKind::Password));
+    assert!(unlock[0].requires(UnlockFactorKind::Biometric));
+    assert_eq!(unlock[1].to_string(), "biometric");
+
+    let cli = Cli::try_parse_from(["factorseal", "unseal", "--unlock", "biometric"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Unseal { unlock: Some(group), .. } if group.to_string() == "biometric"
+    ));
+}
+
+#[test]
+fn biometric_only_groups_do_not_read_a_password_source() {
+    let group = UnlockGroup::new([UnlockFactorKind::Biometric]).unwrap();
+    let factor = FactorSource {
+        password_file: Some(Path::new("/does/not/exist")),
+        askpass: None,
+    };
+    assert!(
+        read_password_for_groups(&[group], factor, false)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn keyring_commands_accept_item_field_and_service_override() {
     let cli = Cli::try_parse_from([
         "factorseal",
@@ -207,6 +254,13 @@ fn keyring_commands_accept_item_field_and_service_override() {
         Command::Get { item, field }
             if item == "github" && field.as_deref() == Some("token")
     ));
+}
+
+#[test]
+fn seal_is_a_first_class_cli_command_and_permission() {
+    let cli = Cli::try_parse_from(["factorseal", "seal"]).unwrap();
+    assert!(matches!(cli.command, Command::Seal));
+    assert!(KEYRING_PERMISSIONS.contains(&GrantPermission::Seal));
 }
 
 #[test]

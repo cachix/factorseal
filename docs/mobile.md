@@ -30,9 +30,10 @@ mobile-safe layers are:
 
 ## Platform adapter contract
 
-Implement `KeyProtectorFactory` and return two distinct non-exportable native
-keys. Factorseal generates their stable labels and calls the factory to create,
-open, and delete them. Each `KeyProtector` must:
+Implement `KeyProtectorFactory` and return distinct non-exportable native keys.
+Factorseal creates a wrapping/signing pair for each unlock group, generates
+their stable labels, and calls the factory to create, open, and delete them.
+Each `KeyProtector` must:
 
 - report the security level that actually created the key;
 - reject software fallback;
@@ -47,12 +48,18 @@ Accepted mobile combinations are deliberately fail-closed:
   `HardwareBackend::AndroidStrongBox` or
   `HardwareBackend::AndroidTrustedEnvironment`.
 
-Call `Vault::create_with_key_protector`,
-`Vault::unseal_with_key_protector`, and
+For explicit AND/OR policies, call
+`Vault::create_with_key_protector_policy`,
+`Vault::unseal_with_key_protector_group`, and
 `Vault::discard_initialization_with_key_protector`. After unsealing, open
 `VaultService` in the application process with `VaultService::open`. Grant the
 app's authenticated caller identity only the operations it needs, then route
 all app actions through `VaultRequest`; the raw encrypted store is not public.
+
+Each policy group creates two distinct native keys. Factors inside a group are
+AND requirements and groups are OR alternatives. The same password credential
+is used by every password-containing group in the initial API. A biometric-only
+group receives `UnlockCredentials::none()` and has no Argon2id layer.
 
 The current Rust boundary is synchronous. A biometric adapter must run the
 Factorseal call on a background thread, dispatch native prompt presentation to

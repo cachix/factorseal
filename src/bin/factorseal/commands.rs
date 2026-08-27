@@ -8,9 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
-    GrantPermission, Keyring, UnsealFactor, UnsealLeasePolicy, Vault, VaultAction, VaultClient,
-    VaultError, VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode,
-    VaultService, WireSecretAddress,
+    GrantPermission, Keyring, UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy,
+    UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient, VaultError, VaultMetadata,
+    VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService, WireSecretAddress,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -31,7 +31,7 @@ struct Status<'a> {
     actor_id: String,
     platform: &'a str,
     hardware_backend: &'a str,
-    nested_factor: &'a str,
+    unlock_policy: Vec<String>,
     key_epoch: u64,
     created_at: u64,
     state: &'static str,
@@ -39,11 +39,16 @@ struct Status<'a> {
 
 pub(super) fn initialize(
     root: &Path,
-    biometric: bool,
+    unlock_groups: Vec<UnlockGroup>,
     factor: FactorSource<'_>,
 ) -> Result<(), CliError> {
-    let password = read_factor(factor, true)?;
-    let unsealed = Vault::create(root, UnsealFactor::Password(&password), biometric)?;
+    let policy = UnlockPolicy::new(unlock_groups)?;
+    let password = read_password_for_groups(policy.groups(), factor, true)?;
+    let unsealed = Vault::create_with_unlock_policy(
+        root,
+        &policy,
+        credentials(password.as_ref().map(|value| value.as_slice())),
+    )?;
     let device = unsealed.public().clone();
     // The vault metadata is already on disk, and `create` refuses to run again while it
     // is there. Undo what this command wrote so `init` can simply be retried
@@ -83,13 +88,40 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
         actor_id: hex::encode(device.actor_id()),
         platform: device.platform(),
         hardware_backend: device.hardware_backend(),
-        nested_factor: device.nested_factor().as_str(),
+        unlock_policy: device
+            .unlock_policy()
+            .groups()
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         key_epoch: device.key_epoch(),
         created_at: device.created_at(),
         state,
     };
     println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
+}
+
+pub(super) fn seal_vault(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
+    let client = native_client(root, socket)?;
+    let request = VaultRequest::new(VaultAction::Seal {
+        namespace: KEYRING_NAMESPACE.to_vec(),
+    })?;
+    let response = client.request(&request)?;
+    match response.result {
+        Ok(VaultResponseBody::Sealed) => {
+            println!("Sealed Factorseal vault");
+            Ok(())
+        }
+        Ok(_) => Err(VaultError::Protocol(
+            "vault returned an unexpected response to a seal request".to_owned(),
+        )
+        .into()),
+        Err(error) => Err(CliError::VaultRequest {
+            code: error.code,
+            message: error.message,
+        }),
+    }
 }
 
 /// Ask the running agent which state this vault is in.
@@ -176,6 +208,7 @@ pub(super) fn destroy_vault(
     socket: Option<&Path>,
     factor: FactorSource<'_>,
     confirmed: bool,
+    requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
     if !confirmed {
         return Err(CliError::DestroyConfirmationRequired);
@@ -186,8 +219,13 @@ pub(super) fn destroy_vault(
         "unsealed" => return Err(CliError::VaultIsLive),
         _ => return Err(CliError::VaultStateUnknown),
     }
-    let password = read_factor(factor, false)?;
-    Vault::destroy(root, UnsealFactor::Password(&password))?;
+    let group = select_unlock_group(&device, requested_group)?;
+    let password = read_password_for_groups(std::slice::from_ref(&group), factor, false)?;
+    Vault::destroy_with_unlock_group(
+        root,
+        &group,
+        credentials(password.as_ref().map(|value| value.as_slice())),
+    )?;
     println!("Destroyed Factorseal vault at {}", root.display());
     Ok(())
 }
@@ -240,10 +278,10 @@ pub(super) fn run_vault(
     socket: Option<&Path>,
     factor: FactorSource<'_>,
     policy: UnsealLeasePolicy,
+    requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
-    let password = read_factor(factor, false)?;
     let device = Vault::inspect(root)?;
-    let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
+    let unsealed = unseal_selected(root, &device, requested_group, factor)?;
     let service = Arc::new(VaultService::open(root, unsealed, unix_time()?, policy)?);
     serve_vault(&device, &service, root, socket)
 }
@@ -253,14 +291,15 @@ pub(super) fn grant_secretspec(
     executable: &Path,
     expires_in_seconds: Option<u64>,
     factor: FactorSource<'_>,
+    requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
     let now = unix_time()?;
     let expires_at = expires_in_seconds
         .map(|seconds| now.checked_add(seconds).ok_or(CliError::LifetimeOverflow))
         .transpose()?;
     let caller = caller_identity_for_executable(executable)?;
-    let password = read_factor(factor, false)?;
-    let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
+    let device = Vault::inspect(root)?;
+    let unsealed = unseal_selected(root, &device, requested_group, factor)?;
     let service = VaultService::open(root, unsealed, now, UnsealLeasePolicy::default())?;
     service.authorize_cache_namespace(
         &caller,
@@ -281,10 +320,14 @@ pub(super) fn grant_secretspec(
     Ok(())
 }
 
-pub(super) fn grant_cli(root: &Path, factor: FactorSource<'_>) -> Result<(), CliError> {
+pub(super) fn grant_cli(
+    root: &Path,
+    factor: FactorSource<'_>,
+    requested_group: Option<&UnlockGroup>,
+) -> Result<(), CliError> {
     let now = unix_time()?;
-    let password = read_factor(factor, false)?;
-    let unsealed = Vault::unseal(root, UnsealFactor::Password(&password))?;
+    let device = Vault::inspect(root)?;
+    let unsealed = unseal_selected(root, &device, requested_group, factor)?;
     let service = VaultService::open(root, unsealed, now, UnsealLeasePolicy::default())?;
     authorize_cli(&service, now)?;
     service.seal()?;
@@ -298,6 +341,58 @@ fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
     let caller = caller_identity_for_executable(&executable)?;
     service.authorize_namespace(&caller, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, None, now)?;
     Ok(())
+}
+
+fn unseal_selected(
+    root: &Path,
+    device: &VaultMetadata,
+    requested_group: Option<&UnlockGroup>,
+    factor: FactorSource<'_>,
+) -> Result<UnsealedVault, CliError> {
+    let group = select_unlock_group(device, requested_group)?;
+    let password = read_password_for_groups(std::slice::from_ref(&group), factor, false)?;
+    Vault::unseal_with_unlock_group(
+        root,
+        &group,
+        credentials(password.as_ref().map(|value| value.as_slice())),
+    )
+    .map_err(Into::into)
+}
+
+fn select_unlock_group(
+    device: &VaultMetadata,
+    requested: Option<&UnlockGroup>,
+) -> Result<UnlockGroup, CliError> {
+    let groups = device.unlock_policy().groups();
+    if let Some(requested) = requested {
+        return groups
+            .iter()
+            .find(|group| *group == requested)
+            .cloned()
+            .ok_or_else(|| CliError::UnlockGroupNotConfigured(requested.to_string()));
+    }
+    match groups {
+        [group] => Ok(group.clone()),
+        _ => Err(CliError::UnlockGroupRequired(
+            groups.iter().map(ToString::to_string).collect(),
+        )),
+    }
+}
+
+pub(super) fn read_password_for_groups(
+    groups: &[UnlockGroup],
+    factor: FactorSource<'_>,
+    confirm: bool,
+) -> Result<Option<Zeroizing<Vec<u8>>>, CliError> {
+    groups
+        .iter()
+        .any(|group| group.requires(UnlockFactorKind::Password))
+        .then(|| read_factor(factor, confirm))
+        .transpose()
+}
+
+fn credentials(password: Option<&[u8]>) -> UnlockCredentials<'_> {
+    password.map_or_else(UnlockCredentials::none, UnlockCredentials::with_password)
 }
 
 pub(super) fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {

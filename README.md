@@ -39,9 +39,22 @@ rejected. Once the `factorseal` binary is installed, create a vault:
 $ factorseal init
 ```
 
-Initialization prompts for a Factorseal password, creates the enclave-protected
-vault, authorizes that exact CLI executable for the durable keyring, and leaves
-the vault sealed.
+By default, initialization prompts for a Factorseal password, creates the
+hardware-protected vault, authorizes that exact CLI executable for the durable
+keyring, and leaves the vault sealed.
+
+Unlock policies use AND inside one comma-separated group and OR between
+repeated groups. Platform hardware binding is implicit in every group:
+
+```console
+$ factorseal init --unlock password,biometric
+$ factorseal init --unlock password --unlock biometric
+```
+
+The first policy requires password AND biometric approval. The second accepts
+password OR biometric approval. A biometric-only policy does not ask for a
+Factorseal password. When a vault has multiple groups, select the intended one
+while unsealing, for example `factorseal unseal --unlock biometric`.
 
 Start an unsealed service in one terminal:
 
@@ -72,14 +85,20 @@ matching service is reachable.
 Replacing or upgrading the binary changes its executable digest. Stop the
 service and run `factorseal grant-cli` to authorize the new CLI executable.
 
+Seal the running service immediately when it is no longer needed:
+
+```console
+$ factorseal seal
+```
+
 ## How it works
 
 ```text
-        Platform enclave                 Factorseal password
-  TPM 2.0 (Linux/Windows)              Argon2id nested factor
+        Platform enclave               Selected unlock group
+  TPM 2.0 (Linux/Windows)          password and/or biometric
      Secure Enclave (macOS)
                   \                       /
-                   +---- create/unseal ---+
+                   +---- wrapping slot ---+
                               |
                    DEK + device signing seed
                               |
@@ -102,9 +121,11 @@ service and run `factorseal grant-cli` to authorize the new CLI executable.
                      embedded Turso database
 ```
 
-The platform enclave and password protect vault bootstrap keys during creation
-and unsealing; enclave operations are not in the database write path. Once
-unsealed, the data-encryption key and signing seed exist only in zeroizing
+Every configured OR alternative has an independent pair of hardware-wrapping
+keys. A biometric factor gates those keys through the platform policy; a
+password factor additionally encrypts the wrapped payload with Argon2id and
+XChaCha20-Poly1305. Enclave operations are not in the database write path.
+Once unsealed, the data-encryption key and signing seed exist only in zeroizing
 memory owned by the store worker until the vault seals.
 
 ### Creation and unsealing
@@ -113,10 +134,11 @@ Creation generates a random 256-bit data-encryption key and a separate
 ML-DSA-65 signing seed. The signing identity also determines the permanent
 `DeviceKeyId` and stable Automerge actor ID.
 
-The password is hardened with Argon2id and separately encrypts the data key and
-signing seed with XChaCha20-Poly1305. Two distinct enclave keys then wrap those
-ciphertexts. Neither a copied vault plus its password nor the enclave keys
-without the password can recover the vault keys.
+Factors inside a group are all required; each repeated group is an independent
+OR alternative. Password groups harden the shared password with Argon2id and
+separately encrypt the data key and signing seed with XChaCha20-Poly1305 before
+two distinct enclave keys wrap them. Biometric-only groups wrap those keys
+directly with a separate pair whose use requires platform biometric approval.
 
 Unsealing reverses those layers, derives the public signing identity again, and
 rejects any mismatch before opening the database. The store then verifies its
@@ -240,7 +262,7 @@ An unseal lease has independent idle and absolute deadlines. Authorized secret
 operations refresh only the idle deadline and can never extend the absolute
 deadline. Status checks do not refresh the lease.
 
-Explicit sealing, lease expiry, termination, logout, session lock, suspend, and
+`factorseal seal`, lease expiry, termination, logout, session lock, suspend, and
 shutdown all converge on the same worker shutdown path. The platform adapters
 monitor logind on Linux, AppKit notifications on macOS, and power/session window
 messages on Windows. Sealing invalidates every store handle and zeroizes the
@@ -248,8 +270,8 @@ worker's data key and signing seed.
 
 The vault directory contains:
 
-- `factorseal.json`: public identity, key labels, factor parameters, and
-  enclave-wrapped bootstrap material;
+- `factorseal.json`: public identity, unlock policy, per-group key labels,
+  factor parameters, and enclave-wrapped bootstrap material;
 - `factorseal.db`: encrypted, signed vault state;
 - `factorseal.lock`: exclusive store ownership;
 - `factorseal.sock`: the live Linux/macOS endpoint, present only while served.
@@ -259,7 +281,8 @@ Windows uses `\\.\pipe\factorseal-<vault-id>` instead of a socket.
 overrides the native endpoint.
 
 `factorseal destroy --yes-really-destroy` permanently deletes a sealed vault,
-including its enclave keys. It requires the nested factor and is irreversible.
+including every unlock group's enclave keys. It requires one configured unlock
+group and is irreversible.
 
 ## Mobile embedding
 
@@ -293,10 +316,11 @@ The design does not detect rollback of the complete vault directory. Doing so
 requires a trusted checkpoint stored elsewhere. The offline MVP deliberately
 excludes whole-directory rollback from its security claim.
 
-The password remains limited by its entropy: Argon2id raises offline guessing
-cost but cannot turn a human-memorable password into a high-entropy
-post-quantum recovery secret. ML-DSA-65 protects state authenticity, while the
-current platform wrapping mechanisms have their own cryptographic assumptions.
+Password groups remain limited by password entropy: Argon2id raises offline
+guessing cost but cannot turn a human-memorable password into a high-entropy
+post-quantum recovery secret. An OR policy is only as strong as its weakest
+group. ML-DSA-65 protects state authenticity, while the current platform
+wrapping mechanisms have their own cryptographic assumptions.
 
 The signing seed is enclave-wrapped but exists in zeroizing process memory
 while unsealed; signing is not yet performed by a non-exportable native signing

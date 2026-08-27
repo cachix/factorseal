@@ -10,14 +10,14 @@ use zeroize::Zeroizing;
 use super::commands::read_bounded;
 use super::{CliError, MAX_FACTOR_BYTES};
 
-/// Where the vault obtains its nested factor.
+/// Where the vault obtains a password factor when the selected group needs it.
 #[derive(Clone, Copy)]
 pub(super) struct FactorSource<'a> {
     pub(super) password_file: Option<&'a Path>,
     pub(super) askpass: Option<&'a Path>,
 }
 
-/// Read the nested factor from an explicit file, an askpass helper, or the
+/// Read the password factor from an explicit file, an askpass helper, or the
 /// controlling terminal, in that order.
 ///
 /// A package that starts the vault from launchd, a logon task, or a systemd

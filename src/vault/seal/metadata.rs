@@ -11,14 +11,16 @@ use super::factor::NestedProtection;
 use super::filesystem::path_error;
 #[cfg(feature = "key-protection")]
 use super::filesystem::write_new_private_file;
+use super::policy::{UnlockFactorKind, UnlockGroup, UnlockPolicy};
 use super::{KEY_BYTES, VaultMetadata, VaultPlatform};
 use crate::vault::{DeviceKeyId, VaultError, VaultId, VaultResult};
 
 pub(super) const VAULT_FILE: &str = "factorseal.json";
 const VAULT_FORMAT: &str = "factorseal-vault";
-// Version 2 replaces the quantum-vulnerable Ed25519 device identity with an
-// ML-DSA-65 identity. There are no released vaults to migrate.
-const VAULT_VERSION: u32 = 2;
+// Version 3 replaces the single password/biometric tuple with a versioned
+// unlock policy and one independently wrapped slot per OR alternative. There
+// are no released vaults to migrate; older versions are rejected explicitly.
+const VAULT_VERSION: u32 = 3;
 const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,14 +34,21 @@ pub(super) struct VaultFile {
     pub(super) actor_id: Vec<u8>,
     pub(super) platform: VaultPlatform,
     pub(super) hardware_backend: String,
+    pub(super) unlock_policy: UnlockPolicy,
+    pub(super) unlock_slots: Vec<UnlockSlot>,
+    pub(super) key_epoch: u64,
+    pub(super) created_at: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UnlockSlot {
+    pub(super) group: UnlockGroup,
     pub(super) wrapping_key_label: String,
     pub(super) signing_key_label: String,
     pub(super) wrapped_data_key: Vec<u8>,
     pub(super) wrapped_signing_seed: Vec<u8>,
-    pub(super) nested_protection: NestedProtection,
-    pub(super) biometric: bool,
-    pub(super) key_epoch: u64,
-    pub(super) created_at: u64,
+    pub(super) password_protection: Option<NestedProtection>,
 }
 
 #[cfg(feature = "key-protection")]
@@ -50,12 +59,8 @@ pub(super) struct NewVaultFile {
     pub(super) actor_id: Vec<u8>,
     pub(super) platform: VaultPlatform,
     pub(super) hardware_backend: String,
-    pub(super) wrapping_key_label: String,
-    pub(super) signing_key_label: String,
-    pub(super) wrapped_data_key: Vec<u8>,
-    pub(super) wrapped_signing_seed: Vec<u8>,
-    pub(super) nested_protection: NestedProtection,
-    pub(super) biometric: bool,
+    pub(super) unlock_policy: UnlockPolicy,
+    pub(super) unlock_slots: Vec<UnlockSlot>,
     pub(super) created_at: u64,
 }
 
@@ -69,12 +74,8 @@ impl VaultFile {
             actor_id,
             platform,
             hardware_backend,
-            wrapping_key_label,
-            signing_key_label,
-            wrapped_data_key,
-            wrapped_signing_seed,
-            nested_protection,
-            biometric,
+            unlock_policy,
+            unlock_slots,
             created_at,
         } = contents;
         Self {
@@ -86,12 +87,8 @@ impl VaultFile {
             actor_id,
             platform,
             hardware_backend,
-            wrapping_key_label,
-            signing_key_label,
-            wrapped_data_key,
-            wrapped_signing_seed,
-            nested_protection,
-            biometric,
+            unlock_policy,
+            unlock_slots,
             key_epoch: 0,
             created_at,
         }
@@ -105,7 +102,7 @@ impl VaultFile {
             actor_id: self.actor_id.clone(),
             platform: self.platform,
             hardware_backend: self.hardware_backend.clone(),
-            nested_factor: self.nested_protection.kind(),
+            unlock_policy: self.unlock_policy.clone(),
             key_epoch: self.key_epoch,
             created_at: self.created_at,
         }
@@ -118,12 +115,7 @@ impl VaultFile {
             ));
         }
         if !platform_accepts_backend(self.platform, &self.hardware_backend)
-            || self.wrapping_key_label.is_empty()
-            || self.signing_key_label.is_empty()
-            || self.wrapping_key_label == self.signing_key_label
             || self.actor_id.is_empty()
-            || self.wrapped_data_key.is_empty()
-            || self.wrapped_signing_seed.is_empty()
             || DeviceKeyId::for_public_key(&self.public_signing_key) != self.device_key_id
             || actor_id_for_public_key(&self.public_signing_key).as_slice() != self.actor_id
         {
@@ -131,7 +123,50 @@ impl VaultFile {
                 "vault metadata is inconsistent".to_owned(),
             ));
         }
-        self.nested_protection.validate()?;
+        self.unlock_policy.validate()?;
+        if self.unlock_slots.len() != self.unlock_policy.groups().len() {
+            return Err(VaultError::Protection(
+                "unlock policy and wrapping slots do not match".to_owned(),
+            ));
+        }
+        let mut labels = Vec::with_capacity(self.unlock_slots.len() * 2);
+        for (slot, group) in self.unlock_slots.iter().zip(self.unlock_policy.groups()) {
+            slot.validate()?;
+            if &slot.group != group {
+                return Err(VaultError::Protection(
+                    "unlock policy and wrapping slot order do not match".to_owned(),
+                ));
+            }
+            labels.push(slot.wrapping_key_label.as_str());
+            labels.push(slot.signing_key_label.as_str());
+        }
+        labels.sort_unstable();
+        if labels.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(VaultError::Protection(
+                "unlock wrapping key labels must be distinct".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl UnlockSlot {
+    fn validate(&self) -> VaultResult<()> {
+        self.group.validate()?;
+        if self.wrapping_key_label.is_empty()
+            || self.signing_key_label.is_empty()
+            || self.wrapping_key_label == self.signing_key_label
+            || self.wrapped_data_key.is_empty()
+            || self.wrapped_signing_seed.is_empty()
+            || self.password_protection.is_some() != self.group.requires(UnlockFactorKind::Password)
+        {
+            return Err(VaultError::Protection(
+                "unlock wrapping slot is inconsistent".to_owned(),
+            ));
+        }
+        if let Some(protection) = &self.password_protection {
+            protection.validate()?;
+        }
         Ok(())
     }
 }

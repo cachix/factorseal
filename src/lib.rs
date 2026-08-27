@@ -2,8 +2,8 @@
 //!
 //! A per-user background service owns an
 //! embedded Turso database containing encrypted, signed Automerge documents.
-//! Every platform nests a Factorseal password inside its hardware key
-//! wrapping, so neither factor unseals it alone. Applications use its keyring
+//! Each vault records AND-factor groups as independently hardware-wrapped OR
+//! alternatives. Applications use its keyring
 //! interface over authenticated local IPC and never open the database or
 //! receive its keys.
 //!
@@ -35,8 +35,8 @@ pub use keyring::{Keyring, KeyringError, KeyringResult};
 ))]
 pub use vault::{
     DeviceKeyId, DocumentId, DocumentScope, NestedFactorKind, RequestId, SecretAddress,
-    UnsealFactor, UnsealedVault, Vault, VaultError, VaultId, VaultMetadata, VaultPlatform,
-    VaultResult,
+    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealFactor, UnsealedVault,
+    Vault, VaultError, VaultId, VaultMetadata, VaultPlatform, VaultResult,
 };
 
 #[cfg(feature = "vault-client")]

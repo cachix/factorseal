@@ -78,6 +78,7 @@ pub(super) struct NestedProtection {
 }
 
 impl NestedProtection {
+    #[allow(dead_code)]
     pub(super) const fn kind(&self) -> NestedFactorKind {
         self.factor.kind()
     }
@@ -309,7 +310,7 @@ fn factor_empty_error(kind: NestedFactorKind) -> VaultError {
     VaultError::Protection(format!("the {kind} factor must not be empty"))
 }
 #[cfg(feature = "key-protection")]
-fn decode_key<const LENGTH: usize>(
+pub(super) fn decode_key<const LENGTH: usize>(
     plaintext: &Zeroizing<Vec<u8>>,
     name: &'static str,
 ) -> VaultResult<Zeroizing<[u8; LENGTH]>> {
