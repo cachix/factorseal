@@ -4,7 +4,7 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
-- Bump the native protocol to version 2 and forward SecretSpec's declared
+- Bump the native protocol to version 3 and forward SecretSpec's declared
   project, profile, base directory, and access reason through each provider
   request, supporting contextual audit and approval surfaces without treating
   caller-provided metadata as identity.
@@ -13,6 +13,9 @@ All notable changes to FactorSeal will be documented in this file.
   approve`, and `approvals deny`. Approval requires a vault-signed challenge
   produced after satisfying one configured unlock group. Pending requests stay
   in memory for seven days, with equivalent requests refreshing the same ID.
+  Interactive watch mode shows the authenticated provider principal and
+  requires an explicit terminal decision. SecretSpec cache addresses are
+  project-derived and checked before project grants are accepted.
 - Replace the password-plus-biometric boolean with versioned unlock policies:
   comma-separated factors are AND requirements and repeated `--unlock` groups
   are independently hardware-wrapped OR alternatives. Support password,

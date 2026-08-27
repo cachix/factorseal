@@ -1,7 +1,8 @@
 //! Command implementations for vault lifecycle, keyring, and grant operations.
 
+use std::collections::HashSet;
 use std::fs;
-use std::io::{IsTerminal as _, Read, Write};
+use std::io::{BufRead, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -308,33 +309,52 @@ fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ApprovalOptions<'a> {
+    pub(super) watch: bool,
+    pub(super) prompt: bool,
+    pub(super) json: bool,
+    pub(super) unlock: Option<&'a UnlockGroup>,
+    pub(super) action: Option<&'a ApprovalCommand>,
+}
+
 pub(super) fn manage_approvals(
     root: &Path,
     socket: Option<&Path>,
     factor: FactorSource<'_>,
-    watch: bool,
-    json: bool,
-    action: Option<&ApprovalCommand>,
+    options: ApprovalOptions<'_>,
 ) -> Result<(), CliError> {
+    let ApprovalOptions {
+        watch,
+        prompt,
+        json,
+        unlock,
+        action,
+    } = options;
     match action {
-        Some(ApprovalCommand::Approve { id, unlock }) => {
-            if watch || json {
+        Some(ApprovalCommand::Approve { id }) => {
+            if watch || prompt || json {
                 return Err(VaultError::Protocol(
-                    "--watch and --json cannot be combined with approvals approve".to_owned(),
+                    "listing flags cannot be combined with approvals approve".to_owned(),
                 )
                 .into());
             }
-            approve(root, socket, factor, id, unlock.as_ref())
+            approve(root, socket, factor, id, unlock)
         }
         Some(ApprovalCommand::Deny { id }) => {
-            if watch || json {
+            if watch || prompt || json || unlock.is_some() {
                 return Err(VaultError::Protocol(
-                    "--watch and --json cannot be combined with approvals deny".to_owned(),
+                    "listing and unlock flags cannot be combined with approvals deny".to_owned(),
                 )
                 .into());
             }
             resolve_approval(root, socket, VaultAction::Deny { id: id.clone() }, false)
         }
+        None if prompt => prompt_approvals(root, socket, factor, unlock),
+        None if unlock.is_some() => Err(VaultError::Protocol(
+            "--unlock requires approvals approve or --prompt".to_owned(),
+        )
+        .into()),
         None => list_approvals(root, socket, watch, json),
     }
 }
@@ -389,19 +409,147 @@ fn print_approvals(pending: &[PendingApproval], json: bool) -> Result<(), CliErr
         return Ok(());
     }
     for approval in pending {
-        let project = approval.application.project.as_deref().unwrap_or("unknown");
-        let profile = approval.application.profile.as_deref().unwrap_or("default");
-        let reason = approval
-            .application
-            .reason
-            .as_deref()
-            .unwrap_or("unspecified");
-        println!(
-            "{}  {:?}  {project}/{profile}  reason: {reason}  expires: {}",
-            approval.id, approval.operation, approval.expires_at
-        );
+        write_approval(&mut std::io::stdout().lock(), approval)?;
     }
     Ok(())
+}
+
+fn write_approval(output: &mut impl Write, approval: &PendingApproval) -> Result<(), CliError> {
+    let project = approval.application.project.as_deref().unwrap_or("unknown");
+    let profile = approval.application.profile.as_deref().unwrap_or("default");
+    let reason = approval
+        .application
+        .reason
+        .as_deref()
+        .unwrap_or("unspecified");
+    let base_dir = approval
+        .application
+        .base_dir
+        .as_deref()
+        .unwrap_or("unknown");
+    let signer = approval
+        .principal
+        .signer_id
+        .as_deref()
+        .unwrap_or("unsigned");
+    writeln!(output, "{}  {:?}", approval.id, approval.operation)
+        .and_then(|()| {
+            writeln!(
+                output,
+                "  trusted: {:?} {}  user: {}  signer: {signer}",
+                approval.principal.platform,
+                approval.principal.application_id,
+                approval.principal.user_id,
+            )
+        })
+        .and_then(|()| {
+            writeln!(
+                output,
+                "  executable digest: {}",
+                hex::encode(approval.principal.executable_digest)
+            )
+        })
+        .and_then(|()| {
+            writeln!(
+                output,
+                "  declared: {project}/{profile}  base directory: {base_dir}"
+            )
+        })
+        .and_then(|()| {
+            writeln!(
+                output,
+                "  reason: {reason}  created: {}  expires: {}",
+                approval.created_at, approval.expires_at
+            )
+        })
+        .map_err(|error| CliError::ApprovalPrompt(error.to_string()))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ApprovalDecision {
+    Approve,
+    Deny,
+    Ignore,
+}
+
+pub(super) fn require_prompt_terminal(input: bool, output: bool) -> Result<(), CliError> {
+    if input && output {
+        Ok(())
+    } else {
+        Err(CliError::ApprovalPromptRequiresTerminal)
+    }
+}
+
+pub(super) fn read_approval_decision(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<ApprovalDecision, CliError> {
+    loop {
+        write!(output, "Action [a]pprove/[d]eny/[i]gnore: ")
+            .and_then(|()| output.flush())
+            .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
+        let mut answer = String::new();
+        if input
+            .read_line(&mut answer)
+            .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?
+            == 0
+        {
+            return Err(CliError::ApprovalPrompt("input was closed".to_owned()));
+        }
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "a" | "approve" => return Ok(ApprovalDecision::Approve),
+            "d" | "deny" => return Ok(ApprovalDecision::Deny),
+            "i" | "ignore" => return Ok(ApprovalDecision::Ignore),
+            _ => writeln!(output, "Enter approve, deny, or ignore.")
+                .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?,
+        }
+    }
+}
+
+fn prompt_approvals(
+    root: &Path,
+    socket: Option<&Path>,
+    factor: FactorSource<'_>,
+    unlock: Option<&UnlockGroup>,
+) -> Result<(), CliError> {
+    let stdin = std::io::stdin();
+    let stderr = std::io::stderr();
+    require_prompt_terminal(stdin.is_terminal(), stderr.is_terminal())?;
+    let mut input = stdin.lock();
+    let mut output = stderr.lock();
+    let client = native_client(root, socket)?;
+    let mut last_revision = None;
+    let mut handled = HashSet::new();
+    loop {
+        let (revision, pending) = approvals(&client)?;
+        if last_revision != Some(revision) {
+            handled.retain(|id| pending.iter().any(|approval| &approval.id == id));
+            for approval in &pending {
+                if handled.contains(&approval.id) {
+                    continue;
+                }
+                write_approval(&mut output, approval)?;
+                let decision = read_approval_decision(&mut input, &mut output)?;
+                handled.insert(approval.id.clone());
+                match decision {
+                    ApprovalDecision::Approve => {
+                        approve(root, socket, factor, &approval.id, unlock)?;
+                    }
+                    ApprovalDecision::Deny => resolve_approval(
+                        root,
+                        socket,
+                        VaultAction::Deny {
+                            id: approval.id.clone(),
+                        },
+                        false,
+                    )?,
+                    ApprovalDecision::Ignore => {}
+                }
+            }
+            last_revision = Some(revision);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
 
 fn approve(

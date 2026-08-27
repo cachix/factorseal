@@ -139,16 +139,17 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         )
         .unwrap()
     };
-    let get = |project: &str| {
+    let get_scoped = |project: &str, address_project: &str| {
         VaultRequest::new_with_application(
             VaultAction::GetCache {
                 namespace: b"secretspec-cache/v1".to_vec(),
-                address: address(),
+                address: address().scope_to_project(address_project).unwrap(),
             },
             application(project),
         )
         .unwrap()
     };
+    let get = |project: &str| get_scoped(project, project);
 
     let denied = service.handle(&provider, get("demo"), 101);
     let interaction = denied.result.unwrap_err().interaction.unwrap();
@@ -179,6 +180,14 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     };
     assert_eq!(approvals.len(), 1);
     assert_eq!(approvals[0].application.reason.as_deref(), Some("deploy"));
+    assert_eq!(
+        approvals[0].principal.application_id,
+        provider.application_id()
+    );
+    assert_eq!(
+        approvals[0].principal.executable_digest,
+        *provider.executable_digest()
+    );
 
     let root = directory.path().join("factorseal");
     let unsealed = Vault::unseal_for_test(&root).unwrap();
@@ -209,6 +218,18 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
             .unwrap_err()
             .interaction
             .is_some()
+    );
+    let mismatched = service
+        .handle(&provider, get_scoped("demo", "other-project"), 206)
+        .result
+        .unwrap_err();
+    assert_eq!(
+        mismatched.code,
+        VaultResponseErrorCode::AuthorizationRequired
+    );
+    assert!(
+        mismatched.interaction.is_none(),
+        "a mismatched project address must not even create an approvable request"
     );
 }
 

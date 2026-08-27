@@ -4,13 +4,12 @@ use std::io;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "vault-store")]
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::vault::{SecretAddress, VaultError, VaultResult};
 
-pub(super) const PROTOCOL_VERSION: u8 = 2;
+pub(super) const PROTOCOL_VERSION: u8 = 3;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
@@ -21,6 +20,7 @@ const MAX_MUTATIONS_PER_REQUEST: usize = 64;
 const MAX_APPROVAL_ID_BYTES: usize = 128;
 #[cfg(feature = "vault-store")]
 const CALLER_FINGERPRINT_DOMAIN: &[u8] = b"factorseal/caller-identity/v1\0";
+const PROJECT_ADDRESS_DOMAIN: &[u8] = b"factorseal/project-address/v1\0";
 
 /// Platform that authenticated one local IPC caller.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -173,9 +173,39 @@ impl WireSecretAddress {
         self.resolve().map(|_| ())
     }
 
+    /// Bind a cache address to one caller-declared project. The service checks
+    /// this prefix before considering a project-scoped grant.
+    pub fn scope_to_project(mut self, project: &str) -> VaultResult<Self> {
+        if project.is_empty() || project.len() > MAX_APPLICATION_COMPONENT_BYTES {
+            return Err(VaultError::Protocol(
+                "application project is empty or too long".to_owned(),
+            ));
+        }
+        self.item = format!(
+            "{}{item}",
+            project_address_prefix(project),
+            item = self.item
+        );
+        self.validate()?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "vault-store")]
+    pub(super) fn is_scoped_to_project(&self, project: &str) -> bool {
+        self.item.starts_with(&project_address_prefix(project))
+    }
+
     pub(super) fn resolve(&self) -> VaultResult<SecretAddress> {
         SecretAddress::new(self.item.clone(), self.field.clone())
     }
+}
+
+fn project_address_prefix(project: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(PROJECT_ADDRESS_DOMAIN);
+    digest.update((project.len() as u64).to_be_bytes());
+    digest.update(project.as_bytes());
+    format!("project/v1/{}/", URL_SAFE_NO_PAD.encode(digest.finalize()))
 }
 
 /// Secret bytes that wipe their allocation on drop.
@@ -662,8 +692,33 @@ pub struct PendingApproval {
     pub created_at: u64,
     pub expires_at: u64,
     pub operation: ApprovalOperation,
+    /// Transport-authenticated identity used as the grant principal.
+    pub principal: ApprovalPrincipal,
+    /// Caller-declared display and audit context; never grant authority.
     pub application: VaultApplicationContext,
     pub challenge: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalPrincipal {
+    pub platform: CallerPlatform,
+    pub user_id: String,
+    pub application_id: String,
+    pub executable_digest: [u8; 32],
+    pub signer_id: Option<String>,
+}
+
+impl From<&CallerIdentity> for ApprovalPrincipal {
+    fn from(identity: &CallerIdentity) -> Self {
+        Self {
+            platform: identity.platform(),
+            user_id: identity.user_id().to_owned(),
+            application_id: identity.application_id().to_owned(),
+            executable_digest: *identity.executable_digest(),
+            signer_id: identity.signer_id().map(str::to_owned),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

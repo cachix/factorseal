@@ -19,7 +19,7 @@ mod provider;
 
 use cli::{Cli, Command};
 use commands::{
-    delete_keyring_value, destroy_vault, get_keyring_value, grant_cli, initialize,
+    ApprovalOptions, delete_keyring_value, destroy_vault, get_keyring_value, grant_cli, initialize,
     manage_approvals, resolve_root, run_vault, seal_vault, set_keyring_value, show_status,
 };
 use factor::FactorSource;
@@ -86,6 +86,12 @@ enum CliError {
     #[error("could not identify the Factorseal executable: {0}")]
     CurrentExecutable(String),
 
+    #[error("interactive approval prompting requires terminal input and error output")]
+    ApprovalPromptRequiresTerminal,
+
+    #[error("approval prompt failed: {0}")]
+    ApprovalPrompt(String),
+
     #[error(
         "no way to obtain the Factorseal factor: there is no controlling \
          terminal, and neither --askpass nor --password-file was given"
@@ -150,9 +156,22 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::GrantCli { unlock } => grant_cli(&root, factor, unlock.as_ref()),
         Command::Approvals {
             watch,
+            prompt,
             json,
+            unlock,
             action,
-        } => manage_approvals(&root, socket, factor, watch, json, action.as_ref()),
+        } => manage_approvals(
+            &root,
+            socket,
+            factor,
+            ApprovalOptions {
+                watch,
+                prompt,
+                json,
+                unlock: unlock.as_ref(),
+                action: action.as_ref(),
+            },
+        ),
         #[cfg(feature = "secretspec-provider")]
         Command::Provider => provider::serve(&root, socket),
     }

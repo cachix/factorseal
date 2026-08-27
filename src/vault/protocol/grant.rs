@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::vault::{DocumentScope, SecretAddress, VaultError, VaultResult, VaultStore};
+use crate::vault::{
+    DocumentScope, SecretAddress, VaultError, VaultResult, VaultStore, WireSecretAddress,
+};
 
 use super::CallerIdentity;
 use super::wire::append_digest_bytes;
@@ -127,7 +129,12 @@ pub(super) fn require_grant(
             address,
         }));
     }
-    if let Some(project) = project {
+    if let Some(project) = project
+        && address.is_none_or(|address| {
+            WireSecretAddress::new(address.item(), address.field().map(str::to_owned))
+                .is_scoped_to_project(project)
+        })
+    {
         targets.push(grant_target_digest(&GrantTarget::Project {
             scope,
             namespace,

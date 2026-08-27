@@ -8,8 +8,8 @@ use crate::vault::{DocumentScope, VaultError, VaultResult, VaultStore};
 
 use super::super::grant::{GrantTarget, store_grant};
 use super::super::{
-    ApprovalOperation, CallerIdentity, GrantPermission, PendingApproval, VaultAction,
-    VaultApplicationContext, VaultInteractionReference,
+    ApprovalOperation, ApprovalPrincipal, CallerIdentity, GrantPermission, PendingApproval,
+    VaultAction, VaultApplicationContext, VaultInteractionReference,
 };
 use crate::vault::signature::{approval_payload, verify};
 
@@ -48,32 +48,38 @@ impl ApprovalCandidate {
         action: &VaultAction,
     ) -> Option<Self> {
         let application = application?.clone();
-        application.project.as_ref()?;
+        let project = application.project.as_deref()?;
         let (scope, namespace, permission, operation) = match action {
-            VaultAction::GetCache { namespace, .. } => (
-                DocumentScope::DeviceCache,
-                namespace,
-                GrantPermission::Get,
-                ApprovalOperation::Get,
-            ),
-            VaultAction::PutCache { namespace, .. } => (
+            VaultAction::GetCache { namespace, address }
+                if address.is_scoped_to_project(project) =>
+            {
+                (
+                    DocumentScope::DeviceCache,
+                    namespace,
+                    GrantPermission::Get,
+                    ApprovalOperation::Get,
+                )
+            }
+            VaultAction::PutCache {
+                namespace, address, ..
+            } if address.is_scoped_to_project(project) => (
                 DocumentScope::DeviceCache,
                 namespace,
                 GrantPermission::Put,
                 ApprovalOperation::Put,
             ),
-            VaultAction::DeleteCache { namespace, .. } => (
-                DocumentScope::DeviceCache,
-                namespace,
-                GrantPermission::Delete,
-                ApprovalOperation::Delete,
-            ),
-            VaultAction::ClearCache { namespace } => (
-                DocumentScope::DeviceCache,
-                namespace,
-                GrantPermission::Clear,
-                ApprovalOperation::Clear,
-            ),
+            VaultAction::DeleteCache { namespace, address }
+                if address.is_scoped_to_project(project) =>
+            {
+                (
+                    DocumentScope::DeviceCache,
+                    namespace,
+                    GrantPermission::Delete,
+                    ApprovalOperation::Delete,
+                )
+            }
+            // A namespace clear cannot be constrained to one project's
+            // address prefix, so it and all non-CRUD actions are ineligible.
             _ => return None,
         };
         Some(Self {
@@ -132,6 +138,7 @@ impl PendingApprovals {
             created_at: now,
             expires_at,
             operation: candidate.operation,
+            principal: ApprovalPrincipal::from(&candidate.caller),
             application: candidate.application,
             challenge,
         };

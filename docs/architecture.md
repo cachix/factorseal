@@ -161,12 +161,15 @@ the typed IPC wire contract. Factorseal implements its `factorseal provider`
 subcommand against the Rust IPC crate, which is the external-provider endpoint
 SecretSpec launches over private stdin/stdout pipes.
 
-The endpoint translates convention and native addresses into a versioned,
-percent-encoded Factorseal address and sends get, set, expiring set, and delete
-as `device-cache` requests in the `secretspec-cache/v1` namespace. It never
-opens the embedded database, handles vault keys, or performs durable `Keyring`
-operations. The `vault-client` feature remains the lightweight native seam for
-Factorseal-aware applications.
+The endpoint translates convention and native addresses into a versioned
+Factorseal address beneath a derived project prefix and sends get, set,
+expiring set, and delete as `device-cache` requests in the
+`secretspec-cache/v1` namespace. The service verifies that prefix before it
+considers a project grant, preventing an approved project context from naming
+another project's cached secrets. The endpoint never opens the embedded
+database, handles vault keys, or performs durable `Keyring` operations. The
+`vault-client` feature remains the lightweight native seam for Factorseal-aware
+applications.
 
 The endpoint executable, not the SecretSpec CLI or embedding application, is
 the principal authenticated by Factorseal's Unix socket or Windows named pipe.
@@ -185,7 +188,10 @@ accept that ID as authority. `factorseal approvals approve`
 must satisfy one configured unlock group and sign the agent's one-time
 challenge with the vault identity before the agent stores a project-scoped
 grant. Denial needs no factor but is restricted to the separately authorized
-Factorseal CLI executable. Approval state disappears on expiry or sealing.
+Factorseal CLI executable. `factorseal approvals --watch --prompt` displays
+that trusted principal separately from declared application context and
+requires an explicit terminal choice of approve, deny, or ignore. Approval
+state disappears on expiry or sealing.
 
 ## Platform adapters
 

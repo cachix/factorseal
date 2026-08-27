@@ -1,5 +1,8 @@
 use super::cli::{ApprovalCommand, Cli, Command};
-use super::commands::{read_bounded, read_keyring_value, read_password_for_groups};
+use super::commands::{
+    ApprovalDecision, read_approval_decision, read_bounded, read_keyring_value,
+    read_password_for_groups, require_prompt_terminal,
+};
 use super::factor::read_factor;
 use super::*;
 
@@ -291,7 +294,8 @@ fn approvals_use_listing_flags_and_explicit_action_subcommands() {
         Command::Approvals {
             watch: true,
             json: true,
-            action: None
+            action: None,
+            ..
         }
     ));
 
@@ -307,7 +311,8 @@ fn approvals_use_listing_flags_and_explicit_action_subcommands() {
     assert!(matches!(
         cli.command,
         Command::Approvals {
-            action: Some(ApprovalCommand::Approve { id, unlock: Some(group) }),
+            unlock: Some(group),
+            action: Some(ApprovalCommand::Approve { id }),
             ..
         } if id == "apr_demo" && group.to_string() == "biometric"
     ));
@@ -320,4 +325,48 @@ fn approvals_use_listing_flags_and_explicit_action_subcommands() {
             ..
         } if id == "apr_demo"
     ));
+
+    let cli = Cli::try_parse_from([
+        "factorseal",
+        "approvals",
+        "--watch",
+        "--prompt",
+        "--unlock",
+        "biometric",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Approvals {
+            watch: true,
+            prompt: true,
+            unlock: Some(group),
+            action: None,
+            ..
+        } if group.to_string() == "biometric"
+    ));
+    assert!(Cli::try_parse_from(["factorseal", "approvals", "--prompt"]).is_err());
+}
+
+#[test]
+fn approval_prompt_requires_a_terminal_and_explicit_decision() {
+    assert!(require_prompt_terminal(true, true).is_ok());
+    assert!(require_prompt_terminal(false, true).is_err());
+    assert!(require_prompt_terminal(true, false).is_err());
+
+    for (answer, expected) in [
+        ("approve\n", ApprovalDecision::Approve),
+        ("d\n", ApprovalDecision::Deny),
+        ("ignore\n", ApprovalDecision::Ignore),
+    ] {
+        let mut input = std::io::Cursor::new(answer.as_bytes());
+        let mut output = Vec::new();
+        assert_eq!(
+            read_approval_decision(&mut input, &mut output).unwrap(),
+            expected
+        );
+    }
+
+    let mut closed = std::io::Cursor::new(Vec::<u8>::new());
+    assert!(read_approval_decision(&mut closed, &mut Vec::new()).is_err());
 }

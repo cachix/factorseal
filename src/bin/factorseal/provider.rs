@@ -58,6 +58,17 @@ impl FactorsealProvider {
             .await
             .map_err(|_| RpcError::new(ErrorKind::Internal))?
     }
+
+    fn wire_address(&self, address: Address) -> RpcResult<factorseal::WireSecretAddress> {
+        let project = self
+            .application
+            .get()
+            .and_then(|application| application.project.as_deref())
+            .ok_or_else(|| RpcError::new(ErrorKind::InvalidParams))?;
+        address::wire_address(address)?
+            .scope_to_project(project)
+            .map_err(|_| RpcError::new(ErrorKind::InvalidParams))
+    }
 }
 
 #[async_trait]
@@ -97,6 +108,9 @@ impl ProviderHandler for FactorsealProvider {
             application.context.reason,
         )
         .map_err(|error| map_vault_error(&error))?;
+        if application_context.project.is_none() {
+            return Err(RpcError::new(ErrorKind::InvalidParams));
+        }
         self.application
             .set(application_context)
             .map_err(|_| RpcError::new(ErrorKind::Conflict))?;
@@ -130,7 +144,7 @@ impl ProviderHandler for FactorsealProvider {
         match self
             .request(VaultAction::GetCache {
                 namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
-                address: address::wire_address(address)?,
+                address: self.wire_address(address)?,
             })
             .await?
         {
@@ -158,7 +172,7 @@ impl ProviderHandler for FactorsealProvider {
         let response = self
             .request(VaultAction::PutCache {
                 namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
-                address: address::wire_address(address)?,
+                address: self.wire_address(address)?,
                 value: WireSecret::new(value.expose().as_bytes().to_vec()),
                 evict_at: None,
             })
@@ -187,7 +201,7 @@ impl ProviderHandler for FactorsealProvider {
         let response = self
             .request(VaultAction::PutCache {
                 namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
-                address: address::wire_address(address)?,
+                address: self.wire_address(address)?,
                 value: WireSecret::new(value.expose().as_bytes().to_vec()),
                 evict_at: Some(evict_at),
             })
@@ -201,7 +215,7 @@ impl ProviderHandler for FactorsealProvider {
         match self
             .request(VaultAction::DeleteCache {
                 namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
-                address: address::wire_address(address)?,
+                address: self.wire_address(address)?,
             })
             .await?
         {
@@ -211,11 +225,11 @@ impl ProviderHandler for FactorsealProvider {
     }
 
     async fn check_writable(&self, _context: RequestContext, address: Address) -> RpcResult<()> {
-        address::wire_address(address).map(|_| ())
+        self.wire_address(address).map(|_| ())
     }
 
     async fn check_deletable(&self, _context: RequestContext, address: Address) -> RpcResult<()> {
-        address::wire_address(address).map(|_| ())
+        self.wire_address(address).map(|_| ())
     }
 
     async fn describe_write_target(
@@ -223,7 +237,7 @@ impl ProviderHandler for FactorsealProvider {
         _context: RequestContext,
         address: Address,
     ) -> RpcResult<String> {
-        address::wire_address(address)?;
+        self.wire_address(address)?;
         Ok("Factorseal device cache".to_owned())
     }
 }

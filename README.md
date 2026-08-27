@@ -233,7 +233,8 @@ path:
 ```
 
 Place this registration at `factorseal.json` in SecretSpec's provider
-registration directory. The provider URI is `factorseal://default`.
+registration directory. The provider URI is `factorseal://default`. Factorseal
+requires SecretSpec to supply a project context so cache access can be isolated.
 
 Start the service with `factorseal unseal`. Because the endpoint cannot prompt
 on its protocol streams, a sealed service is reported to SecretSpec as
@@ -247,14 +248,18 @@ requests, then approve or deny one explicitly:
 ```console
 $ factorseal approvals
 $ factorseal approvals --watch
+$ factorseal approvals --watch --prompt --unlock biometric
 $ factorseal approvals approve apr_7K3M --unlock biometric
 $ factorseal approvals deny apr_7K3M
 ```
 
 Approval requires one configured unlock group and creates only the requested
-permission for the declared project. Project, profile, base directory, and
-reason are display and audit context; the native transport's executable
-identity remains the grant principal.
+permission for the declared project. Factorseal derives a project-specific
+cache address and verifies it before accepting the project grant, so declaring
+an approved project cannot reach another project's secrets. Interactive
+prompts distinguish the transport-authenticated executable identity and digest
+from caller-declared project, profile, base directory, and reason. They require
+a terminal and never approve by default.
 
 Factorseal currently follows the SecretSpec IPC API from the sibling
 `../secretspec` checkout. Release packaging still depends on publishing and
