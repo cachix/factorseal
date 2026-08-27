@@ -1,9 +1,10 @@
 # Packaging
 
 Linux, macOS, and Windows are equal Factorseal targets. The packaging inputs in
-this directory contain the identity-ready `factorseal` vault CLI. A planned
-SecretSpec `factorseal` provider will connect to the background vault service
-through its keyring interface; it does not ship in these packages.
+this directory contain the identity-ready `factorseal` vault CLI and its
+`factorseal provider` SecretSpec endpoint. The endpoint runs from the same
+installed binary and connects to the background vault service through the
+authenticated native client.
 
 The archive builders are reproducible developer packaging, not a claim that an
 artifact is ready to release:
@@ -17,10 +18,12 @@ artifact is ready to release:
   release decision; current WiX releases require explicit OSMF terms and are
   not silently accepted by this repository.
 
-After device initialization, `factorseal grant-secretspec` authorizes the
-exact SecretSpec CLI or embedding application executable that will connect to
-the native vault. No provider endpoint or SecretSpec registration file is
-installed by Factorseal.
+After device initialization, `factorseal grant-secretspec` authorizes the exact
+installed `factorseal` executable that SecretSpec launches with the `provider`
+argument. The endpoint, not the SecretSpec CLI or embedding application, is the
+principal seen by the native vault. The archives include the endpoint code but
+do not install a SecretSpec registration file; packagers or users must register
+the absolute executable path as described in the repository README.
 
 Official macOS and Windows releases still require platform signing/notarization
 credentials. Linux release jobs must build against the supported deployment

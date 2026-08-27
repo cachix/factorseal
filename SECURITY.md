@@ -69,10 +69,13 @@ resolution, so a reused process ID cannot inherit another process's grant.
   of the complete vault directory. Detecting that needs a checkpoint held
   outside the directory; the offline MVP does not claim whole-directory
   rollback detection.
-- A planned SecretSpec provider will compile against the `Keyring` interface
-  implemented by the native `VaultClient`. It does not ship in this repository;
-  upstream integration and packaged end-to-end conformance remain required on
-  every target.
+- The implemented `factorseal provider` endpoint uses SecretSpec's typed IPC
+  protocol over private standard-I/O pipes and translates requests into the
+  disposable `device-cache` scope through the native `VaultClient`. The
+  endpoint executable—not the SecretSpec CLI or embedding application—is the
+  authenticated vault principal. Its IPC dependency is still pinned to an
+  unpublished Git revision, registration is not installed by the packages,
+  and installed end-to-end conformance remains required on every target.
 - Linux executable authentication depends on access to the ptrace-gated
   `/proc/<pid>/exe` link. The current systemd user unit therefore cannot use
   filesystem mount-namespace hardening. A verified IPC sandbox/application

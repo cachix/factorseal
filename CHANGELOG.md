@@ -46,10 +46,10 @@ All notable changes to FactorSeal will be documented in this file.
   Nested secret factors must derive their keys from hash or symmetric
   primitives, since TPM 2.0 and the Secure Enclave both wrap with P-256.
 - Expose the native transport through a lightweight Rust `vault-client`
-  feature as the seam for a planned SecretSpec-compiled `factorseal://`
-  provider. The future consuming SecretSpec CLI or embedding application will
-  connect directly through the `Keyring` interface implemented by the native
-  `VaultClient`; no provider subprocess or registration file is planned.
+  feature and implement `factorseal provider` against SecretSpec's typed IPC
+  API. The subprocess translates provider operations into cache-only native
+  vault requests; its executable is the authenticated principal. Packages ship
+  the endpoint in the main binary but do not install its registration file.
 - Generate the Linux systemd user unit from a template so its absolute
   `ExecStart` comes from whichever packager installed the binary, rather than
   a hardcoded prefix that only one install location satisfied.
