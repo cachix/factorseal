@@ -1,5 +1,5 @@
 use super::*;
-use factorseal::VaultResponse;
+use factorseal::{VaultInteractionReference, VaultResponse, VaultResponseError, WireSecretAddress};
 use secretspec_ipc::client::Client;
 use secretspec_ipc::protocol::provider::{
     AddressParams, ApplicationContext, Coordinates, DeletedResult, GetResult,
@@ -243,4 +243,39 @@ fn convention_addresses_are_versioned_and_unambiguous() {
     assert_eq!(first.item, "v1/a%2Fb/c/d");
     assert_eq!(second.item, "v1/a/b%2Fc/d");
     assert_ne!(first.item, second.item);
+}
+
+struct ApprovalVault;
+
+impl VaultClient for ApprovalVault {
+    fn request(&self, request: &VaultRequest) -> factorseal::VaultResult<VaultResponse> {
+        Ok(VaultResponse::failure(
+            request.request_id(),
+            VaultResponseError {
+                code: VaultResponseErrorCode::AuthorizationRequired,
+                message: "application authorization is required".to_owned(),
+                interaction: Some(VaultInteractionReference {
+                    id: "apr_provider_test".to_owned(),
+                    expires_at: 1_800_000_000,
+                }),
+            },
+        ))
+    }
+}
+
+#[test]
+fn provider_maps_pending_approval_to_structured_interaction() {
+    let error = request(
+        &ApprovalVault,
+        VaultAction::GetCache {
+            namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
+            address: WireSecretAddress::new("demo/default/TOKEN", None),
+        },
+        application_context(),
+    )
+    .unwrap_err();
+    assert_eq!(error.data.kind, ErrorKind::InteractionRequired);
+    let interaction = error.data.interaction.unwrap();
+    assert_eq!(interaction.id, "apr_provider_test");
+    assert_eq!(interaction.expires_at_unix_ms, Some(1_800_000_000_000));
 }

@@ -1,4 +1,4 @@
-use super::cli::{Cli, Command};
+use super::cli::{ApprovalCommand, Cli, Command};
 use super::commands::{read_bounded, read_keyring_value, read_password_for_groups};
 use super::factor::read_factor;
 use super::*;
@@ -281,4 +281,43 @@ fn bounded_reads_retain_one_byte_to_detect_overflow() {
     let read = read_bounded(bytes.as_slice(), 4).unwrap();
 
     assert_eq!(read.as_slice(), &[7; 5]);
+}
+
+#[test]
+fn approvals_use_listing_flags_and_explicit_action_subcommands() {
+    let cli = Cli::try_parse_from(["factorseal", "approvals", "--watch", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Approvals {
+            watch: true,
+            json: true,
+            action: None
+        }
+    ));
+
+    let cli = Cli::try_parse_from([
+        "factorseal",
+        "approvals",
+        "approve",
+        "apr_demo",
+        "--unlock",
+        "biometric",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Approvals {
+            action: Some(ApprovalCommand::Approve { id, unlock: Some(group) }),
+            ..
+        } if id == "apr_demo" && group.to_string() == "biometric"
+    ));
+
+    let cli = Cli::try_parse_from(["factorseal", "approvals", "deny", "apr_demo"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Approvals {
+            action: Some(ApprovalCommand::Deny { id }),
+            ..
+        } if id == "apr_demo"
+    ));
 }

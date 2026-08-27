@@ -41,8 +41,9 @@ pub use vault::{
 
 #[cfg(feature = "vault-client")]
 pub use vault::{
-    VaultAction, VaultApplicationContext, VaultClient, VaultMutation, VaultRequest, VaultResponse,
-    VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    ApprovalOperation, PendingApproval, VaultAction, VaultApplicationContext, VaultClient,
+    VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse, VaultResponseBody,
+    VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
 };
 
 #[cfg(feature = "vault-store")]

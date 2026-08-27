@@ -18,6 +18,7 @@ const MAX_APPLICATION_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_APPLICATION_BASE_DIR_BYTES: usize = 32 * 1024;
 const MAX_NAMESPACE_BYTES: usize = 4 * 1024;
 const MAX_MUTATIONS_PER_REQUEST: usize = 64;
+const MAX_APPROVAL_ID_BYTES: usize = 128;
 #[cfg(feature = "vault-store")]
 const CALLER_FINGERPRINT_DOMAIN: &[u8] = b"factorseal/caller-identity/v1\0";
 
@@ -471,12 +472,30 @@ pub enum VaultAction {
     SealCache {
         namespace: Vec<u8>,
     },
+    ListApprovals,
+    Approve {
+        id: String,
+        signature: Vec<u8>,
+    },
+    Deny {
+        id: String,
+    },
 }
 
 impl VaultAction {
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
-            Self::Status => Ok(()),
+            Self::Status | Self::ListApprovals => Ok(()),
+            Self::Approve { id, signature } => {
+                validate_approval_id(id)?;
+                if signature.is_empty() || signature.len() > 16 * 1024 {
+                    return Err(VaultError::Protocol(
+                        "approval signature is empty or too long".to_owned(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::Deny { id } => validate_approval_id(id),
             Self::Get { namespace, address }
             | Self::GetCache { namespace, address }
             | Self::Delete { namespace, address }
@@ -627,6 +646,40 @@ pub enum VaultResponseBody {
         entries: usize,
     },
     Sealed,
+    Approvals {
+        revision: u64,
+        approvals: Vec<PendingApproval>,
+    },
+    ApprovalResolved {
+        approved: bool,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingApproval {
+    pub id: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub operation: ApprovalOperation,
+    pub application: VaultApplicationContext,
+    pub challenge: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalOperation {
+    Get,
+    Put,
+    Delete,
+    Clear,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultInteractionReference {
+    pub id: String,
+    pub expires_at: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -634,6 +687,8 @@ pub enum VaultResponseBody {
 pub struct VaultResponseError {
     pub code: VaultResponseErrorCode,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<VaultInteractionReference>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -661,6 +716,18 @@ fn validate_namespace(namespace: &[u8]) -> VaultResult<()> {
         return Err(VaultError::Protocol(
             "document namespace is empty or too long".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_approval_id(id: &str) -> VaultResult<()> {
+    if id.is_empty()
+        || id.len() > MAX_APPROVAL_ID_BYTES
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(VaultError::Protocol("invalid approval ID".to_owned()));
     }
     Ok(())
 }

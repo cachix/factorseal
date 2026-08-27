@@ -127,6 +127,86 @@ fn application_context_is_bounded_and_requires_an_absolute_base_directory() {
 }
 
 #[test]
+fn approval_is_project_scoped_and_requires_a_vault_signature() {
+    let (directory, service) = service(100, UnsealLeasePolicy::default());
+    let provider = caller();
+    let application = |project: &str| {
+        VaultApplicationContext::new(
+            Some(project.to_owned()),
+            Some("production".to_owned()),
+            None,
+            Some("deploy".to_owned()),
+        )
+        .unwrap()
+    };
+    let get = |project: &str| {
+        VaultRequest::new_with_application(
+            VaultAction::GetCache {
+                namespace: b"secretspec-cache/v1".to_vec(),
+                address: address(),
+            },
+            application(project),
+        )
+        .unwrap()
+    };
+
+    let denied = service.handle(&provider, get("demo"), 101);
+    let interaction = denied.result.unwrap_err().interaction.unwrap();
+    assert!(interaction.id.starts_with("apr_"));
+
+    let manager = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.cli",
+        [9; 32],
+        None,
+    )
+    .unwrap();
+    service.authorize_approval_manager(&manager, 101).unwrap();
+    let listed = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListApprovals).unwrap(),
+        102,
+    );
+    let Ok(VaultResponseBody::Approvals { approvals, .. }) = listed.result else {
+        panic!("expected pending approvals");
+    };
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].application.reason.as_deref(), Some("deploy"));
+
+    let root = directory.path().join("factorseal");
+    let unsealed = Vault::unseal_for_test(&root).unwrap();
+    let signature = unsealed
+        .sign_approval_challenge(&approvals[0].id, &approvals[0].challenge)
+        .unwrap();
+    let approved = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::Approve {
+            id: approvals[0].id.clone(),
+            signature,
+        })
+        .unwrap(),
+        103,
+    );
+    assert!(matches!(
+        approved.result,
+        Ok(VaultResponseBody::ApprovalResolved { approved: true })
+    ));
+    assert!(matches!(
+        service.handle(&provider, get("demo"), 104).result,
+        Ok(VaultResponseBody::Secret { value: None })
+    ));
+    assert!(
+        service
+            .handle(&provider, get("other-project"), 105)
+            .result
+            .unwrap_err()
+            .interaction
+            .is_some()
+    );
+}
+
+#[test]
 fn direct_service_requests_obey_the_wire_size_bound() {
     let (_directory, service) = service(100, UnsealLeasePolicy::default());
     let request = VaultRequest::new(VaultAction::Put {

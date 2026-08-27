@@ -8,6 +8,10 @@ All notable changes to FactorSeal will be documented in this file.
   project, profile, base directory, and access reason through each provider
   request, supporting contextual audit and approval surfaces without treating
   caller-provided metadata as identity.
+- Add bounded project-scoped approval requests, structured SecretSpec
+  interaction IDs, and `factorseal approvals`, `approvals --watch`, `approvals
+  approve`, and `approvals deny`. Approval requires a vault-signed challenge
+  produced after satisfying one configured unlock group.
 - Replace the password-plus-biometric boolean with versioned unlock policies:
   comma-separated factors are AND requirements and repeated `--unlock` groups
   are independently hardware-wrapped OR alternatives. Support password,

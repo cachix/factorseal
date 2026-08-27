@@ -10,9 +10,11 @@ use crate::vault::{DocumentScope, SecretAddress, VaultError, VaultResult, VaultS
 use super::CallerIdentity;
 use super::wire::append_digest_bytes;
 
-const GRANT_VERSION: u8 = 1;
-const GRANT_DOCUMENT_NAMESPACE: &[u8] = b"factorseal/vault-grants/v1";
-const GRANT_TARGET_DOMAIN: &[u8] = b"factorseal/grant-target/v1\0";
+// Version 2 deliberately invalidates the former namespace-wide SecretSpec
+// grants. Those grants predate project approvals and must not bypass them.
+const GRANT_VERSION: u8 = 2;
+const GRANT_DOCUMENT_NAMESPACE: &[u8] = b"factorseal/vault-grants/v2";
+const GRANT_TARGET_DOMAIN: &[u8] = b"factorseal/grant-target/v2\0";
 
 /// Permission persisted in one caller grant.
 #[cfg(feature = "vault-store")]
@@ -24,6 +26,7 @@ pub enum GrantPermission {
     Delete,
     Clear,
     Seal,
+    ManageApprovals,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +48,21 @@ pub(super) enum GrantTarget<'a> {
         namespace: &'a [u8],
         address: &'a SecretAddress,
     },
+    Project {
+        scope: DocumentScope,
+        namespace: &'a [u8],
+        project: &'a str,
+    },
+}
+
+#[cfg(feature = "vault-store")]
+#[derive(Clone, Copy)]
+pub(super) struct GrantRequirement<'a> {
+    pub scope: DocumentScope,
+    pub namespace: &'a [u8],
+    pub address: Option<&'a SecretAddress>,
+    pub project: Option<&'a str>,
+    pub permission: GrantPermission,
 }
 
 pub(super) fn store_grant(
@@ -90,12 +108,16 @@ pub(super) fn store_grant(
 pub(super) fn require_grant(
     store: &VaultStore,
     caller: &CallerIdentity,
-    scope: DocumentScope,
-    namespace: &[u8],
-    address: Option<&SecretAddress>,
-    permission: GrantPermission,
+    requirement: GrantRequirement<'_>,
     now: u64,
 ) -> VaultResult<()> {
+    let GrantRequirement {
+        scope,
+        namespace,
+        address,
+        project,
+        permission,
+    } = requirement;
     let caller_fingerprint = caller.fingerprint();
     let mut targets = Vec::with_capacity(2);
     if let Some(address) = address {
@@ -103,6 +125,13 @@ pub(super) fn require_grant(
             scope,
             namespace,
             address,
+        }));
+    }
+    if let Some(project) = project {
+        targets.push(grant_target_digest(&GrantTarget::Project {
+            scope,
+            namespace,
+            project,
         }));
     }
     targets.push(grant_target_digest(&GrantTarget::Namespace {
@@ -162,6 +191,18 @@ pub(super) fn grant_target_digest(target: &GrantTarget<'_>) -> [u8; 32] {
             } else {
                 digest.update([0]);
             }
+        }
+        GrantTarget::Project {
+            scope,
+            namespace,
+            project,
+        } => {
+            digest.update([match scope {
+                DocumentScope::DeviceLocal => 5,
+                DocumentScope::DeviceCache => 6,
+            }]);
+            append_digest_bytes(&mut digest, namespace);
+            append_digest_bytes(&mut digest, project.as_bytes());
         }
     }
     digest.finalize().into()

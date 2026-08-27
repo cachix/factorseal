@@ -170,13 +170,21 @@ Factorseal-aware applications.
 
 The endpoint executable, not the SecretSpec CLI or embedding application, is
 the principal authenticated by Factorseal's Unix socket or Windows named pipe.
-`factorseal grant-secretspec` therefore grants that exact executable cache-only
-permissions. The endpoint forwards SecretSpec's declared project, profile,
+Project approval therefore grants that exact executable cache-only permission
+for the declared project. The endpoint forwards SecretSpec's project, profile,
 base directory, and reason with every native request for future approval,
 notification, and audit presentation. That context is metadata only: it does
 not replace the transport-authenticated executable identity and is never grant
 authority. The remaining release proof is publishing the IPC dependency and
 running installed end-to-end conformance on each platform.
+
+Missing project permissions create bounded in-memory approvals. The agent
+deduplicates equivalent requests and returns an opaque, expiring correlation
+ID; it does not accept that ID as authority. `factorseal approvals approve`
+must satisfy one configured unlock group and sign the agent's one-time
+challenge with the vault identity before the agent stores a project-scoped
+grant. Denial needs no factor but is restricted to the separately authorized
+Factorseal CLI executable. Approval state disappears on expiry or sealing.
 
 ## Platform adapters
 

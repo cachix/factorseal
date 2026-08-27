@@ -13,9 +13,10 @@ pub use lease::UnsealLeasePolicy;
 #[cfg(feature = "vault-store")]
 pub use service::VaultService;
 pub use wire::{
-    CallerIdentity, CallerPlatform, RequestId, VaultAction, VaultApplicationContext, VaultClient,
-    VaultMutation, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
-    VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    ApprovalOperation, CallerIdentity, CallerPlatform, PendingApproval, RequestId, VaultAction,
+    VaultApplicationContext, VaultClient, VaultInteractionReference, VaultMutation, VaultRequest,
+    VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret,
+    WireSecretAddress,
 };
 
 #[cfg(test)]

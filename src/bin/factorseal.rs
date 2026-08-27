@@ -19,8 +19,8 @@ mod provider;
 
 use cli::{Cli, Command};
 use commands::{
-    delete_keyring_value, destroy_vault, get_keyring_value, grant_cli, grant_secretspec,
-    initialize, resolve_root, run_vault, seal_vault, set_keyring_value, show_status,
+    delete_keyring_value, destroy_vault, get_keyring_value, grant_cli, initialize,
+    manage_approvals, resolve_root, run_vault, seal_vault, set_keyring_value, show_status,
 };
 use factor::FactorSource;
 
@@ -47,9 +47,6 @@ enum CliError {
 
     #[error("could not determine the platform user-data directory; pass --root")]
     NoDefaultRoot,
-
-    #[error("the requested lifetime is outside the supported range")]
-    LifetimeOverflow,
 
     #[error("password input failed: {0}")]
     Password(String),
@@ -151,17 +148,11 @@ fn run(cli: Cli) -> Result<(), CliError> {
             unlock,
         } => destroy_vault(&root, socket, factor, yes_really_destroy, unlock.as_ref()),
         Command::GrantCli { unlock } => grant_cli(&root, factor, unlock.as_ref()),
-        Command::GrantSecretspec {
-            executable,
-            expires_in_seconds,
-            unlock,
-        } => grant_secretspec(
-            &root,
-            &executable,
-            expires_in_seconds,
-            factor,
-            unlock.as_ref(),
-        ),
+        Command::Approvals {
+            watch,
+            json,
+            action,
+        } => manage_approvals(&root, socket, factor, watch, json, action.as_ref()),
         #[cfg(feature = "secretspec-provider")]
         Command::Provider => provider::serve(&root, socket),
     }

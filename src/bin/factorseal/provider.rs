@@ -9,7 +9,7 @@ use factorseal::{
     VaultAction, VaultApplicationContext, VaultClient, VaultError, VaultRequest, VaultResponseBody,
     VaultResponseErrorCode, WireSecret,
 };
-use secretspec_ipc::error::{ErrorKind, RpcError};
+use secretspec_ipc::error::{ErrorKind, InteractionReference, RpcError};
 use secretspec_ipc::protocol::provider::{
     self as wire, Address, CoordinateName, InitializeApplication, Metadata, Persistence,
     ResolveAddressResult,
@@ -238,9 +238,19 @@ fn request(
     let response = client
         .request(&request)
         .map_err(|error| map_vault_error(&error))?;
-    response.result.map_err(|error| {
-        RpcError::new(match error.code {
-            VaultResponseErrorCode::AuthorizationRequired => ErrorKind::PermissionDenied,
+    response.result.map_err(|error| match error.code {
+        VaultResponseErrorCode::AuthorizationRequired => {
+            if let Some(interaction) = error.interaction {
+                let expires_at_unix_ms = interaction.expires_at.checked_mul(1_000);
+                RpcError::interaction_required(Some(InteractionReference::authorization(
+                    interaction.id,
+                    expires_at_unix_ms,
+                )))
+            } else {
+                RpcError::new(ErrorKind::PermissionDenied)
+            }
+        }
+        code => RpcError::new(match code {
             VaultResponseErrorCode::Replay | VaultResponseErrorCode::Conflict => {
                 ErrorKind::Conflict
             }
@@ -249,7 +259,8 @@ fn request(
             }
             VaultResponseErrorCode::InvalidRequest => ErrorKind::InvalidParams,
             VaultResponseErrorCode::Internal => ErrorKind::OperationFailed,
-        })
+            VaultResponseErrorCode::AuthorizationRequired => unreachable!("handled above"),
+        }),
     })
 }
 

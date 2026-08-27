@@ -6,7 +6,9 @@ use std::time::Instant;
 use crate::vault::{VaultError, VaultResult, VaultStore};
 
 use super::super::lease::{ReplayWindow, UnsealLease};
+use super::super::{PendingApproval, VaultInteractionReference};
 use super::super::{RequestId, UnsealLeasePolicy};
+use super::approvals::{ApprovalCandidate, PendingApprovals};
 
 pub(super) struct ServiceState {
     live: Mutex<LiveState>,
@@ -19,6 +21,7 @@ struct LiveState {
     store: VaultStore,
     lease: UnsealLease,
     replay: ReplayWindow,
+    approvals: PendingApprovals,
     /// Whole second the storage eviction sweep last ran in. The sweep
     /// decrypts, verifies, and re-parses every cached document, while platform
     /// event loops poll expiration about ten times a second.
@@ -37,6 +40,7 @@ impl ServiceState {
                 store,
                 lease: UnsealLease::new(now, policy)?,
                 replay: ReplayWindow::new(),
+                approvals: PendingApprovals::default(),
                 // Opening the store already swept this second.
                 last_purge_at: now,
                 #[cfg(all(test, feature = "hardware"))]
@@ -117,6 +121,27 @@ impl ServiceState {
 impl LiveStateGuard<'_> {
     pub(super) fn store(&self) -> &VaultStore {
         &self.0.store
+    }
+
+    pub(super) fn create_approval(
+        &mut self,
+        candidate: ApprovalCandidate,
+        now: u64,
+    ) -> VaultResult<VaultInteractionReference> {
+        self.0.approvals.create(candidate, now)
+    }
+
+    pub(super) fn list_approvals(&mut self, now: u64) -> (u64, Vec<PendingApproval>) {
+        self.0.approvals.list(now)
+    }
+
+    pub(super) fn deny_approval(&mut self, id: &str, now: u64) -> VaultResult<()> {
+        self.0.approvals.deny(id, now)
+    }
+
+    pub(super) fn approve(&mut self, id: &str, signature: &[u8], now: u64) -> VaultResult<()> {
+        let live = &mut *self.0;
+        live.approvals.approve(&live.store, id, signature, now)
     }
 
     pub(super) fn consume(&mut self, request_id: RequestId) -> VaultResult<()> {

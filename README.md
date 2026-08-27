@@ -83,7 +83,9 @@ status` reads validated public metadata without unsealing and reports whether a
 matching service is reachable.
 
 Replacing or upgrading the binary changes its executable digest. Stop the
-service and run `factorseal grant-cli` to authorize the new CLI executable.
+service and run `factorseal grant-cli` to authorize the new CLI executable. The
+project-approval upgrade also requires this once because legacy broad provider
+grants are intentionally ignored.
 
 Seal the running service immediately when it is no longer needed:
 
@@ -233,16 +235,25 @@ path:
 Place this registration at `factorseal.json` in SecretSpec's provider
 registration directory. The provider URI is `factorseal://default`.
 
-Authorize the endpoint executable before using it:
+Start the service with `factorseal unseal`. Because the endpoint cannot prompt
+on its protocol streams, a sealed service is reported to SecretSpec as
+`interaction_required`.
+
+When a project lacks a cache grant, Factorseal retains a bounded five-minute
+approval and returns its opaque ID to SecretSpec. Inspect or follow pending
+requests, then approve or deny one explicitly:
 
 ```console
-$ factorseal grant-secretspec /absolute/path/to/factorseal
-$ factorseal unseal
+$ factorseal approvals
+$ factorseal approvals --watch
+$ factorseal approvals approve apr_7K3M --unlock biometric
+$ factorseal approvals deny apr_7K3M
 ```
 
-The endpoint itself is the caller seen by Factorseal. Replacing it requires a
-new grant. Because it cannot prompt on its protocol streams, a sealed service
-is reported to SecretSpec as `interaction_required`.
+Approval requires one configured unlock group and creates only the requested
+permission for the declared project. Project, profile, base directory, and
+reason are display and audit context; the native transport's executable
+identity remains the grant principal.
 
 Factorseal currently follows the SecretSpec IPC API from the sibling
 `../secretspec` checkout. Release packaging still depends on publishing and

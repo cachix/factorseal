@@ -8,19 +8,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
-    GrantPermission, Keyring, UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy,
+    Keyring, PendingApproval, UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy,
     UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient, VaultError, VaultMetadata,
     VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService, WireSecretAddress,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
 
+use super::cli::ApprovalCommand;
 use super::factor::{FactorSource, read_factor};
 use super::platform::{caller_identity_for_executable, native_client, serve_vault};
-use super::{
-    CliError, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, MAX_KEYRING_VALUE_BYTES,
-    SECRETSPEC_CACHE_NAMESPACE,
-};
+use super::{CliError, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, MAX_KEYRING_VALUE_BYTES};
 
 #[derive(Serialize)]
 struct Status<'a> {
@@ -286,40 +284,6 @@ pub(super) fn run_vault(
     serve_vault(&device, &service, root, socket)
 }
 
-pub(super) fn grant_secretspec(
-    root: &Path,
-    executable: &Path,
-    expires_in_seconds: Option<u64>,
-    factor: FactorSource<'_>,
-    requested_group: Option<&UnlockGroup>,
-) -> Result<(), CliError> {
-    let now = unix_time()?;
-    let expires_at = expires_in_seconds
-        .map(|seconds| now.checked_add(seconds).ok_or(CliError::LifetimeOverflow))
-        .transpose()?;
-    let caller = caller_identity_for_executable(executable)?;
-    let device = Vault::inspect(root)?;
-    let unsealed = unseal_selected(root, &device, requested_group, factor)?;
-    let service = VaultService::open(root, unsealed, now, UnsealLeasePolicy::default())?;
-    service.authorize_cache_namespace(
-        &caller,
-        SECRETSPEC_CACHE_NAMESPACE,
-        [
-            GrantPermission::Get,
-            GrantPermission::Put,
-            GrantPermission::Delete,
-        ],
-        expires_at,
-        now,
-    )?;
-    service.seal()?;
-    println!(
-        "Authorized {} for the Factorseal SecretSpec cache",
-        caller.application_id()
-    );
-    Ok(())
-}
-
 pub(super) fn grant_cli(
     root: &Path,
     factor: FactorSource<'_>,
@@ -340,7 +304,164 @@ fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
         std::env::current_exe().map_err(|error| CliError::CurrentExecutable(error.to_string()))?;
     let caller = caller_identity_for_executable(&executable)?;
     service.authorize_namespace(&caller, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, None, now)?;
+    service.authorize_approval_manager(&caller, now)?;
     Ok(())
+}
+
+pub(super) fn manage_approvals(
+    root: &Path,
+    socket: Option<&Path>,
+    factor: FactorSource<'_>,
+    watch: bool,
+    json: bool,
+    action: Option<&ApprovalCommand>,
+) -> Result<(), CliError> {
+    match action {
+        Some(ApprovalCommand::Approve { id, unlock }) => {
+            if watch || json {
+                return Err(VaultError::Protocol(
+                    "--watch and --json cannot be combined with approvals approve".to_owned(),
+                )
+                .into());
+            }
+            approve(root, socket, factor, id, unlock.as_ref())
+        }
+        Some(ApprovalCommand::Deny { id }) => {
+            if watch || json {
+                return Err(VaultError::Protocol(
+                    "--watch and --json cannot be combined with approvals deny".to_owned(),
+                )
+                .into());
+            }
+            resolve_approval(root, socket, VaultAction::Deny { id: id.clone() }, false)
+        }
+        None => list_approvals(root, socket, watch, json),
+    }
+}
+
+fn approvals(client: &dyn VaultClient) -> Result<(u64, Vec<PendingApproval>), CliError> {
+    let request = VaultRequest::new(VaultAction::ListApprovals)?;
+    let response = client.request(&request)?;
+    match response.result {
+        Ok(VaultResponseBody::Approvals {
+            revision,
+            approvals,
+        }) => Ok((revision, approvals)),
+        Ok(_) => Err(VaultError::Protocol(
+            "vault returned an unexpected approvals response".to_owned(),
+        )
+        .into()),
+        Err(error) => Err(CliError::VaultRequest {
+            code: error.code,
+            message: error.message,
+        }),
+    }
+}
+
+fn list_approvals(
+    root: &Path,
+    socket: Option<&Path>,
+    watch: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let client = native_client(root, socket)?;
+    let mut last_revision = None;
+    loop {
+        let (revision, pending) = approvals(&client)?;
+        if last_revision != Some(revision) {
+            print_approvals(&pending, json)?;
+            last_revision = Some(revision);
+        }
+        if !watch {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+fn print_approvals(pending: &[PendingApproval], json: bool) -> Result<(), CliError> {
+    if json {
+        println!("{}", serde_json::to_string(pending)?);
+        return Ok(());
+    }
+    if pending.is_empty() {
+        println!("No pending approvals");
+        return Ok(());
+    }
+    for approval in pending {
+        let project = approval.application.project.as_deref().unwrap_or("unknown");
+        let profile = approval.application.profile.as_deref().unwrap_or("default");
+        let reason = approval
+            .application
+            .reason
+            .as_deref()
+            .unwrap_or("unspecified");
+        println!(
+            "{}  {:?}  {project}/{profile}  reason: {reason}  expires: {}",
+            approval.id, approval.operation, approval.expires_at
+        );
+    }
+    Ok(())
+}
+
+fn approve(
+    root: &Path,
+    socket: Option<&Path>,
+    factor: FactorSource<'_>,
+    id: &str,
+    requested_group: Option<&UnlockGroup>,
+) -> Result<(), CliError> {
+    let client = native_client(root, socket)?;
+    let (_, pending) = approvals(&client)?;
+    let approval = pending
+        .iter()
+        .find(|approval| approval.id == id)
+        .ok_or_else(|| VaultError::Protocol("approval is missing or expired".to_owned()))?;
+    let device = Vault::inspect(root)?;
+    let unsealed = unseal_selected(root, &device, requested_group, factor)?;
+    let signature = unsealed.sign_approval_challenge(&approval.id, &approval.challenge)?;
+    drop(unsealed);
+    resolve_approval(
+        root,
+        socket,
+        VaultAction::Approve {
+            id: id.to_owned(),
+            signature,
+        },
+        true,
+    )
+}
+
+fn resolve_approval(
+    root: &Path,
+    socket: Option<&Path>,
+    action: VaultAction,
+    expected_approved: bool,
+) -> Result<(), CliError> {
+    let client = native_client(root, socket)?;
+    let request = VaultRequest::new(action)?;
+    let response = client.request(&request)?;
+    match response.result {
+        Ok(VaultResponseBody::ApprovalResolved { approved }) if approved == expected_approved => {
+            println!(
+                "{}",
+                if approved {
+                    "Approved pending request"
+                } else {
+                    "Denied pending request"
+                }
+            );
+            Ok(())
+        }
+        Ok(_) => Err(VaultError::Protocol(
+            "vault returned an unexpected approval response".to_owned(),
+        )
+        .into()),
+        Err(error) => Err(CliError::VaultRequest {
+            code: error.code,
+            message: error.message,
+        }),
+    }
 }
 
 fn unseal_selected(

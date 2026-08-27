@@ -18,12 +18,12 @@ artifact is ready to release:
   release decision; current WiX releases require explicit OSMF terms and are
   not silently accepted by this repository.
 
-After device initialization, `factorseal grant-secretspec` authorizes the exact
-installed `factorseal` executable that SecretSpec launches with the `provider`
-argument. The endpoint, not the SecretSpec CLI or embedding application, is the
-principal seen by the native vault. The archives include the endpoint code but
-do not install a SecretSpec registration file; packagers or users must register
-the absolute executable path as described in the repository README.
+SecretSpec cache access is approved per project through `factorseal approvals`;
+there is no installation-wide provider grant. The endpoint, not the SecretSpec
+CLI or embedding application, remains the principal seen by the native vault.
+The archives include the endpoint code but do not install a SecretSpec
+registration file; packagers or users must register the absolute executable
+path as described in the repository README.
 
 Official macOS and Windows releases still require platform signing/notarization
 credentials. Linux release jobs must build against the supported deployment

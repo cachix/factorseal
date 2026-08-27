@@ -6,7 +6,7 @@ use crate::vault::{
     DocumentOperation, DocumentScope, SecretAddress, VaultError, VaultResult, VaultStore,
 };
 
-use super::super::grant::require_grant;
+use super::super::grant::{GrantRequirement, require_grant};
 use super::super::{
     CallerIdentity, GrantPermission, VaultAction, VaultMutation, VaultResponseBody, WireSecret,
     WireSecretAddress,
@@ -22,6 +22,7 @@ struct ActionContext<'a> {
     store: &'a VaultStore,
     caller: &'a CallerIdentity,
     scope: DocumentScope,
+    project: Option<&'a str>,
     now: u64,
 }
 
@@ -29,6 +30,7 @@ pub(super) fn execute_action(
     store: &VaultStore,
     caller: &CallerIdentity,
     action: VaultAction,
+    project: Option<&str>,
     now: u64,
     lease_deadlines: (u64, u64),
 ) -> VaultResult<(VaultResponseBody, bool)> {
@@ -37,6 +39,7 @@ pub(super) fn execute_action(
         store,
         caller,
         scope,
+        project,
         now,
     };
     match action {
@@ -73,7 +76,10 @@ pub(super) fn execute_action(
         | VaultAction::PutCache { .. }
         | VaultAction::DeleteCache { .. }
         | VaultAction::ClearCache { .. }
-        | VaultAction::SealCache { .. } => unreachable!("cache action was normalized"),
+        | VaultAction::SealCache { .. }
+        | VaultAction::ListApprovals
+        | VaultAction::Approve { .. }
+        | VaultAction::Deny { .. } => unreachable!("action was handled before execution"),
     }
 }
 
@@ -87,10 +93,13 @@ impl ActionContext<'_> {
         require_grant(
             self.store,
             self.caller,
-            self.scope,
-            namespace,
-            address,
-            permission,
+            GrantRequirement {
+                scope: self.scope,
+                namespace,
+                address,
+                project: self.project,
+                permission,
+            },
             self.now,
         )
     }

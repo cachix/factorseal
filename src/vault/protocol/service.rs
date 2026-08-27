@@ -1,36 +1,56 @@
 use std::path::Path;
 use std::time::Instant;
 
-#[cfg(all(test, feature = "hardware"))]
-use crate::vault::DocumentScope;
-use crate::vault::{UnsealedVault, VaultError, VaultResult, VaultStore};
+use crate::vault::{DocumentScope, UnsealedVault, VaultError, VaultResult, VaultStore};
 
 use super::wire::PROTOCOL_VERSION;
 #[cfg(all(test, feature = "hardware"))]
 use super::wire::{MAX_MESSAGE_BYTES, REQUEST_ID_BYTES};
 use super::{
-    CallerIdentity, UnsealLeasePolicy, VaultRequest, VaultResponse, VaultResponseBody,
-    VaultResponseError, VaultResponseErrorCode,
+    CallerIdentity, GrantPermission, UnsealLeasePolicy, VaultAction, VaultRequest, VaultResponse,
+    VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
 };
 #[cfg(all(test, feature = "hardware"))]
 use super::{
-    CallerPlatform, GrantPermission, RequestId, VaultAction, VaultApplicationContext,
-    VaultMutation, WireSecret, WireSecretAddress,
+    CallerPlatform, RequestId, VaultApplicationContext, VaultMutation, WireSecret,
+    WireSecretAddress,
 };
 
 #[cfg(feature = "vault-store")]
 mod actions;
+#[cfg(feature = "vault-store")]
+mod approvals;
 #[cfg(feature = "vault-store")]
 mod authorization;
 #[cfg(feature = "vault-store")]
 mod state;
 
 #[cfg(feature = "vault-store")]
+use super::grant::{GrantRequirement, require_grant};
+#[cfg(feature = "vault-store")]
 use actions::execute_action;
 #[cfg(all(test, feature = "hardware"))]
 use actions::{ScopedAction, scope_action, validate_evict_at};
 #[cfg(feature = "vault-store")]
+use approvals::{APPROVAL_CONTROL_NAMESPACE, ApprovalCandidate};
+#[cfg(feature = "vault-store")]
 use state::ServiceState;
+
+#[cfg(feature = "vault-store")]
+struct RequestFailure {
+    error: VaultError,
+    interaction: Option<super::VaultInteractionReference>,
+}
+
+#[cfg(feature = "vault-store")]
+impl From<VaultError> for RequestFailure {
+    fn from(error: VaultError) -> Self {
+        Self {
+            error,
+            interaction: None,
+        }
+    }
+}
 
 /// Shared request processor used behind every platform transport.
 #[cfg(feature = "vault-store")]
@@ -90,16 +110,20 @@ impl VaultService {
         monotonic_now: Instant,
     ) -> VaultResponse {
         let request_id = request.request_id();
-        let result = self.handle_inner(caller, request, now, monotonic_now);
+        let result = self
+            .handle_inner(caller, request, now, monotonic_now)
+            .map_err(|failure| {
+                response_error_with_interaction(&failure.error, failure.interaction)
+            });
         let result = match result {
             Ok(VaultResponseBody::Sealed) => Ok(VaultResponseBody::Sealed),
-            _ if self.state.is_sealed() => Err(VaultError::Sealed),
+            _ if self.state.is_sealed() => Err(response_error(&VaultError::Sealed)),
             result => result,
         };
         VaultResponse {
             version: PROTOCOL_VERSION,
             request_id,
-            result: result.map_err(|error| response_error(&error)),
+            result,
         }
     }
 
@@ -127,18 +151,90 @@ impl VaultService {
         request: VaultRequest,
         now: u64,
         monotonic_now: Instant,
-    ) -> VaultResult<VaultResponseBody> {
+    ) -> Result<VaultResponseBody, RequestFailure> {
         caller.validate()?;
         request.validate()?;
+        let application = request.application().cloned();
+        let project = application
+            .as_ref()
+            .and_then(|context| context.project.clone());
+        let approval =
+            ApprovalCandidate::for_request(caller, application.as_ref(), &request.action);
         let mut state = self.state.lock_live(monotonic_now)?;
         state.consume(request.request_id())?;
-        let (result, refresh_lease) = execute_action(
-            state.store(),
-            caller,
-            request.action,
-            now,
-            state.lease_deadlines(),
-        )?;
+        let result = match request.action {
+            VaultAction::ListApprovals => {
+                require_grant(
+                    state.store(),
+                    caller,
+                    GrantRequirement {
+                        scope: DocumentScope::DeviceLocal,
+                        namespace: APPROVAL_CONTROL_NAMESPACE,
+                        address: None,
+                        project: None,
+                        permission: GrantPermission::ManageApprovals,
+                    },
+                    now,
+                )?;
+                let (revision, approvals) = state.list_approvals(now);
+                return Ok(VaultResponseBody::Approvals {
+                    revision,
+                    approvals,
+                });
+            }
+            VaultAction::Deny { id } => {
+                require_grant(
+                    state.store(),
+                    caller,
+                    GrantRequirement {
+                        scope: DocumentScope::DeviceLocal,
+                        namespace: APPROVAL_CONTROL_NAMESPACE,
+                        address: None,
+                        project: None,
+                        permission: GrantPermission::ManageApprovals,
+                    },
+                    now,
+                )?;
+                state.deny_approval(&id, now)?;
+                return Ok(VaultResponseBody::ApprovalResolved { approved: false });
+            }
+            VaultAction::Approve { id, signature } => {
+                require_grant(
+                    state.store(),
+                    caller,
+                    GrantRequirement {
+                        scope: DocumentScope::DeviceLocal,
+                        namespace: APPROVAL_CONTROL_NAMESPACE,
+                        address: None,
+                        project: None,
+                        permission: GrantPermission::ManageApprovals,
+                    },
+                    now,
+                )?;
+                state.approve(&id, &signature, now)?;
+                state.touch(now, monotonic_now)?;
+                return Ok(VaultResponseBody::ApprovalResolved { approved: true });
+            }
+            action => execute_action(
+                state.store(),
+                caller,
+                action,
+                project.as_deref(),
+                now,
+                state.lease_deadlines(),
+            ),
+        };
+        let (result, refresh_lease) = match result {
+            Ok(result) => result,
+            Err(VaultError::AuthorizationRequired) if approval.is_some() => {
+                let interaction = state.create_approval(approval.expect("checked above"), now)?;
+                return Err(RequestFailure {
+                    error: VaultError::AuthorizationRequired,
+                    interaction: Some(interaction),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
         if refresh_lease {
             state.touch(now, monotonic_now)?;
         }
@@ -148,6 +244,14 @@ impl VaultService {
 
 #[cfg(feature = "vault-store")]
 fn response_error(error: &VaultError) -> VaultResponseError {
+    response_error_with_interaction(error, None)
+}
+
+#[cfg(feature = "vault-store")]
+fn response_error_with_interaction(
+    error: &VaultError,
+    interaction: Option<super::VaultInteractionReference>,
+) -> VaultResponseError {
     let code = match error {
         VaultError::AuthorizationRequired => VaultResponseErrorCode::AuthorizationRequired,
         VaultError::Replay => VaultResponseErrorCode::Replay,
@@ -178,6 +282,7 @@ fn response_error(error: &VaultError) -> VaultResponseError {
     VaultResponseError {
         code,
         message: message.to_owned(),
+        interaction,
     }
 }
 #[cfg(all(test, feature = "vault-store", feature = "hardware"))]

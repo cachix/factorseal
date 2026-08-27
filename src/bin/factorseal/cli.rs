@@ -112,20 +112,36 @@ pub(super) enum Command {
         unlock: Option<UnlockGroup>,
     },
 
-    /// Authorize one exact SecretSpec provider-endpoint executable.
-    GrantSecretspec {
-        executable: PathBuf,
-
-        /// Optional lifetime for the cache grant.
+    /// List, watch, approve, or deny pending application requests.
+    Approvals {
+        /// Continue printing whenever the pending set changes.
         #[arg(long)]
-        expires_in_seconds: Option<u64>,
+        watch: bool,
+
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+
+        #[command(subcommand)]
+        action: Option<ApprovalCommand>,
+    },
+
+    /// Serve the SecretSpec external-provider protocol over standard I/O.
+    #[cfg(feature = "secretspec-provider")]
+    Provider,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum ApprovalCommand {
+    /// Approve a pending request after satisfying one configured unlock group.
+    Approve {
+        id: String,
 
         /// Exact unlock group to use; required when more than one is configured.
         #[arg(long, value_name = "FACTORS")]
         unlock: Option<UnlockGroup>,
     },
 
-    /// Serve the SecretSpec external-provider protocol over standard I/O.
-    #[cfg(feature = "secretspec-provider")]
-    Provider,
+    /// Deny and remove a pending request.
+    Deny { id: String },
 }
