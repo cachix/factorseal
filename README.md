@@ -11,12 +11,22 @@
 > [!WARNING]
 > Factorseal is an unaudited prototype. It is not ready for production secrets.
 
-Factorseal is an enclave-backed local secrets vault for Linux, macOS, and
-Windows. The platform enclave is TPM 2.0 on Linux and Windows, and Apple's
-Secure Enclave on macOS. One per-user service owns the encrypted database and
-exposes narrowly scoped operations to local applications through authenticated
-native IPC. Applications never open the database or receive the vault's
-encryption and signing keys.
+Factorseal is a hardware-backed local secrets vault. It stores encrypted
+secrets on your device and makes them available through a per-user service
+protected by TPM 2.0 on Linux and Windows or Apple's Secure Enclave on macOS.
+
+The basic lifecycle is:
+
+1. **Create** a vault and choose a password and/or biometric unlock policy.
+2. **Unseal** it by satisfying one of those policies.
+3. **Authorize** local applications for only the secrets and operations they
+   need.
+4. **Use** the vault through the CLI or an integration while it is unsealed.
+5. **Seal** it to stop the service and remove plaintext vault keys from memory.
+
+Applications ask the service to perform narrowly scoped operations such as
+getting or storing a secret. They never open the database or receive the
+vault's encryption and signing keys.
 
 Factorseal provides:
 
@@ -25,9 +35,9 @@ Factorseal provides:
 - the standard `org.freedesktop.secrets` interface on Linux;
 - an embeddable store and key-protection boundary for Android and iOS.
 
-It is the local broker around that platform enclave, not a password manager or
-remote secrets service. It also does not attempt to replace every Apple
-Keychain or Windows Credential Manager API.
+Factorseal is a local security broker around platform hardware. It is not a
+password manager or remote secrets service, and it does not attempt to replace
+every Apple Keychain or Windows Credential Manager API.
 
 ## Quick start
 
@@ -94,6 +104,11 @@ $ factorseal seal
 ```
 
 ## How it works
+
+Once unsealed, clients send requests over authenticated native IPC to the
+per-user vault service. The service identifies the calling executable, checks
+its grant, applies the requested operation, and persists only encrypted,
+device-signed data.
 
 ```text
         Platform enclave               Selected unlock group
