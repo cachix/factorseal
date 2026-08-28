@@ -4,16 +4,17 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
-- Bump the native protocol to version 5 and forward SecretSpec's declared
-  project, profile, base directory, access reason, and requested authorization
+- Bump the native protocol to version 6 and forward SecretSpec's declared
+  project, profile, base directory, reason, and requested permission
   duration through each provider request, supporting contextual audit and
   approval surfaces without treating
   caller-provided metadata as identity.
-- Add bounded project-scoped approval requests, structured SecretSpec
-  interaction IDs, and `factorseal approvals`, `approvals --watch`, `approvals
-  approve`, and `approvals deny`. Approval requires a vault-signed challenge
+- Add a unified permission lifecycle with structured SecretSpec interaction
+  IDs and `factorseal permissions list`, `watch`, `approve`, `deny`, and
+  `revoke`. Granting requires a vault-signed challenge
   produced after satisfying one configured unlock group. Pending requests stay
-  in memory for seven days, with equivalent requests refreshing the same ID.
+  in memory for seven days, with equivalent requests refreshing the same
+  `prm_` ID; approval promotes that ID into durable granted state.
   Interactive watch mode shows the authenticated provider principal and
   requires an explicit terminal decision, prompting for an unlock-group choice
   only when multiple alternatives exist; approval commands expose no factor

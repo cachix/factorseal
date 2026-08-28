@@ -240,32 +240,33 @@ Start the service with `factorseal unseal`. Because the endpoint cannot prompt
 on its protocol streams, a sealed service is reported to SecretSpec as
 `interaction_required`.
 
-When a project lacks a cache grant, Factorseal retains a bounded in-memory
-approval for seven days and returns its opaque ID to SecretSpec. Equivalent
-requests reuse the ID and refresh its expiry. Inspect or follow pending
-requests, then approve or deny one explicitly:
+When a project lacks a cache permission, Factorseal creates a pending permission
+with a stable opaque ID and retains it in memory for seven days. Equivalent
+requests reuse the ID and refresh its expiry. Grant, deny, or later revoke it
+through one command family:
 
 ```console
-$ factorseal approvals
-$ factorseal approvals --watch
-$ factorseal approvals --watch --prompt
-$ factorseal approvals approve apr_7K3M
-$ factorseal approvals deny apr_7K3M
+$ factorseal permissions list
+$ factorseal permissions watch
+$ factorseal permissions watch --prompt
+$ factorseal permissions approve prm_7K3M
+$ factorseal permissions deny prm_7K3M
+$ factorseal permissions revoke prm_7K3M
 ```
 
 Watch mode uses a bounded native revision wait: it wakes immediately when the
-approval set changes without polling once per second. The agent permits a small
+permission set changes without polling once per second. The agent permits a small
 bounded set of concurrent local connections, allowing provider requests to
-create approvals while CLI and future GUI notification listeners wait.
+create pending permissions while CLI and future GUI notification listeners wait.
 
-Approval requires one configured unlock group and creates only the requested
+Granting requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal
-prompts for the grant lifetime; Enter accepts the app-requested default (or one
+prompts for the permission lifetime; Enter accepts the app-requested default (or one
 hour when the app supplied none), and values such as `30m`, `8h`, `7d`, and
 `forever` override it. The chosen lifetime is bound into the vault signature,
 so it cannot be changed after factor confirmation. Factorseal derives a
 project-specific cache address and verifies it before accepting the project
-grant, so declaring an approved project cannot reach another project's secrets.
+permission, so declaring an approved project cannot reach another project's secrets.
 Interactive prompts distinguish the transport-authenticated executable identity
 and digest from caller-declared project, profile, base directory, and reason.
 They require a terminal and never approve by default. A vault with multiple

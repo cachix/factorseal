@@ -9,15 +9,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
-    Keyring, MAX_APPROVAL_WAIT_MS, PendingApproval, UnlockCredentials, UnlockFactorKind,
-    UnlockGroup, UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient,
-    VaultError, VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode,
-    VaultService, WireSecretAddress,
+    Keyring, MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionState,
+    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealLeasePolicy,
+    UnsealedVault, Vault, VaultAction, VaultClient, VaultError, VaultMetadata, VaultRequest,
+    VaultResponseBody, VaultResponseErrorCode, VaultService, WireSecretAddress,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
 
-use super::cli::ApprovalCommand;
+use super::cli::PermissionCommand;
 use super::factor::{FactorSource, read_factor};
 use super::platform::{caller_identity_for_executable, native_client, serve_vault};
 use super::{CliError, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, MAX_KEYRING_VALUE_BYTES};
@@ -306,73 +306,55 @@ fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
         std::env::current_exe().map_err(|error| CliError::CurrentExecutable(error.to_string()))?;
     let caller = caller_identity_for_executable(&executable)?;
     service.authorize_namespace(&caller, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, None, now)?;
-    service.authorize_approval_manager(&caller, now)?;
+    service.authorize_permission_manager(&caller, now)?;
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct ApprovalOptions<'a> {
-    pub(super) watch: bool,
-    pub(super) prompt: bool,
-    pub(super) json: bool,
-    pub(super) action: Option<&'a ApprovalCommand>,
-}
-
-pub(super) fn manage_approvals(
+pub(super) fn manage_permissions(
     root: &Path,
     socket: Option<&Path>,
     factor: FactorSource<'_>,
-    options: ApprovalOptions<'_>,
+    action: &PermissionCommand,
 ) -> Result<(), CliError> {
-    let ApprovalOptions {
-        watch,
-        prompt,
-        json,
-        action,
-    } = options;
     match action {
-        Some(ApprovalCommand::Approve { id }) => {
-            if watch || prompt || json {
-                return Err(VaultError::Protocol(
-                    "listing flags cannot be combined with approvals approve".to_owned(),
-                )
-                .into());
-            }
-            approve_with_prompted_group(root, socket, factor, id)
-        }
-        Some(ApprovalCommand::Deny { id }) => {
-            if watch || prompt || json {
-                return Err(VaultError::Protocol(
-                    "listing flags cannot be combined with approvals deny".to_owned(),
-                )
-                .into());
-            }
-            resolve_approval(root, socket, VaultAction::Deny { id: id.clone() }, false)
-        }
-        None if prompt => prompt_approvals(root, socket, factor),
-        None => list_approvals(root, socket, watch, json),
+        PermissionCommand::List { json } => list_permissions(root, socket, false, *json),
+        PermissionCommand::Watch { prompt: true, .. } => prompt_permissions(root, socket, factor),
+        PermissionCommand::Watch { json, .. } => list_permissions(root, socket, true, *json),
+        PermissionCommand::Approve { id } => approve_with_prompted_group(root, socket, factor, id),
+        PermissionCommand::Deny { id } => change_permission(
+            root,
+            socket,
+            VaultAction::DenyPermission { id: id.clone() },
+            PermissionChange::Denied,
+        ),
+        PermissionCommand::Revoke { id } => change_permission(
+            root,
+            socket,
+            VaultAction::RevokePermission { id: id.clone() },
+            PermissionChange::Revoked,
+        ),
     }
 }
 
-fn approvals(
+fn permissions(
     client: &dyn VaultClient,
     after_revision: Option<u64>,
-) -> Result<(u64, Vec<PendingApproval>), CliError> {
-    let action = after_revision.map_or(VaultAction::ListApprovals, |after_revision| {
-        VaultAction::WaitApprovals {
+) -> Result<(u64, Vec<Permission>), CliError> {
+    let action = after_revision.map_or(VaultAction::ListPermissions, |after_revision| {
+        VaultAction::WaitPermissions {
             after_revision,
-            timeout_ms: MAX_APPROVAL_WAIT_MS,
+            timeout_ms: MAX_PERMISSION_WAIT_MS,
         }
     });
     let request = VaultRequest::new(action)?;
     let response = client.request(&request)?;
     match response.result {
-        Ok(VaultResponseBody::Approvals {
+        Ok(VaultResponseBody::Permissions {
             revision,
-            approvals,
-        }) => Ok((revision, approvals)),
+            permissions,
+        }) => Ok((revision, permissions)),
         Ok(_) => Err(VaultError::Protocol(
-            "vault returned an unexpected approvals response".to_owned(),
+            "vault returned an unexpected permissions response".to_owned(),
         )
         .into()),
         Err(error) => Err(CliError::VaultRequest {
@@ -382,7 +364,7 @@ fn approvals(
     }
 }
 
-fn list_approvals(
+fn list_permissions(
     root: &Path,
     socket: Option<&Path>,
     watch: bool,
@@ -391,9 +373,9 @@ fn list_approvals(
     let client = native_client(root, socket)?;
     let mut last_revision = None;
     loop {
-        let (revision, pending) = approvals(&client, last_revision)?;
+        let (revision, current) = permissions(&client, last_revision)?;
         if last_revision != Some(revision) {
-            print_approvals(&pending, json)?;
+            print_permissions(&current, json)?;
             last_revision = Some(revision);
         }
         if !watch {
@@ -402,22 +384,22 @@ fn list_approvals(
     }
 }
 
-fn print_approvals(pending: &[PendingApproval], json: bool) -> Result<(), CliError> {
+fn print_permissions(current: &[Permission], json: bool) -> Result<(), CliError> {
     if json {
-        println!("{}", serde_json::to_string(pending)?);
+        println!("{}", serde_json::to_string(current)?);
         return Ok(());
     }
-    if pending.is_empty() {
-        println!("No pending approvals");
+    if current.is_empty() {
+        println!("No permissions");
         return Ok(());
     }
-    for approval in pending {
-        write_approval(&mut std::io::stdout().lock(), approval)?;
+    for permission in current {
+        write_permission(&mut std::io::stdout().lock(), permission)?;
     }
     Ok(())
 }
 
-fn write_approval(output: &mut impl Write, approval: &PendingApproval) -> Result<(), CliError> {
+fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<(), CliError> {
     let project = approval.application.project.as_deref().unwrap_or("unknown");
     let profile = approval.application.profile.as_deref().unwrap_or("default");
     let reason = approval
@@ -435,7 +417,21 @@ fn write_approval(output: &mut impl Write, approval: &PendingApproval) -> Result
         .signer_id
         .as_deref()
         .unwrap_or("unsigned");
-    writeln!(output, "{}  {:?}", approval.id, approval.operation)
+    let state = match approval.state {
+        PermissionState::Pending {
+            created_at,
+            expires_at,
+            ..
+        } => format!("pending  created: {created_at}  expires: {expires_at}"),
+        PermissionState::Granted {
+            granted_at,
+            expires_at,
+        } => format!(
+            "granted  granted: {granted_at}  expires: {}",
+            expires_at.map_or_else(|| "never".to_owned(), |value| value.to_string())
+        ),
+    };
+    writeln!(output, "{}  {:?}  {state}", approval.id, approval.operation)
         .and_then(|()| {
             writeln!(
                 output,
@@ -458,21 +454,12 @@ fn write_approval(output: &mut impl Write, approval: &PendingApproval) -> Result
                 "  declared: {project}/{profile}  base directory: {base_dir}"
             )
         })
+        .and_then(|()| writeln!(output, "  reason: {reason}"))
         .and_then(|()| {
-            writeln!(
-                output,
-                "  reason: {reason}  created: {}  expires: {}",
-                approval.created_at, approval.expires_at
-            )
-        })
-        .and_then(|()| {
-            if let Some(duration) = approval
-                .application
-                .requested_authorization_duration_seconds
-            {
+            if let Some(duration) = approval.application.requested_permission_duration_seconds {
                 writeln!(
                     output,
-                    "  requested grant duration: {}",
+                    "  requested permission duration: {}",
                     format_grant_duration(duration)
                 )
             } else {
@@ -541,7 +528,7 @@ pub(super) fn read_grant_duration(
     loop {
         write!(
             output,
-            "Grant access for [{}]: ",
+            "Permission duration [{}]: ",
             format_grant_duration(default)
         )
         .and_then(|()| output.flush())
@@ -650,7 +637,7 @@ fn prompt_unlock_group(
     }
 }
 
-fn prompt_approvals(
+fn prompt_permissions(
     root: &Path,
     socket: Option<&Path>,
     factor: FactorSource<'_>,
@@ -662,17 +649,20 @@ fn prompt_approvals(
     let mut last_revision = None;
     let mut handled = HashSet::new();
     loop {
-        let (revision, pending) = approvals(&client, last_revision)?;
+        let (revision, pending) = permissions(&client, last_revision)?;
         if last_revision != Some(revision) {
             handled.retain(|id| pending.iter().any(|approval| &approval.id == id));
             for approval in &pending {
+                if !matches!(approval.state, PermissionState::Pending { .. }) {
+                    continue;
+                }
                 if handled.contains(&approval.id) {
                     continue;
                 }
                 let decision = {
                     let mut input = stdin.lock();
                     let mut output = stderr.lock();
-                    write_approval(&mut output, approval)?;
+                    write_permission(&mut output, approval)?;
                     read_approval_decision(&mut input, &mut output)?
                 };
                 handled.insert(approval.id.clone());
@@ -684,9 +674,7 @@ fn prompt_approvals(
                             let duration = read_grant_duration(
                                 &mut input,
                                 &mut output,
-                                approval
-                                    .application
-                                    .requested_authorization_duration_seconds,
+                                approval.application.requested_permission_duration_seconds,
                             )?;
                             let group = prompt_unlock_group(root, &mut input, &mut output)?;
                             (duration, group)
@@ -700,13 +688,13 @@ fn prompt_approvals(
                             Some(&group),
                         )?;
                     }
-                    ApprovalDecision::Deny => resolve_approval(
+                    ApprovalDecision::Deny => change_permission(
                         root,
                         socket,
-                        VaultAction::Deny {
+                        VaultAction::DenyPermission {
                             id: approval.id.clone(),
                         },
-                        false,
+                        PermissionChange::Denied,
                     )?,
                     ApprovalDecision::Ignore => {}
                 }
@@ -726,11 +714,11 @@ fn approve_with_prompted_group(
     let stderr = std::io::stderr();
     require_prompt_terminal(stdin.is_terminal(), stderr.is_terminal())?;
     let client = native_client(root, socket)?;
-    let (_, pending) = approvals(&client, None)?;
+    let (_, pending) = permissions(&client, None)?;
     let approval = pending
         .iter()
         .find(|approval| approval.id == id)
-        .ok_or_else(|| VaultError::Protocol("approval is missing or expired".to_owned()))?;
+        .ok_or_else(|| VaultError::Protocol("permission is missing or expired".to_owned()))?;
     let device = Vault::inspect(root)?;
     let (grant_duration_seconds, group) = {
         let mut input = stdin.lock();
@@ -738,9 +726,7 @@ fn approve_with_prompted_group(
         let duration = read_grant_duration(
             &mut input,
             &mut output,
-            approval
-                .application
-                .requested_authorization_duration_seconds,
+            approval.application.requested_permission_duration_seconds,
         )?;
         let group = match device.unlock_policy().groups() {
             [group] => group.clone(),
@@ -767,54 +753,54 @@ fn approve(
     requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
     let client = native_client(root, socket)?;
-    let (_, pending) = approvals(&client, None)?;
+    let (_, pending) = permissions(&client, None)?;
     let approval = pending
         .iter()
         .find(|approval| approval.id == id)
-        .ok_or_else(|| VaultError::Protocol("approval is missing or expired".to_owned()))?;
+        .ok_or_else(|| VaultError::Protocol("permission is missing or expired".to_owned()))?;
     let device = Vault::inspect(root)?;
     let unsealed = unseal_selected(root, &device, requested_group, factor)?;
-    let signature = unsealed.sign_approval_challenge(
-        &approval.id,
-        &approval.challenge,
-        grant_duration_seconds,
-    )?;
+    let PermissionState::Pending { challenge, .. } = &approval.state else {
+        return Err(VaultError::Protocol("permission is already granted".to_owned()).into());
+    };
+    let signature =
+        unsealed.sign_permission_challenge(&approval.id, challenge, grant_duration_seconds)?;
     drop(unsealed);
-    resolve_approval(
+    change_permission(
         root,
         socket,
-        VaultAction::Approve {
+        VaultAction::ApprovePermission {
             id: id.to_owned(),
             signature,
-            grant_duration_seconds,
+            duration_seconds: grant_duration_seconds,
         },
-        true,
+        PermissionChange::Granted,
     )
 }
 
-fn resolve_approval(
+fn change_permission(
     root: &Path,
     socket: Option<&Path>,
     action: VaultAction,
-    expected_approved: bool,
+    expected: PermissionChange,
 ) -> Result<(), CliError> {
     let client = native_client(root, socket)?;
     let request = VaultRequest::new(action)?;
     let response = client.request(&request)?;
     match response.result {
-        Ok(VaultResponseBody::ApprovalResolved { approved }) if approved == expected_approved => {
+        Ok(VaultResponseBody::PermissionChanged { status }) if status == expected => {
             println!(
-                "{}",
-                if approved {
-                    "Approved pending request"
-                } else {
-                    "Denied pending request"
+                "{} permission",
+                match status {
+                    PermissionChange::Granted => "Granted",
+                    PermissionChange::Denied => "Denied",
+                    PermissionChange::Revoked => "Revoked",
                 }
             );
             Ok(())
         }
         Ok(_) => Err(VaultError::Protocol(
-            "vault returned an unexpected approval response".to_owned(),
+            "vault returned an unexpected permission response".to_owned(),
         )
         .into()),
         Err(error) => Err(CliError::VaultRequest {

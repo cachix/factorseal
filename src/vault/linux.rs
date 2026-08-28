@@ -501,7 +501,7 @@ mod tests {
         client: &LinuxVaultClient,
         now: u64,
     ) {
-        service.authorize_approval_manager(caller, now).unwrap();
+        service.authorize_permission_manager(caller, now).unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let wait_barrier = Arc::clone(&barrier);
         let wait_client = client.clone();
@@ -509,7 +509,7 @@ mod tests {
             wait_barrier.wait();
             wait_client
                 .request(
-                    &VaultRequest::new(VaultAction::WaitApprovals {
+                    &VaultRequest::new(VaultAction::WaitPermissions {
                         after_revision: 0,
                         timeout_ms: 2_000,
                     })
@@ -547,10 +547,10 @@ mod tests {
         assert!(denied.result.unwrap_err().interaction.is_some());
         assert!(matches!(
             wait.join().unwrap().result,
-            Ok(VaultResponseBody::Approvals {
+            Ok(VaultResponseBody::Permissions {
                 revision,
-                approvals
-            }) if revision > 0 && approvals.len() == 1
+                permissions
+            }) if revision > 0 && permissions.len() == 1
         ));
     }
 

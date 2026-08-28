@@ -442,7 +442,7 @@ pub(crate) mod unix_socket {
 mod tests {
     use super::*;
     #[cfg(feature = "vault-client")]
-    use crate::vault::{MAX_APPROVAL_WAIT_MS, VaultAction, VaultResponseBody};
+    use crate::vault::{MAX_PERMISSION_WAIT_MS, VaultAction, VaultResponseBody};
     #[cfg(feature = "vault-client")]
     use std::io::Cursor;
 
@@ -477,7 +477,7 @@ mod tests {
     #[cfg(all(feature = "vault", feature = "vault-client"))]
     fn a_client_deadline_outlasts_first_use_caller_authentication() {
         assert!(IPC_RESPONSE_TIMEOUT >= IPC_FRAME_IO_TIMEOUT * 4);
-        assert!(IPC_RESPONSE_TIMEOUT > Duration::from_millis(MAX_APPROVAL_WAIT_MS));
+        assert!(IPC_RESPONSE_TIMEOUT > Duration::from_millis(MAX_PERMISSION_WAIT_MS));
     }
 
     #[test]

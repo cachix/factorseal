@@ -7,7 +7,7 @@ use crate::vault::{DocumentScope, VaultResult};
 use super::super::grant::{GrantTarget, store_grant};
 use super::super::{CallerIdentity, GrantPermission, WireSecretAddress};
 use super::VaultService;
-use super::approvals::APPROVAL_CONTROL_NAMESPACE;
+use super::approvals::PERMISSION_CONTROL_NAMESPACE;
 
 #[derive(Clone, Copy)]
 enum AuthorizationTarget<'a> {
@@ -25,14 +25,18 @@ enum AuthorizationTarget<'a> {
 impl VaultService {
     /// Permit one authenticated Factorseal CLI executable to list and resolve
     /// pending approvals.
-    pub fn authorize_approval_manager(&self, caller: &CallerIdentity, now: u64) -> VaultResult<()> {
+    pub fn authorize_permission_manager(
+        &self,
+        caller: &CallerIdentity,
+        now: u64,
+    ) -> VaultResult<()> {
         self.authorize(
             caller,
             AuthorizationTarget::Namespace {
                 scope: DocumentScope::DeviceLocal,
-                namespace: APPROVAL_CONTROL_NAMESPACE,
+                namespace: PERMISSION_CONTROL_NAMESPACE,
             },
-            [GrantPermission::ManageApprovals],
+            [GrantPermission::ManagePermissions],
             None,
             now,
         )

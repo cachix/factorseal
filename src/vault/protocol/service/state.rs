@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use crate::vault::{VaultError, VaultResult, VaultStore};
 
+use super::super::grant::{list_granted_permissions, revoke_permission};
 use super::super::lease::{ReplayWindow, UnsealLease};
-use super::super::{PendingApproval, VaultInteractionReference};
+use super::super::{Permission, VaultInteractionReference};
 use super::super::{RequestId, UnsealLeasePolicy};
 use super::approvals::{ApprovalCandidate, PendingApprovals};
 
@@ -23,6 +24,7 @@ struct LiveState {
     lease: UnsealLease,
     replay: ReplayWindow,
     approvals: PendingApprovals,
+    granted_permissions: Vec<Permission>,
     /// Whole second the storage eviction sweep last ran in. The sweep
     /// decrypts, verifies, and re-parses every cached document, while platform
     /// event loops poll expiration about ten times a second.
@@ -45,6 +47,7 @@ impl ServiceState {
                 lease: UnsealLease::new(now, policy)?,
                 replay: ReplayWindow::new(),
                 approvals: PendingApprovals::default(),
+                granted_permissions: Vec::new(),
                 // Opening the store already swept this second.
                 last_purge_at: now,
                 #[cfg(all(test, feature = "hardware"))]
@@ -144,12 +147,28 @@ impl LiveStateGuard<'_> {
         Ok(interaction)
     }
 
-    pub(super) fn list_approvals(&mut self, now: u64) -> (u64, Vec<PendingApproval>) {
-        self.live.approvals.list(now)
+    pub(super) fn list_permissions(&mut self, now: u64) -> VaultResult<(u64, Vec<Permission>)> {
+        let (_, mut permissions) = self.live.approvals.list(now);
+        let mut granted = list_granted_permissions(&self.live.store, now)?;
+        granted.sort_by(|left, right| left.id.cmp(&right.id));
+        if granted != self.live.granted_permissions {
+            self.live.granted_permissions.clone_from(&granted);
+            self.live.approvals.changed();
+        }
+        permissions.extend(granted);
+        permissions.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok((self.live.approvals.revision(), permissions))
     }
 
     pub(super) fn deny_approval(&mut self, id: &str, now: u64) -> VaultResult<()> {
         self.live.approvals.deny(id, now)?;
+        self.approval_changed.notify_all();
+        Ok(())
+    }
+
+    pub(super) fn revoke_permission(&mut self, id: &str, now: u64) -> VaultResult<()> {
+        revoke_permission(&self.live.store, id, now)?;
+        self.live.approvals.changed();
         self.approval_changed.notify_all();
         Ok(())
     }
@@ -191,16 +210,16 @@ impl LiveStateGuard<'_> {
         after_revision: u64,
         timeout: Duration,
         now: u64,
-    ) -> VaultResult<(u64, Vec<PendingApproval>)> {
+    ) -> VaultResult<(u64, Vec<Permission>)> {
         let deadline = Instant::now()
             .checked_add(timeout)
-            .ok_or_else(|| VaultError::Protocol("approval wait timeout overflows".to_owned()))?;
+            .ok_or_else(|| VaultError::Protocol("permission wait timeout overflows".to_owned()))?;
         loop {
             if self.live.store.is_sealed() || self.live.lease.is_expired(Instant::now()) {
                 self.live.store.seal();
                 return Err(VaultError::Sealed);
             }
-            let current = self.live.approvals.list(now);
+            let current = self.list_permissions(now)?;
             if current.0 != after_revision {
                 return Ok(current);
             }
@@ -213,7 +232,7 @@ impl LiveStateGuard<'_> {
                 .map_err(|_| VaultError::WorkerUnavailable)?;
             self.live = live;
             if result.timed_out() {
-                return Ok(self.live.approvals.list(now));
+                return self.list_permissions(now);
             }
         }
     }

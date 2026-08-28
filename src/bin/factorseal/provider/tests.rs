@@ -1,9 +1,9 @@
 use super::*;
 use factorseal::{
     CallerIdentity, CallerPlatform, HardwareBackend, KeyProtector, KeyProtectorFactory,
-    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealLeasePolicy, Vault,
-    VaultInteractionReference, VaultPlatform, VaultResponse, VaultResponseError, VaultService,
-    WireSecretAddress,
+    PermissionChange, PermissionState, UnlockCredentials, UnlockFactorKind, UnlockGroup,
+    UnlockPolicy, UnsealLeasePolicy, Vault, VaultInteractionReference, VaultPlatform,
+    VaultResponse, VaultResponseError, VaultService, WireSecretAddress,
 };
 use secretspec_ipc::client::Client;
 use secretspec_ipc::error::Error as IpcError;
@@ -265,7 +265,7 @@ impl VaultClient for ApprovalVault {
                 code: VaultResponseErrorCode::AuthorizationRequired,
                 message: "application authorization is required".to_owned(),
                 interaction: Some(VaultInteractionReference {
-                    id: "apr_provider_test".to_owned(),
+                    id: "prm_provider_test".to_owned(),
                     expires_at: 1_800_000_000,
                 }),
             },
@@ -286,7 +286,7 @@ fn provider_maps_pending_approval_to_structured_interaction() {
     .unwrap_err();
     assert_eq!(error.data.kind, ErrorKind::InteractionRequired);
     let interaction = error.data.interaction.unwrap();
-    assert_eq!(interaction.id, "apr_provider_test");
+    assert_eq!(interaction.id, "prm_provider_test");
     assert_eq!(interaction.expires_at_unix_ms, Some(1_800_000_000_000));
 }
 
@@ -391,7 +391,7 @@ impl ApprovalIntegrationFixture {
             None,
         )
         .unwrap();
-        service.authorize_approval_manager(&manager, now).unwrap();
+        service.authorize_permission_manager(&manager, now).unwrap();
         Self {
             _directory: directory,
             root,
@@ -483,20 +483,20 @@ async fn secretspec_request_can_be_approved_and_retried() {
 
     let listed = fixture.service.handle(
         &fixture.manager,
-        VaultRequest::new(VaultAction::ListApprovals).unwrap(),
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
         fixture.now + 2,
     );
-    let Ok(VaultResponseBody::Approvals { approvals, .. }) = listed.result else {
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
         panic!("expected one pending approval");
     };
-    assert_eq!(approvals.len(), 1);
-    assert_eq!(approvals[0].id, interaction.id);
-    assert_eq!(approvals[0].application.project.as_deref(), Some("demo"));
-    assert_eq!(approvals[0].application.reason.as_deref(), Some("deploy"));
+    assert_eq!(permissions.len(), 1);
+    assert_eq!(permissions[0].id, interaction.id);
+    assert_eq!(permissions[0].application.project.as_deref(), Some("demo"));
+    assert_eq!(permissions[0].application.reason.as_deref(), Some("deploy"));
     assert_eq!(
-        approvals[0]
+        permissions[0]
             .application
-            .requested_authorization_duration_seconds,
+            .requested_permission_duration_seconds,
         Some(8 * 60 * 60)
     );
 
@@ -507,22 +507,27 @@ async fn secretspec_request_can_be_approved_and_retried() {
         &IntegrationProtectorFactory,
     )
     .unwrap();
+    let PermissionState::Pending { challenge, .. } = &permissions[0].state else {
+        panic!("expected a pending permission");
+    };
     let signature = unsealed
-        .sign_approval_challenge(&approvals[0].id, &approvals[0].challenge, Some(8 * 60 * 60))
+        .sign_permission_challenge(&permissions[0].id, challenge, Some(8 * 60 * 60))
         .unwrap();
     let approved = fixture.service.handle(
         &fixture.manager,
-        VaultRequest::new(VaultAction::Approve {
-            id: approvals[0].id.clone(),
+        VaultRequest::new(VaultAction::ApprovePermission {
+            id: permissions[0].id.clone(),
             signature,
-            grant_duration_seconds: Some(8 * 60 * 60),
+            duration_seconds: Some(8 * 60 * 60),
         })
         .unwrap(),
         fixture.now + 3,
     );
     assert!(matches!(
         approved.result,
-        Ok(VaultResponseBody::ApprovalResolved { approved: true })
+        Ok(VaultResponseBody::PermissionChanged {
+            status: PermissionChange::Granted
+        })
     ));
 
     let retried: GetResult = client

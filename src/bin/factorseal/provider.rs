@@ -112,7 +112,7 @@ impl ProviderHandler for FactorsealProvider {
             application.context.reason,
         )
         .and_then(|context| {
-            context.with_requested_authorization_duration_seconds(requested_duration_seconds)
+            context.with_requested_permission_duration_seconds(requested_duration_seconds)
         })
         .map_err(|error| map_vault_error(&error))?;
         if application_context.project.is_none() {

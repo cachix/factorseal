@@ -112,22 +112,10 @@ pub(super) enum Command {
         unlock: Option<UnlockGroup>,
     },
 
-    /// List, watch, approve, or deny pending application requests.
-    Approvals {
-        /// Continue printing whenever the pending set changes.
-        #[arg(long)]
-        watch: bool,
-
-        /// Interactively approve, deny, or ignore pending requests.
-        #[arg(long, requires = "watch", conflicts_with = "json")]
-        prompt: bool,
-
-        /// Emit machine-readable JSON.
-        #[arg(long)]
-        json: bool,
-
+    /// List and manage application permissions.
+    Permissions {
         #[command(subcommand)]
-        action: Option<ApprovalCommand>,
+        action: PermissionCommand,
     },
 
     /// Serve the SecretSpec external-provider protocol over standard I/O.
@@ -136,10 +124,31 @@ pub(super) enum Command {
 }
 
 #[derive(Debug, Subcommand)]
-pub(super) enum ApprovalCommand {
-    /// Approve a pending request after satisfying one configured unlock group.
+pub(super) enum PermissionCommand {
+    /// List pending and granted permissions.
+    List {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Continue printing whenever permissions change.
+    Watch {
+        /// Interactively approve, deny, or ignore pending permissions.
+        #[arg(long, conflicts_with = "json")]
+        prompt: bool,
+
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Grant a pending permission after satisfying one configured unlock group.
     Approve { id: String },
 
-    /// Deny and remove a pending request.
+    /// Deny and remove a pending permission.
     Deny { id: String },
+
+    /// Revoke a granted permission.
+    Revoke { id: String },
 }

@@ -1,4 +1,4 @@
-use super::cli::{ApprovalCommand, Cli, Command};
+use super::cli::{Cli, Command, PermissionCommand};
 use super::commands::{
     ApprovalDecision, ParsedGrantDuration, parse_grant_duration, read_approval_decision,
     read_bounded, read_grant_duration, read_keyring_value, read_password_for_groups,
@@ -288,53 +288,48 @@ fn bounded_reads_retain_one_byte_to_detect_overflow() {
 }
 
 #[test]
-fn approvals_use_listing_flags_and_explicit_action_subcommands() {
-    let cli = Cli::try_parse_from(["factorseal", "approvals", "--watch", "--json"]).unwrap();
+fn permissions_use_explicit_subcommands() {
+    let cli = Cli::try_parse_from(["factorseal", "permissions", "watch", "--json"]).unwrap();
     assert!(matches!(
         cli.command,
-        Command::Approvals {
-            watch: true,
-            json: true,
-            action: None,
-            ..
+        Command::Permissions {
+            action: PermissionCommand::Watch {
+                prompt: false,
+                json: true
+            }
         }
     ));
 
-    let cli = Cli::try_parse_from(["factorseal", "approvals", "approve", "apr_demo"]).unwrap();
+    let cli = Cli::try_parse_from(["factorseal", "permissions", "approve", "prm_demo"]).unwrap();
     assert!(matches!(
         cli.command,
-        Command::Approvals {
-            action: Some(ApprovalCommand::Approve { id }),
-            ..
-        } if id == "apr_demo"
+        Command::Permissions {
+            action: PermissionCommand::Approve { id },
+        } if id == "prm_demo"
     ));
 
-    let cli = Cli::try_parse_from(["factorseal", "approvals", "deny", "apr_demo"]).unwrap();
+    let cli = Cli::try_parse_from(["factorseal", "permissions", "deny", "prm_demo"]).unwrap();
     assert!(matches!(
         cli.command,
-        Command::Approvals {
-            action: Some(ApprovalCommand::Deny { id }),
-            ..
-        } if id == "apr_demo"
+        Command::Permissions {
+            action: PermissionCommand::Deny { id },
+        } if id == "prm_demo"
     ));
 
-    let cli = Cli::try_parse_from(["factorseal", "approvals", "--watch", "--prompt"]).unwrap();
+    let cli = Cli::try_parse_from(["factorseal", "permissions", "revoke", "prm_demo"]).unwrap();
     assert!(matches!(
         cli.command,
-        Command::Approvals {
-            watch: true,
-            prompt: true,
-            action: None,
-            ..
-        }
+        Command::Permissions {
+            action: PermissionCommand::Revoke { id },
+        } if id == "prm_demo"
     ));
-    assert!(Cli::try_parse_from(["factorseal", "approvals", "--prompt"]).is_err());
+    assert!(Cli::try_parse_from(["factorseal", "permissions", "--prompt"]).is_err());
     assert!(
         Cli::try_parse_from([
             "factorseal",
-            "approvals",
+            "permissions",
             "approve",
-            "apr_demo",
+            "prm_demo",
             "--unlock",
             "biometric",
         ])

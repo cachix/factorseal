@@ -154,7 +154,7 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
 
     let denied = service.handle(&provider, get("demo"), 101);
     let interaction = denied.result.unwrap_err().interaction.unwrap();
-    assert!(interaction.id.starts_with("apr_"));
+    assert!(interaction.id.starts_with("prm_"));
     assert_eq!(interaction.expires_at, 101 + 7 * 24 * 60 * 60);
 
     let repeated = service.handle(&provider, get("demo"), 201);
@@ -170,37 +170,40 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         None,
     )
     .unwrap();
-    service.authorize_approval_manager(&manager, 101).unwrap();
+    service.authorize_permission_manager(&manager, 101).unwrap();
     let listed = service.handle(
         &manager,
-        VaultRequest::new(VaultAction::ListApprovals).unwrap(),
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
         202,
     );
-    let Ok(VaultResponseBody::Approvals { approvals, .. }) = listed.result else {
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
         panic!("expected pending approvals");
     };
-    assert_eq!(approvals.len(), 1);
-    assert_eq!(approvals[0].application.reason.as_deref(), Some("deploy"));
+    assert_eq!(permissions.len(), 1);
+    assert_eq!(permissions[0].application.reason.as_deref(), Some("deploy"));
     assert_eq!(
-        approvals[0].principal.application_id,
+        permissions[0].principal.application_id,
         provider.application_id()
     );
     assert_eq!(
-        approvals[0].principal.executable_digest,
+        permissions[0].principal.executable_digest,
         *provider.executable_digest()
     );
 
     let root = directory.path().join("factorseal");
     let unsealed = Vault::unseal_for_test(&root).unwrap();
+    let PermissionState::Pending { challenge, .. } = &permissions[0].state else {
+        panic!("expected pending permission");
+    };
     let signature = unsealed
-        .sign_approval_challenge(&approvals[0].id, &approvals[0].challenge, Some(60 * 60))
+        .sign_permission_challenge(&permissions[0].id, challenge, Some(60 * 60))
         .unwrap();
     let duration_tampered = service.handle(
         &manager,
-        VaultRequest::new(VaultAction::Approve {
-            id: approvals[0].id.clone(),
+        VaultRequest::new(VaultAction::ApprovePermission {
+            id: permissions[0].id.clone(),
             signature: signature.clone(),
-            grant_duration_seconds: None,
+            duration_seconds: None,
         })
         .unwrap(),
         203,
@@ -208,32 +211,51 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     assert!(duration_tampered.result.is_err());
     let approved = service.handle(
         &manager,
-        VaultRequest::new(VaultAction::Approve {
-            id: approvals[0].id.clone(),
+        VaultRequest::new(VaultAction::ApprovePermission {
+            id: permissions[0].id.clone(),
             signature,
-            grant_duration_seconds: Some(60 * 60),
+            duration_seconds: Some(60 * 60),
         })
         .unwrap(),
         204,
     );
     assert!(matches!(
         approved.result,
-        Ok(VaultResponseBody::ApprovalResolved { approved: true })
+        Ok(VaultResponseBody::PermissionChanged {
+            status: PermissionChange::Granted
+        })
     ));
     assert!(matches!(
         service.handle(&provider, get("demo"), 205).result,
         Ok(VaultResponseBody::Secret { value: None })
     ));
+    let permissions = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+        206,
+    );
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = permissions.result else {
+        panic!("expected granted permission");
+    };
+    assert_eq!(permissions.len(), 1);
+    assert_eq!(permissions[0].id, interaction.id);
+    assert!(matches!(
+        permissions[0].state,
+        PermissionState::Granted {
+            granted_at: 204,
+            expires_at: Some(deadline)
+        } if deadline == 204 + 60 * 60
+    ));
     assert!(
         service
-            .handle(&provider, get("other-project"), 206)
+            .handle(&provider, get("other-project"), 207)
             .result
             .unwrap_err()
             .interaction
             .is_some()
     );
     let mismatched = service
-        .handle(&provider, get_scoped("demo", "other-project"), 207)
+        .handle(&provider, get_scoped("demo", "other-project"), 208)
         .result
         .unwrap_err();
     assert_eq!(
@@ -244,22 +266,49 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         mismatched.interaction.is_none(),
         "a mismatched project address must not even create an approvable request"
     );
+    let revoked = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::RevokePermission {
+            id: interaction.id.clone(),
+        })
+        .unwrap(),
+        209,
+    );
+    assert!(matches!(
+        revoked.result,
+        Ok(VaultResponseBody::PermissionChanged {
+            status: PermissionChange::Revoked
+        })
+    ));
+    let remaining = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+        210,
+    );
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = remaining.result else {
+        panic!("expected permission list");
+    };
+    assert!(
+        permissions
+            .iter()
+            .all(|permission| permission.id != interaction.id)
+    );
     assert!(
         service
-            .handle(&provider, get("demo"), 204 + 60 * 60)
+            .handle(&provider, get("demo"), 211)
             .result
             .unwrap_err()
             .interaction
             .is_some(),
-        "the project grant must expire after the user-selected duration"
+        "revocation must remove the underlying project authority"
     );
 }
 
 #[test]
 fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
-    for timeout_ms in [0, super::super::MAX_APPROVAL_WAIT_MS + 1] {
+    for timeout_ms in [0, super::super::MAX_PERMISSION_WAIT_MS + 1] {
         assert!(
-            VaultRequest::new(VaultAction::WaitApprovals {
+            VaultRequest::new(VaultAction::WaitPermissions {
                 after_revision: 0,
                 timeout_ms,
             })
@@ -278,11 +327,11 @@ fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
         None,
     )
     .unwrap();
-    service.authorize_approval_manager(&manager, 100).unwrap();
+    service.authorize_permission_manager(&manager, 100).unwrap();
 
     let timed_out = service.handle(
         &manager,
-        VaultRequest::new(VaultAction::WaitApprovals {
+        VaultRequest::new(VaultAction::WaitPermissions {
             after_revision: 0,
             timeout_ms: 10,
         })
@@ -291,10 +340,10 @@ fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
     );
     assert!(matches!(
         timed_out.result,
-        Ok(VaultResponseBody::Approvals {
+        Ok(VaultResponseBody::Permissions {
             revision: 0,
-            approvals
-        }) if approvals.is_empty()
+            permissions
+        }) if permissions.is_empty()
     ));
 
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -305,7 +354,7 @@ fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
         waiter_barrier.wait();
         waiter_service.handle(
             &waiter_manager,
-            VaultRequest::new(VaultAction::WaitApprovals {
+            VaultRequest::new(VaultAction::WaitPermissions {
                 after_revision: 0,
                 timeout_ms: 1_000,
             })
@@ -335,10 +384,10 @@ fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
     let changed = waiter.join().unwrap();
     assert!(matches!(
         changed.result,
-        Ok(VaultResponseBody::Approvals {
+        Ok(VaultResponseBody::Permissions {
             revision,
-            approvals
-        }) if revision > 0 && approvals.len() == 1
+            permissions
+        }) if revision > 0 && permissions.len() == 1
     ));
 }
 

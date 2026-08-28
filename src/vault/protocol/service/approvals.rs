@@ -6,17 +6,17 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use crate::vault::{DocumentScope, VaultError, VaultResult, VaultStore};
 
-use super::super::grant::{GrantTarget, store_grant};
+use super::super::grant::{GrantTarget, promote_permission};
 use super::super::{
-    ApprovalOperation, ApprovalPrincipal, CallerIdentity, GrantPermission, PendingApproval,
-    VaultAction, VaultApplicationContext, VaultInteractionReference,
+    CallerIdentity, GrantPermission, Permission, PermissionOperation, PermissionPrincipal,
+    PermissionState, VaultAction, VaultApplicationContext, VaultInteractionReference,
 };
-use crate::vault::signature::{approval_payload, verify};
+use crate::vault::signature::{permission_payload, verify};
 
 const APPROVAL_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_PENDING_APPROVALS: usize = 128;
 
-pub(super) const APPROVAL_CONTROL_NAMESPACE: &[u8] = b"factorseal/approvals/v1";
+pub(super) const PERMISSION_CONTROL_NAMESPACE: &[u8] = b"factorseal/permissions/v1";
 
 pub(super) struct ApprovalCandidate {
     caller: CallerIdentity,
@@ -24,11 +24,11 @@ pub(super) struct ApprovalCandidate {
     scope: DocumentScope,
     namespace: Vec<u8>,
     permission: GrantPermission,
-    operation: ApprovalOperation,
+    operation: PermissionOperation,
 }
 
 struct ApprovalRecord {
-    summary: PendingApproval,
+    summary: Permission,
     caller: CallerIdentity,
     scope: DocumentScope,
     namespace: Vec<u8>,
@@ -57,7 +57,7 @@ impl ApprovalCandidate {
                     DocumentScope::DeviceCache,
                     namespace,
                     GrantPermission::Get,
-                    ApprovalOperation::Get,
+                    PermissionOperation::Get,
                 )
             }
             VaultAction::PutCache {
@@ -66,7 +66,7 @@ impl ApprovalCandidate {
                 DocumentScope::DeviceCache,
                 namespace,
                 GrantPermission::Put,
-                ApprovalOperation::Put,
+                PermissionOperation::Put,
             ),
             VaultAction::DeleteCache { namespace, address }
                 if address.is_scoped_to_project(project) =>
@@ -75,7 +75,7 @@ impl ApprovalCandidate {
                     DocumentScope::DeviceCache,
                     namespace,
                     GrantPermission::Delete,
-                    ApprovalOperation::Delete,
+                    PermissionOperation::Delete,
                 )
             }
             // A namespace clear cannot be constrained to one project's
@@ -94,10 +94,22 @@ impl ApprovalCandidate {
 }
 
 impl PendingApprovals {
+    pub(super) const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(super) fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     fn purge_expired(&mut self, now: u64) {
         let before = self.records.len();
-        self.records
-            .retain(|record| record.summary.expires_at > now);
+        self.records.retain(|record| {
+            matches!(
+                record.summary.state,
+                PermissionState::Pending { expires_at, .. } if expires_at > now
+            )
+        });
         if self.records.len() != before {
             self.revision = self.revision.wrapping_add(1);
         }
@@ -118,7 +130,13 @@ impl PendingApprovals {
                 && record.namespace == candidate.namespace
                 && record.permission == candidate.permission
         }) {
-            existing.summary.expires_at = expires_at;
+            if let PermissionState::Pending {
+                expires_at: current,
+                ..
+            } = &mut existing.summary.state
+            {
+                *current = expires_at;
+            }
             self.revision = self.revision.wrapping_add(1);
             return Ok(VaultInteractionReference {
                 id: existing.summary.id.clone(),
@@ -132,15 +150,17 @@ impl PendingApprovals {
         let mut challenge = [0_u8; 32];
         getrandom::fill(&mut id_bytes)?;
         getrandom::fill(&mut challenge)?;
-        let id = format!("apr_{}", URL_SAFE_NO_PAD.encode(id_bytes));
-        let summary = PendingApproval {
+        let id = format!("prm_{}", URL_SAFE_NO_PAD.encode(id_bytes));
+        let summary = Permission {
             id: id.clone(),
-            created_at: now,
-            expires_at,
             operation: candidate.operation,
-            principal: ApprovalPrincipal::from(&candidate.caller),
+            principal: PermissionPrincipal::from(&candidate.caller),
             application: candidate.application,
-            challenge,
+            state: PermissionState::Pending {
+                created_at: now,
+                expires_at,
+                challenge,
+            },
         };
         self.records.push_back(ApprovalRecord {
             summary,
@@ -153,7 +173,7 @@ impl PendingApprovals {
         Ok(VaultInteractionReference { id, expires_at })
     }
 
-    pub(super) fn list(&mut self, now: u64) -> (u64, Vec<PendingApproval>) {
+    pub(super) fn list(&mut self, now: u64) -> (u64, Vec<Permission>) {
         self.purge_expired(now);
         (
             self.revision,
@@ -170,7 +190,7 @@ impl PendingApprovals {
             .records
             .iter()
             .position(|record| record.summary.id == id)
-            .ok_or_else(|| VaultError::Protocol("approval is missing or expired".to_owned()))?;
+            .ok_or_else(|| VaultError::Protocol("permission is missing or expired".to_owned()))?;
         self.records.remove(index);
         self.revision = self.revision.wrapping_add(1);
         Ok(())
@@ -189,15 +209,14 @@ impl PendingApprovals {
             .records
             .iter()
             .position(|record| record.summary.id == id)
-            .ok_or_else(|| VaultError::Protocol("approval is missing or expired".to_owned()))?;
+            .ok_or_else(|| VaultError::Protocol("permission is missing or expired".to_owned()))?;
         let record = &self.records[index];
+        let PermissionState::Pending { challenge, .. } = record.summary.state else {
+            return Err(VaultError::Protocol("permission is not pending".to_owned()));
+        };
         verify(
             store.device().public_signing_key(),
-            &approval_payload(
-                &record.summary.id,
-                &record.summary.challenge,
-                grant_duration_seconds,
-            ),
+            &permission_payload(&record.summary.id, &challenge, grant_duration_seconds),
             signature,
         )?;
         let grant_expires_at = grant_duration_seconds
@@ -208,8 +227,13 @@ impl PendingApprovals {
             .application
             .project
             .as_deref()
-            .ok_or_else(|| VaultError::Protocol("approval has no project".to_owned()))?;
-        store_grant(
+            .ok_or_else(|| VaultError::Protocol("permission has no project".to_owned()))?;
+        let mut permission = record.summary.clone();
+        permission.state = PermissionState::Granted {
+            granted_at: now,
+            expires_at: grant_expires_at,
+        };
+        promote_permission(
             store,
             &record.caller,
             GrantTarget::Project {
@@ -217,7 +241,8 @@ impl PendingApprovals {
                 namespace: &record.namespace,
                 project,
             },
-            [record.permission],
+            record.permission,
+            permission,
             grant_expires_at,
             now,
         )?;

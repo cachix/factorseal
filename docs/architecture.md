@@ -175,28 +175,31 @@ The endpoint executable, not the SecretSpec CLI or embedding application, is
 the principal authenticated by Factorseal's Unix socket or Windows named pipe.
 Project approval therefore grants that exact executable cache-only permission
 for the declared project. The endpoint forwards SecretSpec's project, profile,
-base directory, reason, and optional requested authorization duration with
+base directory, reason, and optional requested permission duration with
 every native request for future approval, notification, and audit presentation.
 That context is metadata only: it does
 not replace the transport-authenticated executable identity and is never grant
 authority. The remaining release proof is publishing the IPC dependency and
 running installed end-to-end conformance on each platform.
 
-Missing project permissions create bounded in-memory approvals with a
-seven-day retention window. The agent deduplicates equivalent requests,
-refreshes their expiry, and returns an opaque correlation ID; it does not
-accept that ID as authority. `factorseal approvals approve`
+Missing project permissions create bounded in-memory pending permission records
+with a seven-day retention window. The agent deduplicates equivalent requests,
+refreshes their expiry, and returns an opaque `prm_` correlation ID; it does not
+accept that ID as authority. `factorseal permissions approve`
 must satisfy one configured unlock group and sign the agent's one-time
-challenge with the vault identity before the agent stores a project-scoped
-grant. Denial needs no factor but is restricted to the separately authorized
-Factorseal CLI executable. `factorseal approvals --watch --prompt` displays
+challenge with the vault identity before the same ID becomes a durable,
+project-scoped granted permission. Denial and revocation need no factor but are
+restricted to the separately authorized Factorseal CLI executable.
+`factorseal permissions watch --prompt` displays
 that trusted principal separately from declared application context and
 requires an explicit terminal choice of approve, deny, or ignore. It selects a
 sole configured unlock group automatically and asks when multiple alternatives
-exist. Approval asks for the final grant lifetime before satisfying a factor;
-the app request is only the prompt default, and the resulting project grant
-expires at the signed duration. Approval state disappears on expiry or sealing.
-Watchers use a bounded native long-poll keyed by the approval revision. Local
+exist. Approval asks for the final permission lifetime before satisfying a factor;
+the app request is only the prompt default, and the resulting project permission
+expires at the signed duration. Pending state disappears on denial or sealing;
+granted state disappears on revocation or expiry. SecretSpec's audit log owns
+the historical record. Watchers use a bounded native long-poll keyed by the
+permission revision. Local
 transports accept at most eight concurrent requests, so a waiting CLI or GUI
 listener releases the approval-state mutex and cannot block a provider request
 that creates or refreshes an approval.

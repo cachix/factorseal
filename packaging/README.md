@@ -18,7 +18,7 @@ artifact is ready to release:
   release decision; current WiX releases require explicit OSMF terms and are
   not silently accepted by this repository.
 
-SecretSpec cache access is approved per project through `factorseal approvals`;
+SecretSpec cache permissions are granted per project through `factorseal permissions`;
 there is no installation-wide provider grant. The endpoint, not the SecretSpec
 CLI or embedding application, remains the principal seen by the native vault.
 The archives include the endpoint code but do not install a SecretSpec

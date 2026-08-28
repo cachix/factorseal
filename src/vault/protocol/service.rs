@@ -12,8 +12,8 @@ use super::{
 };
 #[cfg(all(test, feature = "hardware"))]
 use super::{
-    CallerPlatform, RequestId, VaultApplicationContext, VaultMutation, WireSecret,
-    WireSecretAddress,
+    CallerPlatform, PermissionChange, PermissionState, RequestId, VaultApplicationContext,
+    VaultMutation, WireSecret, WireSecretAddress,
 };
 
 #[cfg(feature = "vault-store")]
@@ -32,7 +32,7 @@ use actions::execute_action;
 #[cfg(all(test, feature = "hardware"))]
 use actions::{ScopedAction, scope_action, validate_evict_at};
 #[cfg(feature = "vault-store")]
-use approvals::{APPROVAL_CONTROL_NAMESPACE, ApprovalCandidate};
+use approvals::{ApprovalCandidate, PERMISSION_CONTROL_NAMESPACE};
 #[cfg(feature = "vault-store")]
 use state::{LiveStateGuard, ServiceState};
 
@@ -166,43 +166,55 @@ impl VaultService {
         let mut state = self.state.lock_live(monotonic_now)?;
         state.consume(request.request_id())?;
         let result = match request.action {
-            VaultAction::ListApprovals => {
-                require_approval_manager(&state, caller, now)?;
-                let (revision, approvals) = state.list_approvals(now);
-                return Ok(VaultResponseBody::Approvals {
+            VaultAction::ListPermissions => {
+                require_permission_manager(&state, caller, now)?;
+                let (revision, permissions) = state.list_permissions(now)?;
+                return Ok(VaultResponseBody::Permissions {
                     revision,
-                    approvals,
+                    permissions,
                 });
             }
-            VaultAction::WaitApprovals {
+            VaultAction::WaitPermissions {
                 after_revision,
                 timeout_ms,
             } => {
-                require_approval_manager(&state, caller, now)?;
-                let (revision, approvals) = state.wait_for_approvals(
+                require_permission_manager(&state, caller, now)?;
+                let (revision, permissions) = state.wait_for_approvals(
                     after_revision,
                     Duration::from_millis(timeout_ms),
                     now,
                 )?;
-                return Ok(VaultResponseBody::Approvals {
+                return Ok(VaultResponseBody::Permissions {
                     revision,
-                    approvals,
+                    permissions,
                 });
             }
-            VaultAction::Deny { id } => {
-                require_approval_manager(&state, caller, now)?;
+            VaultAction::DenyPermission { id } => {
+                require_permission_manager(&state, caller, now)?;
                 state.deny_approval(&id, now)?;
-                return Ok(VaultResponseBody::ApprovalResolved { approved: false });
+                return Ok(VaultResponseBody::PermissionChanged {
+                    status: super::PermissionChange::Denied,
+                });
             }
-            VaultAction::Approve {
+            VaultAction::ApprovePermission {
                 id,
                 signature,
-                grant_duration_seconds,
+                duration_seconds,
             } => {
-                require_approval_manager(&state, caller, now)?;
-                state.approve(&id, &signature, grant_duration_seconds, now)?;
+                require_permission_manager(&state, caller, now)?;
+                state.approve(&id, &signature, duration_seconds, now)?;
                 state.touch(now, monotonic_now)?;
-                return Ok(VaultResponseBody::ApprovalResolved { approved: true });
+                return Ok(VaultResponseBody::PermissionChanged {
+                    status: super::PermissionChange::Granted,
+                });
+            }
+            VaultAction::RevokePermission { id } => {
+                require_permission_manager(&state, caller, now)?;
+                state.revoke_permission(&id, now)?;
+                state.touch(now, monotonic_now)?;
+                return Ok(VaultResponseBody::PermissionChanged {
+                    status: super::PermissionChange::Revoked,
+                });
             }
             action => execute_action(
                 state.store(),
@@ -232,7 +244,7 @@ impl VaultService {
 }
 
 #[cfg(feature = "vault-store")]
-fn require_approval_manager(
+fn require_permission_manager(
     state: &LiveStateGuard<'_>,
     caller: &CallerIdentity,
     now: u64,
@@ -242,10 +254,10 @@ fn require_approval_manager(
         caller,
         GrantRequirement {
             scope: DocumentScope::DeviceLocal,
-            namespace: APPROVAL_CONTROL_NAMESPACE,
+            namespace: PERMISSION_CONTROL_NAMESPACE,
             address: None,
             project: None,
-            permission: GrantPermission::ManageApprovals,
+            permission: GrantPermission::ManagePermissions,
         },
         now,
     )

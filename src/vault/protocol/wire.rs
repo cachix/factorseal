@@ -9,17 +9,17 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::vault::{SecretAddress, VaultError, VaultResult};
 
-pub(super) const PROTOCOL_VERSION: u8 = 5;
+pub(super) const PROTOCOL_VERSION: u8 = 6;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
-/// Maximum bounded wait accepted by [`VaultAction::WaitApprovals`].
-pub const MAX_APPROVAL_WAIT_MS: u64 = 5_000;
+/// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
+pub const MAX_PERMISSION_WAIT_MS: u64 = 5_000;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_APPLICATION_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_APPLICATION_BASE_DIR_BYTES: usize = 32 * 1024;
 const MAX_NAMESPACE_BYTES: usize = 4 * 1024;
 const MAX_MUTATIONS_PER_REQUEST: usize = 64;
-const MAX_APPROVAL_ID_BYTES: usize = 128;
+const MAX_PERMISSION_ID_BYTES: usize = 128;
 #[cfg(feature = "vault-store")]
 const CALLER_FINGERPRINT_DOMAIN: &[u8] = b"factorseal/caller-identity/v1\0";
 const PROJECT_ADDRESS_DOMAIN: &[u8] = b"factorseal/project-address/v1\0";
@@ -265,10 +265,10 @@ pub struct VaultApplicationContext {
     pub profile: Option<String>,
     pub base_dir: Option<String>,
     pub reason: Option<String>,
-    /// Caller-requested default for the authorization grant. This remains
+    /// Caller-requested default for the permission lifetime. This remains
     /// display context until the user chooses and signs the actual duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_authorization_duration_seconds: Option<u64>,
+    pub requested_permission_duration_seconds: Option<u64>,
 }
 
 impl VaultApplicationContext {
@@ -283,17 +283,17 @@ impl VaultApplicationContext {
             profile,
             base_dir,
             reason,
-            requested_authorization_duration_seconds: None,
+            requested_permission_duration_seconds: None,
         };
         context.validate()?;
         Ok(context)
     }
 
-    pub fn with_requested_authorization_duration_seconds(
+    pub fn with_requested_permission_duration_seconds(
         mut self,
         duration: Option<u64>,
     ) -> VaultResult<Self> {
-        self.requested_authorization_duration_seconds = duration;
+        self.requested_permission_duration_seconds = duration;
         self.validate()?;
         Ok(self)
     }
@@ -336,9 +336,9 @@ impl VaultApplicationContext {
                 "application reason is too long".to_owned(),
             ));
         }
-        if self.requested_authorization_duration_seconds == Some(0) {
+        if self.requested_permission_duration_seconds == Some(0) {
             return Err(VaultError::Protocol(
-                "requested authorization duration must be positive".to_owned(),
+                "requested permission duration must be positive".to_owned(),
             ));
         }
         Ok(())
@@ -523,20 +523,23 @@ pub enum VaultAction {
     SealCache {
         namespace: Vec<u8>,
     },
-    ListApprovals,
-    /// Wait until the approval revision changes or the bounded timeout elapses.
-    WaitApprovals {
+    ListPermissions,
+    /// Wait until the permission revision changes or the bounded timeout elapses.
+    WaitPermissions {
         after_revision: u64,
         timeout_ms: u64,
     },
-    Approve {
+    ApprovePermission {
         id: String,
         signature: Vec<u8>,
-        /// User-selected grant lifetime. `None` means no expiry.
+        /// User-selected permission lifetime. `None` means no expiry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        grant_duration_seconds: Option<u64>,
+        duration_seconds: Option<u64>,
     },
-    Deny {
+    DenyPermission {
+        id: String,
+    },
+    RevokePermission {
         id: String,
     },
 }
@@ -544,34 +547,36 @@ pub enum VaultAction {
 impl VaultAction {
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
-            Self::Status | Self::ListApprovals => Ok(()),
-            Self::WaitApprovals { timeout_ms, .. } => {
-                if !(1..=MAX_APPROVAL_WAIT_MS).contains(timeout_ms) {
+            Self::Status | Self::ListPermissions => Ok(()),
+            Self::WaitPermissions { timeout_ms, .. } => {
+                if !(1..=MAX_PERMISSION_WAIT_MS).contains(timeout_ms) {
                     return Err(VaultError::Protocol(
-                        "approval wait timeout is outside the supported range".to_owned(),
+                        "permission wait timeout is outside the supported range".to_owned(),
                     ));
                 }
                 Ok(())
             }
-            Self::Approve {
+            Self::ApprovePermission {
                 id,
                 signature,
-                grant_duration_seconds,
+                duration_seconds,
             } => {
-                validate_approval_id(id)?;
+                validate_permission_id(id)?;
                 if signature.is_empty() || signature.len() > 16 * 1024 {
                     return Err(VaultError::Protocol(
-                        "approval signature is empty or too long".to_owned(),
+                        "permission signature is empty or too long".to_owned(),
                     ));
                 }
-                if *grant_duration_seconds == Some(0) {
+                if *duration_seconds == Some(0) {
                     return Err(VaultError::Protocol(
-                        "approval grant duration must be positive".to_owned(),
+                        "permission duration must be positive".to_owned(),
                     ));
                 }
                 Ok(())
             }
-            Self::Deny { id } => validate_approval_id(id),
+            Self::DenyPermission { id } | Self::RevokePermission { id } => {
+                validate_permission_id(id)
+            }
             Self::Get { namespace, address }
             | Self::GetCache { namespace, address }
             | Self::Delete { namespace, address }
@@ -722,32 +727,53 @@ pub enum VaultResponseBody {
         entries: usize,
     },
     Sealed,
-    Approvals {
+    Permissions {
         revision: u64,
-        approvals: Vec<PendingApproval>,
+        permissions: Vec<Permission>,
     },
-    ApprovalResolved {
-        approved: bool,
+    PermissionChanged {
+        status: PermissionChange,
     },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PendingApproval {
+pub struct Permission {
     pub id: String,
-    pub created_at: u64,
-    pub expires_at: u64,
-    pub operation: ApprovalOperation,
+    pub operation: PermissionOperation,
     /// Transport-authenticated identity used as the grant principal.
-    pub principal: ApprovalPrincipal,
+    pub principal: PermissionPrincipal,
     /// Caller-declared display and audit context; never grant authority.
     pub application: VaultApplicationContext,
-    pub challenge: [u8; 32],
+    pub state: PermissionState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum PermissionState {
+    Pending {
+        created_at: u64,
+        expires_at: u64,
+        challenge: [u8; 32],
+    },
+    Granted {
+        granted_at: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at: Option<u64>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionChange {
+    Granted,
+    Denied,
+    Revoked,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ApprovalPrincipal {
+pub struct PermissionPrincipal {
     pub platform: CallerPlatform,
     pub user_id: String,
     pub application_id: String,
@@ -755,7 +781,7 @@ pub struct ApprovalPrincipal {
     pub signer_id: Option<String>,
 }
 
-impl From<&CallerIdentity> for ApprovalPrincipal {
+impl From<&CallerIdentity> for PermissionPrincipal {
     fn from(identity: &CallerIdentity) -> Self {
         Self {
             platform: identity.platform(),
@@ -769,7 +795,7 @@ impl From<&CallerIdentity> for ApprovalPrincipal {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ApprovalOperation {
+pub enum PermissionOperation {
     Get,
     Put,
     Delete,
@@ -821,14 +847,14 @@ fn validate_namespace(namespace: &[u8]) -> VaultResult<()> {
     Ok(())
 }
 
-fn validate_approval_id(id: &str) -> VaultResult<()> {
+fn validate_permission_id(id: &str) -> VaultResult<()> {
     if id.is_empty()
-        || id.len() > MAX_APPROVAL_ID_BYTES
+        || id.len() > MAX_PERMISSION_ID_BYTES
         || !id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err(VaultError::Protocol("invalid approval ID".to_owned()));
+        return Err(VaultError::Protocol("invalid permission ID".to_owned()));
     }
     Ok(())
 }
