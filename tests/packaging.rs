@@ -118,6 +118,10 @@ fn the_linux_unit_uses_askpass_without_a_password_file() {
         "the Linux service still stages its factor in a file"
     );
     assert!(
+        unit.contains("WantedBy=default.target"),
+        "the Linux service is not enabled for user-session startup"
+    );
+    assert!(
         starter.contains("systemctl --user start --no-block factorseal.service")
             && starter.contains("systemd-tty-ask-password-agent --query"),
         "the starter does not answer the service's password request"

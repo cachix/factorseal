@@ -104,13 +104,14 @@ is:
 }
 ```
 
-Listed users are added to the TPM resource-manager group. The module installs a
-global systemd user unit but deliberately does not enable it at login, because
-the default unlock group requires an interactive password request. `factorseal-start`
-supplies the invoking logind session and waits for the socket. The module also
-enables polkit so the unprivileged vault can obtain logind's default-permitted
-delay inhibitor before holding unwrapped keys; without that inhibitor the vault
-fails closed.
+Listed users are added to the TPM resource-manager group. The module installs
+and enables a global systemd user unit. Before a vault exists, the unit exits
+after logging an instruction to run `factorseal init`. Once initialized, the
+default unlock group requires an interactive password request.
+`factorseal-start` supplies the invoking logind session, answers that request,
+and waits for the socket. The module also enables polkit so the unprivileged
+vault can obtain logind's default-permitted delay inhibitor before holding
+unwrapped keys; without that inhibitor the vault fails closed.
 
 `nix build .#checks.x86_64-linux.nixos-module` runs the installed module in a
 NixOS VM with a virtual TPM. It covers initialization, service startup, the

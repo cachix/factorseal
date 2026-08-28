@@ -180,6 +180,24 @@ fn unseal_policy_and_root_are_explicitly_configurable() {
 }
 
 #[test]
+fn unseal_of_a_missing_vault_explains_how_to_initialize_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("missing-vault");
+    let cli =
+        Cli::try_parse_from(["factorseal", "--root", root.to_str().unwrap(), "unseal"]).unwrap();
+
+    let error = run(cli).unwrap_err();
+    assert!(
+        matches!(&error, CliError::VaultNotInitialized(path) if path == &root.display().to_string())
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("run `factorseal init` to create it")
+    );
+}
+
+#[test]
 fn unlock_cli_uses_and_inside_groups_and_or_between_repetitions() {
     let default = Cli::try_parse_from(["factorseal", "init"]).unwrap();
     assert!(matches!(

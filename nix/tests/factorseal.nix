@@ -92,26 +92,26 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("user@1000.service")
 
-    with subtest("module installs a static, password-gated user service"):
+    with subtest("module installs an enabled, password-gated user service"):
         machine.succeed("test -e /dev/tpm0")
         machine.succeed("test -e /dev/tpmrm0")
         machine.wait_for_unit("polkit.service")
         machine.succeed("id -nG alice | grep -w tss")
-        machine.fail(
-            f"{alice_prefix} systemctl --user cat factorseal.service "
-            "| grep -q '^WantedBy='"
+        as_alice("systemctl --user is-enabled factorseal.service | grep -x enabled")
+        as_alice(
+            "systemctl --user cat factorseal.service "
+            "| grep -q '^WantedBy=default.target'"
         )
         as_alice("systemctl --user cat factorseal.service | grep -- '--idle-seconds=5'")
         machine.succeed("test -x ${package}/bin/factorseal-start")
         machine.succeed("test -x ${package}/bin/factorseal")
 
-    with subtest("service stays sealed while its password request is unanswered"):
-        as_alice("systemctl --user start --no-block factorseal.service")
+    with subtest("service startup explains how to initialize a missing vault"):
         machine.wait_until_succeeds(
-            f"{alice_prefix} systemctl --user is-active factorseal.service"
+            f"{alice_prefix} journalctl --user -u factorseal.service --no-pager "
+            "| grep -F 'run `factorseal init` to create it'"
         )
         machine.fail(f"test -S {socket}")
-        as_alice("systemctl --user stop factorseal.service")
 
     with subtest("initialize a real device through the virtual TPM"):
         initialize_on(machine)
@@ -121,6 +121,14 @@ pkgs.testers.runNixOSTest {
             "| jq -e '.hardware_backend == \"tpm\"'"
         )
         machine.succeed(f"test $(stat -c %a {root}) = 700")
+
+    with subtest("service stays sealed while its password request is unanswered"):
+        as_alice("systemctl --user start --no-block factorseal.service")
+        machine.wait_until_succeeds(
+            f"{alice_prefix} systemctl --user is-active factorseal.service"
+        )
+        machine.fail(f"test -S {socket}")
+        as_alice("systemctl --user stop factorseal.service")
 
     with subtest("start the native socket"):
         start_vault()

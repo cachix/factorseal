@@ -280,6 +280,9 @@ pub(super) fn run_vault(
     policy: UnsealLeasePolicy,
     requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
+    if !root.exists() {
+        return Err(CliError::VaultNotInitialized(root.display().to_string()));
+    }
     let device = Vault::inspect(root)?;
     let unsealed = unseal_selected(root, &device, requested_group, factor)?;
     let service = Arc::new(VaultService::open(root, unsealed, unix_time()?, policy)?);

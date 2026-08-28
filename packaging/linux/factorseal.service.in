@@ -20,6 +20,4 @@ RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 
 [Install]
-# Deliberately no WantedBy: Linux requires an interactive Factorseal password
-# for each unsealed vault session. Start it through factorseal-start so its
-# terminal agent can answer the service's prompt.
+WantedBy=default.target
