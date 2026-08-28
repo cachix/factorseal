@@ -13,7 +13,10 @@
 
 Factorseal is a hardware-backed local secrets vault. It stores encrypted
 secrets on your device and makes them available through a per-user service
-protected by TPM 2.0 on Linux and Windows or Apple's Secure Enclave on macOS.
+protected by [TPM 2.0](https://trustedcomputinggroup.org/resource/tpm-library-specification/)
+on Linux and Windows or Apple's
+[Secure Enclave](https://developer.apple.com/documentation/security/protecting-keys-with-the-secure-enclave)
+on macOS.
 
 The basic lifecycle is:
 
@@ -30,10 +33,13 @@ vault's encryption and signing keys.
 
 Factorseal provides:
 
-- a durable keyring for the CLI and Factorseal-aware applications;
-- a separate disposable cache for SecretSpec;
-- the standard `org.freedesktop.secrets` interface on Linux;
-- an embeddable store and key-protection boundary for Android and iOS.
+- a durable [keyring](#interfaces-and-scopes) for the CLI and Factorseal-aware
+  applications;
+- a separate disposable [provider cache](https://secretspec.dev/concepts/providers/caching/)
+  for [SecretSpec](https://secretspec.dev/);
+- the standard
+  [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-service/latest/)
+  interface on Linux.
 
 Factorseal is a local security broker around platform hardware. It is not a
 password manager or remote secrets service, and it does not attempt to replace
@@ -331,19 +337,6 @@ overrides the native endpoint.
 `factorseal destroy --yes-really-destroy` permanently deletes a sealed vault,
 including every unlock group's enclave keys. It requires one configured unlock
 group and is irreversible.
-
-## Mobile embedding
-
-Android and iOS applications embed the reusable vault in-process; they do not
-run the desktop daemon, IPC transports, or lifecycle monitors. The application
-sandbox becomes the caller boundary, and the host supplies an Android
-Keystore/StrongBox or iOS Secure Enclave implementation of
-`KeyProtectorFactory`.
-
-Build the portable layers with `vault-store` and `key-protection`. The host app
-must serialize access, keep the vault in a backup-excluded directory, and seal
-on device lock or protected-data loss. See [Mobile embedding](docs/mobile.md)
-for the adapter and lifecycle contract.
 
 ## Security properties and limitations
 
