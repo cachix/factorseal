@@ -7,7 +7,7 @@ use crate::vault::{VaultError, VaultResult, VaultStore};
 
 use super::super::grant::{list_granted_permissions, revoke_permission};
 use super::super::lease::{ReplayWindow, UnsealLease};
-use super::super::{Permission, VaultInteractionReference};
+use super::super::{CallerIdentity, Permission, PermissionWaitStatus, VaultInteractionReference};
 use super::super::{RequestId, UnsealLeasePolicy};
 use super::approvals::{ApprovalCandidate, PendingApprovals};
 
@@ -205,6 +205,53 @@ impl LiveStateGuard<'_> {
 }
 
 impl LiveStateGuard<'_> {
+    fn permission_status(
+        &mut self,
+        caller: &CallerIdentity,
+        id: &str,
+        now: u64,
+    ) -> VaultResult<PermissionWaitStatus> {
+        self.live.approvals.status(caller, id, now).ok_or_else(|| {
+            VaultError::Protocol("permission does not belong to this caller".to_owned())
+        })
+    }
+
+    pub(super) fn wait_for_permission(
+        mut self,
+        caller: &CallerIdentity,
+        id: &str,
+        timeout: Duration,
+        now: u64,
+    ) -> VaultResult<PermissionWaitStatus> {
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(timeout)
+            .ok_or_else(|| VaultError::Protocol("permission wait timeout overflows".to_owned()))?;
+        loop {
+            if self.live.store.is_sealed() || self.live.lease.is_expired(Instant::now()) {
+                self.live.store.seal();
+                return Err(VaultError::Sealed);
+            }
+            let current_now = now.saturating_add(started.elapsed().as_secs());
+            let status = self.permission_status(caller, id, current_now)?;
+            if status != PermissionWaitStatus::Pending {
+                return Ok(status);
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Ok(PermissionWaitStatus::Pending);
+            };
+            let (live, result) = self
+                .approval_changed
+                .wait_timeout(self.live, remaining)
+                .map_err(|_| VaultError::WorkerUnavailable)?;
+            self.live = live;
+            if result.timed_out() {
+                let current_now = now.saturating_add(started.elapsed().as_secs());
+                return self.permission_status(caller, id, current_now);
+            }
+        }
+    }
+
     pub(super) fn wait_for_approvals(
         mut self,
         after_revision: u64,

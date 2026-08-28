@@ -6,13 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use factorseal::{
-    VaultAction, VaultApplicationContext, VaultClient, VaultError, VaultRequest, VaultResponseBody,
-    VaultResponseErrorCode, WireSecret,
+    MAX_PERMISSION_WAIT_MS, PermissionWaitStatus, VaultAction, VaultApplicationContext,
+    VaultClient, VaultError, VaultRequest, VaultResponseBody, VaultResponseErrorCode, WireSecret,
 };
-use secretspec_ipc::error::{ErrorKind, InteractionReference, RpcError};
+use secretspec_ipc::error::{ErrorKind, InteractionKind, InteractionReference, RpcError};
 use secretspec_ipc::protocol::provider::{
     self as wire, Address, CoordinateName, InitializeApplication, Metadata, Persistence,
-    ResolveAddressResult,
+    ResolveAddressResult, WaitInteractionParams, WaitInteractionResult,
 };
 use secretspec_ipc::provider::{ProvidedSecret, ProviderHandler, SecretValue, serve_provider};
 use secretspec_ipc::server::{RequestContext, RpcResult, ServerConfig};
@@ -84,6 +84,7 @@ impl ProviderHandler for FactorsealProvider {
             wire::method::CHECK_WRITABLE,
             wire::method::CHECK_DELETABLE,
             wire::method::DESCRIBE_WRITE_TARGET,
+            wire::method::WAIT_INTERACTION,
         ]
         .into_iter()
         .map(str::to_owned)
@@ -246,6 +247,49 @@ impl ProviderHandler for FactorsealProvider {
     ) -> RpcResult<String> {
         self.wire_address(address)?;
         Ok("Factorseal device cache".to_owned())
+    }
+
+    async fn wait_interaction(
+        &self,
+        context: RequestContext,
+        params: WaitInteractionParams,
+    ) -> RpcResult<WaitInteractionResult> {
+        if params.interaction.kind != InteractionKind::Authorization {
+            return Err(RpcError::new(ErrorKind::InvalidParams));
+        }
+        loop {
+            if context.cancellation.is_cancelled() {
+                return Err(RpcError::new(ErrorKind::Cancelled));
+            }
+            let remaining = context
+                .deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .ok_or_else(|| RpcError::new(ErrorKind::DeadlineExceeded))?;
+            let timeout_ms = u64::try_from(remaining.as_millis())
+                .unwrap_or(u64::MAX)
+                .clamp(1, MAX_PERMISSION_WAIT_MS);
+            match self
+                .request(VaultAction::WaitPermission {
+                    id: params.interaction.id.clone(),
+                    timeout_ms,
+                })
+                .await?
+            {
+                VaultResponseBody::PermissionWait {
+                    status: PermissionWaitStatus::Pending,
+                } => {}
+                VaultResponseBody::PermissionWait {
+                    status: PermissionWaitStatus::Granted,
+                } => return Ok(WaitInteractionResult::Granted),
+                VaultResponseBody::PermissionWait {
+                    status: PermissionWaitStatus::Denied,
+                } => return Ok(WaitInteractionResult::Denied),
+                VaultResponseBody::PermissionWait {
+                    status: PermissionWaitStatus::Expired,
+                } => return Ok(WaitInteractionResult::Expired),
+                _ => return Err(RpcError::new(ErrorKind::OperationFailed)),
+            }
+        }
     }
 }
 

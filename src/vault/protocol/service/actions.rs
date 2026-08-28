@@ -79,6 +79,7 @@ pub(super) fn execute_action(
         | VaultAction::SealCache { .. }
         | VaultAction::ListPermissions
         | VaultAction::WaitPermissions { .. }
+        | VaultAction::WaitPermission { .. }
         | VaultAction::ApprovePermission { .. }
         | VaultAction::DenyPermission { .. }
         | VaultAction::RevokePermission { .. } => {

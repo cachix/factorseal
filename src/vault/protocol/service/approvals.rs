@@ -9,7 +9,8 @@ use crate::vault::{DocumentScope, VaultError, VaultResult, VaultStore};
 use super::super::grant::{GrantTarget, promote_permission};
 use super::super::{
     CallerIdentity, GrantPermission, Permission, PermissionOperation, PermissionPrincipal,
-    PermissionState, VaultAction, VaultApplicationContext, VaultInteractionReference,
+    PermissionState, PermissionWaitStatus, VaultAction, VaultApplicationContext,
+    VaultInteractionReference,
 };
 use crate::vault::signature::{permission_payload, verify};
 
@@ -35,9 +36,17 @@ struct ApprovalRecord {
     permission: GrantPermission,
 }
 
+struct ResolvedRecord {
+    id: String,
+    caller_fingerprint: [u8; 32],
+    status: PermissionWaitStatus,
+    retain_until: u64,
+}
+
 #[derive(Default)]
 pub(super) struct PendingApprovals {
     records: VecDeque<ApprovalRecord>,
+    resolved: VecDeque<ResolvedRecord>,
     revision: u64,
 }
 
@@ -104,15 +113,49 @@ impl PendingApprovals {
 
     fn purge_expired(&mut self, now: u64) {
         let before = self.records.len();
-        self.records.retain(|record| {
-            matches!(
-                record.summary.state,
-                PermissionState::Pending { expires_at, .. } if expires_at > now
-            )
+        let mut expired = Vec::new();
+        self.records.retain(|record| match record.summary.state {
+            PermissionState::Pending { expires_at, .. } if expires_at <= now => {
+                expired.push((
+                    record.summary.id.clone(),
+                    record.caller.fingerprint(),
+                    expires_at,
+                ));
+                false
+            }
+            PermissionState::Pending { .. } => true,
+            PermissionState::Granted { .. } => false,
         });
+        for (id, caller_fingerprint, expires_at) in expired {
+            self.push_resolved(
+                id,
+                caller_fingerprint,
+                PermissionWaitStatus::Expired,
+                expires_at.saturating_add(APPROVAL_TTL_SECONDS),
+            );
+        }
+        self.resolved.retain(|record| record.retain_until > now);
         if self.records.len() != before {
             self.revision = self.revision.wrapping_add(1);
         }
+    }
+
+    fn push_resolved(
+        &mut self,
+        id: String,
+        caller_fingerprint: [u8; 32],
+        status: PermissionWaitStatus,
+        retain_until: u64,
+    ) {
+        if self.resolved.len() == MAX_PENDING_APPROVALS {
+            self.resolved.pop_front();
+        }
+        self.resolved.push_back(ResolvedRecord {
+            id,
+            caller_fingerprint,
+            status,
+            retain_until,
+        });
     }
 
     pub(super) fn create(
@@ -191,9 +234,40 @@ impl PendingApprovals {
             .iter()
             .position(|record| record.summary.id == id)
             .ok_or_else(|| VaultError::Protocol("permission is missing or expired".to_owned()))?;
-        self.records.remove(index);
+        let record = self.records.remove(index).expect("located above");
+        let expires_at = match record.summary.state {
+            PermissionState::Pending { expires_at, .. } => expires_at,
+            PermissionState::Granted { .. } => unreachable!("queue stores only pending records"),
+        };
+        self.push_resolved(
+            id.to_owned(),
+            record.caller.fingerprint(),
+            PermissionWaitStatus::Denied,
+            expires_at.saturating_add(APPROVAL_TTL_SECONDS),
+        );
         self.revision = self.revision.wrapping_add(1);
         Ok(())
+    }
+
+    pub(super) fn status(
+        &mut self,
+        caller: &CallerIdentity,
+        id: &str,
+        now: u64,
+    ) -> Option<PermissionWaitStatus> {
+        self.purge_expired(now);
+        let fingerprint = caller.fingerprint();
+        if self
+            .records
+            .iter()
+            .any(|record| record.summary.id == id && record.caller.fingerprint() == fingerprint)
+        {
+            return Some(PermissionWaitStatus::Pending);
+        }
+        self.resolved
+            .iter()
+            .find(|record| record.id == id && record.caller_fingerprint == fingerprint)
+            .map(|record| record.status)
     }
 
     pub(super) fn approve(
@@ -246,7 +320,14 @@ impl PendingApprovals {
             grant_expires_at,
             now,
         )?;
+        let caller_fingerprint = record.caller.fingerprint();
         self.records.remove(index);
+        self.push_resolved(
+            id.to_owned(),
+            caller_fingerprint,
+            PermissionWaitStatus::Granted,
+            now.saturating_add(APPROVAL_TTL_SECONDS),
+        );
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }

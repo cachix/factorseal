@@ -10,6 +10,7 @@ use secretspec_ipc::error::Error as IpcError;
 use secretspec_ipc::protocol::provider::{
     AddressParams, ApplicationContext, Coordinates, DeletedResult, GetResult,
     InitializeApplication, InitializedApplication, SetExpiringParams, SetParams, StoredResult,
+    WaitInteractionParams, WaitInteractionResult,
 };
 use secretspec_ipc::protocol::{
     InitializeParams, Limits, PROTOCOL_VERSION, PROVIDER_PROTOCOL, Product,
@@ -103,6 +104,21 @@ fn address() -> Address {
 
 fn deadline() -> u64 {
     unix_time_ms().unwrap() + 2_000
+}
+
+fn spawn_interaction_wait(
+    client: Client,
+    interaction: InteractionReference,
+) -> tokio::task::JoinHandle<Result<WaitInteractionResult, IpcError>> {
+    tokio::spawn(async move {
+        client
+            .call(
+                wire::method::WAIT_INTERACTION,
+                &WaitInteractionParams { interaction },
+                unix_time_ms().unwrap() + 10_000,
+            )
+            .await
+    })
 }
 
 fn native_address() -> Address {
@@ -500,6 +516,9 @@ async fn secretspec_request_can_be_approved_and_retried() {
         Some(8 * 60 * 60)
     );
 
+    let wait = spawn_interaction_wait(client.clone(), interaction.clone());
+    tokio::task::yield_now().await;
+
     let unsealed = Vault::unseal_with_key_protector_group(
         &fixture.root,
         &fixture.unlock_group,
@@ -529,6 +548,7 @@ async fn secretspec_request_can_be_approved_and_retried() {
             status: PermissionChange::Granted
         })
     ));
+    assert_eq!(wait.await.unwrap().unwrap(), WaitInteractionResult::Granted);
 
     let retried: GetResult = client
         .call(

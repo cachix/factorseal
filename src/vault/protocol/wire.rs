@@ -9,7 +9,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::vault::{SecretAddress, VaultError, VaultResult};
 
-pub(super) const PROTOCOL_VERSION: u8 = 6;
+pub(super) const PROTOCOL_VERSION: u8 = 7;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -529,6 +529,11 @@ pub enum VaultAction {
         after_revision: u64,
         timeout_ms: u64,
     },
+    /// Wait for one permission owned by this authenticated caller.
+    WaitPermission {
+        id: String,
+        timeout_ms: u64,
+    },
     ApprovePermission {
         id: String,
         signature: Vec<u8>,
@@ -548,11 +553,14 @@ impl VaultAction {
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
             Self::Status | Self::ListPermissions => Ok(()),
-            Self::WaitPermissions { timeout_ms, .. } => {
+            Self::WaitPermissions { timeout_ms, .. } | Self::WaitPermission { timeout_ms, .. } => {
                 if !(1..=MAX_PERMISSION_WAIT_MS).contains(timeout_ms) {
                     return Err(VaultError::Protocol(
                         "permission wait timeout is outside the supported range".to_owned(),
                     ));
+                }
+                if let Self::WaitPermission { id, .. } = self {
+                    validate_permission_id(id)?;
                 }
                 Ok(())
             }
@@ -734,6 +742,9 @@ pub enum VaultResponseBody {
     PermissionChanged {
         status: PermissionChange,
     },
+    PermissionWait {
+        status: PermissionWaitStatus,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -769,6 +780,15 @@ pub enum PermissionChange {
     Granted,
     Denied,
     Revoked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionWaitStatus {
+    Pending,
+    Granted,
+    Denied,
+    Expired,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -162,6 +162,45 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     assert_eq!(refreshed.id, interaction.id);
     assert_eq!(refreshed.expires_at, 201 + 7 * 24 * 60 * 60);
 
+    let pending = service.handle(
+        &provider,
+        VaultRequest::new(VaultAction::WaitPermission {
+            id: interaction.id.clone(),
+            timeout_ms: 1,
+        })
+        .unwrap(),
+        201,
+    );
+    assert!(matches!(
+        pending.result,
+        Ok(VaultResponseBody::PermissionWait {
+            status: PermissionWaitStatus::Pending
+        })
+    ));
+    let stranger = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.other-provider",
+        [8; 32],
+        None,
+    )
+    .unwrap();
+    assert!(
+        service
+            .handle(
+                &stranger,
+                VaultRequest::new(VaultAction::WaitPermission {
+                    id: interaction.id.clone(),
+                    timeout_ms: 1,
+                })
+                .unwrap(),
+                201,
+            )
+            .result
+            .is_err(),
+        "a caller must not observe another principal's permission"
+    );
+
     let manager = CallerIdentity::new(
         CallerPlatform::Linux,
         "uid:1000",
@@ -223,6 +262,21 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         approved.result,
         Ok(VaultResponseBody::PermissionChanged {
             status: PermissionChange::Granted
+        })
+    ));
+    let granted = service.handle(
+        &provider,
+        VaultRequest::new(VaultAction::WaitPermission {
+            id: interaction.id.clone(),
+            timeout_ms: 1,
+        })
+        .unwrap(),
+        204,
+    );
+    assert!(matches!(
+        granted.result,
+        Ok(VaultResponseBody::PermissionWait {
+            status: PermissionWaitStatus::Granted
         })
     ));
     assert!(matches!(
@@ -293,15 +347,41 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
             .iter()
             .all(|permission| permission.id != interaction.id)
     );
-    assert!(
-        service
-            .handle(&provider, get("demo"), 211)
-            .result
-            .unwrap_err()
-            .interaction
-            .is_some(),
-        "revocation must remove the underlying project authority"
+    let new_interaction = service
+        .handle(&provider, get("demo"), 211)
+        .result
+        .unwrap_err()
+        .interaction
+        .expect("revocation must remove the underlying project authority");
+    let denied = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::DenyPermission {
+            id: new_interaction.id.clone(),
+        })
+        .unwrap(),
+        212,
     );
+    assert!(matches!(
+        denied.result,
+        Ok(VaultResponseBody::PermissionChanged {
+            status: PermissionChange::Denied
+        })
+    ));
+    let observed = service.handle(
+        &provider,
+        VaultRequest::new(VaultAction::WaitPermission {
+            id: new_interaction.id,
+            timeout_ms: 1,
+        })
+        .unwrap(),
+        212,
+    );
+    assert!(matches!(
+        observed.result,
+        Ok(VaultResponseBody::PermissionWait {
+            status: PermissionWaitStatus::Denied
+        })
+    ));
 }
 
 #[test]

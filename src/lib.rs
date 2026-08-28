@@ -42,9 +42,9 @@ pub use vault::{
 #[cfg(feature = "vault-client")]
 pub use vault::{
     MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionOperation, PermissionPrincipal,
-    PermissionState, VaultAction, VaultApplicationContext, VaultClient, VaultInteractionReference,
-    VaultMutation, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
-    VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    PermissionState, PermissionWaitStatus, VaultAction, VaultApplicationContext, VaultClient,
+    VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse, VaultResponseBody,
+    VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
 };
 
 #[cfg(feature = "vault-store")]

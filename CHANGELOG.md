@@ -4,7 +4,7 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
-- Bump the native protocol to version 6 and forward SecretSpec's declared
+- Bump the native protocol to version 7 and forward SecretSpec's declared
   project, profile, base directory, reason, and requested permission
   duration through each provider request, supporting contextual audit and
   approval surfaces without treating
@@ -26,6 +26,10 @@ All notable changes to FactorSeal will be documented in this file.
   polling once per second. The local transports serve a bounded number of
   concurrent connections so a watcher cannot prevent providers from creating
   new approval requests.
+- Add an owner-bound native permission wait and advertise SecretSpec's optional
+  `provider.wait_interaction` method. SecretSpec can wait for the exact `prm_`
+  decision and retry once after it becomes granted without giving the provider
+  authority to enumerate other applications' permissions.
 - Replace the password-plus-biometric boolean with versioned unlock policies:
   comma-separated factors are AND requirements and repeated `--unlock` groups
   are independently hardware-wrapped OR alternatives. Support password,

@@ -12,8 +12,8 @@ use super::{
 };
 #[cfg(all(test, feature = "hardware"))]
 use super::{
-    CallerPlatform, PermissionChange, PermissionState, RequestId, VaultApplicationContext,
-    VaultMutation, WireSecret, WireSecretAddress,
+    CallerPlatform, PermissionChange, PermissionState, PermissionWaitStatus, RequestId,
+    VaultApplicationContext, VaultMutation, WireSecret, WireSecretAddress,
 };
 
 #[cfg(feature = "vault-store")]
@@ -188,6 +188,15 @@ impl VaultService {
                     revision,
                     permissions,
                 });
+            }
+            VaultAction::WaitPermission { id, timeout_ms } => {
+                let status = state.wait_for_permission(
+                    caller,
+                    &id,
+                    Duration::from_millis(timeout_ms),
+                    now,
+                )?;
+                return Ok(VaultResponseBody::PermissionWait { status });
             }
             VaultAction::DenyPermission { id } => {
                 require_permission_manager(&state, caller, now)?;
