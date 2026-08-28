@@ -9,10 +9,10 @@ use factorseal::{
     MAX_PERMISSION_WAIT_MS, PermissionWaitStatus, VaultAction, VaultApplicationContext,
     VaultClient, VaultError, VaultRequest, VaultResponseBody, VaultResponseErrorCode, WireSecret,
 };
-use secretspec_ipc::error::{ErrorKind, InteractionKind, InteractionReference, RpcError};
+use secretspec_ipc::error::{ErrorKind, InteractionReference, RpcError};
 use secretspec_ipc::protocol::provider::{
     self as wire, Address, CoordinateName, InitializeApplication, Metadata, Persistence,
-    ResolveAddressResult, WaitInteractionParams, WaitInteractionResult,
+    ResolveAddressResult,
 };
 use secretspec_ipc::provider::{ProvidedSecret, ProviderHandler, SecretValue, serve_provider};
 use secretspec_ipc::server::{RequestContext, RpcResult, ServerConfig};
@@ -47,7 +47,7 @@ impl FactorsealProvider {
         }
     }
 
-    async fn request(&self, action: VaultAction) -> RpcResult<VaultResponseBody> {
+    async fn request_once(&self, action: VaultAction) -> RpcResult<VaultResponseBody> {
         let client = Arc::clone(&self.client);
         let application = self
             .application
@@ -57,6 +57,64 @@ impl FactorsealProvider {
         tokio::task::spawn_blocking(move || request(client.as_ref(), action, application))
             .await
             .map_err(|_| RpcError::new(ErrorKind::Internal))?
+    }
+
+    async fn request<F>(
+        &self,
+        context: &RequestContext,
+        mut action: F,
+    ) -> RpcResult<VaultResponseBody>
+    where
+        F: FnMut() -> VaultAction,
+    {
+        let first = self.request_once(action()).await;
+        let interaction = match &first {
+            Err(error) if error.data.kind == ErrorKind::InteractionRequired => {
+                error.data.interaction.clone()
+            }
+            _ => return first,
+        };
+        let Some(interaction) = interaction else {
+            return first;
+        };
+        match self.wait_for_permission(context, &interaction.id).await? {
+            PermissionWaitStatus::Granted => self.request_once(action()).await,
+            PermissionWaitStatus::Denied => Err(RpcError::new(ErrorKind::PermissionDenied)),
+            PermissionWaitStatus::Expired => Err(RpcError::interaction_required(Some(interaction))),
+            PermissionWaitStatus::Pending => unreachable!("permission wait loops while pending"),
+        }
+    }
+
+    async fn wait_for_permission(
+        &self,
+        context: &RequestContext,
+        id: &str,
+    ) -> RpcResult<PermissionWaitStatus> {
+        loop {
+            if context.cancellation.is_cancelled() {
+                return Err(RpcError::new(ErrorKind::Cancelled));
+            }
+            let remaining = context
+                .deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .ok_or_else(|| RpcError::new(ErrorKind::DeadlineExceeded))?;
+            let timeout_ms = u64::try_from(remaining.as_millis())
+                .unwrap_or(u64::MAX)
+                .clamp(1, MAX_PERMISSION_WAIT_MS);
+            match self
+                .request_once(VaultAction::WaitPermission {
+                    id: id.to_owned(),
+                    timeout_ms,
+                })
+                .await?
+            {
+                VaultResponseBody::PermissionWait {
+                    status: PermissionWaitStatus::Pending,
+                } => {}
+                VaultResponseBody::PermissionWait { status } => return Ok(status),
+                _ => return Err(RpcError::new(ErrorKind::OperationFailed)),
+            }
+        }
     }
 
     fn wire_address(&self, address: Address) -> RpcResult<factorseal::WireSecretAddress> {
@@ -84,7 +142,6 @@ impl ProviderHandler for FactorsealProvider {
             wire::method::CHECK_WRITABLE,
             wire::method::CHECK_DELETABLE,
             wire::method::DESCRIBE_WRITE_TARGET,
-            wire::method::WAIT_INTERACTION,
         ]
         .into_iter()
         .map(str::to_owned)
@@ -146,13 +203,14 @@ impl ProviderHandler for FactorsealProvider {
 
     async fn get(
         &self,
-        _context: RequestContext,
+        context: RequestContext,
         address: Address,
     ) -> RpcResult<Option<ProvidedSecret>> {
+        let address = self.wire_address(address)?;
         match self
-            .request(VaultAction::GetCache {
+            .request(&context, || VaultAction::GetCache {
                 namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
-                address: self.wire_address(address)?,
+                address: address.clone(),
             })
             .await?
         {
@@ -173,14 +231,15 @@ impl ProviderHandler for FactorsealProvider {
 
     async fn set(
         &self,
-        _context: RequestContext,
+        context: RequestContext,
         address: Address,
         value: SecretValue,
     ) -> RpcResult<()> {
+        let address = self.wire_address(address)?;
         let response = self
-            .request(VaultAction::PutCache {
+            .request(&context, || VaultAction::PutCache {
                 namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
-                address: self.wire_address(address)?,
+                address: address.clone(),
                 value: WireSecret::new(value.expose().as_bytes().to_vec()),
                 evict_at: None,
             })
@@ -192,7 +251,7 @@ impl ProviderHandler for FactorsealProvider {
 
     async fn set_expiring(
         &self,
-        _context: RequestContext,
+        context: RequestContext,
         address: Address,
         value: SecretValue,
         ttl_ms: u64,
@@ -206,10 +265,11 @@ impl ProviderHandler for FactorsealProvider {
             .and_then(|expires_at| expires_at.checked_add(999))
             .ok_or_else(|| RpcError::new(ErrorKind::InvalidParams))?
             / 1_000;
+        let address = self.wire_address(address)?;
         let response = self
-            .request(VaultAction::PutCache {
+            .request(&context, || VaultAction::PutCache {
                 namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
-                address: self.wire_address(address)?,
+                address: address.clone(),
                 value: WireSecret::new(value.expose().as_bytes().to_vec()),
                 evict_at: Some(evict_at),
             })
@@ -219,11 +279,12 @@ impl ProviderHandler for FactorsealProvider {
             .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
     }
 
-    async fn delete(&self, _context: RequestContext, address: Address) -> RpcResult<bool> {
+    async fn delete(&self, context: RequestContext, address: Address) -> RpcResult<bool> {
+        let address = self.wire_address(address)?;
         match self
-            .request(VaultAction::DeleteCache {
+            .request(&context, || VaultAction::DeleteCache {
                 namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
-                address: self.wire_address(address)?,
+                address: address.clone(),
             })
             .await?
         {
@@ -247,49 +308,6 @@ impl ProviderHandler for FactorsealProvider {
     ) -> RpcResult<String> {
         self.wire_address(address)?;
         Ok("Factorseal device cache".to_owned())
-    }
-
-    async fn wait_interaction(
-        &self,
-        context: RequestContext,
-        params: WaitInteractionParams,
-    ) -> RpcResult<WaitInteractionResult> {
-        if params.interaction.kind != InteractionKind::Authorization {
-            return Err(RpcError::new(ErrorKind::InvalidParams));
-        }
-        loop {
-            if context.cancellation.is_cancelled() {
-                return Err(RpcError::new(ErrorKind::Cancelled));
-            }
-            let remaining = context
-                .deadline
-                .checked_duration_since(tokio::time::Instant::now())
-                .ok_or_else(|| RpcError::new(ErrorKind::DeadlineExceeded))?;
-            let timeout_ms = u64::try_from(remaining.as_millis())
-                .unwrap_or(u64::MAX)
-                .clamp(1, MAX_PERMISSION_WAIT_MS);
-            match self
-                .request(VaultAction::WaitPermission {
-                    id: params.interaction.id.clone(),
-                    timeout_ms,
-                })
-                .await?
-            {
-                VaultResponseBody::PermissionWait {
-                    status: PermissionWaitStatus::Pending,
-                } => {}
-                VaultResponseBody::PermissionWait {
-                    status: PermissionWaitStatus::Granted,
-                } => return Ok(WaitInteractionResult::Granted),
-                VaultResponseBody::PermissionWait {
-                    status: PermissionWaitStatus::Denied,
-                } => return Ok(WaitInteractionResult::Denied),
-                VaultResponseBody::PermissionWait {
-                    status: PermissionWaitStatus::Expired,
-                } => return Ok(WaitInteractionResult::Expired),
-                _ => return Err(RpcError::new(ErrorKind::OperationFailed)),
-            }
-        }
     }
 }
 

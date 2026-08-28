@@ -258,10 +258,10 @@ Watch mode uses a bounded native revision wait: it wakes immediately when the
 permission set changes without polling once per second. The agent permits a small
 bounded set of concurrent local connections, allowing provider requests to
 create pending permissions while CLI and future GUI notification listeners wait.
-The SecretSpec endpoint also exposes an owner-bound interaction wait. A client
-that supports it can remain within its operation deadline and retry once after
-the exact permission becomes granted; the endpoint cannot list or observe any
-other application's permissions.
+The SecretSpec endpoint waits internally for its own pending permission while
+the original provider request remains within its deadline. Approval completes
+that request without exposing permission-management APIs to SecretSpec; a later
+approval remains useful when the caller retries after its deadline.
 
 Granting requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal

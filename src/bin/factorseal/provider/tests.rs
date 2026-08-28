@@ -6,11 +6,9 @@ use factorseal::{
     VaultResponse, VaultResponseError, VaultService, WireSecretAddress,
 };
 use secretspec_ipc::client::Client;
-use secretspec_ipc::error::Error as IpcError;
 use secretspec_ipc::protocol::provider::{
     AddressParams, ApplicationContext, Coordinates, DeletedResult, GetResult,
     InitializeApplication, InitializedApplication, SetExpiringParams, SetParams, StoredResult,
-    WaitInteractionParams, WaitInteractionResult,
 };
 use secretspec_ipc::protocol::{
     InitializeParams, Limits, PROTOCOL_VERSION, PROVIDER_PROTOCOL, Product,
@@ -104,21 +102,6 @@ fn address() -> Address {
 
 fn deadline() -> u64 {
     unix_time_ms().unwrap() + 2_000
-}
-
-fn spawn_interaction_wait(
-    client: Client,
-    interaction: InteractionReference,
-) -> tokio::task::JoinHandle<Result<WaitInteractionResult, IpcError>> {
-    tokio::spawn(async move {
-        client
-            .call(
-                wire::method::WAIT_INTERACTION,
-                &WaitInteractionParams { interaction },
-                unix_time_ms().unwrap() + 10_000,
-            )
-            .await
-    })
 }
 
 fn native_address() -> Address {
@@ -463,7 +446,7 @@ fn approval_initialize() -> InitializeParams<InitializeApplication> {
 }
 
 #[tokio::test]
-async fn secretspec_request_can_be_approved_and_retried() {
+async fn secretspec_request_waits_for_approval_and_completes() {
     let fixture = ApprovalIntegrationFixture::new();
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (client_read, client_write) = tokio::io::split(client_io);
@@ -483,30 +466,36 @@ async fn secretspec_request_can_be_approved_and_retried() {
     .await
     .unwrap();
 
-    let first = client
-        .call::<_, GetResult>(
-            wire::method::GET,
-            &AddressParams { address: address() },
-            deadline(),
+    let request_client = client.clone();
+    let pending_request = tokio::spawn(async move {
+        request_client
+            .call::<_, GetResult>(
+                wire::method::GET,
+                &AddressParams { address: address() },
+                unix_time_ms().unwrap() + 10_000,
+            )
+            .await
+    });
+    let service = Arc::clone(&fixture.service);
+    let manager = fixture.manager.clone();
+    let now = fixture.now;
+    let listed = tokio::task::spawn_blocking(move || {
+        service.handle(
+            &manager,
+            VaultRequest::new(VaultAction::WaitPermissions {
+                after_revision: 0,
+                timeout_ms: 5_000,
+            })
+            .unwrap(),
+            now + 2,
         )
-        .await
-        .unwrap_err();
-    let IpcError::Remote(error) = first else {
-        panic!("expected a structured provider refusal");
-    };
-    assert_eq!(error.data.kind, ErrorKind::InteractionRequired);
-    let interaction = error.data.interaction.unwrap();
-
-    let listed = fixture.service.handle(
-        &fixture.manager,
-        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
-        fixture.now + 2,
-    );
+    })
+    .await
+    .unwrap();
     let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
         panic!("expected one pending approval");
     };
     assert_eq!(permissions.len(), 1);
-    assert_eq!(permissions[0].id, interaction.id);
     assert_eq!(permissions[0].application.project.as_deref(), Some("demo"));
     assert_eq!(permissions[0].application.reason.as_deref(), Some("deploy"));
     assert_eq!(
@@ -515,9 +504,6 @@ async fn secretspec_request_can_be_approved_and_retried() {
             .requested_permission_duration_seconds,
         Some(8 * 60 * 60)
     );
-
-    let wait = spawn_interaction_wait(client.clone(), interaction.clone());
-    tokio::task::yield_now().await;
 
     let unsealed = Vault::unseal_with_key_protector_group(
         &fixture.root,
@@ -548,17 +534,7 @@ async fn secretspec_request_can_be_approved_and_retried() {
             status: PermissionChange::Granted
         })
     ));
-    assert_eq!(wait.await.unwrap().unwrap(), WaitInteractionResult::Granted);
-
-    let retried: GetResult = client
-        .call(
-            wire::method::GET,
-            &AddressParams { address: address() },
-            deadline(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(retried, GetResult::Missing);
+    assert_eq!(pending_request.await.unwrap().unwrap(), GetResult::Missing);
 
     client.close(deadline()).await.unwrap();
     server.await.unwrap().unwrap();

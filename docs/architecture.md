@@ -204,11 +204,11 @@ transports accept at most eight concurrent requests, so a waiting CLI or GUI
 listener releases the approval-state mutex and cannot block a provider request
 that creates or refreshes an approval.
 
-The provider-facing wait is narrower than the management watch. Its native
+The provider's internal wait is narrower than the management watch. Its native
 request names one permission ID and the service accepts it only from the
-transport-authenticated principal that created that permission. This lets
-SecretSpec implement `provider.wait_interaction` and one granted retry without
-giving the provider permission-list or decision authority. Pending and recently
+transport-authenticated principal that created that permission. The provider
+can therefore complete the original SecretSpec request after approval without
+giving SecretSpec permission-list or decision authority. Pending and recently
 resolved decisions live only in the bounded in-memory approval queue; durable
 grants are consulted only when authorizing secret operations.
 
