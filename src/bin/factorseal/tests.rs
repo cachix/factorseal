@@ -2,13 +2,14 @@ use super::cli::{Cli, Command, PermissionCommand};
 use super::commands::{
     ApprovalDecision, ParsedGrantDuration, parse_grant_duration, read_approval_decision,
     read_bounded, read_grant_duration, read_keyring_value, read_password_for_groups,
-    read_unlock_group_choice, require_prompt_terminal,
+    read_unlock_group_choice, require_prompt_terminal, wait_for_initialization,
 };
 use super::factor::read_factor;
 use super::*;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::Parser;
 use factorseal::{UnlockFactorKind, UnlockGroup};
@@ -180,21 +181,21 @@ fn unseal_policy_and_root_are_explicitly_configurable() {
 }
 
 #[test]
-fn unseal_of_a_missing_vault_explains_how_to_initialize_it() {
+fn unseal_waits_for_initialization_metadata() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("missing-vault");
-    let cli =
-        Cli::try_parse_from(["factorseal", "--root", root.to_str().unwrap(), "unseal"]).unwrap();
+    let metadata = root.join("factorseal.json");
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        fs::create_dir(&root).unwrap();
+        fs::write(metadata, b"{}").unwrap();
+    });
 
-    let error = run(cli).unwrap_err();
-    assert!(
-        matches!(&error, CliError::VaultNotInitialized(path) if path == &root.display().to_string())
+    wait_for_initialization(
+        &directory.path().join("missing-vault"),
+        Duration::from_millis(1),
     );
-    assert!(
-        error
-            .to_string()
-            .contains("run `factorseal init` to create it")
-    );
+    writer.join().unwrap();
 }
 
 #[test]

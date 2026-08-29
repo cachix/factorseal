@@ -48,9 +48,6 @@ enum CliError {
     #[error("could not determine the platform user-data directory; pass --root")]
     NoDefaultRoot,
 
-    #[error("vault is not initialized at `{0}`; run `factorseal init` to create it")]
-    VaultNotInitialized(String),
-
     #[error("password input failed: {0}")]
     Password(String),
 

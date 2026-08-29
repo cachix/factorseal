@@ -23,8 +23,8 @@ use filesystem::validate_root;
 #[cfg(feature = "key-protection")]
 use filesystem::{prepare_root, unix_time};
 #[cfg(feature = "key-protection")]
-use metadata::VAULT_FILE;
-use metadata::read_vault;
+use metadata::{PENDING_VAULT_FILE, VAULT_FILE};
+use metadata::{read_pending_vault, read_vault};
 #[cfg(feature = "key-protection")]
 use protectors::{
     LabeledProtector, SlotProtectors, VaultCreation, create_with_protectors, unseal_with_protectors,
@@ -183,12 +183,9 @@ impl Vault {
     /// Delete a vault whose store could never be opened, so initialization can
     /// be retried.
     ///
-    /// [`Self::create`] writes `factorseal.json` before the caller can open the
-    /// store, and refuses to run again while that file exists, so a store that
-    /// fails to open leaves a root that initialization can never complete and
-    /// the user cannot recover without deleting keys by hand. Call this only
-    /// on the failure path of a `create` the same process just performed: it
-    /// destroys the hardware-wrapped keys along with everything they protect.
+    /// Call this only on the failure path of a creation attempt by the same
+    /// process. It removes staged or published metadata and destroys the
+    /// hardware-wrapped keys along with everything they protect.
     #[cfg(feature = "hardware")]
     pub fn discard_initialization(root: impl AsRef<Path>) -> VaultResult<()> {
         discard_initialization_with_factory(root.as_ref(), &PlatformProtectorFactory, true)
@@ -288,6 +285,27 @@ impl Vault {
         )
     }
 
+    /// Prepare a native desktop vault without publishing its metadata yet.
+    ///
+    /// The caller must initialize the backing store and then call
+    /// [`Self::complete_initialization`]. This lets `factorseal.json` act as an
+    /// atomic signal that the entire vault is ready to unseal.
+    #[cfg(feature = "hardware")]
+    pub fn prepare_with_unlock_policy(
+        root: impl AsRef<Path>,
+        policy: &UnlockPolicy,
+        credentials: UnlockCredentials<'_>,
+    ) -> VaultResult<UnsealedVault> {
+        Self::create_with_key_protector_policy_mode(
+            root,
+            current_platform()?,
+            policy,
+            credentials,
+            &PlatformProtectorFactory,
+            true,
+        )
+    }
+
     /// Create a vault using an injected hardware-key adapter.
     ///
     /// Android and iOS embedders should call this entry point with their
@@ -312,6 +330,25 @@ impl Vault {
         policy: &UnlockPolicy,
         credentials: UnlockCredentials<'_>,
         factory: &dyn KeyProtectorFactory,
+    ) -> VaultResult<UnsealedVault> {
+        Self::create_with_key_protector_policy_mode(
+            root,
+            platform,
+            policy,
+            credentials,
+            factory,
+            false,
+        )
+    }
+
+    #[cfg(feature = "key-protection")]
+    fn create_with_key_protector_policy_mode(
+        root: impl AsRef<Path>,
+        platform: VaultPlatform,
+        policy: &UnlockPolicy,
+        credentials: UnlockCredentials<'_>,
+        factory: &dyn KeyProtectorFactory,
+        pending: bool,
     ) -> VaultResult<UnsealedVault> {
         let root = root.as_ref();
         prepare_root(root)?;
@@ -369,6 +406,7 @@ impl Vault {
                 policy.clone(),
                 &slot_protectors,
                 credentials,
+                pending,
             )
         })();
 
@@ -397,6 +435,26 @@ impl Vault {
                 }
             }
         }
+    }
+
+    /// Atomically publish metadata for a vault prepared by
+    /// [`Self::prepare_with_unlock_policy`].
+    #[cfg(feature = "key-protection")]
+    pub fn complete_initialization(root: impl AsRef<Path>) -> VaultResult<()> {
+        let root = root.as_ref();
+        validate_root(root)?;
+        let pending = root.join(PENDING_VAULT_FILE);
+        let published = root.join(VAULT_FILE);
+        if published.exists() {
+            return Err(VaultError::Protection(format!(
+                "refusing to replace existing vault metadata `{}`",
+                published.display()
+            )));
+        }
+        // Validate the complete staged document before one atomic rename makes
+        // it visible to waiting services.
+        read_pending_vault(root)?;
+        fs::rename(&pending, &published).map_err(|error| path_error(&published, error))
     }
 
     #[cfg(not(feature = "hardware"))]
@@ -518,6 +576,7 @@ impl Vault {
                 },
             }],
             UnlockCredentials::with_password(TEST_PASSWORD),
+            false,
         )
     }
 
@@ -563,8 +622,14 @@ fn discard_initialization_with_factory(
 
     let mut cleanup_error = None;
     let vault_path = root.join(VAULT_FILE);
-    if vault_path.exists() {
-        match read_vault(root) {
+    let pending_path = root.join(PENDING_VAULT_FILE);
+    if vault_path.exists() || pending_path.exists() {
+        let stored = if vault_path.exists() {
+            read_vault(root)
+        } else {
+            read_pending_vault(root)
+        };
+        match stored {
             Ok(stored) => {
                 let delete_keys = {
                     #[cfg(test)]

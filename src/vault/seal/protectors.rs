@@ -40,6 +40,7 @@ pub(super) fn create_with_protectors(
     policy: UnlockPolicy,
     protectors: &[SlotProtectors<'_>],
     credentials: UnlockCredentials<'_>,
+    pending: bool,
 ) -> VaultResult<UnsealedVault> {
     policy.validate()?;
     if protectors.len() != policy.groups().len() {
@@ -117,7 +118,7 @@ pub(super) fn create_with_protectors(
         unlock_slots: slots,
         created_at,
     });
-    write_vault(root, &stored)?;
+    write_vault(root, &stored, pending)?;
     Ok(UnsealedVault {
         public: stored.public(),
         data_key,

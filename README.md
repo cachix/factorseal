@@ -78,6 +78,11 @@ Start an unsealed service in one terminal:
 $ factorseal unseal
 ```
 
+If the vault does not exist yet, `factorseal unseal` stays alive, logs the
+initialization instruction, and continues automatically after `factorseal init`
+creates it. Packaged background launchers use this same behavior on every
+desktop platform.
+
 Then use the keyring from another terminal:
 
 ```console

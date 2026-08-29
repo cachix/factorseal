@@ -106,6 +106,34 @@ fn injected_mobile_protector_creates_unseals_and_discards() {
 }
 
 #[test]
+fn prepared_vault_metadata_is_published_atomically_on_completion() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    let group = UnlockGroup::new([UnlockFactorKind::Password]).unwrap();
+    let policy = UnlockPolicy::new([group]).unwrap();
+
+    let prepared = Vault::create_with_key_protector_policy_mode(
+        &root,
+        VaultPlatform::Android,
+        &policy,
+        UnlockCredentials::with_password(TEST_PASSWORD),
+        &TestProtectorFactory,
+        true,
+    )
+    .unwrap();
+
+    assert!(root.join(PENDING_VAULT_FILE).is_file());
+    assert!(!root.join(VAULT_FILE).exists());
+    assert!(Vault::inspect(&root).is_err());
+
+    Vault::complete_initialization(&root).unwrap();
+
+    assert!(!root.join(PENDING_VAULT_FILE).exists());
+    assert!(root.join(VAULT_FILE).is_file());
+    assert_eq!(Vault::inspect(&root).unwrap(), *prepared.public());
+}
+
+#[test]
 fn unlock_groups_are_independent_or_slots_with_and_factors() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("factorseal");
@@ -209,6 +237,7 @@ fn mobile_vault_rejects_a_backend_from_another_platform() {
             },
         }],
         UnlockCredentials::with_password(TEST_PASSWORD),
+        false,
     )
     .unwrap_err();
 
@@ -368,6 +397,7 @@ fn every_platform_requires_a_nested_factor_and_hardware() {
                 },
             }],
             UnlockCredentials::with_password(b"correct horse battery staple"),
+            false,
         )
         .unwrap();
         let expected = created.public().clone();

@@ -16,6 +16,7 @@ use super::{KEY_BYTES, VaultMetadata, VaultPlatform};
 use crate::vault::{DeviceKeyId, VaultError, VaultId, VaultResult};
 
 pub(super) const VAULT_FILE: &str = "factorseal.json";
+pub(super) const PENDING_VAULT_FILE: &str = ".factorseal.json.pending";
 const VAULT_FORMAT: &str = "factorseal-vault";
 // Version 3 replaces the single password/biometric tuple with a versioned
 // unlock policy and one independently wrapped slot per OR alternative. There
@@ -172,9 +173,16 @@ impl UnlockSlot {
 }
 
 pub(super) fn read_vault(root: &Path) -> VaultResult<VaultFile> {
-    let path = root.join(VAULT_FILE);
-    let file = fs::File::open(&path).map_err(|error| path_error(&path, error))?;
-    let metadata = file.metadata().map_err(|error| path_error(&path, error))?;
+    read_vault_file(&root.join(VAULT_FILE))
+}
+
+pub(super) fn read_pending_vault(root: &Path) -> VaultResult<VaultFile> {
+    read_vault_file(&root.join(PENDING_VAULT_FILE))
+}
+
+fn read_vault_file(path: &Path) -> VaultResult<VaultFile> {
+    let file = fs::File::open(path).map_err(|error| path_error(path, error))?;
+    let metadata = file.metadata().map_err(|error| path_error(path, error))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_VAULT_FILE_BYTES {
         return Err(VaultError::Protection(
             "vault metadata is not a bounded regular file".to_owned(),
@@ -185,7 +193,7 @@ pub(super) fn read_vault(root: &Path) -> VaultResult<VaultFile> {
     let mut bytes = Vec::with_capacity(capacity);
     file.take(MAX_VAULT_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| path_error(&path, error))?;
+        .map_err(|error| path_error(path, error))?;
     if bytes.len() as u64 > MAX_VAULT_FILE_BYTES {
         return Err(VaultError::Protection(
             "vault metadata is not a bounded regular file".to_owned(),
@@ -198,9 +206,13 @@ pub(super) fn read_vault(root: &Path) -> VaultResult<VaultFile> {
 }
 
 #[cfg(feature = "key-protection")]
-pub(super) fn write_vault(root: &Path, stored: &VaultFile) -> VaultResult<()> {
+pub(super) fn write_vault(root: &Path, stored: &VaultFile, pending: bool) -> VaultResult<()> {
     stored.validate()?;
-    let path = root.join(VAULT_FILE);
+    let path = root.join(if pending {
+        PENDING_VAULT_FILE
+    } else {
+        VAULT_FILE
+    });
     let bytes = serde_json::to_vec_pretty(stored)
         .map_err(|error| VaultError::Protection(error.to_string()))?;
     write_new_private_file(&path, &bytes)

@@ -54,6 +54,10 @@ so it must use one of the first two. The askpass helper is preferred: the
 secret crosses a pipe and is never written beside the vault it protects. macOS
 and Windows packages ship their own helper and pass `--askpass` for exactly
 this reason, which is why both can keep unsealing the vault at login.
+`factorseal unseal` waits for initialization by default: before a vault exists,
+the process logs the `factorseal init` instruction and waits. As soon as
+initialization creates the vault metadata, the same process continues into the
+platform's normal askpass flow on all three desktop platforms.
 
 Linux uses `systemd-ask-password` as its askpass helper. The service publishes
 a per-user password request, and the terminal agent run by `factorseal-start`
@@ -105,9 +109,10 @@ is:
 ```
 
 Listed users are added to the TPM resource-manager group. The module installs
-and enables a global systemd user unit. Before a vault exists, the unit exits
-after logging an instruction to run `factorseal init`. Once initialized, the
-default unlock group requires an interactive password request.
+and enables a global systemd user unit. Before a vault exists, the unit remains
+active after logging an instruction to run `factorseal init`; it notices the
+new vault and continues automatically once initialization finishes. The default
+unlock group then requires an interactive password request.
 `factorseal-start` supplies the invoking logind session, answers that request,
 and waits for the socket. The module also enables polkit so the unprivileged
 vault can obtain logind's default-permitted delay inhibitor before holding

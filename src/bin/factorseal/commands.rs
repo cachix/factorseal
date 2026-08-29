@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{BufRead, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
@@ -37,6 +37,9 @@ struct Status<'a> {
     state: &'static str,
 }
 
+const VAULT_METADATA_FILE: &str = "factorseal.json";
+const INITIALIZATION_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 pub(super) fn initialize(
     root: &Path,
     unlock_groups: Vec<UnlockGroup>,
@@ -44,30 +47,29 @@ pub(super) fn initialize(
 ) -> Result<(), CliError> {
     let policy = UnlockPolicy::new(unlock_groups)?;
     let password = read_password_for_groups(policy.groups(), factor, true)?;
-    let unsealed = Vault::create_with_unlock_policy(
+    let unsealed = Vault::prepare_with_unlock_policy(
         root,
         &policy,
         credentials(password.as_ref().map(|value| value.as_slice())),
     )?;
     let device = unsealed.public().clone();
-    // The vault metadata is already on disk, and `create` refuses to run again while it
-    // is there. Undo what this command wrote so `init` can simply be retried
-    // rather than leaving a root nothing can finish or open.
-    let now = unix_time()?;
-    let service = match VaultService::open(root, unsealed, now, UnsealLeasePolicy::default()) {
-        Ok(service) => service,
-        Err(open_error) => {
-            return match Vault::discard_initialization(root) {
-                Ok(()) => Err(open_error.into()),
-                Err(cleanup_error) => Err(VaultError::Protection(format!(
-                    "{open_error}; initialization rollback failed: {cleanup_error}"
-                ))
-                .into()),
-            };
-        }
-    };
-    authorize_cli(&service, now)?;
-    service.seal()?;
+    let initialized = (|| -> Result<(), CliError> {
+        let now = unix_time()?;
+        let service = VaultService::open(root, unsealed, now, UnsealLeasePolicy::default())?;
+        authorize_cli(&service, now)?;
+        service.seal()?;
+        Vault::complete_initialization(root)?;
+        Ok(())
+    })();
+    if let Err(initialization_error) = initialized {
+        return match Vault::discard_initialization(root) {
+            Ok(()) => Err(initialization_error),
+            Err(cleanup_error) => Err(VaultError::Protection(format!(
+                "{initialization_error}; initialization rollback failed: {cleanup_error}"
+            ))
+            .into()),
+        };
+    }
     println!(
         "Initialized Factorseal vault {} at {} using {}",
         device.vault_id(),
@@ -280,13 +282,26 @@ pub(super) fn run_vault(
     policy: UnsealLeasePolicy,
     requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
-    if !root.exists() {
-        return Err(CliError::VaultNotInitialized(root.display().to_string()));
-    }
+    wait_for_initialization(root, INITIALIZATION_POLL_INTERVAL);
     let device = Vault::inspect(root)?;
     let unsealed = unseal_selected(root, &device, requested_group, factor)?;
     let service = Arc::new(VaultService::open(root, unsealed, unix_time()?, policy)?);
     serve_vault(&device, &service, root, socket)
+}
+
+pub(super) fn wait_for_initialization(root: &Path, poll_interval: Duration) {
+    let metadata = root.join(VAULT_METADATA_FILE);
+    if metadata.is_file() {
+        return;
+    }
+
+    eprintln!(
+        "factorseal: vault is not initialized at `{}`; run `factorseal init` to create it; waiting for initialization",
+        root.display()
+    );
+    while !metadata.is_file() {
+        std::thread::sleep(poll_interval);
+    }
 }
 
 pub(super) fn grant_cli(
