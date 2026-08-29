@@ -116,8 +116,9 @@ pkgs.testers.runNixOSTest {
 
     with subtest("service startup explains how to initialize a missing vault"):
         machine.wait_until_succeeds(
-            f"{alice_prefix} journalctl --user -u factorseal.service --no-pager "
-            "| grep -F 'run `factorseal init` to create it'"
+            "journalctl _SYSTEMD_USER_UNIT=factorseal.service --no-pager "
+            "| grep -F 'run `factorseal init` to create it'",
+            timeout=30,
         )
         machine.fail(f"test -S {socket}")
 
