@@ -72,8 +72,9 @@ $ factorseal init --unlock password --unlock biometric
 
 The first policy requires password AND biometric approval. The second accepts
 password OR biometric approval. A biometric-only policy does not ask for a
-Factorseal password. When a vault has multiple groups, select the intended one
-when starting the agent, for example `factorseal agent --unlock biometric`.
+Factorseal password. The first repeated group is the preferred unlock method;
+override it when starting the agent, for example `factorseal agent --unlock
+biometric`.
 
 Start an unsealed service in one terminal:
 

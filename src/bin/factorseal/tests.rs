@@ -3,7 +3,7 @@ use super::commands::{
     ApprovalDecision, ParsedGrantDuration, parse_grant_duration, read_approval_decision,
     read_bounded, read_grant_duration, read_init_unlock_groups, read_keyring_value,
     read_password_for_groups, read_unlock_group_choice, require_prompt_terminal,
-    wait_for_initialization,
+    resolve_unlock_group, wait_for_initialization,
 };
 use super::factor::read_factor;
 use super::*;
@@ -251,6 +251,7 @@ fn init_prompt_explains_and_maps_unlock_choices() {
         let prompt = String::from_utf8(output).unwrap();
         assert!(prompt.contains("protected by this device's hardware"));
         assert!(prompt.contains("Password or biometric approval"));
+        assert!(prompt.contains("password preferred by default"));
     }
 }
 
@@ -279,6 +280,24 @@ fn biometric_only_groups_do_not_read_a_password_source() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn agent_uses_the_preferred_group_unless_unlock_is_explicit() {
+    let password = UnlockGroup::new([UnlockFactorKind::Password]).unwrap();
+    let biometric = UnlockGroup::new([UnlockFactorKind::Biometric]).unwrap();
+    let groups = [password.clone(), biometric.clone()];
+
+    assert_eq!(
+        resolve_unlock_group(&groups, &password, None).unwrap(),
+        password
+    );
+    assert_eq!(
+        resolve_unlock_group(&groups, &password, Some(&biometric)).unwrap(),
+        biometric
+    );
+    let both = UnlockGroup::new([UnlockFactorKind::Password, UnlockFactorKind::Biometric]).unwrap();
+    assert!(resolve_unlock_group(&groups, &password, Some(&both)).is_err());
 }
 
 #[test]

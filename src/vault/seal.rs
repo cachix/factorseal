@@ -50,6 +50,7 @@ pub struct VaultMetadata {
     platform: VaultPlatform,
     hardware_backend: String,
     unlock_policy: UnlockPolicy,
+    preferred_unlock_group: UnlockGroup,
     key_epoch: u64,
     created_at: u64,
 }
@@ -84,6 +85,12 @@ impl VaultMetadata {
     #[must_use]
     pub const fn unlock_policy(&self) -> &UnlockPolicy {
         &self.unlock_policy
+    }
+
+    /// Unlock group used when a caller does not request one explicitly.
+    #[must_use]
+    pub const fn preferred_unlock_group(&self) -> &UnlockGroup {
+        &self.preferred_unlock_group
     }
 
     #[must_use]

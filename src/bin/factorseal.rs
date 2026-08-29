@@ -60,9 +60,6 @@ enum CliError {
     #[error("keyring entry was not found")]
     KeyringEntryNotFound,
 
-    #[error("select an unlock group with --unlock; configured groups: {0:?}")]
-    UnlockGroupRequired(Vec<String>),
-
     #[error("unlock group `{0}` is not configured for this vault")]
     UnlockGroupNotConfigured(String),
 

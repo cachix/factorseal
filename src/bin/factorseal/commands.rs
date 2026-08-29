@@ -32,6 +32,7 @@ struct Status<'a> {
     platform: &'a str,
     hardware_backend: &'a str,
     unlock_policy: Vec<String>,
+    preferred_unlock_group: String,
     key_epoch: u64,
     created_at: u64,
     state: &'static str,
@@ -106,7 +107,7 @@ pub(super) fn read_init_unlock_groups(
            1. Password\n\
            2. Biometric approval\n\
            3. Password and biometric approval\n\
-           4. Password or biometric approval (choose one when starting the agent)"
+           4. Password or biometric approval (password preferred by default)"
     )
     .map_err(|error| CliError::InitPrompt(error.to_string()))?;
 
@@ -157,6 +158,7 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
             .iter()
             .map(ToString::to_string)
             .collect(),
+        preferred_unlock_group: device.preferred_unlock_group().to_string(),
         key_epoch: device.key_epoch(),
         created_at: device.created_at(),
         state,
@@ -909,7 +911,18 @@ fn select_unlock_group(
     device: &VaultMetadata,
     requested: Option<&UnlockGroup>,
 ) -> Result<UnlockGroup, CliError> {
-    let groups = device.unlock_policy().groups();
+    resolve_unlock_group(
+        device.unlock_policy().groups(),
+        device.preferred_unlock_group(),
+        requested,
+    )
+}
+
+pub(super) fn resolve_unlock_group(
+    groups: &[UnlockGroup],
+    preferred: &UnlockGroup,
+    requested: Option<&UnlockGroup>,
+) -> Result<UnlockGroup, CliError> {
     if let Some(requested) = requested {
         return groups
             .iter()
@@ -917,12 +930,7 @@ fn select_unlock_group(
             .cloned()
             .ok_or_else(|| CliError::UnlockGroupNotConfigured(requested.to_string()));
     }
-    match groups {
-        [group] => Ok(group.clone()),
-        _ => Err(CliError::UnlockGroupRequired(
-            groups.iter().map(ToString::to_string).collect(),
-        )),
-    }
+    Ok(preferred.clone())
 }
 
 pub(super) fn read_password_for_groups(

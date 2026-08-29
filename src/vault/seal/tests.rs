@@ -155,9 +155,14 @@ fn unlock_groups_are_independent_or_slots_with_and_factors() {
     .unwrap();
     let expected = created.public().clone();
     assert_eq!(expected.unlock_policy(), &policy);
+    assert_eq!(expected.preferred_unlock_group(), &policy.groups()[0]);
     drop(created);
 
     let stored = read_vault(&root).unwrap();
+    assert_eq!(
+        stored.preferred_unlock_group.as_ref(),
+        Some(&policy.groups()[0])
+    );
     assert_eq!(stored.unlock_slots.len(), 3);
     assert!(stored.unlock_slots[0].password_protection.is_some());
     assert!(stored.unlock_slots[1].password_protection.is_none());
@@ -194,6 +199,44 @@ fn unlock_groups_are_independent_or_slots_with_and_factors() {
     )
     .unwrap();
     assert_eq!(via_both.public(), &expected);
+}
+
+#[test]
+fn metadata_without_a_preferred_group_uses_the_first_policy_group() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    Vault::create_for_test(&root).unwrap();
+    let stored = read_vault(&root).unwrap();
+
+    let mut json = serde_json::to_value(&stored).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .remove("preferred_unlock_group");
+    let compatible: super::metadata::VaultFile = serde_json::from_value(json).unwrap();
+    compatible.validate().unwrap();
+
+    assert!(compatible.preferred_unlock_group.is_none());
+    assert_eq!(
+        compatible.public().preferred_unlock_group(),
+        &compatible.unlock_policy.groups()[0]
+    );
+}
+
+#[test]
+fn preferred_group_must_belong_to_the_unlock_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    Vault::create_for_test(&root).unwrap();
+    let mut stored = read_vault(&root).unwrap();
+    stored.preferred_unlock_group = Some(UnlockGroup::new([UnlockFactorKind::Biometric]).unwrap());
+
+    assert!(
+        stored
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("preferred unlock group")
+    );
 }
 
 #[test]

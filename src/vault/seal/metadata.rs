@@ -36,6 +36,8 @@ pub(super) struct VaultFile {
     pub(super) platform: VaultPlatform,
     pub(super) hardware_backend: String,
     pub(super) unlock_policy: UnlockPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) preferred_unlock_group: Option<UnlockGroup>,
     pub(super) unlock_slots: Vec<UnlockSlot>,
     pub(super) key_epoch: u64,
     pub(super) created_at: u64,
@@ -88,6 +90,7 @@ impl VaultFile {
             actor_id,
             platform,
             hardware_backend,
+            preferred_unlock_group: unlock_policy.groups().first().cloned(),
             unlock_policy,
             unlock_slots,
             key_epoch: 0,
@@ -96,6 +99,11 @@ impl VaultFile {
     }
 
     pub(super) fn public(&self) -> VaultMetadata {
+        let preferred_unlock_group = self
+            .preferred_unlock_group
+            .clone()
+            .or_else(|| self.unlock_policy.groups().first().cloned())
+            .expect("validated unlock policies contain a group");
         VaultMetadata {
             vault_id: self.vault_id,
             device_key_id: self.device_key_id,
@@ -104,6 +112,7 @@ impl VaultFile {
             platform: self.platform,
             hardware_backend: self.hardware_backend.clone(),
             unlock_policy: self.unlock_policy.clone(),
+            preferred_unlock_group,
             key_epoch: self.key_epoch,
             created_at: self.created_at,
         }
@@ -125,6 +134,13 @@ impl VaultFile {
             ));
         }
         self.unlock_policy.validate()?;
+        if let Some(preferred) = &self.preferred_unlock_group
+            && !self.unlock_policy.groups().contains(preferred)
+        {
+            return Err(VaultError::Protection(
+                "preferred unlock group is not in the unlock policy".to_owned(),
+            ));
+        }
         if self.unlock_slots.len() != self.unlock_policy.groups().len() {
             return Err(VaultError::Protection(
                 "unlock policy and wrapping slots do not match".to_owned(),

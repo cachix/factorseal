@@ -45,7 +45,7 @@ pub(super) enum Command {
 
     /// Run the vault agent, waiting for initialization before serving requests.
     Agent {
-        /// Exact unlock group to use; required when more than one is configured.
+        /// Exact unlock group to use instead of the vault's preferred group.
         #[arg(long, value_name = "FACTORS")]
         unlock: Option<UnlockGroup>,
 
@@ -100,14 +100,14 @@ pub(super) enum Command {
         #[arg(long)]
         yes_really_destroy: bool,
 
-        /// Exact unlock group to use; required when more than one is configured.
+        /// Exact unlock group to use instead of the vault's preferred group.
         #[arg(long, value_name = "FACTORS")]
         unlock: Option<UnlockGroup>,
     },
 
     /// Reauthorize this exact Factorseal executable after an upgrade.
     GrantCli {
-        /// Exact unlock group to use; required when more than one is configured.
+        /// Exact unlock group to use instead of the vault's preferred group.
         #[arg(long, value_name = "FACTORS")]
         unlock: Option<UnlockGroup>,
     },
