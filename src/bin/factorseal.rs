@@ -20,7 +20,7 @@ mod provider;
 use cli::{Cli, Command};
 use commands::{
     delete_keyring_value, destroy_vault, get_keyring_value, grant_cli, initialize,
-    manage_permissions, resolve_root, run_vault, seal_vault, set_keyring_value, show_status,
+    manage_permissions, resolve_root, run_agent, seal_vault, set_keyring_value, show_status,
 };
 use factor::FactorSource;
 
@@ -126,11 +126,11 @@ fn run(cli: Cli) -> Result<(), CliError> {
     };
     match cli.command {
         Command::Init { unlock } => initialize(&root, unlock, factor),
-        Command::Unseal {
+        Command::Agent {
             unlock,
             idle_seconds,
             maximum_seconds,
-        } => run_vault(
+        } => run_agent(
             &root,
             socket,
             factor,

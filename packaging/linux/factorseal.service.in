@@ -7,7 +7,7 @@ After=dbus.socket
 [Service]
 Type=simple
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
-ExecStart=@INSTALL_DIR@/factorseal --askpass=systemd-ask-password unseal
+ExecStart=@INSTALL_DIR@/factorseal --askpass=systemd-ask-password agent
 Restart=no
 UMask=0077
 NoNewPrivileges=yes

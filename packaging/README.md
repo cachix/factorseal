@@ -10,7 +10,7 @@ The archive builders are reproducible developer packaging, not a claim that an
 artifact is ready to release:
 
 - `build-unix.sh linux` creates a tarball with the binaries, systemd user unit,
-  and interactive session-unseal helper;
+  and interactive session-agent helper;
 - `build-unix.sh macos` creates a tarball and an unsigned `.pkg` containing an
   app bundle, its askpass helper, and a LaunchAgent property list;
 - `build-windows.ps1` creates a ZIP containing the executables, the askpass
@@ -54,7 +54,7 @@ so it must use one of the first two. The askpass helper is preferred: the
 secret crosses a pipe and is never written beside the vault it protects. macOS
 and Windows packages ship their own helper and pass `--askpass` for exactly
 this reason, which is why both can keep unsealing the vault at login.
-`factorseal unseal` waits for initialization by default: before a vault exists,
+`factorseal agent` waits for initialization by default: before a vault exists,
 the process logs the `factorseal init` instruction and waits. As soon as
 initialization creates the vault metadata, the same process continues into the
 platform's normal askpass flow on all three desktop platforms.

@@ -70,15 +70,15 @@ $ factorseal init --unlock password --unlock biometric
 The first policy requires password AND biometric approval. The second accepts
 password OR biometric approval. A biometric-only policy does not ask for a
 Factorseal password. When a vault has multiple groups, select the intended one
-while unsealing, for example `factorseal unseal --unlock biometric`.
+when starting the agent, for example `factorseal agent --unlock biometric`.
 
 Start an unsealed service in one terminal:
 
 ```console
-$ factorseal unseal
+$ factorseal agent
 ```
 
-If the vault does not exist yet, `factorseal unseal` stays alive, logs the
+If the vault does not exist yet, `factorseal agent` stays alive, logs the
 initialization instruction, and continues automatically after `factorseal init`
 creates it. Packaged background launchers use this same behavior on every
 desktop platform.
@@ -262,7 +262,7 @@ Place this registration at `factorseal.json` in SecretSpec's provider
 registration directory. The provider URI is `factorseal://default`. Factorseal
 requires SecretSpec to supply a project context so cache access can be isolated.
 
-Start the service with `factorseal unseal`. Because the endpoint cannot prompt
+Start the service with `factorseal agent`. Because the endpoint cannot prompt
 on its protocol streams, a sealed service is reported to SecretSpec as
 `interaction_required`.
 

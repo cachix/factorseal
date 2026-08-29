@@ -150,17 +150,17 @@ fn an_explicit_file_takes_precedence_over_the_helper() {
 
 #[test]
 fn askpass_is_configurable_through_the_environment() {
-    let cli = Cli::try_parse_from(["factorseal", "--askpass", "/usr/bin/true", "unseal"]).unwrap();
+    let cli = Cli::try_parse_from(["factorseal", "--askpass", "/usr/bin/true", "agent"]).unwrap();
     assert_eq!(cli.askpass.unwrap(), PathBuf::from("/usr/bin/true"));
 }
 
 #[test]
-fn unseal_policy_and_root_are_explicitly_configurable() {
+fn agent_policy_and_root_are_explicitly_configurable() {
     let cli = Cli::try_parse_from([
         "factorseal",
         "--root",
         "/tmp/factorseal-test",
-        "unseal",
+        "agent",
         "--idle-seconds",
         "10",
         "--maximum-seconds",
@@ -168,20 +168,20 @@ fn unseal_policy_and_root_are_explicitly_configurable() {
     ])
     .unwrap();
     assert_eq!(cli.root.unwrap(), PathBuf::from("/tmp/factorseal-test"));
-    let Command::Unseal {
+    let Command::Agent {
         idle_seconds,
         maximum_seconds,
         ..
     } = cli.command
     else {
-        panic!("expected unseal command");
+        panic!("expected agent command");
     };
     assert_eq!(idle_seconds, 10);
     assert_eq!(maximum_seconds, 20);
 }
 
 #[test]
-fn unseal_waits_for_initialization_metadata() {
+fn agent_waits_for_initialization_metadata() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("missing-vault");
     let metadata = root.join("factorseal.json");
@@ -223,10 +223,10 @@ fn unlock_cli_uses_and_inside_groups_and_or_between_repetitions() {
     assert!(unlock[0].requires(UnlockFactorKind::Biometric));
     assert_eq!(unlock[1].to_string(), "biometric");
 
-    let cli = Cli::try_parse_from(["factorseal", "unseal", "--unlock", "biometric"]).unwrap();
+    let cli = Cli::try_parse_from(["factorseal", "agent", "--unlock", "biometric"]).unwrap();
     assert!(matches!(
         cli.command,
-        Command::Unseal { unlock: Some(group), .. } if group.to_string() == "biometric"
+        Command::Agent { unlock: Some(group), .. } if group.to_string() == "biometric"
     ));
 }
 

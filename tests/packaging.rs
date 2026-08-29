@@ -274,7 +274,7 @@ fn the_windows_wrapper_invokes_its_own_powershell_companion() {
 }
 
 #[test]
-fn both_gui_launchers_start_the_vault_at_login() {
+fn both_desktop_launchers_start_the_agent_at_login() {
     // Login start is only safe because a helper can prompt without a console.
     // If either trigger is removed, the askpass wiring has become pointless
     // and this test should be revisited rather than deleted.
@@ -289,4 +289,15 @@ fn both_gui_launchers_start_the_vault_at_login() {
         task.contains("<LogonTrigger>"),
         "the scheduled task no longer starts at logon"
     );
+}
+
+#[test]
+fn every_background_launcher_uses_the_agent_command() {
+    let linux = packaging("linux/factorseal.service.in");
+    let macos = packaging("macos/dev.factorseal.plist");
+    let windows = packaging("windows/factorseal-task.xml.in");
+
+    assert!(linux.contains("systemd-ask-password agent"));
+    assert!(macos.contains("<string>agent</string>"));
+    assert!(windows.contains("factorseal-askpass.cmd\" agent"));
 }

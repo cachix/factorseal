@@ -8,7 +8,7 @@
     <string>/Applications/Factorseal.app/Contents/MacOS/factorseal</string>
     <string>--askpass</string>
     <string>/Applications/Factorseal.app/Contents/MacOS/factorseal-askpass</string>
-    <string>unseal</string>
+    <string>agent</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>

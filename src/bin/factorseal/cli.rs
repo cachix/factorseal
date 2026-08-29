@@ -43,8 +43,8 @@ pub(super) enum Command {
         unlock: Vec<UnlockGroup>,
     },
 
-    /// Wait for initialization, then unseal the vault service until its lease ends.
-    Unseal {
+    /// Run the vault agent, waiting for initialization before serving requests.
+    Agent {
         /// Exact unlock group to use; required when more than one is configured.
         #[arg(long, value_name = "FACTORS")]
         unlock: Option<UnlockGroup>,

@@ -22,7 +22,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>@INSTALL_DIR@\factorseal.exe</Command>
-      <Arguments>--askpass "@INSTALL_DIR@\factorseal-askpass.cmd" unseal</Arguments>
+      <Arguments>--askpass "@INSTALL_DIR@\factorseal-askpass.cmd" agent</Arguments>
       <WorkingDirectory>@INSTALL_DIR@</WorkingDirectory>
     </Exec>
   </Actions>

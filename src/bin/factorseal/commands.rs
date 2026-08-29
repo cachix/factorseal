@@ -275,7 +275,7 @@ pub(super) fn read_bounded(reader: impl Read, maximum: u64) -> std::io::Result<Z
     Ok(value)
 }
 
-pub(super) fn run_vault(
+pub(super) fn run_agent(
     root: &Path,
     socket: Option<&Path>,
     factor: FactorSource<'_>,

@@ -84,15 +84,15 @@ in
       # org.freedesktop.secrets service on the per-user bus.
       environment.DBUS_SESSION_BUS_ADDRESS = "unix:path=%t/bus";
 
-      # Before initialization this exits with an actionable message in the
-      # journal. Once initialized, systemd's password agent passes the factor
+      # Before initialization the agent remains active and logs an actionable
+      # message. Once initialized, systemd's password agent passes the factor
       # to Factorseal over a pipe; it is never staged in the runtime directory.
       serviceConfig = {
         Type = "simple";
         ExecStart = lib.concatStringsSep " " [
           "${cfg.package}/bin/factorseal"
           "--askpass=${pkgs.systemd}/bin/systemd-ask-password"
-          "unseal"
+          "agent"
           "--idle-seconds=${toString cfg.idleSeconds}"
           "--maximum-seconds=${toString cfg.maximumSeconds}"
         ];
