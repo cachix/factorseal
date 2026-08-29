@@ -55,9 +55,12 @@ rejected. Once the `factorseal` binary is installed, create a vault:
 $ factorseal init
 ```
 
-By default, initialization prompts for a Factorseal password, creates the
+When run in a terminal, initialization briefly introduces the vault and asks
+you to choose password, biometric, password AND biometric, or password OR
+biometric unlocking. The default is password. It then creates the
 hardware-protected vault, authorizes that exact CLI executable for the durable
-keyring, and leaves the vault sealed.
+keyring, and leaves the vault sealed. Non-interactive initialization also
+defaults to password unless `--unlock` is passed explicitly.
 
 Unlock policies use AND inside one comma-separated group and OR between
 repeated groups. Platform hardware binding is implicit in every group:

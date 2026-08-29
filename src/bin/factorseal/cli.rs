@@ -39,7 +39,7 @@ pub(super) enum Command {
     /// Create and seal a hardware-bound vault.
     Init {
         /// AND-separated factors in one unlock group; repeat for OR alternatives.
-        #[arg(long, value_name = "FACTORS", default_value = "password")]
+        #[arg(long, value_name = "FACTORS")]
         unlock: Vec<UnlockGroup>,
     },
 

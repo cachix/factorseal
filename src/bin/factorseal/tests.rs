@@ -1,8 +1,9 @@
 use super::cli::{Cli, Command, PermissionCommand};
 use super::commands::{
     ApprovalDecision, ParsedGrantDuration, parse_grant_duration, read_approval_decision,
-    read_bounded, read_grant_duration, read_keyring_value, read_password_for_groups,
-    read_unlock_group_choice, require_prompt_terminal, wait_for_initialization,
+    read_bounded, read_grant_duration, read_init_unlock_groups, read_keyring_value,
+    read_password_for_groups, read_unlock_group_choice, require_prompt_terminal,
+    wait_for_initialization,
 };
 use super::factor::read_factor;
 use super::*;
@@ -203,7 +204,7 @@ fn unlock_cli_uses_and_inside_groups_and_or_between_repetitions() {
     let default = Cli::try_parse_from(["factorseal", "init"]).unwrap();
     assert!(matches!(
         default.command,
-        Command::Init { unlock } if unlock.len() == 1 && unlock[0].to_string() == "password"
+        Command::Init { unlock } if unlock.is_empty()
     ));
 
     let cli = Cli::try_parse_from([
@@ -228,6 +229,42 @@ fn unlock_cli_uses_and_inside_groups_and_or_between_repetitions() {
         cli.command,
         Command::Agent { unlock: Some(group), .. } if group.to_string() == "biometric"
     ));
+}
+
+#[test]
+fn init_prompt_explains_and_maps_unlock_choices() {
+    let cases = [
+        ("\n", vec!["password"]),
+        ("2\n", vec!["biometric"]),
+        ("3\n", vec!["password,biometric"]),
+        ("4\n", vec!["password", "biometric"]),
+    ];
+
+    for (answer, expected) in cases {
+        let mut input = std::io::Cursor::new(answer);
+        let mut output = Vec::new();
+        let groups = read_init_unlock_groups(&mut input, &mut output).unwrap();
+        assert_eq!(
+            groups.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            expected
+        );
+        let prompt = String::from_utf8(output).unwrap();
+        assert!(prompt.contains("protected by this device's hardware"));
+        assert!(prompt.contains("Password or biometric approval"));
+    }
+}
+
+#[test]
+fn init_prompt_retries_an_invalid_choice() {
+    let mut input = std::io::Cursor::new("nope\n3\n");
+    let mut output = Vec::new();
+    let groups = read_init_unlock_groups(&mut input, &mut output).unwrap();
+    assert_eq!(groups[0].to_string(), "password,biometric");
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("Enter a number from 1 to 4.")
+    );
 }
 
 #[test]

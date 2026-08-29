@@ -45,6 +45,7 @@ pub(super) fn initialize(
     unlock_groups: Vec<UnlockGroup>,
     factor: FactorSource<'_>,
 ) -> Result<(), CliError> {
+    let unlock_groups = init_unlock_groups(unlock_groups)?;
     let policy = UnlockPolicy::new(unlock_groups)?;
     let password = read_password_for_groups(policy.groups(), factor, true)?;
     let unsealed = Vault::prepare_with_unlock_policy(
@@ -77,6 +78,66 @@ pub(super) fn initialize(
         device.hardware_backend()
     );
     Ok(())
+}
+
+fn init_unlock_groups(configured: Vec<UnlockGroup>) -> Result<Vec<UnlockGroup>, CliError> {
+    if !configured.is_empty() {
+        return Ok(configured);
+    }
+
+    let stdin = std::io::stdin();
+    let stderr = std::io::stderr();
+    if stdin.is_terminal() && stderr.is_terminal() {
+        return read_init_unlock_groups(&mut stdin.lock(), &mut stderr.lock());
+    }
+
+    Ok(vec![UnlockGroup::new([UnlockFactorKind::Password])?])
+}
+
+pub(super) fn read_init_unlock_groups(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<Vec<UnlockGroup>, CliError> {
+    writeln!(
+        output,
+        "Factorseal creates a local secrets vault protected by this device's hardware.\n\
+         Choose how you want to unlock it. 'And' requires both factors; 'or' creates\n\
+         two alternatives. The vault will be sealed after setup.\n\n\
+           1. Password\n\
+           2. Biometric approval\n\
+           3. Password and biometric approval\n\
+           4. Password or biometric approval (choose one when starting the agent)"
+    )
+    .map_err(|error| CliError::InitPrompt(error.to_string()))?;
+
+    loop {
+        write!(output, "Unlock method [1]: ")
+            .and_then(|()| output.flush())
+            .map_err(|error| CliError::InitPrompt(error.to_string()))?;
+        let mut answer = String::new();
+        if input
+            .read_line(&mut answer)
+            .map_err(|error| CliError::InitPrompt(error.to_string()))?
+            == 0
+        {
+            return Err(CliError::InitPrompt("input was closed".to_owned()));
+        }
+
+        let password = || UnlockGroup::new([UnlockFactorKind::Password]);
+        let biometric = || UnlockGroup::new([UnlockFactorKind::Biometric]);
+        let both = || UnlockGroup::new([UnlockFactorKind::Password, UnlockFactorKind::Biometric]);
+        return match answer.trim() {
+            "" | "1" => Ok(vec![password()?]),
+            "2" => Ok(vec![biometric()?]),
+            "3" => Ok(vec![both()?]),
+            "4" => Ok(vec![password()?, biometric()?]),
+            _ => {
+                writeln!(output, "Enter a number from 1 to 4.")
+                    .map_err(|error| CliError::InitPrompt(error.to_string()))?;
+                continue;
+            }
+        };
+    }
 }
 
 pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {

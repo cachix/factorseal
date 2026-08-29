@@ -92,6 +92,9 @@ enum CliError {
     #[error("permission prompt failed: {0}")]
     ApprovalPrompt(String),
 
+    #[error("initialization prompt failed: {0}")]
+    InitPrompt(String),
+
     #[error(
         "no way to obtain the Factorseal factor: there is no controlling \
          terminal, and neither --askpass nor --password-file was given"
