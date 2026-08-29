@@ -102,6 +102,14 @@ pkgs.testers.runNixOSTest {
             "systemctl --user cat factorseal.service "
             "| grep -q '^WantedBy=default.target'"
         )
+        as_alice(
+            "systemctl --user cat factorseal.service "
+            "| grep -q '^Wants=dbus.socket'"
+        )
+        as_alice(
+            "systemctl --user cat factorseal.service "
+            "| grep -q '^After=dbus.socket'"
+        )
         as_alice("systemctl --user cat factorseal.service | grep -- '--idle-seconds=5'")
         machine.succeed("test -x ${package}/bin/factorseal-start")
         machine.succeed("test -x ${package}/bin/factorseal")

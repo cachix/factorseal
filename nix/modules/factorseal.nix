@@ -76,6 +76,8 @@ in
       description = "Factorseal per-user vault service";
       documentation = [ "https://github.com/domenkozar/factorseal" ];
       wantedBy = [ "default.target" ];
+      wants = [ "dbus.socket" ];
+      after = [ "dbus.socket" ];
 
       # A user manager does not necessarily inherit the graphical session's
       # environment. The broker needs this address to publish the standard

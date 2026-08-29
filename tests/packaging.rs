@@ -122,6 +122,10 @@ fn the_linux_unit_uses_askpass_without_a_password_file() {
         "the Linux service is not enabled for user-session startup"
     );
     assert!(
+        unit.contains("Wants=dbus.socket") && unit.contains("After=dbus.socket"),
+        "the Linux service does not start the user D-Bus before publishing Secret Service"
+    );
+    assert!(
         starter.contains("systemctl --user start --no-block factorseal.service")
             && starter.contains("systemd-tty-ask-password-agent --query"),
         "the starter does not answer the service's password request"
