@@ -4,8 +4,6 @@
   stdenv,
   pkg-config,
   dbus,
-  pcsclite,
-  tpm2-tss,
 }:
 
 rustPlatform.buildRustPackage {
@@ -18,37 +16,19 @@ rustPlatform.buildRustPackage {
       ../Cargo.lock
       ../Cargo.toml
       ../crates
-      ../nix/patches/hardware-enclave-tpm-auth-sessions.patch
       ../src
     ];
   };
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    # `[patch.crates-io]` in Cargo.toml points hardware-enclave at our branch
-    # behind godaddy/hardware-enclave#208. Cargo.lock pins the commit this hash
-    # covers, so both move together.
     outputHashes = {
-      "hardware-enclave-0.2.10" = "sha256-8bvhRDkrDB9xICySrCbbWqMB2WDqN/tDqgtKYJ0soTQ=";
       "secretspec-ipc-0.19.1" = "sha256-uMemqk3LJo8InszQcjoFY7o3WyySd1feQZKf7Afg97E=";
     };
   };
 
-  # hardware-enclave 0.2.10 invokes authorized TPM commands without a
-  # session, which current tss-esapi rejects before reaching the TPM. Keep
-  # this downstream patch isolated so it can be dropped with an upstream
-  # release containing the equivalent fix.
-  postPatch = ''
-    patch -d "$cargoDepsCopy/hardware-enclave-0.2.10" -p1 \
-      < ${./patches/hardware-enclave-tpm-auth-sessions.patch}
-  '';
-
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [
-    dbus
-    pcsclite
-    tpm2-tss
-  ];
+  buildInputs = [ dbus ];
 
   cargoBuildFlags = [
     "--no-default-features"

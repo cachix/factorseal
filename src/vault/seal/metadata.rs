@@ -240,9 +240,8 @@ pub(super) fn platform_accepts_backend(platform: VaultPlatform, backend: &str) -
             matches!(backend, "android-strongbox" | "android-trusted-environment")
         }
         VaultPlatform::Ios | VaultPlatform::Macos => backend == "secure-enclave",
-        VaultPlatform::Linux | VaultPlatform::Windows => {
-            matches!(backend, "tpm" | "tpm-bridge")
-        }
+        VaultPlatform::Linux => backend == "tpm",
+        VaultPlatform::Windows => backend == "windows-tpm",
         #[cfg(test)]
         VaultPlatform::Test => {
             matches!(
@@ -251,7 +250,7 @@ pub(super) fn platform_accepts_backend(platform: VaultPlatform, backend: &str) -
                     | "android-strongbox"
                     | "android-trusted-environment"
                     | "tpm"
-                    | "tpm-bridge"
+                    | "windows-tpm"
             )
         }
     }

@@ -67,7 +67,7 @@ wait_for_vault_exit() {
 status | grep -q '"hardware_backend": "secure-enclave"'
 
 "$factorseal" --root "$root" --password-file "$password_file" \
-    unseal --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-unseal.log" 2>&1 &
+    agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-unseal.log" 2>&1 &
 vault_pid=$!
 wait_for unsealed
 printf '%s' 'hardware-lifecycle-acceptance' | "$factorseal" --root "$root" set acceptance --field value
@@ -85,7 +85,7 @@ if "$factorseal" --root "$root" get acceptance --field value >/dev/null 2>&1; th
 fi
 
 "$factorseal" --root "$root" --password-file "$password_file" \
-    unseal --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-reunseal.log" 2>&1 &
+    agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-reunseal.log" 2>&1 &
 vault_pid=$!
 wait_for unsealed
 [ "$("$factorseal" --root "$root" get acceptance --field value)" = "hardware-lifecycle-acceptance" ]

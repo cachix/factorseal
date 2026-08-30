@@ -1,17 +1,19 @@
 { pkgs, ... }: {
   packages = with pkgs; [
-    cargo
-    clippy
+    cargo-xwin
     dbus
     pkg-config
-    pcsclite
-    rustc
-    rustfmt
     shellcheck
-    tpm2-tss
   ];
 
+  languages.rust = {
+    enable = true;
+    channel = "stable";
+    version = "1.91.0";
+    targets = [ "x86_64-pc-windows-msvc" ];
+  };
+
   enterTest = ''
-    cargo test --all-features
+    cargo test --workspace --all-targets --all-features
   '';
 }

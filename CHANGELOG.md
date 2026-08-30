@@ -69,7 +69,8 @@ All notable changes to FactorSeal will be documented in this file.
   is a tamper check, not an audit log.
 - Add the Argon2id password factor used by password-containing unlock groups.
   Nested secret factors must derive their keys from hash or symmetric
-  primitives, since TPM 2.0 and the Secure Enclave both wrap with P-256.
+  primitives so they do not introduce a separate public-key ciphertext around
+  the platform's opaque native sealed-data mechanism.
 - Expose the native transport through a lightweight Rust `vault-client`
   feature and implement `factorseal provider` against SecretSpec's typed IPC
   API. The subprocess translates provider operations into cache-only native

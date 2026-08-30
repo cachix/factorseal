@@ -7,7 +7,7 @@ owns lifecycle-driven sealing.
 ## Rust features
 
 Build the reusable store and hardware-injection boundary without desktop IPC,
-lifecycle monitors, the CLI, or `hardware-enclave`:
+lifecycle monitors, the CLI, or `hardwareseal`:
 
 ```console
 cargo build --no-default-features \

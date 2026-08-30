@@ -27,7 +27,7 @@ jobs:
       - name: Install native Linux package dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libdbus-1-dev libtss2-dev pkg-config
+          sudo apt-get install --yes libdbus-1-dev pkg-config
       - name: Install devenv
         run: nix profile add nixpkgs#devenv
       - name: Check formatting

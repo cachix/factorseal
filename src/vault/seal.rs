@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 #[cfg(feature = "hardware")]
-use crate::hardware::PlatformProtectorFactory;
+use crate::hardware::{PlatformProtectorFactory, validate_native_biometric};
 
 use super::{DeviceKeyId, VaultError, VaultId, VaultResult};
 #[cfg(feature = "key-protection")]
@@ -39,6 +39,14 @@ mod policy;
 
 pub use factor::{NestedFactorKind, UnsealFactor};
 pub use policy::{UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy};
+
+#[cfg(feature = "hardware")]
+fn validate_native_unlock_policy(policy: &UnlockPolicy) -> VaultResult<()> {
+    for group in policy.groups() {
+        validate_native_biometric(group.requires(UnlockFactorKind::Biometric))?;
+    }
+    Ok(())
+}
 
 /// Public, stable identity of this vault.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,6 +291,7 @@ impl Vault {
         policy: &UnlockPolicy,
         credentials: UnlockCredentials<'_>,
     ) -> VaultResult<UnsealedVault> {
+        validate_native_unlock_policy(policy)?;
         Self::create_with_key_protector_policy(
             root,
             current_platform()?,
@@ -303,6 +312,7 @@ impl Vault {
         policy: &UnlockPolicy,
         credentials: UnlockCredentials<'_>,
     ) -> VaultResult<UnsealedVault> {
+        validate_native_unlock_policy(policy)?;
         Self::create_with_key_protector_policy_mode(
             root,
             current_platform()?,
@@ -494,6 +504,7 @@ impl Vault {
         group: &UnlockGroup,
         credentials: UnlockCredentials<'_>,
     ) -> VaultResult<UnsealedVault> {
+        validate_native_biometric(group.requires(UnlockFactorKind::Biometric))?;
         Self::unseal_with_key_protector_group(root, group, credentials, &PlatformProtectorFactory)
     }
 

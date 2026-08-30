@@ -1,76 +1,53 @@
 use std::path::Path;
 
-use hardware_enclave::{
-    AccessPolicy, BackendKind, EnclaveConfig, EncryptorHandle, create_encryptor,
-};
+use hardwareseal::{AccessPolicy, Backend, Protector};
 use zeroize::Zeroizing;
 
 use crate::vault::{HardwareBackend, KeyProtector, KeyProtectorFactory, VaultError, VaultResult};
 
-const APP_NAME: &str = "factorseal";
-const KEYS_DIRECTORY: &str = "hardware";
+#[cfg(target_os = "linux")]
+const LINUX_BIOMETRIC_UNAVAILABLE: &str = "biometric unlock is not supported on Linux: Linux does not provide a hardware-bound biometric secret, and fprintd match results are not accepted as a cryptographic factor";
+
+pub(crate) fn validate_native_biometric(biometric: bool) -> VaultResult<()> {
+    #[cfg(target_os = "linux")]
+    if biometric {
+        return Err(VaultError::Protection(
+            LINUX_BIOMETRIC_UNAVAILABLE.to_owned(),
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = biometric;
+
+    Ok(())
+}
 
 pub(crate) struct PlatformProtector {
-    handle: EncryptorHandle,
-    label: String,
+    protector: Protector,
     backend: HardwareBackend,
 }
 
 impl PlatformProtector {
     pub(crate) fn open(root: &Path, label: &str, biometric: bool) -> VaultResult<Self> {
-        Self::open_inner(root, label, biometric, false)
+        Self::open_inner(root, label, biometric)
     }
 
-    /// Open a fresh initialization key and delete it if backend validation
-    /// fails after the platform has already created it.
     pub(crate) fn create(root: &Path, label: &str, biometric: bool) -> VaultResult<Self> {
-        Self::open_inner(root, label, biometric, true)
+        Self::open_inner(root, label, biometric)
     }
 
-    fn open_inner(
-        root: &Path,
-        label: &str,
-        biometric: bool,
-        delete_on_validation_error: bool,
-    ) -> VaultResult<Self> {
-        let keys_dir = root.join(KEYS_DIRECTORY);
-        let mut config = EnclaveConfig::new(APP_NAME, label);
-        config.keys_dir = Some(keys_dir);
-        config.access_policy = Some(if biometric {
-            AccessPolicy::BiometricOnly
+    fn open_inner(_root: &Path, label: &str, biometric: bool) -> VaultResult<Self> {
+        // Fail before creating directories or native keys. In particular, a
+        // Linux fingerprint match delivered through fprintd is only a
+        // same-user software signal and must never be treated as key policy.
+        validate_native_biometric(biometric)?;
+        let policy = if biometric {
+            AccessPolicy::Biometric
         } else {
             AccessPolicy::None
-        });
-        // Keep the Windows default `prefer_windows_hello_ux = false`.
-        // hardware-enclave's convenience Hello path replaces the CNG key's
-        // OS-mediated UI policy with a hookable application-level consent
-        // result and may degrade when Hello is unavailable. Factorseal keeps
-        // the hardware-enforced key-use policy and treats modern Hello prompt
-        // behavior as a native release-acceptance requirement.
-        let handle = create_encryptor(&config).map_err(map_hardware_error)?;
-        let backend = match verify_hardware_backend(&handle, label) {
-            Ok(backend) => backend,
-            Err(error) => {
-                // `create_encryptor` creates or opens the key eagerly. If
-                // validation fails, this initialization attempt must not
-                // strand either native key material or its local metadata.
-                if delete_on_validation_error {
-                    let _ = handle.delete_key(label);
-                }
-                return Err(error);
-            }
         };
-        Ok(Self {
-            handle,
-            label: label.to_owned(),
-            backend,
-        })
-    }
-
-    fn delete_inner(&self) -> VaultResult<()> {
-        self.handle
-            .delete_key(&self.label)
-            .map_err(map_hardware_error)
+        let protector = Protector::open(label, policy).map_err(map_hardware_error)?;
+        let backend = map_backend(protector.backend())?;
+        Ok(Self { protector, backend })
     }
 }
 
@@ -80,19 +57,17 @@ impl KeyProtector for PlatformProtector {
     }
 
     fn wrap(&self, plaintext: &[u8]) -> VaultResult<Vec<u8>> {
-        self.handle
-            .encrypt(&self.label, plaintext)
-            .map_err(map_hardware_error)
+        self.protector.seal(plaintext).map_err(map_hardware_error)
     }
 
     fn unwrap(&self, ciphertext: &[u8]) -> VaultResult<Zeroizing<Vec<u8>>> {
-        self.handle
-            .decrypt(&self.label, ciphertext)
+        self.protector
+            .unseal(ciphertext)
             .map_err(map_hardware_error)
     }
 
     fn delete(&self) -> VaultResult<()> {
-        self.delete_inner()
+        self.protector.delete().map_err(map_hardware_error)
     }
 }
 
@@ -120,45 +95,71 @@ impl KeyProtectorFactory for PlatformProtectorFactory {
     }
 }
 
-/// Map the backend the platform actually initialized onto the ones Factorseal
-/// accepts as hardware.
-///
-/// `hardware-enclave` reports the backend its storage chose rather than static
-/// platform detection, so a native Linux TPM key arrives here as
-/// `BackendKind::Tpm` and the keyring fallback as `BackendKind::Keyring`. That
-/// holds only with the `[patch.crates-io]` pin in `Cargo.toml`
-/// (godaddy/hardware-enclave#208); without it every Linux key reports
-/// `Keyring` and a TPM-backed vault is rejected as software-backed.
-fn verify_hardware_backend(handle: &EncryptorHandle, label: &str) -> VaultResult<HardwareBackend> {
-    match handle.backend_kind() {
-        BackendKind::SecureEnclave => Ok(HardwareBackend::SecureEnclave),
-        BackendKind::Tpm => Ok(HardwareBackend::Tpm),
-        BackendKind::TpmBridge => Ok(HardwareBackend::TpmBridge),
-        BackendKind::WindowsDpapi => {
-            reject_fallback(handle, label, "Windows DPAPI is software-backed")
-        }
-        BackendKind::Keyring => reject_fallback(
-            handle,
-            label,
-            "Linux keyring fallback is not hardware-backed",
-        ),
+fn map_backend(backend: Backend) -> VaultResult<HardwareBackend> {
+    match backend {
+        Backend::Tpm => Ok(HardwareBackend::Tpm),
+        // A Windows Hello protector adds user verification and PRF encryption
+        // around the same TPM-bound payload. The unlock group records whether
+        // biometric verification is required; the hardware backend records
+        // the TPM that ultimately binds the secret to this Windows device.
+        Backend::WindowsTpm | Backend::WindowsHello => Ok(HardwareBackend::WindowsTpm),
+        Backend::AppleKeychain => Ok(HardwareBackend::SecureEnclave),
+        Backend::AndroidKeystore => Err(VaultError::Protection(
+            "the Android hardware backend cannot serve the desktop vault".to_owned(),
+        )),
+        _ => Err(VaultError::Protection(
+            "hardwareseal selected an unknown backend".to_owned(),
+        )),
     }
 }
 
-fn reject_fallback<T>(handle: &EncryptorHandle, label: &str, reason: &str) -> VaultResult<T> {
-    // `create_encryptor` creates its default key eagerly. Do not leave a
-    // software fallback key behind after rejecting that backend.
-    let _ = handle.delete_key(label);
-    Err(VaultError::Protection(format!(
-        "no supported hardware security backend is available: {reason}"
-    )))
-}
-
-fn map_hardware_error(error: hardware_enclave::Error) -> VaultError {
+fn map_hardware_error(error: hardwareseal::Error) -> VaultError {
     match error {
-        hardware_enclave::Error::NotAvailable => VaultError::Protection(format!(
+        hardwareseal::Error::NotAvailable => VaultError::Protection(format!(
             "no supported hardware security backend is available: {error}"
         )),
+        hardwareseal::Error::PolicyNotSupported { .. } => {
+            VaultError::Protection(format!("hardware security policy is unavailable: {error}"))
+        }
         other => VaultError::Protection(format!("hardware security operation failed: {other}")),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use crate::vault::{UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, Vault};
+
+    #[test]
+    fn native_linux_vault_rejects_a_biometric_policy_without_creating_a_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("vault");
+        let group = UnlockGroup::new([UnlockFactorKind::Biometric]).unwrap();
+        let policy = UnlockPolicy::new([group]).unwrap();
+        let result = Vault::create_with_unlock_policy(&root, &policy, UnlockCredentials::none());
+
+        let Err(VaultError::Protection(message)) = result else {
+            panic!("expected Linux biometric policy to fail closed");
+        };
+        assert_eq!(message, LINUX_BIOMETRIC_UNAVAILABLE);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn biometric_protection_fails_before_creating_linux_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("vault");
+        let result = PlatformProtector::create(&root, "biometric-test", true);
+
+        let Err(VaultError::Protection(message)) = result else {
+            panic!("expected Linux biometric protection to fail closed");
+        };
+        assert_eq!(message, LINUX_BIOMETRIC_UNAVAILABLE);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn non_biometric_linux_policy_passes_the_platform_guard() {
+        validate_native_biometric(false).unwrap();
     }
 }

@@ -414,7 +414,8 @@ fn every_platform_requires_a_nested_factor_and_hardware() {
             VaultPlatform::Ios | VaultPlatform::Macos => {
                 super::super::HardwareBackend::SecureEnclave
             }
-            VaultPlatform::Linux | VaultPlatform::Windows => super::super::HardwareBackend::Tpm,
+            VaultPlatform::Linux => super::super::HardwareBackend::Tpm,
+            VaultPlatform::Windows => super::super::HardwareBackend::WindowsTpm,
             VaultPlatform::Test => unreachable!(),
         };
         let wrapping = TestProtector::with_backend([0x35; KEY_BYTES], backend);

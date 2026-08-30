@@ -20,10 +20,10 @@ pub enum HardwareBackend {
     AndroidStrongBox,
     /// Android trusted-environment KeyMint security level.
     AndroidTrustedEnvironment,
-    /// A directly accessible TPM 2.0 device.
+    /// A directly accessible TPM 2.0 device on Linux.
     Tpm,
-    /// A TPM reached through a platform bridge.
-    TpmBridge,
+    /// A TPM 2.0 device accessed through Windows TPM Base Services.
+    WindowsTpm,
 }
 
 impl HardwareBackend {
@@ -35,7 +35,7 @@ impl HardwareBackend {
             Self::AndroidStrongBox => "android-strongbox",
             Self::AndroidTrustedEnvironment => "android-trusted-environment",
             Self::Tpm => "tpm",
-            Self::TpmBridge => "tpm-bridge",
+            Self::WindowsTpm => "windows-tpm",
         }
     }
 }

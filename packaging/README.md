@@ -28,7 +28,7 @@ path as described in the repository README.
 Official macOS and Windows releases still require platform signing/notarization
 credentials. Linux release jobs must build against the supported deployment
 baseline and publish checksums and provenance. The Linux binaries dynamically
-requires glibc, D-Bus, and `tpm2-tss`; it is not a universal static binary and
+require glibc and D-Bus; they are not universal static binaries and
 must not be published from a Nix development shell whose loader paths point
 into `/nix/store`. Physical TPM/Secure Enclave acceptance is separate from
 archive smoke testing.
@@ -132,13 +132,11 @@ no-new-privileges, W^X memory, native-architecture, Unix-socket-only, SUID/SGID,
 realtime, and restrictive-umask controls. Restoring mount isolation requires a
 different verifiable IPC application identity or a broker architecture.
 
-The pinned `hardware-enclave` 0.2.10 Linux backend omits authorization sessions
-from its TPM commands. The Nix package carries the narrow downstream patch in
-`nix/patches/hardware-enclave-tpm-auth-sessions.patch`; it wraps each authorized
-command in `tss-esapi`'s encrypted null-auth session. Remove the patch when an
-equivalent upstream release is pinned. The standalone Linux archive builder
-does not patch Cargo dependencies and therefore remains a development artifact
-until that fix is consumed upstream or through a repository-wide source pin.
+The desktop adapter uses `hardwareseal` directly and rejects software fallback.
+Linux biometric policies fail closed; Windows biometric policies require a
+Windows Hello platform credential with PRF support; macOS biometric policies
+use the Data Protection Keychain. Physical-host acceptance remains mandatory
+because CI cannot demonstrate the native prompt or hardware boundary.
 
 ## Native lifecycle scope
 

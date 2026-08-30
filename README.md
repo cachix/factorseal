@@ -45,6 +45,25 @@ Factorseal is a local security broker around platform hardware. It is not a
 password manager or remote secrets service, and it does not attempt to replace
 every Apple Keychain or Windows Credential Manager API.
 
+## Platform unlock support
+
+| Platform | Biometric method | Intended hardware binding | Status |
+| --- | --- | --- | --- |
+| macOS | Touch ID | Keychain/Secure Enclave key-use policy | Implemented; physical-device release acceptance remains |
+| Windows | Windows Hello fingerprint, face, or PIN | TPM sealed-data object nested inside Windows Hello PRF encryption | Implemented; physical-device prompt and policy acceptance remains |
+| Linux | No portable built-in biometric path | TPM 2.0 supports hardware wrapping, but `fprintd` does not provide a hardware-bound secret | Password-backed TPM unlock only |
+| iPhone and iPad | Face ID or Touch ID | Keychain/Secure Enclave-protected share | Mobile core and adapter boundary implemented; native app adapter remains |
+| Android | `BiometricPrompt` | StrongBox or trusted-environment Keystore-protected share | Mobile core and adapter boundary implemented; native app adapter remains |
+| Any desktop using a phone | Phone Face ID or fingerprint | Phone-held share returned over an authenticated post-quantum-hybrid channel | Planned optional feature |
+
+The vault encryption and ML-DSA signatures are designed to resist quantum
+attacks. Native biometric enforcement still inherits the cryptographic and
+certification properties of Secure Enclave, Windows Hello, or Android
+Keystore, so Factorseal does not claim that those complete platform paths are
+post-quantum certified. Phone unlock is intended to give Linux and machines
+without a suitable local sensor the same approval flow without treating a
+software-only biometric result as a cryptographic factor.
+
 ## Quick start
 
 Factorseal requires a supported platform enclave: TPM 2.0 on Linux and Windows,

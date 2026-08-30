@@ -90,10 +90,11 @@ resolution, so a reused process ID cannot inherit another process's grant.
 - Physical TPM/Secure Enclave matrices, official code signing/notarization,
   process-dump protection, locked memory, recovery, and independent audit are
   not complete.
-- Windows currently selects the hardware-enforced CNG UI-protection policy,
-  not the hardware crate's hookable application-level Hello convenience gate.
-  Native acceptance must establish the supported Windows prompt behavior and
-  modern Windows Hello path before the release gate can pass.
+- Windows biometric groups encrypt a TPM sealed-data object under a Windows
+  Hello platform-credential PRF output. Native acceptance must establish PRF
+  support, TPM binding, timeout/cancellation behavior, the application-owned
+  prompt window, and the supported Windows Hello prompt before the release
+  gate can pass.
 - The current ML-DSA-65 signing seed is hardware-wrapped and exists in zeroizing
   vault memory during an unseal lease. Signing is not yet performed by a non-exportable
   platform signing primitive.

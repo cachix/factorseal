@@ -38,8 +38,8 @@ bootstrap material:
 
 Factors inside one unlock group are AND requirements; groups are OR
 alternatives. Hardware binding is implicit in every group. Creation opens two
-distinct `hardware-enclave` keys per group and rejects DPAPI-only and Linux
-software-keyring fallbacks. Password groups apply Argon2id and separate
+distinct `hardwareseal` protectors per group and rejects unsupported or
+software-only backends. Password groups apply Argon2id and separate
 XChaCha20-Poly1305 layers before hardware wrapping. Biometric groups create
 their pair with the platform biometric policy; biometric-only groups have no
 password layer. Unsealing opens only the selected group's labels, checks its
@@ -220,7 +220,7 @@ The shared core implements the following native adapters:
   with `SO_PEERCRED`, executable digest grants, and a systemd user unit;
 - macOS: Secure Enclave user verification, a private Unix socket authenticated
   with kernel peer credentials, peer PID, and audit token, plus a LaunchAgent;
-- Windows: TPM 2.0 plus an OS-mediated CNG key-use policy, a local-only named
+- Windows: TPM 2.0 plus Windows Hello platform-credential PRF policy, a local-only named
   pipe protected by a same-user DACL and verified through client
   impersonation, SID, PID, and executable digest, plus a per-user Scheduled
   Task template.
@@ -233,11 +233,11 @@ The shared core implements the following native adapters:
 
 The transports, lifecycle monitors, and developer packaging inputs are
 implemented. Code-signature identities, official signing/notarization, and
-physical-hardware/lifecycle acceptance remain release work. Windows uses the
-CNG key's OS-mediated UI-protection policy; the current hardware library's
-application-level modern Hello convenience gate is intentionally disabled
-because it is not bound to the TPM operation and can degrade when Hello is not
-available. The shared caller identity type is never populated from untrusted
+physical-hardware/lifecycle acceptance remain release work. Windows biometric
+groups require a platform WebAuthn credential with PRF support; its output
+authenticates an outer AES-256-GCM envelope around the TPM sealed-data object,
+so neither a separate consent result nor a software fallback can authorize
+unsealing. The shared caller identity type is never populated from untrusted
 JSON fields.
 
 Linux executable authentication reads the ptrace-gated

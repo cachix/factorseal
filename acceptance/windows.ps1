@@ -35,13 +35,13 @@ try {
 & $Factorseal --root $Root --password-file $PasswordFile init --unlock password,biometric
 if ($LASTEXITCODE -ne 0) { throw 'factorseal init failed' }
 $metadata = Get-Status
-if ($metadata.hardware_backend -notin @('tpm', 'tpm-bridge')) {
-    throw "Expected TPM backend, got $($metadata.hardware_backend)"
+if ($metadata.hardware_backend -ne 'windows-tpm') {
+    throw "Expected Windows TPM backend, got $($metadata.hardware_backend)"
 }
 
 $service = Start-Process -FilePath $Factorseal -ArgumentList @(
     '--root', $Root, '--password-file', $PasswordFile,
-    'unseal', '--idle-seconds', '3600', '--maximum-seconds', '3600'
+    'agent', '--idle-seconds', '3600', '--maximum-seconds', '3600'
 ) -PassThru -RedirectStandardOutput (Join-Path $Root 'acceptance-unseal.log') -RedirectStandardError (Join-Path $Root 'acceptance-unseal-error.log')
 Wait-ForState 'unsealed'
 'hardware-lifecycle-acceptance' | & $Factorseal --root $Root set acceptance --field value
@@ -64,7 +64,7 @@ if ($LASTEXITCODE -eq 0 -or $sealedValue) {
 
 $service = Start-Process -FilePath $Factorseal -ArgumentList @(
     '--root', $Root, '--password-file', $PasswordFile,
-    'unseal', '--idle-seconds', '3600', '--maximum-seconds', '3600'
+    'agent', '--idle-seconds', '3600', '--maximum-seconds', '3600'
 ) -PassThru -RedirectStandardOutput (Join-Path $Root 'acceptance-reunseal.log') -RedirectStandardError (Join-Path $Root 'acceptance-reunseal-error.log')
 Wait-ForState 'unsealed'
 $value = & $Factorseal --root $Root get acceptance --field value

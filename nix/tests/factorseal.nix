@@ -72,7 +72,7 @@ pkgs.testers.runNixOSTest {
     def initialize_on(node):
         with_password(
             node,
-            f"${package}/bin/factorseal --root={root} init",
+            f"${package}/bin/factorseal --root={root} init --unlock password",
             confirm=True,
         )
 

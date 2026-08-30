@@ -40,12 +40,12 @@ pub(super) type UnsealedVaultKeys = (
 /// Parameters of the secret-bearing factor nested inside the platform
 /// hardware wrapping.
 ///
-/// Every variant must derive its key from a hash or symmetric primitive.
-/// That is what keeps the nested layer standing when the platform wrapping
-/// key falls: TPM 2.0 and the Secure Enclave wrap with P-256 on all three
-/// targets, so an elliptic-curve factor would add no independent barrier. A
-/// password remains entropy-limited: Argon2id raises offline-guessing cost but
-/// cannot turn a human-memorable password into a post-quantum-strength factor.
+/// Every variant derives its key from a hash or symmetric primitive. This
+/// avoids adding a public-key ciphertext that creates a separate
+/// store-now/decrypt-later exposure around HardwareSeal's opaque native
+/// sealed-data mechanisms. A password remains entropy-limited: Argon2id raises
+/// offline-guessing cost but cannot turn a human-memorable password into a
+/// post-quantum-strength factor.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "algorithm", rename_all = "kebab-case")]
 #[serde(deny_unknown_fields)]

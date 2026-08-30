@@ -10,7 +10,7 @@ macOS and Windows runners request native biometric/user verification at
 creation and unseal; Linux validates the TPM plus nested password. They verify:
 
 1. the backend recorded in `factorseal status` is the expected real hardware
-   backend (`tpm`/`tpm-bridge` on Linux and Windows, `secure-enclave` on macOS);
+   backend (`tpm` on Linux, `windows-tpm` on Windows, or `secure-enclave` on macOS);
 2. the native transport permits an authorized local CLI to put, get, and delete
    an exact-byte value;
 3. a real OS lock, sleep, shutdown-preparation, or session event causes the
@@ -37,10 +37,10 @@ nix run .#acceptance-linux -- \
   --password-file "$HOME/.config/factorseal-acceptance-password"
 ```
 
-The app builds and uses the repository's Nix package, including its TPM
-authorization-session patch. To test a separately installed release artifact,
-run `acceptance/linux.sh --factorseal /path/to/factorseal` with the same
-arguments instead.
+The app builds and uses the repository's Nix package with the bundled
+HardwareSeal TPM backend. To test a separately installed release artifact, run
+`acceptance/linux.sh --factorseal /path/to/factorseal` with the same arguments
+instead.
 
 Also complete one installed-service run with `factorseal-start`, then lock the
 same logind session. Record the release-candidate hash, machine TPM model,
@@ -67,8 +67,8 @@ acceptance/macos.sh \
 
 Run from an interactive, standard-user PowerShell session on a TPM 2.0 machine.
 The runner asks you to lock the current session, then waits for the vault
-process to exit. It must visibly exercise the supported CNG/Windows user
-verification policy. Separately install the signed release candidate, register
+process to exit. It must visibly exercise Windows Hello user verification and
+confirm the platform credential reports PRF support. Separately install the signed release candidate, register
 the Scheduled Task template, log out/in, and verify the masked askpass dialog
 and Windows Hello UX.
 
