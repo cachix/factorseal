@@ -34,9 +34,9 @@ pub use keyring::{Keyring, KeyringError, KeyringResult};
     feature = "vault-store"
 ))]
 pub use vault::{
-    DeviceKeyId, DocumentId, DocumentScope, NestedFactorKind, RequestId, SecretAddress,
-    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealFactor, UnsealedVault,
-    Vault, VaultError, VaultId, VaultMetadata, VaultPlatform, VaultResult,
+    DeviceKeyId, DocumentId, DocumentScope, NativeAuthorizationError, NestedFactorKind, RequestId,
+    SecretAddress, UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealFactor,
+    UnsealedVault, Vault, VaultError, VaultId, VaultMetadata, VaultPlatform, VaultResult,
 };
 
 #[cfg(feature = "vault-client")]

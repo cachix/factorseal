@@ -51,6 +51,31 @@ pub enum Backend {
     AndroidKeystore,
 }
 
+/// A native user-authorization ceremony that did not release the secret.
+///
+/// These outcomes are intentionally separate from [`Error::Hardware`] so a
+/// caller can decide whether to retry, wait for an interactive session, or
+/// start recovery without parsing platform-specific error text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum AuthorizationError {
+    /// The user or caller cancelled the native ceremony.
+    #[error("authorization was cancelled")]
+    Cancelled,
+    /// The native policy evaluated but did not authorize access.
+    #[error("authorization was denied")]
+    Denied,
+    /// No interactive authorization UI can be presented in this context.
+    #[error("authorization UI is unavailable")]
+    UiUnavailable,
+    /// The interactive user session is locked or no longer exists.
+    #[error("the interactive session is locked or unavailable")]
+    SessionLocked,
+    /// The platform credential was removed or invalidated after enrollment.
+    #[error("the platform credential was invalidated")]
+    CredentialInvalidated,
+}
+
 /// Errors returned by hardware sealing operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -80,6 +105,9 @@ pub enum Error {
     /// The sealed envelope is malformed or belongs to another label or policy.
     #[error("invalid sealed envelope: {0}")]
     InvalidEnvelope(String),
+    /// Native user authorization did not release the protected secret.
+    #[error("native hardware authorization failed: {0}")]
+    Authorization(#[source] AuthorizationError),
     /// A platform hardware operation failed.
     #[error("hardware security operation failed: {0}")]
     Hardware(String),

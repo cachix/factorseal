@@ -4,7 +4,7 @@ use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
 use jni::{JNIEnv, JavaVM};
 use zeroize::Zeroizing;
 
-use crate::{AccessPolicy, Backend, Error, LABEL_HASH_BYTES};
+use crate::{AccessPolicy, AuthorizationError, Backend, Error, LABEL_HASH_BYTES};
 
 const MAGIC: &[u8; 8] = b"HSEALAND";
 const VERSION: u8 = 1;
@@ -239,8 +239,8 @@ fn get_existing_key<'local>(
     alias: &str,
 ) -> Result<JObject<'local>, Error> {
     if !contains_alias(env, store, alias)? {
-        return Err(Error::InvalidEnvelope(
-            "Android Keystore key is missing".to_owned(),
+        return Err(Error::Authorization(
+            AuthorizationError::CredentialInvalidated,
         ));
     }
     let alias = env.new_string(alias).map_err(jni_error)?;
@@ -259,7 +259,9 @@ fn get_existing_key<'local>(
         .l()
         .map_err(jni_error)?;
     if key.is_null() {
-        return Err(Error::NotAvailable);
+        return Err(Error::Authorization(
+            AuthorizationError::CredentialInvalidated,
+        ));
     }
     Ok(key)
 }

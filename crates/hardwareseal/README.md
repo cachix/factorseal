@@ -69,6 +69,21 @@ ceremony uses a process-owned window with a two-minute timeout.
 The envelope is opaque and versioned; callers should persist it without
 inspecting it.
 
+## Authorization errors
+
+Native authorization outcomes are returned as
+`Error::Authorization(AuthorizationError)` instead of platform error strings.
+Callers can distinguish cancellation, denial, unavailable authorization UI, a
+locked or missing interactive session, and an invalidated platform credential.
+`Error::NotAvailable` remains the distinct signal for unavailable hardware,
+while unclassified device and operating-system failures remain
+`Error::Hardware`.
+
+The biometric policy performs a native authorization ceremony on every
+`unseal` call. HardwareSeal does not cache an approval or an unsealed secret;
+an embedding application that keeps a secret available after unsealing owns
+that session policy and must bound it separately.
+
 ## Development
 
 Enter the development environment and run the checks:

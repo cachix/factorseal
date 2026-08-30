@@ -6,6 +6,11 @@ use aes_gcm::aead::{Aead as _, KeyInit as _, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine as _;
 use sha2::{Digest as _, Sha256};
+use windows_sys::Win32::Foundation::{
+    E_ACCESSDENIED, ERROR_CANCELLED, ERROR_NO_SUCH_LOGON_SESSION, ERROR_NOT_LOGGED_ON,
+    ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION, NTE_DEVICE_NOT_FOUND, NTE_NOT_FOUND, NTE_PERM,
+    NTE_USER_CANCELLED,
+};
 use windows_sys::Win32::Networking::WindowsWebServices::{
     WEBAUTHN_API_VERSION_6, WEBAUTHN_ASSERTION, WEBAUTHN_ATTESTATION_CONVEYANCE_PREFERENCE_NONE,
     WEBAUTHN_AUTHENTICATOR_ATTACHMENT_PLATFORM, WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS,
@@ -39,7 +44,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use zeroize::Zeroizing;
 
 use crate::tpm2::{self, Transport};
-use crate::{AccessPolicy, Backend, Error, LABEL_HASH_BYTES};
+use crate::{AccessPolicy, AuthorizationError, Backend, Error, LABEL_HASH_BYTES};
 
 const MAGIC: &[u8; 8] = b"HSEALTPM";
 const VERSION: u8 = 1;
@@ -68,6 +73,12 @@ const HELLO_RP_ID_UTF8: &[u8] = b"dev.factorseal.hardwareseal";
 const HELLO_RP_ID: windows_sys::core::PCWSTR = windows_sys::core::w!("dev.factorseal.hardwareseal");
 const HELLO_RP_NAME: windows_sys::core::PCWSTR = windows_sys::core::w!("Factorseal");
 const HELLO_ORIGIN: &str = "https://dev.factorseal.hardwareseal";
+
+const HRESULT_ERROR_CANCELLED: i32 = hresult_from_win32(ERROR_CANCELLED);
+const HRESULT_ERROR_NOT_LOGGED_ON: i32 = hresult_from_win32(ERROR_NOT_LOGGED_ON);
+const HRESULT_ERROR_NO_SUCH_LOGON_SESSION: i32 = hresult_from_win32(ERROR_NO_SUCH_LOGON_SESSION);
+const HRESULT_ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION: i32 =
+    hresult_from_win32(ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION);
 
 pub(super) fn ensure_available(policy: AccessPolicy) -> Result<(), Error> {
     match policy {
@@ -651,11 +662,42 @@ fn check_webauthn(status: i32, operation: &str) -> Result<(), Error> {
     if status >= 0 {
         return Ok(());
     }
+    if let Some(error) = classify_webauthn_error(status) {
+        return Err(error);
+    }
     let name = unsafe { webauthn_error_name(status) };
     Err(Error::Hardware(format!(
         "failed to {operation}: {name} (0x{:08x})",
         status.cast_unsigned()
     )))
+}
+
+fn classify_webauthn_error(status: i32) -> Option<Error> {
+    match status {
+        HRESULT_ERROR_CANCELLED | NTE_USER_CANCELLED => {
+            Some(Error::Authorization(AuthorizationError::Cancelled))
+        }
+        E_ACCESSDENIED | NTE_PERM => Some(Error::Authorization(AuthorizationError::Denied)),
+        NTE_NOT_FOUND => Some(Error::Authorization(
+            AuthorizationError::CredentialInvalidated,
+        )),
+        NTE_DEVICE_NOT_FOUND => Some(Error::NotAvailable),
+        HRESULT_ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION => {
+            Some(Error::Authorization(AuthorizationError::UiUnavailable))
+        }
+        HRESULT_ERROR_NOT_LOGGED_ON | HRESULT_ERROR_NO_SUCH_LOGON_SESSION => {
+            Some(Error::Authorization(AuthorizationError::SessionLocked))
+        }
+        _ => None,
+    }
+}
+
+const fn hresult_from_win32(code: u32) -> i32 {
+    if code == 0 {
+        0
+    } else {
+        i32::from_ne_bytes(((code & 0x0000_ffff) | 0x8007_0000).to_ne_bytes())
+    }
 }
 
 unsafe fn webauthn_error_name(status: i32) -> String {
@@ -747,9 +789,7 @@ impl WebauthnWindow {
             )
         };
         if hwnd.is_null() {
-            Err(Error::Hardware(
-                "failed to create the Windows Hello owner window".to_owned(),
-            ))
+            Err(Error::Authorization(AuthorizationError::UiUnavailable))
         } else {
             Ok(Self(hwnd))
         }
@@ -1104,5 +1144,36 @@ mod tests {
         data[32] = 0x01;
         assert!(validate_authenticator_data(&data).is_err());
         assert!(validate_authenticator_data(&data[..36]).is_err());
+    }
+
+    #[test]
+    fn webauthn_statuses_have_stable_authorization_categories() {
+        assert!(matches!(
+            classify_webauthn_error(NTE_USER_CANCELLED),
+            Some(Error::Authorization(AuthorizationError::Cancelled))
+        ));
+        assert!(matches!(
+            classify_webauthn_error(E_ACCESSDENIED),
+            Some(Error::Authorization(AuthorizationError::Denied))
+        ));
+        assert!(matches!(
+            classify_webauthn_error(NTE_NOT_FOUND),
+            Some(Error::Authorization(
+                AuthorizationError::CredentialInvalidated
+            ))
+        ));
+        assert!(matches!(
+            classify_webauthn_error(HRESULT_ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION),
+            Some(Error::Authorization(AuthorizationError::UiUnavailable))
+        ));
+        assert!(matches!(
+            classify_webauthn_error(HRESULT_ERROR_NO_SUCH_LOGON_SESSION),
+            Some(Error::Authorization(AuthorizationError::SessionLocked))
+        ));
+        assert!(matches!(
+            classify_webauthn_error(NTE_DEVICE_NOT_FOUND),
+            Some(Error::NotAvailable)
+        ));
+        assert!(classify_webauthn_error(i32::MIN).is_none());
     }
 }

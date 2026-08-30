@@ -299,6 +299,9 @@ fn response_error_with_interaction(
         | VaultError::Signature
         | VaultError::Random(_)
         | VaultError::Database(_)
+        | VaultError::HardwareUnavailable
+        | VaultError::HardwarePolicyUnsupported
+        | VaultError::NativeAuthorization(_)
         | VaultError::Protection(_) => VaultResponseErrorCode::Internal,
     };
     let message = match code {

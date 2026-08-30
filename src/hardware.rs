@@ -1,9 +1,12 @@
 use std::path::Path;
 
-use hardwareseal::{AccessPolicy, Backend, Protector};
+use hardwareseal::{AccessPolicy, AuthorizationError, Backend, Protector};
 use zeroize::Zeroizing;
 
-use crate::vault::{HardwareBackend, KeyProtector, KeyProtectorFactory, VaultError, VaultResult};
+use crate::vault::{
+    HardwareBackend, KeyProtector, KeyProtectorFactory, NativeAuthorizationError, VaultError,
+    VaultResult,
+};
 
 #[cfg(target_os = "linux")]
 const LINUX_BIOMETRIC_UNAVAILABLE: &str = "biometric unlock is not supported on Linux: Linux does not provide a hardware-bound biometric secret, and fprintd match results are not accepted as a cryptographic factor";
@@ -115,12 +118,28 @@ fn map_backend(backend: Backend) -> VaultResult<HardwareBackend> {
 
 fn map_hardware_error(error: hardwareseal::Error) -> VaultError {
     match error {
-        hardwareseal::Error::NotAvailable => VaultError::Protection(format!(
-            "no supported hardware security backend is available: {error}"
-        )),
-        hardwareseal::Error::PolicyNotSupported { .. } => {
-            VaultError::Protection(format!("hardware security policy is unavailable: {error}"))
-        }
+        hardwareseal::Error::NotAvailable => VaultError::HardwareUnavailable,
+        hardwareseal::Error::PolicyNotSupported { .. } => VaultError::HardwarePolicyUnsupported,
+        hardwareseal::Error::Authorization(kind) => match kind {
+            AuthorizationError::Cancelled => {
+                VaultError::NativeAuthorization(NativeAuthorizationError::Cancelled)
+            }
+            AuthorizationError::Denied => {
+                VaultError::NativeAuthorization(NativeAuthorizationError::Denied)
+            }
+            AuthorizationError::UiUnavailable => {
+                VaultError::NativeAuthorization(NativeAuthorizationError::UiUnavailable)
+            }
+            AuthorizationError::SessionLocked => {
+                VaultError::NativeAuthorization(NativeAuthorizationError::SessionLocked)
+            }
+            AuthorizationError::CredentialInvalidated => {
+                VaultError::NativeAuthorization(NativeAuthorizationError::CredentialInvalidated)
+            }
+            _ => VaultError::Protection(format!(
+                "hardware authorization failed with an unknown outcome: {error}"
+            )),
+        },
         other => VaultError::Protection(format!("hardware security operation failed: {other}")),
     }
 }
@@ -161,5 +180,50 @@ mod tests {
     #[test]
     fn non_biometric_linux_policy_passes_the_platform_guard() {
         validate_native_biometric(false).unwrap();
+    }
+
+    #[test]
+    fn native_authorization_outcomes_remain_structured() {
+        let cases = [
+            (
+                AuthorizationError::Cancelled,
+                NativeAuthorizationError::Cancelled,
+            ),
+            (AuthorizationError::Denied, NativeAuthorizationError::Denied),
+            (
+                AuthorizationError::UiUnavailable,
+                NativeAuthorizationError::UiUnavailable,
+            ),
+            (
+                AuthorizationError::SessionLocked,
+                NativeAuthorizationError::SessionLocked,
+            ),
+            (
+                AuthorizationError::CredentialInvalidated,
+                NativeAuthorizationError::CredentialInvalidated,
+            ),
+        ];
+
+        for (source, expected) in cases {
+            assert!(matches!(
+                map_hardware_error(hardwareseal::Error::Authorization(source)),
+                VaultError::NativeAuthorization(actual) if actual == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn hardware_availability_and_policy_remain_structured() {
+        assert!(matches!(
+            map_hardware_error(hardwareseal::Error::NotAvailable),
+            VaultError::HardwareUnavailable
+        ));
+        assert!(matches!(
+            map_hardware_error(hardwareseal::Error::PolicyNotSupported {
+                policy: AccessPolicy::Biometric,
+                backend: Backend::Tpm,
+            }),
+            VaultError::HardwarePolicyUnsupported
+        ));
     }
 }

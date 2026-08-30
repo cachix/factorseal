@@ -153,6 +153,26 @@ impl CallerIdentityCache {
     }
 }
 
+/// Stable outcomes from a native hardware-authorization ceremony.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum NativeAuthorizationError {
+    #[error("native authorization was cancelled")]
+    Cancelled,
+
+    #[error("native authorization was denied")]
+    Denied,
+
+    #[error("native authorization UI is unavailable")]
+    UiUnavailable,
+
+    #[error("the interactive session is locked or unavailable")]
+    SessionLocked,
+
+    #[error("the native platform credential was invalidated")]
+    CredentialInvalidated,
+}
+
 /// Errors returned by the vault layer.
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
@@ -203,6 +223,15 @@ pub enum VaultError {
 
     #[error("application authorization is required")]
     AuthorizationRequired,
+
+    #[error("no supported hardware security backend is available")]
+    HardwareUnavailable,
+
+    #[error("the requested hardware security policy is unsupported")]
+    HardwarePolicyUnsupported,
+
+    #[error("vault hardware authorization failed: {0}")]
+    NativeAuthorization(#[source] NativeAuthorizationError),
 
     #[error("invalid vault protocol message: {0}")]
     Protocol(String),

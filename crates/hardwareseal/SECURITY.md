@@ -48,6 +48,9 @@ envelope is encrypted with a credential-bound symmetric PRF output.
 - Android rejects software-only Keystore keys.
 - Envelopes bind their backend version, access policy, and SHA-256 label hash.
 - Biometric authentication is never simulated with a separate, unbound prompt.
+- Native cancellation, denial, unavailable UI/session, and credential
+  invalidation are typed authorization outcomes. Unknown native failures stay
+  generic and never become authorization success.
 
 Linux and Android currently reject the biometric policy where the native
 operation cannot yet bind a cryptographic factor to each unseal.

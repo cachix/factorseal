@@ -81,6 +81,10 @@ All notable changes to FactorSeal will be documented in this file.
   a hardcoded prefix that only one install location satisfied.
 - Add a Nix package, NixOS module, and virtual-TPM VM test for the Linux user
   service, native socket authorization, persistence, delay inhibition, idle
-  lockout, and session-lock shutdown; carry a
-  scoped downstream fix for missing Linux TPM authorization sessions in the
-  pinned hardware dependency.
+  lockout, and session-lock shutdown. Bundle HardwareSeal's raw TPM 2.0 command
+  codec instead of relying on a patched external hardware crate or a dynamic
+  TSS library.
+- Preserve structured native hardware outcomes through the public vault API:
+  unavailable hardware, unsupported policy, cancellation, denial, unavailable
+  authorization UI, locked sessions, invalidated credentials, and generic
+  hardware failures remain distinguishable without parsing error strings.

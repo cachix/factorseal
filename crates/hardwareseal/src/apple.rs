@@ -1,18 +1,25 @@
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
+use security_framework::base::Error as SecurityError;
 use security_framework::key::{GenerateKeyOptions, KeyType, SecKey, Token};
 use security_framework::passwords::{
     AccessControlOptions, PasswordOptions, delete_generic_password_options, generic_password,
     set_generic_password_options,
 };
-use security_framework_sys::base::errSecItemNotFound;
+use security_framework_sys::base::{errSecAuthFailed, errSecItemNotFound};
 use zeroize::Zeroizing;
 
-use crate::{AccessPolicy, Error, LABEL_HASH_BYTES};
+use crate::{AccessPolicy, AuthorizationError, Error, LABEL_HASH_BYTES};
 
 const SERVICE: &str = "dev.factorseal.hardwareseal";
 const MAGIC: &[u8; 8] = b"HSEALAPL";
 const VERSION: u8 = 1;
 const ENVELOPE_BYTES: usize = MAGIC.len() + 1 + 1 + LABEL_HASH_BYTES;
+
+// security-framework-sys exposes only a subset of Security.framework status
+// constants. These values are stable OSStatus ABI constants from SecBase.h.
+const ERR_SEC_USER_CANCELED: i32 = -128;
+const ERR_SEC_NOT_AVAILABLE: i32 = -25291;
+const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
 
 pub(super) fn ensure_available(_policy: AccessPolicy) -> Result<(), Error> {
     // Creating the access-control object validates that the Security framework
@@ -23,7 +30,9 @@ pub(super) fn ensure_available(_policy: AccessPolicy) -> Result<(), Error> {
         .set_key_type(KeyType::ec_sec_prime_random())
         .set_size_in_bits(256)
         .set_token(Token::SecureEnclave);
-    SecKey::new(&options).map(drop).map_err(hardware_error)
+    SecKey::new(&options)
+        .map(drop)
+        .map_err(|error| Error::Hardware(error.to_string()))
 }
 
 pub(super) fn seal(
@@ -139,8 +148,15 @@ fn hex_label(hash: [u8; LABEL_HASH_BYTES]) -> String {
         })
 }
 
-fn hardware_error(error: impl std::fmt::Display) -> Error {
-    Error::Hardware(error.to_string())
+fn hardware_error(error: SecurityError) -> Error {
+    match error.code() {
+        ERR_SEC_USER_CANCELED => Error::Authorization(AuthorizationError::Cancelled),
+        errSecAuthFailed => Error::Authorization(AuthorizationError::Denied),
+        ERR_SEC_INTERACTION_NOT_ALLOWED => Error::Authorization(AuthorizationError::UiUnavailable),
+        errSecItemNotFound => Error::Authorization(AuthorizationError::CredentialInvalidated),
+        ERR_SEC_NOT_AVAILABLE => Error::NotAvailable,
+        _ => Error::Hardware(error.to_string()),
+    }
 }
 
 #[cfg(test)]

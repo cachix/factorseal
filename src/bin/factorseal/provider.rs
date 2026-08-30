@@ -364,6 +364,9 @@ fn map_vault_error(error: &VaultError) -> RpcError {
         | VaultError::Random(_)
         | VaultError::Database(_)
         | VaultError::Protocol(_)
+        | VaultError::HardwareUnavailable
+        | VaultError::HardwarePolicyUnsupported
+        | VaultError::NativeAuthorization(_)
         | VaultError::Protection(_) => ErrorKind::OperationFailed,
     })
 }

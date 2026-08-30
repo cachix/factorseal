@@ -35,6 +35,13 @@ do not contain a password layer. Password files are accepted only as private
 bounded regular files and are intended for short-lived session launch handoff.
 Software keyring and DPAPI-only fallbacks are rejected.
 
+Each biometric HardwareSeal unseal performs a native authorization ceremony.
+Factorseal then holds the unsealed vault keys only for its independently
+bounded idle and absolute lease. Native cancellation, denial, unavailable UI,
+locked session, and invalidated credentials remain distinct vault errors;
+unavailable hardware and unsupported policy are distinct as well. None is
+treated as a prompt success or silently downgraded.
+
 ## Authenticated transports
 
 - Linux uses a mode-0600 Unix socket, `SO_PEERCRED`, same-UID enforcement, peer
