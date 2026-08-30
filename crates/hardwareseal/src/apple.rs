@@ -5,7 +5,9 @@ use security_framework::passwords::{
     AccessControlOptions, PasswordOptions, delete_generic_password_options, generic_password,
     set_generic_password_options,
 };
-use security_framework_sys::base::{errSecAuthFailed, errSecItemNotFound};
+use security_framework_sys::base::{
+    errSecAuthFailed as ERR_SEC_AUTH_FAILED, errSecItemNotFound as ERR_SEC_ITEM_NOT_FOUND,
+};
 use zeroize::Zeroizing;
 
 use crate::{AccessPolicy, AuthorizationError, Error, LABEL_HASH_BYTES};
@@ -21,10 +23,10 @@ const ERR_SEC_USER_CANCELED: i32 = -128;
 const ERR_SEC_NOT_AVAILABLE: i32 = -25291;
 const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
 
-pub(super) fn ensure_available(_policy: AccessPolicy) -> Result<(), Error> {
+pub(super) fn ensure_available(policy: AccessPolicy) -> Result<(), Error> {
     // Creating the access-control object validates that the Security framework
     // understands the requested policy without creating persistent state.
-    access_control(_policy)?;
+    access_control(policy)?;
     let mut options = GenerateKeyOptions::default();
     options
         .set_key_type(KeyType::ec_sec_prime_random())
@@ -77,7 +79,7 @@ fn delete_if_present(
 ) -> Result<(), Error> {
     match delete_generic_password_options(options(label_hash, policy)) {
         Ok(()) => Ok(()),
-        Err(error) if error.code() == errSecItemNotFound => Ok(()),
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
         Err(error) => Err(hardware_error(error)),
     }
 }
@@ -151,9 +153,9 @@ fn hex_label(hash: [u8; LABEL_HASH_BYTES]) -> String {
 fn hardware_error(error: SecurityError) -> Error {
     match error.code() {
         ERR_SEC_USER_CANCELED => Error::Authorization(AuthorizationError::Cancelled),
-        errSecAuthFailed => Error::Authorization(AuthorizationError::Denied),
+        ERR_SEC_AUTH_FAILED => Error::Authorization(AuthorizationError::Denied),
         ERR_SEC_INTERACTION_NOT_ALLOWED => Error::Authorization(AuthorizationError::UiUnavailable),
-        errSecItemNotFound => Error::Authorization(AuthorizationError::CredentialInvalidated),
+        ERR_SEC_ITEM_NOT_FOUND => Error::Authorization(AuthorizationError::CredentialInvalidated),
         ERR_SEC_NOT_AVAILABLE => Error::NotAvailable,
         _ => Error::Hardware(error.to_string()),
     }

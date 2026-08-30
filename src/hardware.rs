@@ -11,6 +11,9 @@ use crate::vault::{
 #[cfg(target_os = "linux")]
 const LINUX_BIOMETRIC_UNAVAILABLE: &str = "biometric unlock is not supported on Linux: Linux does not provide a hardware-bound biometric secret, and fprintd match results are not accepted as a cryptographic factor";
 
+// The shared fallible signature keeps callers platform-independent; only the
+// Linux implementation currently rejects a native biometric policy here.
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
 pub(crate) fn validate_native_biometric(biometric: bool) -> VaultResult<()> {
     #[cfg(target_os = "linux")]
     if biometric {
