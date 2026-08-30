@@ -36,7 +36,9 @@
             name = "factorseal-acceptance-linux";
             runtimeInputs = [
               pkgs.coreutils
+              pkgs.gawk
               pkgs.gnugrep
+              pkgs.systemd
             ];
             text = ''
               exec ${pkgs.dash}/bin/dash ${./acceptance/linux.sh} \\

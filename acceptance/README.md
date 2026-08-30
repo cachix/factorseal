@@ -9,13 +9,15 @@ Each runner creates a fresh vault through the release candidate binary. The
 macOS and Windows runners request native biometric/user verification at
 creation and unseal; Linux validates the TPM plus nested password. They verify:
 
-1. the backend recorded in `factorseal status` is the expected real hardware
+1. the host identifies as physical (known VM models are rejected, and Linux
+   additionally requires `/dev/tpmrm0` while Windows requires a ready TPM);
+2. the backend recorded in `factorseal status` is the expected real hardware
    backend (`tpm` on Linux, `windows-tpm` on Windows, or `secure-enclave` on macOS);
-2. the native transport permits an authorized local CLI to put, get, and delete
+3. the native transport permits an authorized local CLI to put, get, and delete
    an exact-byte value;
-3. a real OS lock, sleep, shutdown-preparation, or session event causes the
+4. a real OS lock, sleep, shutdown-preparation, or session event causes the
    live vault process to exit and the socket/pipe to become sealed;
-4. the same vault can be unsealed again and recover the stored value.
+5. the same vault can be unsealed again and recover the stored value.
 
 Run the script from the account that will own the release installation. Pass a
 new, absolute `--root` and a private password file (`0600`, regular file). Do
@@ -24,6 +26,16 @@ test vault in place so an operator can inspect it. Add `--destroy-after` only
 after recording the result: it invokes the explicit, factor-gated irreversible
 `factorseal destroy --yes-really-destroy` command to delete both local data and
 native keys.
+
+On success, every runner writes a private evidence record beside
+the test root (`ROOT.acceptance-record` by default). Use `--evidence` on the
+POSIX runners or `-Evidence` on Windows to select another absolute path. The
+record is a line-oriented `key=value` file with schema
+`factorseal-physical-acceptance-v1`; it contains the artifact hash, redacted
+hardware/OS identity, observed backend, and individual test outcomes. A failed
+or interrupted run retains the same path with a `.partial` suffix so the point
+of failure is visible. Neither form contains the vault ID, device key ID,
+password, test secret, or username. Never overwrite an existing record.
 
 ## Linux
 
@@ -34,7 +46,8 @@ session. It must be invoked from a terminal which survives the lock event.
 ```console
 nix run .#acceptance-linux -- \
   --root "$HOME/.local/share/factorseal-acceptance" \
-  --password-file "$HOME/.config/factorseal-acceptance-password"
+  --password-file "$HOME/.config/factorseal-acceptance-password" \
+  --evidence "$HOME/factorseal-linux.acceptance-record"
 ```
 
 The app builds and uses the repository's Nix package with the bundled
@@ -60,8 +73,13 @@ askpass dialog works without a terminal.
 acceptance/macos.sh \
   --factorseal /Applications/Factorseal.app/Contents/MacOS/factorseal \
   --root "$HOME/Library/Application Support/Factorseal-acceptance" \
-  --password-file "$HOME/.factorseal-acceptance-password"
+  --password-file "$HOME/.factorseal-acceptance-password" \
+  --event lock \
+  --evidence "$HOME/factorseal-macos.acceptance-record"
 ```
+
+Repeat the macOS runner with `--event switch` and `--event sleep`, using a new
+root and evidence path each time, to capture those lifecycle paths separately.
 
 ## Windows
 
@@ -76,14 +94,18 @@ and Windows Hello UX.
 ./acceptance/windows.ps1 `
   -Factorseal 'C:\Program Files\Factorseal\factorseal.exe' `
   -Root "$env:LOCALAPPDATA\Factorseal-acceptance" `
-  -PasswordFile "$env:USERPROFILE\.factorseal-acceptance-password"
+  -PasswordFile "$env:USERPROFILE\.factorseal-acceptance-password" `
+  -Evidence "$env:USERPROFILE\factorseal-windows.acceptance-record"
 ```
 
 ## Release evidence
 
-For every supported OS/hardware combination, attach the redacted script output
-and a completed copy of [the acceptance record](results-template.md) to the
-release approval. A pass requires all lifecycle
+For every supported OS/hardware combination, attach the generated evidence
+record, redacted script output, and a completed copy of
+[the release acceptance record](results-template.md) to the release approval.
+The generated file covers the repeatable core test; the template records
+signature verification, installed-service behavior, and the additional
+lifecycle events that require separate runs. A pass requires all lifecycle
 events named above, a verified real backend, an observed native user-verification
 prompt where policy requires one, and a successful re-unseal. Treat a missing
 prompt, software fallback, inability to seal, or a failure to re-unseal as a

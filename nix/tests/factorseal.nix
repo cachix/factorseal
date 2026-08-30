@@ -34,6 +34,11 @@ let
         pkgs.jq
         pkgs.util-linux
       ];
+      # The VM exercises the Factorseal module, not NixOS installation or
+      # recovery tooling. Keep both profiles out so an unrelated installer-tool
+      # regression cannot prevent this service test from booting.
+      environment.defaultPackages = lib.mkForce [ ];
+      system.disableInstallerTools = true;
       system.stateVersion = "26.05";
     };
 in
@@ -93,6 +98,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("user@1000.service")
 
     with subtest("module installs an enabled, password-gated user service"):
+        machine.succeed("systemd-detect-virt --quiet")
         machine.succeed("test -e /dev/tpm0")
         machine.succeed("test -e /dev/tpmrm0")
         machine.wait_for_unit("polkit.service")

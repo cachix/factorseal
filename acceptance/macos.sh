@@ -3,19 +3,23 @@
 set -eu
 
 usage() {
-    echo "usage: $0 --factorseal PATH --root ABSOLUTE_PATH --password-file PATH [--destroy-after]" >&2
+    echo "usage: $0 --factorseal PATH --root ABSOLUTE_PATH --password-file PATH [--event lock|switch|sleep] [--evidence ABSOLUTE_PATH] [--destroy-after]" >&2
     exit "${1:-2}"
 }
 
 factorseal=
 root=
 password_file=
+evidence=
+lifecycle_event=lock
 destroy_after=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --factorseal) factorseal=${2:-}; shift 2 ;;
         --root) root=${2:-}; shift 2 ;;
         --password-file) password_file=${2:-}; shift 2 ;;
+        --evidence) evidence=${2:-}; shift 2 ;;
+        --event) lifecycle_event=${2:-}; shift 2 ;;
         --destroy-after) destroy_after=true; shift ;;
         --help|-h) usage 0 ;;
         *) usage ;;
@@ -26,6 +30,44 @@ done
 [ -n "$root" ] && [ "${root#/}" != "$root" ] || usage
 [ ! -e "$root" ] || { echo "acceptance root already exists: $root" >&2; exit 2; }
 [ -n "$password_file" ] && [ -f "$password_file" ] || usage
+case $lifecycle_event in lock|switch|sleep) ;; *) usage ;; esac
+
+hardware_summary=$(/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null \
+    | awk -F': ' '/Model Name|Model Identifier|Chip|Processor Name/ { printf "%s%s", separator, $2; separator="; " }')
+[ -n "$hardware_summary" ] || { echo "could not identify physical Mac hardware" >&2; exit 2; }
+case $(printf '%s' "$hardware_summary" | tr '[:upper:]' '[:lower:]') in
+    *virtual*|*vmware*|*parallels*|*qemu*|*kvm*|*xen*)
+        echo "physical acceptance refuses virtualized hardware: $hardware_summary" >&2
+        exit 2
+        ;;
+esac
+
+[ -n "$evidence" ] || evidence="${root}.acceptance-record"
+[ "${evidence#/}" != "$evidence" ] || { echo "evidence path must be absolute" >&2; exit 2; }
+evidence_partial="${evidence}.partial"
+[ ! -e "$evidence" ] && [ ! -e "$evidence_partial" ] || {
+    echo "evidence path already exists: $evidence (or its .partial file)" >&2
+    exit 2
+}
+[ -d "$(dirname "$evidence")" ] || { echo "evidence parent directory does not exist" >&2; exit 2; }
+
+umask 077
+record() {
+    record_key=$1
+    record_value=$(printf '%s' "$2" | tr '\r\n\t=' '    ')
+    printf '%s=%s\n' "$record_key" "$record_value" >>"$evidence_partial"
+}
+record schema factorseal-physical-acceptance-v1
+record platform macos
+record started_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+record factorseal_filename "$(basename "$factorseal")"
+record factorseal_sha256 "$(shasum -a 256 "$factorseal" | awk '{print $1}')"
+record factorseal_version "$("$factorseal" --version)"
+record os_summary "macOS $(sw_vers -productVersion); $(uname -m)"
+record expected_backend secure-enclave
+record physical_host_check pass
+record hardware_summary "$hardware_summary"
+record lifecycle_event "$lifecycle_event"
 
 vault_pid=
 cleanup() {
@@ -64,32 +106,50 @@ wait_for_vault_exit() {
 }
 
 "$factorseal" --root "$root" --password-file "$password_file" init --unlock password,biometric
-status | grep -q '"hardware_backend": "secure-enclave"'
+observed_backend=$(status | sed -n 's/.*"hardware_backend": "\([^"]*\)".*/\1/p')
+[ "$observed_backend" = secure-enclave ]
+record observed_backend "$observed_backend"
+printf 'Did you observe the native Touch ID or macOS user-verification prompt? [y/N] '
+read -r prompt_observed
+case $prompt_observed in y|Y|yes|YES|Yes) ;; *) echo "native user verification was not observed" >&2; exit 1 ;; esac
+record native_prompt_create_observed pass
+record test.create pass
 
 "$factorseal" --root "$root" --password-file "$password_file" \
     agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-unseal.log" 2>&1 &
 vault_pid=$!
 wait_for unsealed
+printf 'Did the initial unseal show a native Touch ID or macOS user-verification prompt? [y/N] '
+read -r unseal_prompt_observed
+case $unseal_prompt_observed in y|Y|yes|YES|Yes) ;; *) echo "native user verification was not observed during unseal" >&2; exit 1 ;; esac
+record native_prompt_unseal_observed pass
+record native_prompt_observed pass
+record test.initial_unseal pass
 printf '%s' 'hardware-lifecycle-acceptance' | "$factorseal" --root "$root" set acceptance --field value
 [ "$("$factorseal" --root "$root" get acceptance --field value)" = "hardware-lifecycle-acceptance" ]
+record test.ipc_round_trip pass
 
-echo "Lock/switch away from this session or put the Mac to sleep now."
+echo "Trigger the requested macOS lifecycle event now: $lifecycle_event."
 echo "The runner will fail if the real AppKit lifecycle notification does not seal the vault."
 printf 'Press Enter after initiating the lifecycle event: '
 read -r _
 wait_for_vault_exit
 wait_for sealed
+record test.lifecycle_seal pass
 if "$factorseal" --root "$root" get acceptance --field value >/dev/null 2>&1; then
     echo "sealed vault returned a secret" >&2
     exit 1
 fi
+record test.sealed_read_denied pass
 
 "$factorseal" --root "$root" --password-file "$password_file" \
     agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-reunseal.log" 2>&1 &
 vault_pid=$!
 wait_for unsealed
 [ "$("$factorseal" --root "$root" get acceptance --field value)" = "hardware-lifecycle-acceptance" ]
+record test.reunseal_recovery pass
 "$factorseal" --root "$root" delete acceptance --field value
+record test.delete pass
 kill -TERM "$vault_pid"
 wait "$vault_pid"
 vault_pid=
@@ -97,5 +157,10 @@ wait_for sealed
 
 if [ "$destroy_after" = true ]; then
     "$factorseal" --root "$root" --password-file "$password_file" destroy --yes-really-destroy
+    record test.destroy pass
+else
+    record test.destroy not-run
 fi
-echo "macOS native hardware/lifecycle acceptance passed."
+record completed_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mv "$evidence_partial" "$evidence"
+echo "macOS native hardware/lifecycle acceptance passed. Evidence: $evidence"
