@@ -11,6 +11,10 @@ The crate cannot protect that plaintext from a compromised process, kernel, or
 debugger. Callers should keep the returned `Zeroizing<Vec<u8>>` alive for as
 little time as possible.
 
+Internally, every buffer that can hold cleartext is wiped rather than merely
+freed: the assembled TPM command, the transport response buffer, and each
+intermediate copy taken from it.
+
 ## Cryptography
 
 - Linux and non-biometric Windows policies create TPM 2.0 sealed-data objects
@@ -24,12 +28,13 @@ little time as possible.
   keys whose `KeyInfo` reports software-only storage, and authenticates the
   envelope metadata as associated data.
 - Apple stores the short secret as a device-only Data Protection Keychain item.
-  With the biometric policy, `biometryCurrentSet` gates every retrieval and
+  Each seal writes its own item under a random identifier that the envelope
+  carries, so an envelope always names the one secret it was created for. With
+  the biometric policy, `biometryCurrentSet` gates every retrieval and
   invalidates the item when biometric enrollment changes.
 
-`hardwareseal` does not use public-key encryption to wrap the secret. Apple's
-backend creates and immediately discards an ephemeral Secure Enclave P-256 key
-only as a capability probe. The Windows Hello credential and WebAuthn protocol
+`hardwareseal` does not use public-key encryption to wrap the secret. The
+Windows Hello credential and WebAuthn protocol
 may internally use classical public-key cryptography, so the complete Windows
 biometric path is not claimed to be post-quantum certified. Its stored secret
 envelope is encrypted with a credential-bound symmetric PRF output.
@@ -38,7 +43,10 @@ envelope is encrypted with a credential-bound symmetric PRF output.
 
 - Unsupported backends and policies return an error.
 - Linux requires `/dev/tpmrm0`; it does not fall back to an unmediated TPM
-  device or a software simulator.
+  device or a software simulator. A device that is absent, unreadable by this
+  process, or held by another one reports `Error::NotAvailable`, so a caller
+  sees the same structured outcome as a machine with no TPM instead of an
+  opaque device error.
 - Windows rejects the explicit TBS emulator interface for TPM sealing and
   requires a user-verifying platform authenticator with PRF support for the
   biometric policy. It uses standard WebAuthn PRF input transformation, fresh

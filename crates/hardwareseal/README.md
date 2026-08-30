@@ -34,10 +34,12 @@ With its platform feature disabled, `Protector::open` returns
 Apple does not expose general symmetric encryption in the Secure Enclave. The
 Data Protection Keychain is therefore the correct native primitive: a
 device-only item is released only after the configured Secure Enclave-backed
-authentication ceremony. `hardwareseal` creates an ephemeral P-256 key only to
-verify that a Secure Enclave exists; no sealed secret or wrapping key depends
-on P-256. Android requires a StrongBox or TEE security level and rejects
-software-only Keystore keys.
+authentication ceremony. No sealed secret or wrapping key depends on P-256.
+Each `seal` writes its own keychain item and returns an envelope naming that
+item, so re-sealing under a label never destroys or silently repoints the
+previous secret, and `delete` removes every generation stored under the label.
+Android requires a StrongBox or TEE security level and rejects software-only
+Keystore keys.
 
 Android's non-interactive policy is implemented directly through JNI. The
 embedding runtime must initialize `ndk-context` (as `android-activity` does).

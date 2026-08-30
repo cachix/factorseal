@@ -1,6 +1,6 @@
 #![allow(unsafe_code)]
 
-use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
+use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JThrowable, JValue};
 use jni::{JNIEnv, JavaVM};
 use zeroize::Zeroizing;
 
@@ -31,6 +31,10 @@ pub(super) fn open(label_hash: [u8; LABEL_HASH_BYTES], policy: AccessPolicy) -> 
         let alias = alias(label_hash, policy);
         let key = get_or_create_key(env, &store, &alias)?;
         if let Err(error) = ensure_hardware_key(env, &key) {
+            // `delete_alias` is itself a JNI call, and calling into JNI with a
+            // pending exception aborts the process under CheckJNI. Take the
+            // exception first, then clean up the rejected alias.
+            let error = take_pending_exception(env).unwrap_or(error);
             let _ = delete_alias(env, &store, &alias);
             return Err(error);
         }
@@ -171,10 +175,61 @@ fn with_env<T>(operation: impl FnOnce(&mut JNIEnv<'_>) -> Result<T, Error>) -> R
     let vm = unsafe { JavaVM::from_raw(context.vm().cast()) }.map_err(jni_error)?;
     let mut env = vm.attach_current_thread().map_err(jni_error)?;
     let result = operation(&mut env);
-    if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_clear();
+    let pending = take_pending_exception(&mut env);
+    match (result, pending) {
+        // jni-rs reports every Java throw as the same opaque `JavaException`,
+        // so the pending throwable is the only place the actual outcome is
+        // recorded. Refine the untyped error with it, but never override an
+        // outcome a caller already classified.
+        (Err(Error::Hardware(_)), Some(error)) => Err(error),
+        (result, _) => result,
     }
-    result
+}
+
+/// Clear the pending Java exception, if any, and classify it.
+///
+/// Clearing is mandatory before any further JNI call on this thread; the
+/// classification is what lets callers tell "credential invalidated, start
+/// recovery" from "transient device failure, retry".
+fn take_pending_exception(env: &mut JNIEnv<'_>) -> Option<Error> {
+    if !env.exception_check().unwrap_or(false) {
+        return None;
+    }
+    let throwable = env.exception_occurred().ok();
+    let _ = env.exception_clear();
+    let class = throwable.and_then(|throwable| exception_class_name(env, &throwable))?;
+    Some(classify_exception(&class))
+}
+
+fn exception_class_name(env: &mut JNIEnv<'_>, throwable: &JThrowable<'_>) -> Option<String> {
+    let class = env
+        .call_method(throwable, "getClass", "()Ljava/lang/Class;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    let name = env
+        .call_method(class, "getName", "()Ljava/lang/String;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    env.get_string(&JString::from(name)).ok().map(Into::into)
+}
+
+fn classify_exception(class: &str) -> Error {
+    match class {
+        "android.security.keystore.KeyPermanentlyInvalidatedException"
+        | "java.security.UnrecoverableKeyException" => {
+            Error::Authorization(AuthorizationError::CredentialInvalidated)
+        }
+        "android.security.keystore.UserNotAuthenticatedException" => {
+            Error::Authorization(AuthorizationError::Denied)
+        }
+        "android.os.OperationCanceledException" => {
+            Error::Authorization(AuthorizationError::Cancelled)
+        }
+        "android.security.keystore.StrongBoxUnavailableException" => Error::NotAvailable,
+        other => Error::Hardware(other.to_owned()),
+    }
 }
 
 fn sdk_version(env: &mut JNIEnv<'_>) -> Result<i32, Error> {
@@ -589,5 +644,33 @@ mod tests {
         assert_eq!(parsed.ciphertext, &[2; 32]);
         assert!(parse_envelope(&envelope, [4; LABEL_HASH_BYTES], AccessPolicy::None).is_err());
         assert!(parse_envelope(&envelope, label, AccessPolicy::Biometric).is_err());
+    }
+
+    #[test]
+    fn keystore_exceptions_have_stable_authorization_categories() {
+        assert!(matches!(
+            classify_exception("android.security.keystore.KeyPermanentlyInvalidatedException"),
+            Error::Authorization(AuthorizationError::CredentialInvalidated)
+        ));
+        assert!(matches!(
+            classify_exception("java.security.UnrecoverableKeyException"),
+            Error::Authorization(AuthorizationError::CredentialInvalidated)
+        ));
+        assert!(matches!(
+            classify_exception("android.security.keystore.UserNotAuthenticatedException"),
+            Error::Authorization(AuthorizationError::Denied)
+        ));
+        assert!(matches!(
+            classify_exception("android.os.OperationCanceledException"),
+            Error::Authorization(AuthorizationError::Cancelled)
+        ));
+        assert!(matches!(
+            classify_exception("android.security.keystore.StrongBoxUnavailableException"),
+            Error::NotAvailable
+        ));
+        assert!(matches!(
+            classify_exception("java.lang.IllegalStateException"),
+            Error::Hardware(_)
+        ));
     }
 }

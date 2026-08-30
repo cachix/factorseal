@@ -5,7 +5,6 @@
 //! simpler and avoids store-now/decrypt-later exposure to public-key
 //! cryptanalysis.
 
-use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 #[cfg(all(feature = "android", any(test, target_os = "android")))]
@@ -13,9 +12,16 @@ use zeroize::Zeroizing;
 mod android;
 #[cfg(all(feature = "apple", target_vendor = "apple"))]
 mod apple;
+// `windows` is compiled under `test` on every platform so its envelope and
+// authorization tests run everywhere, which means the modules it depends on
+// have to follow the same gate.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+mod envelope;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod tpm2;
 #[cfg(any(test, target_os = "windows"))]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -136,7 +142,7 @@ impl Protector {
                 });
             }
             Ok(Self {
-                label_hash: Sha256::digest(label.as_bytes()).into(),
+                label_hash: label_hash(label),
                 policy,
                 backend: Backend::Tpm,
             })
@@ -146,7 +152,7 @@ impl Protector {
         {
             apple::ensure_available(policy)?;
             Ok(Self {
-                label_hash: Sha256::digest(label.as_bytes()).into(),
+                label_hash: label_hash(label),
                 policy,
                 backend: Backend::AppleKeychain,
             })
@@ -156,7 +162,7 @@ impl Protector {
         {
             windows::ensure_available(policy)?;
             Ok(Self {
-                label_hash: Sha256::digest(label.as_bytes()).into(),
+                label_hash: label_hash(label),
                 policy,
                 backend: match policy {
                     AccessPolicy::None => Backend::WindowsTpm,
@@ -167,7 +173,7 @@ impl Protector {
 
         #[cfg(all(feature = "android", target_os = "android"))]
         {
-            let label_hash = Sha256::digest(label.as_bytes()).into();
+            let label_hash = label_hash(label);
             android::open(label_hash, policy)?;
             Ok(Self {
                 label_hash,
@@ -272,7 +278,8 @@ impl Protector {
     /// Remove persistent platform state associated with this protector.
     ///
     /// TPM envelopes are self-contained, so this is a no-op on Linux. Key-store
-    /// backends remove their persistent item or key.
+    /// backends remove every persistent item, key, or credential this label
+    /// has stored, including generations superseded by a later [`Self::seal`].
     pub fn delete(&self) -> Result<(), Error> {
         #[cfg(target_os = "linux")]
         {
@@ -304,6 +311,23 @@ impl Protector {
             Err(Error::NotAvailable)
         }
     }
+}
+
+// Only the backend blocks hash labels, so a target that selects no backend
+// compiles this away rather than warning on an unused `sha2` import.
+#[cfg_attr(
+    not(any(
+        target_os = "linux",
+        target_os = "windows",
+        all(feature = "apple", target_vendor = "apple"),
+        all(feature = "android", target_os = "android")
+    )),
+    allow(dead_code)
+)]
+fn label_hash(label: &str) -> [u8; LABEL_HASH_BYTES] {
+    use sha2::{Digest as _, Sha256};
+
+    Sha256::digest(label.as_bytes()).into()
 }
 
 fn validate_label(label: &str) -> Result<(), Error> {

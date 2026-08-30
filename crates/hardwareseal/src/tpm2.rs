@@ -23,10 +23,16 @@ const TPM_ALG_CFB: u16 = 0x0043;
 const PRIMARY_ATTRIBUTES: u32 = 0x0003_0072;
 const SEALED_ATTRIBUTES: u32 = 0x0000_04d2;
 const RESPONSE_HEADER_BYTES: usize = 10;
-const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+
+/// Upper bound on a single TPM response, shared by every transport.
+pub(super) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 pub(super) trait Transport {
-    fn execute(&mut self, command: &[u8]) -> Result<Vec<u8>, Error>;
+    /// Submit one raw TPM command and return its raw response.
+    ///
+    /// An unseal response carries the cleartext secret, so implementations
+    /// must not leave a plaintext copy behind in any buffer they reuse.
+    fn execute(&mut self, command: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error>;
 
     fn owner_auth(&mut self) -> Result<Zeroizing<Vec<u8>>, Error> {
         Ok(Zeroizing::new(Vec::new()))
@@ -38,43 +44,45 @@ pub(super) struct SealedObject {
     pub private: Vec<u8>,
 }
 
-pub(super) fn probe(transport: &mut impl Transport) -> Result<(), Error> {
-    let primary = create_primary(transport)?;
-    flush(transport, primary)
+/// A TPM conversation holding one loaded storage primary.
+///
+/// The primary is deterministic for a fixed template but costs a full key
+/// derivation on every `TPM2_CreatePrimary`, so it is derived once when the
+/// session opens and released when the session drops. Opening a session
+/// doubles as the availability probe: it proves the transport speaks TPM 2.0
+/// and that the storage hierarchy authorization is usable.
+pub(super) struct Session<T: Transport> {
+    transport: T,
+    primary: u32,
 }
 
-pub(super) fn seal(
-    transport: &mut impl Transport,
-    sensitive: &[u8],
-) -> Result<SealedObject, Error> {
-    let primary = create_primary(transport)?;
-    let result = create_sealed(transport, primary, sensitive);
-    let flushed = flush(transport, primary);
-    match (result, flushed) {
-        (Ok(object), Ok(())) => Ok(object),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+impl<T: Transport> Session<T> {
+    pub(super) fn open(mut transport: T) -> Result<Self, Error> {
+        let primary = create_primary(&mut transport)?;
+        Ok(Self { transport, primary })
+    }
+
+    pub(super) fn seal(&mut self, sensitive: &[u8]) -> Result<SealedObject, Error> {
+        create_sealed(&mut self.transport, self.primary, sensitive)
+    }
+
+    pub(super) fn unseal(
+        &mut self,
+        public: &[u8],
+        private: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let child = load(&mut self.transport, self.primary, public, private)?;
+        let secret = unseal_loaded(&mut self.transport, child);
+        // A failed flush only leaks a transient handle until this session
+        // closes. It must never discard a secret the TPM already released.
+        let _ = flush(&mut self.transport, child);
+        secret
     }
 }
 
-pub(super) fn unseal(
-    transport: &mut impl Transport,
-    public: &[u8],
-    private: &[u8],
-) -> Result<Vec<u8>, Error> {
-    let primary = create_primary(transport)?;
-    let child = match load(transport, primary, public, private) {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = flush(transport, primary);
-            return Err(error);
-        }
-    };
-    let result = unseal_loaded(transport, child);
-    let child_flush = flush(transport, child);
-    let primary_flush = flush(transport, primary);
-    match (result, child_flush, primary_flush) {
-        (Ok(secret), Ok(()), Ok(())) => Ok(secret),
-        (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => Err(error),
+impl<T: Transport> Drop for Session<T> {
+    fn drop(&mut self) {
+        let _ = flush(&mut self.transport, self.primary);
     }
 }
 
@@ -150,13 +158,15 @@ fn load(
     response_handle(&response)
 }
 
-fn unseal_loaded(transport: &mut impl Transport, child: u32) -> Result<Vec<u8>, Error> {
+fn unseal_loaded(transport: &mut impl Transport, child: u32) -> Result<Zeroizing<Vec<u8>>, Error> {
     let mut body = Writer::default();
     body.u32(child);
     body.password_session(&[]);
     let response = submit(transport, TPM_ST_SESSIONS, TPM_CC_UNSEAL, body)?;
     let params = response_parameters(&response, 0)?;
-    Reader::new(params).sized().map(ToOwned::to_owned)
+    Reader::new(params)
+        .sized()
+        .map(|secret| Zeroizing::new(secret.to_vec()))
 }
 
 fn flush(transport: &mut impl Transport, handle: u32) -> Result<(), Error> {
@@ -170,11 +180,13 @@ fn submit(
     tag: u16,
     command_code: u32,
     body: Writer,
-) -> Result<Vec<u8>, Error> {
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     let body = body.finish();
     let length = u32::try_from(RESPONSE_HEADER_BYTES + body.len())
         .map_err(|_| Error::Hardware("TPM command is too large".to_owned()))?;
-    let mut command = Vec::with_capacity(length as usize);
+    // A seal command carries the cleartext secret, so the assembled command is
+    // wiped on drop just like the response that later returns it.
+    let mut command = Zeroizing::new(Vec::with_capacity(length as usize));
     command.extend_from_slice(&tag.to_be_bytes());
     command.extend_from_slice(&length.to_be_bytes());
     command.extend_from_slice(&command_code.to_be_bytes());
@@ -246,7 +258,7 @@ fn read_u32(input: &[u8], offset: usize) -> Result<u32, Error> {
 }
 
 #[derive(Default)]
-struct Writer(Vec<u8>);
+struct Writer(Zeroizing<Vec<u8>>);
 
 impl Writer {
     fn u16(&mut self, value: u16) {
@@ -281,7 +293,7 @@ impl Writer {
         self.bytes(auth);
     }
 
-    fn finish(self) -> Vec<u8> {
+    fn finish(self) -> Zeroizing<Vec<u8>> {
         self.0
     }
 }
@@ -317,22 +329,26 @@ mod tests {
     use super::*;
 
     #[cfg(target_os = "linux")]
-    struct Device(std::fs::File);
+    struct Device {
+        device: std::fs::File,
+        scratch: Zeroizing<Vec<u8>>,
+    }
 
     #[cfg(target_os = "linux")]
     impl Transport for Device {
-        fn execute(&mut self, command: &[u8]) -> Result<Vec<u8>, Error> {
+        fn execute(&mut self, command: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
             use std::io::{Read as _, Write as _};
+            use zeroize::Zeroize as _;
 
-            self.0
+            self.device
                 .write_all(command)
                 .map_err(|error| Error::Hardware(error.to_string()))?;
-            let mut response = vec![0; MAX_RESPONSE_BYTES];
             let length = self
-                .0
-                .read(&mut response)
+                .device
+                .read(&mut self.scratch)
                 .map_err(|error| Error::Hardware(error.to_string()))?;
-            response.truncate(length);
+            let response = Zeroizing::new(self.scratch[..length].to_vec());
+            self.scratch[..length].zeroize();
             Ok(response)
         }
     }
@@ -363,10 +379,16 @@ mod tests {
             .write(true)
             .open("/dev/tpmrm0")
             .expect("open TPM resource manager");
-        let mut device = Device(file);
+        let mut session = Session::open(Device {
+            device: file,
+            scratch: Zeroizing::new(vec![0; MAX_RESPONSE_BYTES]),
+        })
+        .expect("open TPM session");
         let expected = b"raw-hardwareseal-roundtrip";
-        let object = seal(&mut device, expected).expect("seal");
-        let actual = unseal(&mut device, &object.public, &object.private).expect("unseal");
-        assert_eq!(actual, expected);
+        let object = session.seal(expected).expect("seal");
+        let actual = session
+            .unseal(&object.public, &object.private)
+            .expect("unseal");
+        assert_eq!(actual.as_slice(), expected);
     }
 }

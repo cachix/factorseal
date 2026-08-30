@@ -41,16 +41,12 @@ use windows_sys::Win32::System::TpmBaseServices::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
+use crate::envelope::{self, MAX_BLOB_BYTES, policy_id, read_length};
 use crate::tpm2::{self, Transport};
 use crate::{AccessPolicy, AuthorizationError, Backend, Error, LABEL_HASH_BYTES};
 
-const MAGIC: &[u8; 8] = b"HSEALTPM";
-const VERSION: u8 = 1;
-const HEADER_BYTES: usize = MAGIC.len() + 1 + 1 + LABEL_HASH_BYTES + 4 + 4;
-const MAX_BLOB_BYTES: usize = 16 * 1024;
-const MAX_TBS_RESPONSE_BYTES: usize = 64 * 1024;
 const TBS_E_OWNERAUTH_NOT_FOUND: u32 = 0x8028_4015;
 
 const HELLO_MAGIC: &[u8; 8] = b"HSEALWHL";
@@ -82,11 +78,13 @@ const HRESULT_ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION: i32 =
 
 pub(super) fn ensure_available(policy: AccessPolicy) -> Result<(), Error> {
     match policy {
-        AccessPolicy::None => {
-            ensure_hardware_tpm()?;
-            tpm2::probe(&mut TbsTransport::open()?)
+        AccessPolicy::None => open_tpm_session().map(drop),
+        AccessPolicy::Biometric => {
+            ensure_hello_api()?;
+            // Windows Hello wraps a TPM-sealed payload, so both halves have to
+            // be reachable before a protector claims the biometric backend.
+            open_tpm_session().map(drop)
         }
-        AccessPolicy::Biometric => ensure_hello_available(),
     }
 }
 
@@ -122,7 +120,12 @@ pub(super) fn delete(
     }
 }
 
-fn ensure_hello_available() -> Result<(), Error> {
+/// Check that the WebAuthn API can serve PRF-backed sealing.
+///
+/// This is the cheap half of the biometric precondition: it makes no TPM
+/// round trip, so seal and unseal can call it without paying for a second
+/// `TPM2_CreatePrimary` on top of the one their TPM session already performs.
+fn ensure_hello_api() -> Result<(), Error> {
     // Version 6 introduced native PRF inputs and outputs. Refuse older APIs
     // instead of degrading to a separate, bypassable consent prompt.
     if unsafe { WebAuthNGetApiVersionNumber() } < WEBAUTHN_API_VERSION_6 {
@@ -138,13 +141,21 @@ fn ensure_hello_available() -> Result<(), Error> {
     if available == 0 {
         return Err(Error::NotAvailable);
     }
-    ensure_hardware_tpm()?;
-    tpm2::probe(&mut TbsTransport::open()?)
+    Ok(())
 }
 
 fn hello_seal(label_hash: [u8; LABEL_HASH_BYTES], secret: &[u8]) -> Result<Vec<u8>, Error> {
-    ensure_hello_available()?;
-    let credential_id = create_hello_credential(label_hash)?;
+    ensure_hello_api()?;
+    // Enrollment is a user verification ceremony of its own. Reuse the
+    // credential already enrolled for this label so re-sealing costs one
+    // prompt instead of two and leaves no orphan behind for the superseded
+    // envelope.
+    let existing = hello_credential_ids(label_hash)?.into_iter().next();
+    let enrolled = existing.is_none();
+    let credential_id = match existing {
+        Some(credential_id) => credential_id,
+        None => create_hello_credential(label_hash)?,
+    };
     let result = (|| {
         let tpm_envelope = Zeroizing::new(tpm_seal_secret(label_hash, secret)?);
         let mut prf_input = [0_u8; HELLO_PRF_INPUT_BYTES];
@@ -168,7 +179,9 @@ fn hello_seal(label_hash: [u8; LABEL_HASH_BYTES], secret: &[u8]) -> Result<Vec<u
             .map_err(|_| Error::Hardware("Windows Hello sealing failed".to_owned()))?;
         encode_hello_envelope(label_hash, &credential_id, prf_input, nonce, &ciphertext)
     })();
-    if result.is_err() {
+    // Only roll back an enrollment this call made. A reused credential still
+    // protects the envelopes sealed before it.
+    if result.is_err() && enrolled {
         let _ = delete_hello_credential(&credential_id);
     }
     result
@@ -176,10 +189,10 @@ fn hello_seal(label_hash: [u8; LABEL_HASH_BYTES], secret: &[u8]) -> Result<Vec<u
 
 fn hello_unseal(
     expected_label_hash: [u8; LABEL_HASH_BYTES],
-    envelope: &[u8],
+    input: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    ensure_hello_available()?;
-    let parsed = parse_hello_envelope(envelope, expected_label_hash)?;
+    ensure_hello_api()?;
+    let parsed = parse_hello_envelope(input, expected_label_hash)?;
     let key = evaluate_hello_prf(parsed.credential_id, parsed.prf_input)?;
     let aad = hello_aad(expected_label_hash, parsed.credential_id, *parsed.prf_input);
     let cipher = Aes256Gcm::new_from_slice(key.as_slice())
@@ -199,13 +212,17 @@ fn hello_unseal(
     tpm_unseal_secret(expected_label_hash, &tpm_envelope)
 }
 
-fn tpm_seal_secret(label_hash: [u8; LABEL_HASH_BYTES], secret: &[u8]) -> Result<Vec<u8>, Error> {
+fn open_tpm_session() -> Result<tpm2::Session<TbsTransport>, Error> {
     ensure_hardware_tpm()?;
+    tpm2::Session::open(TbsTransport::open()?)
+}
+
+fn tpm_seal_secret(label_hash: [u8; LABEL_HASH_BYTES], secret: &[u8]) -> Result<Vec<u8>, Error> {
     let mut sensitive = Zeroizing::new(Vec::with_capacity(LABEL_HASH_BYTES + secret.len()));
     sensitive.extend_from_slice(&label_hash);
     sensitive.extend_from_slice(secret);
-    let object = tpm2::seal(&mut TbsTransport::open()?, &sensitive)?;
-    encode_envelope(
+    let object = open_tpm_session()?.seal(&sensitive)?;
+    envelope::encode(
         AccessPolicy::None,
         label_hash,
         &object.public,
@@ -215,10 +232,9 @@ fn tpm_seal_secret(label_hash: [u8; LABEL_HASH_BYTES], secret: &[u8]) -> Result<
 
 fn tpm_unseal_secret(
     expected_label_hash: [u8; LABEL_HASH_BYTES],
-    envelope: &[u8],
+    input: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    ensure_hardware_tpm()?;
-    let parsed = parse_envelope(envelope)?;
+    let parsed = envelope::parse(input)?;
     if parsed.policy != AccessPolicy::None {
         return Err(Error::InvalidEnvelope(
             "stored TPM access policy is invalid".to_owned(),
@@ -229,11 +245,7 @@ fn tpm_unseal_secret(
             "sealed secret belongs to another label".to_owned(),
         ));
     }
-    let cleartext = Zeroizing::new(tpm2::unseal(
-        &mut TbsTransport::open()?,
-        parsed.public_blob,
-        parsed.private_blob,
-    )?);
+    let cleartext = open_tpm_session()?.unseal(parsed.public_blob, parsed.private_blob)?;
     if cleartext.len() < LABEL_HASH_BYTES || cleartext[..LABEL_HASH_BYTES] != expected_label_hash {
         return Err(Error::InvalidEnvelope(
             "sealed label binding is missing or invalid".to_owned(),
@@ -279,6 +291,10 @@ fn create_hello_credential(label_hash: [u8; LABEL_HASH_BYTES]) -> Result<Vec<u8>
         dwAuthenticatorAttachment: WEBAUTHN_AUTHENTICATOR_ATTACHMENT_PLATFORM,
         dwUserVerificationRequirement: WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
         dwAttestationConveyancePreference: WEBAUTHN_ATTESTATION_CONVEYANCE_PREFERENCE_NONE,
+        // A non-resident credential is invisible to
+        // `WebAuthNGetPlatformCredentialList`, which would leave `delete` and
+        // credential reuse silently finding nothing.
+        bRequireResidentKey: 1,
         bEnablePrf: 1,
         ..WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS::default()
     };
@@ -332,7 +348,10 @@ fn evaluate_hello_prf(
     };
     let mut salt_bytes = *prf_input;
     let mut salt = WEBAUTHN_HMAC_SECRET_SALT {
-        cbFirst: u32::try_from(HELLO_PRF_BYTES).expect("PRF length fits in u32"),
+        // This length describes `salt_bytes`, the PRF *input*. Deriving it
+        // from the output length would hand the API an out-of-bounds read the
+        // moment the two constants stop matching.
+        cbFirst: u32::try_from(salt_bytes.len()).expect("PRF salt length fits in u32"),
         pbFirst: salt_bytes.as_mut_ptr(),
         cbSecond: 0,
         pbSecond: std::ptr::null_mut(),
@@ -414,7 +433,18 @@ fn evaluate_hello_prf(
 }
 
 fn delete_hello_credentials(label_hash: [u8; LABEL_HASH_BYTES]) -> Result<(), Error> {
-    ensure_hello_available()?;
+    for credential_id in hello_credential_ids(label_hash)? {
+        delete_hello_credential(&credential_id)?;
+    }
+    Ok(())
+}
+
+/// List the platform credentials enrolled for `label_hash`.
+///
+/// Only discoverable credentials appear here, which is why enrollment requires
+/// a resident key.
+fn hello_credential_ids(label_hash: [u8; LABEL_HASH_BYTES]) -> Result<Vec<Vec<u8>>, Error> {
+    ensure_hello_api()?;
     let options = WEBAUTHN_GET_CREDENTIALS_OPTIONS {
         dwVersion: WEBAUTHN_GET_CREDENTIALS_OPTIONS_CURRENT_VERSION,
         pwszRpId: HELLO_RP_ID,
@@ -422,6 +452,11 @@ fn delete_hello_credentials(label_hash: [u8; LABEL_HASH_BYTES]) -> Result<(), Er
     };
     let mut output = std::ptr::null_mut();
     let status = unsafe { WebAuthNGetPlatformCredentialList(&raw const options, &raw mut output) };
+    // An empty store reports NTE_NOT_FOUND rather than an empty list. That is
+    // the ordinary state before the first enrollment, not a failure.
+    if status == NTE_NOT_FOUND {
+        return Ok(Vec::new());
+    }
     check_webauthn(status, "list Windows Hello credentials")?;
     let output = CredentialListGuard::new(output)?;
     let list = output.get();
@@ -462,10 +497,7 @@ fn delete_hello_credentials(label_hash: [u8; LABEL_HASH_BYTES]) -> Result<(), Er
         }
     }
     drop(output);
-    for credential_id in matching_ids {
-        delete_hello_credential(&credential_id)?;
-    }
-    Ok(())
+    Ok(matching_ids)
 }
 
 fn delete_hello_credential(credential_id: &[u8]) -> Result<(), Error> {
@@ -900,7 +932,10 @@ fn ensure_hardware_tpm() -> Result<(), Error> {
     Ok(())
 }
 
-struct TbsTransport(*mut c_void);
+struct TbsTransport {
+    context: *mut c_void,
+    scratch: Zeroizing<Vec<u8>>,
+}
 
 impl TbsTransport {
     fn open() -> Result<Self, Error> {
@@ -920,34 +955,46 @@ impl TbsTransport {
         if status != TBS_SUCCESS {
             return Err(tbs_error("open TPM 2.0 context", status));
         }
-        Ok(Self(handle))
+        Ok(Self {
+            context: handle,
+            scratch: Zeroizing::new(vec![0; tpm2::MAX_RESPONSE_BYTES]),
+        })
     }
 }
 
 impl Transport for TbsTransport {
-    fn execute(&mut self, command: &[u8]) -> Result<Vec<u8>, Error> {
+    fn execute(&mut self, command: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
         let command_len = u32::try_from(command.len())
             .map_err(|_| Error::Hardware("TPM command is too large".to_owned()))?;
-        let mut response = vec![0; MAX_TBS_RESPONSE_BYTES];
-        let mut response_len = u32::try_from(response.len())
+        let mut response_len = u32::try_from(self.scratch.len())
             .map_err(|_| Error::Hardware("TPM response buffer is too large".to_owned()))?;
         // SAFETY: Both buffers are valid for their declared lengths. The
         // context is owned by this value and remains open during the call.
         let status = unsafe {
             Tbsip_Submit_Command(
-                self.0,
+                self.context,
                 TBS_COMMAND_LOCALITY_ZERO,
                 TBS_COMMAND_PRIORITY_NORMAL,
                 command.as_ptr(),
                 command_len,
-                response.as_mut_ptr(),
+                self.scratch.as_mut_ptr(),
                 &raw mut response_len,
             )
         };
         if status != TBS_SUCCESS {
             return Err(tbs_error("submit TPM command", status));
         }
-        response.truncate(response_len as usize);
+        let length = response_len as usize;
+        if length > self.scratch.len() {
+            return Err(Error::Hardware(
+                "TBS reported a response longer than its buffer".to_owned(),
+            ));
+        }
+        // An unseal response lands in `scratch`, so copy out only what the TPM
+        // returned and wipe the staging bytes before the next command reuses
+        // the buffer.
+        let response = Zeroizing::new(self.scratch[..length].to_vec());
+        self.scratch[..length].zeroize();
         Ok(response)
     }
 
@@ -960,7 +1007,7 @@ impl Transport for TbsTransport {
         // valid for the duration of the call.
         let status = unsafe {
             Tbsi_Get_OwnerAuth(
-                self.0,
+                self.context,
                 TBS_OWNERAUTH_TYPE_STORAGE_20,
                 auth.as_mut_ptr(),
                 &raw mut length,
@@ -984,107 +1031,7 @@ impl Drop for TbsTransport {
     fn drop(&mut self) {
         // SAFETY: The handle came from `Tbsi_Context_Create`, is owned by this
         // value, and is closed exactly once here.
-        let _ = unsafe { Tbsip_Context_Close(self.0) };
-    }
-}
-
-fn encode_envelope(
-    policy: AccessPolicy,
-    label_hash: [u8; LABEL_HASH_BYTES],
-    public_blob: &[u8],
-    private_blob: &[u8],
-) -> Result<Vec<u8>, Error> {
-    let public_len = u32::try_from(public_blob.len())
-        .map_err(|_| Error::InvalidEnvelope("TPM public blob is too large".to_owned()))?;
-    let private_len = u32::try_from(private_blob.len())
-        .map_err(|_| Error::InvalidEnvelope("TPM private blob is too large".to_owned()))?;
-    let mut output = Vec::with_capacity(HEADER_BYTES + public_blob.len() + private_blob.len());
-    output.extend_from_slice(MAGIC);
-    output.push(VERSION);
-    output.push(policy_id(policy));
-    output.extend_from_slice(&label_hash);
-    output.extend_from_slice(&public_len.to_be_bytes());
-    output.extend_from_slice(&private_len.to_be_bytes());
-    output.extend_from_slice(public_blob);
-    output.extend_from_slice(private_blob);
-    Ok(output)
-}
-
-struct ParsedEnvelope<'a> {
-    policy: AccessPolicy,
-    label_hash: [u8; LABEL_HASH_BYTES],
-    public_blob: &'a [u8],
-    private_blob: &'a [u8],
-}
-
-fn parse_envelope(input: &[u8]) -> Result<ParsedEnvelope<'_>, Error> {
-    if input.len() < HEADER_BYTES || &input[..MAGIC.len()] != MAGIC {
-        return Err(Error::InvalidEnvelope(
-            "missing hardwareseal envelope header".to_owned(),
-        ));
-    }
-    if input[MAGIC.len()] != VERSION {
-        return Err(Error::InvalidEnvelope(format!(
-            "unsupported envelope version {}",
-            input[MAGIC.len()]
-        )));
-    }
-    let policy = policy_from_id(input[MAGIC.len() + 1])?;
-    let mut offset = MAGIC.len() + 2;
-    let mut label_hash = [0; LABEL_HASH_BYTES];
-    label_hash.copy_from_slice(&input[offset..offset + LABEL_HASH_BYTES]);
-    offset += LABEL_HASH_BYTES;
-    let public_len = read_length(input, &mut offset)?;
-    let private_len = read_length(input, &mut offset)?;
-    if public_len > MAX_BLOB_BYTES || private_len > MAX_BLOB_BYTES {
-        return Err(Error::InvalidEnvelope(
-            "TPM blob exceeds the envelope size limit".to_owned(),
-        ));
-    }
-    let expected = offset
-        .checked_add(public_len)
-        .and_then(|length| length.checked_add(private_len))
-        .ok_or_else(|| Error::InvalidEnvelope("envelope length overflow".to_owned()))?;
-    if expected != input.len() {
-        return Err(Error::InvalidEnvelope(
-            "envelope lengths do not match its contents".to_owned(),
-        ));
-    }
-    let public_end = offset + public_len;
-    Ok(ParsedEnvelope {
-        policy,
-        label_hash,
-        public_blob: &input[offset..public_end],
-        private_blob: &input[public_end..],
-    })
-}
-
-fn read_length(input: &[u8], offset: &mut usize) -> Result<usize, Error> {
-    let end = offset
-        .checked_add(4)
-        .ok_or_else(|| Error::InvalidEnvelope("envelope length overflow".to_owned()))?;
-    let bytes = input
-        .get(*offset..end)
-        .and_then(|value| value.try_into().ok())
-        .ok_or_else(|| Error::InvalidEnvelope("truncated envelope lengths".to_owned()))?;
-    *offset = end;
-    Ok(u32::from_be_bytes(bytes) as usize)
-}
-
-const fn policy_id(policy: AccessPolicy) -> u8 {
-    match policy {
-        AccessPolicy::None => 0,
-        AccessPolicy::Biometric => 1,
-    }
-}
-
-fn policy_from_id(id: u8) -> Result<AccessPolicy, Error> {
-    match id {
-        0 => Ok(AccessPolicy::None),
-        1 => Ok(AccessPolicy::Biometric),
-        _ => Err(Error::InvalidEnvelope(format!(
-            "unknown access policy identifier {id}"
-        ))),
+        let _ = unsafe { Tbsip_Context_Close(self.context) };
     }
 }
 

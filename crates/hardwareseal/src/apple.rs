@@ -1,6 +1,6 @@
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::base::Error as SecurityError;
-use security_framework::key::{GenerateKeyOptions, KeyType, SecKey, Token};
+use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
 use security_framework::passwords::{
     AccessControlOptions, PasswordOptions, delete_generic_password_options, generic_password,
     set_generic_password_options,
@@ -15,7 +15,16 @@ use crate::{AccessPolicy, AuthorizationError, Error, LABEL_HASH_BYTES};
 const SERVICE: &str = "dev.factorseal.hardwareseal";
 const MAGIC: &[u8; 8] = b"HSEALAPL";
 const VERSION: u8 = 1;
-const ENVELOPE_BYTES: usize = MAGIC.len() + 1 + 1 + LABEL_HASH_BYTES;
+
+/// Random per-seal identifier that names the keychain item holding a secret.
+///
+/// Each `seal` writes a fresh item under its own account, so an envelope names
+/// exactly the secret it was created for. That keeps Apple envelopes as
+/// self-contained as the TPM and Android ones: re-sealing under a label never
+/// silently repoints an older envelope at a newer secret, and it never has to
+/// destroy the previous item before writing the new one.
+const SEAL_ID_BYTES: usize = 16;
+const ENVELOPE_BYTES: usize = MAGIC.len() + 1 + 1 + LABEL_HASH_BYTES + SEAL_ID_BYTES;
 
 // security-framework-sys exposes only a subset of Security.framework status
 // constants. These values are stable OSStatus ABI constants from SecBase.h.
@@ -24,17 +33,11 @@ const ERR_SEC_NOT_AVAILABLE: i32 = -25291;
 const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
 
 pub(super) fn ensure_available(policy: AccessPolicy) -> Result<(), Error> {
-    // Creating the access-control object validates that the Security framework
-    // understands the requested policy without creating persistent state.
-    access_control(policy)?;
-    let mut options = GenerateKeyOptions::default();
-    options
-        .set_key_type(KeyType::ec_sec_prime_random())
-        .set_size_in_bits(256)
-        .set_token(Token::SecureEnclave);
-    SecKey::new(&options)
-        .map(drop)
-        .map_err(|error| Error::Hardware(error.to_string()))
+    // Sealing stores a generic password item in the Data Protection Keychain,
+    // which needs no Secure Enclave key of its own. Probing for one would
+    // reject Macs whose keychain works perfectly well, so the only precondition
+    // checked here is that Security.framework accepts the requested policy.
+    access_control(policy).map(drop)
 }
 
 pub(super) fn seal(
@@ -42,8 +45,11 @@ pub(super) fn seal(
     policy: AccessPolicy,
     secret: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    delete_if_present(label_hash, policy)?;
-    let mut options = options(label_hash, policy);
+    let mut seal_id = [0_u8; SEAL_ID_BYTES];
+    getrandom::fill(&mut seal_id)
+        .map_err(|error| Error::Hardware(format!("random generation failed: {error}")))?;
+
+    let mut options = options(&account(label_hash, policy, seal_id));
     options.set_access_control(access_control(policy)?);
     set_generic_password_options(secret, options).map_err(hardware_error)?;
 
@@ -52,6 +58,7 @@ pub(super) fn seal(
     envelope.push(VERSION);
     envelope.push(policy_id(policy));
     envelope.extend_from_slice(&label_hash);
+    envelope.extend_from_slice(&seal_id);
     Ok(envelope)
 }
 
@@ -60,36 +67,79 @@ pub(super) fn unseal(
     expected_policy: AccessPolicy,
     envelope: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    parse_envelope(envelope, expected_label_hash, expected_policy)?;
-    generic_password(options(expected_label_hash, expected_policy))
-        .map(Zeroizing::new)
-        .map_err(hardware_error)
+    let seal_id = parse_envelope(envelope, expected_label_hash, expected_policy)?;
+    generic_password(options(&account(
+        expected_label_hash,
+        expected_policy,
+        seal_id,
+    )))
+    .map(Zeroizing::new)
+    .map_err(hardware_error)
 }
 
 pub(super) fn delete(
     label_hash: [u8; LABEL_HASH_BYTES],
     policy: AccessPolicy,
 ) -> Result<(), Error> {
-    delete_if_present(label_hash, policy)
+    // Every generation sealed under this label shares one account prefix, so
+    // deleting the protector removes the superseded items too.
+    let prefix = account_prefix(label_hash, policy);
+    for account in stored_accounts()? {
+        if account.starts_with(&prefix) {
+            delete_if_present(&account)?;
+        }
+    }
+    Ok(())
 }
 
-fn delete_if_present(
-    label_hash: [u8; LABEL_HASH_BYTES],
-    policy: AccessPolicy,
-) -> Result<(), Error> {
-    match delete_generic_password_options(options(label_hash, policy)) {
+fn delete_if_present(account: &str) -> Result<(), Error> {
+    match delete_generic_password_options(options(account)) {
         Ok(()) => Ok(()),
         Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
         Err(error) => Err(hardware_error(error)),
     }
 }
 
-fn options(label_hash: [u8; LABEL_HASH_BYTES], policy: AccessPolicy) -> PasswordOptions {
-    let account = format!("{}.{}", policy_id(policy), hex_label(label_hash));
-    let mut options = PasswordOptions::new_generic_password(SERVICE, &account);
+/// List the accounts of every hardwareseal item in the Data Protection Keychain.
+fn stored_accounts() -> Result<Vec<String>, Error> {
+    let mut search = ItemSearchOptions::new();
+    search
+        .class(ItemClass::generic_password())
+        .service(SERVICE)
+        .load_attributes(true)
+        .limit(Limit::All)
+        // Listing must never raise a biometric prompt: deleting a protector is
+        // a management operation, not an unseal.
+        .skip_authenticated_items(true)
+        .ignore_legacy_keychains();
+    let results = match search.search() {
+        Ok(results) => results,
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => return Ok(Vec::new()),
+        Err(error) => return Err(hardware_error(error)),
+    };
+    Ok(results
+        .iter()
+        .filter_map(|result| result.simplify_dict()?.get("acct").cloned())
+        .collect())
+}
+
+fn options(account: &str) -> PasswordOptions {
+    let mut options = PasswordOptions::new_generic_password(SERVICE, account);
     options.set_access_synchronized(Some(false));
     options.use_protected_keychain();
     options
+}
+
+fn account_prefix(label_hash: [u8; LABEL_HASH_BYTES], policy: AccessPolicy) -> String {
+    format!("{}.{}.", policy_id(policy), hex(&label_hash))
+}
+
+fn account(
+    label_hash: [u8; LABEL_HASH_BYTES],
+    policy: AccessPolicy,
+    seal_id: [u8; SEAL_ID_BYTES],
+) -> String {
+    format!("{}{}", account_prefix(label_hash, policy), hex(&seal_id))
 }
 
 fn access_control(policy: AccessPolicy) -> Result<SecAccessControl, Error> {
@@ -108,7 +158,7 @@ fn parse_envelope(
     input: &[u8],
     expected_label_hash: [u8; LABEL_HASH_BYTES],
     expected_policy: AccessPolicy,
-) -> Result<(), Error> {
+) -> Result<[u8; SEAL_ID_BYTES], Error> {
     if input.len() != ENVELOPE_BYTES || &input[..MAGIC.len()] != MAGIC {
         return Err(Error::InvalidEnvelope(
             "missing Apple Keychain envelope header".to_owned(),
@@ -125,12 +175,17 @@ fn parse_envelope(
             "stored access policy does not match the requested policy".to_owned(),
         ));
     }
-    if input[MAGIC.len() + 2..] != expected_label_hash {
+    let label_start = MAGIC.len() + 2;
+    let label_end = label_start + LABEL_HASH_BYTES;
+    if input[label_start..label_end] != expected_label_hash {
         return Err(Error::InvalidEnvelope(
             "sealed secret belongs to another label".to_owned(),
         ));
     }
-    Ok(())
+    let seal_id = input[label_end..]
+        .try_into()
+        .map_err(|_| Error::InvalidEnvelope("truncated Apple seal identifier".to_owned()))?;
+    Ok(seal_id)
 }
 
 const fn policy_id(policy: AccessPolicy) -> u8 {
@@ -140,14 +195,16 @@ const fn policy_id(policy: AccessPolicy) -> u8 {
     }
 }
 
-fn hex_label(hash: [u8; LABEL_HASH_BYTES]) -> String {
+fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    hash.iter()
-        .fold(String::with_capacity(hash.len() * 2), |mut output, byte| {
+    bytes.iter().fold(
+        String::with_capacity(bytes.len() * 2),
+        |mut output, byte| {
             write!(output, "{byte:02x}").expect("writing to a string cannot fail");
             output
-        })
+        },
+    )
 }
 
 fn hardware_error(error: SecurityError) -> Error {
@@ -165,14 +222,49 @@ fn hardware_error(error: SecurityError) -> Error {
 mod tests {
     use super::*;
 
+    fn envelope(
+        label: [u8; LABEL_HASH_BYTES],
+        policy: AccessPolicy,
+        seal_id: [u8; SEAL_ID_BYTES],
+    ) -> Vec<u8> {
+        let mut envelope = Vec::from(MAGIC.as_slice());
+        envelope.extend_from_slice(&[VERSION, policy_id(policy)]);
+        envelope.extend_from_slice(&label);
+        envelope.extend_from_slice(&seal_id);
+        envelope
+    }
+
     #[test]
     fn envelope_binds_label_and_policy() {
         let label = [9; LABEL_HASH_BYTES];
-        let mut envelope = Vec::from(MAGIC.as_slice());
-        envelope.extend_from_slice(&[VERSION, policy_id(AccessPolicy::None)]);
-        envelope.extend_from_slice(&label);
-        assert!(parse_envelope(&envelope, label, AccessPolicy::None).is_ok());
-        assert!(parse_envelope(&envelope, [8; LABEL_HASH_BYTES], AccessPolicy::None).is_err());
-        assert!(parse_envelope(&envelope, label, AccessPolicy::Biometric).is_err());
+        let seal_id = [1; SEAL_ID_BYTES];
+        let encoded = envelope(label, AccessPolicy::None, seal_id);
+        assert_eq!(
+            parse_envelope(&encoded, label, AccessPolicy::None).expect("parse"),
+            seal_id
+        );
+        assert!(parse_envelope(&encoded, [8; LABEL_HASH_BYTES], AccessPolicy::None).is_err());
+        assert!(parse_envelope(&encoded, label, AccessPolicy::Biometric).is_err());
+    }
+
+    #[test]
+    fn envelope_rejects_truncated_and_trailing_data() {
+        let label = [9; LABEL_HASH_BYTES];
+        let encoded = envelope(label, AccessPolicy::None, [1; SEAL_ID_BYTES]);
+        assert!(parse_envelope(&encoded[..encoded.len() - 1], label, AccessPolicy::None).is_err());
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(parse_envelope(&trailing, label, AccessPolicy::None).is_err());
+    }
+
+    #[test]
+    fn each_seal_identifier_names_its_own_account() {
+        let label = [9; LABEL_HASH_BYTES];
+        let first = account(label, AccessPolicy::None, [1; SEAL_ID_BYTES]);
+        let second = account(label, AccessPolicy::None, [2; SEAL_ID_BYTES]);
+        assert_ne!(first, second);
+        let prefix = account_prefix(label, AccessPolicy::None);
+        assert!(first.starts_with(&prefix) && second.starts_with(&prefix));
+        assert!(!first.starts_with(&account_prefix(label, AccessPolicy::Biometric)));
     }
 }
