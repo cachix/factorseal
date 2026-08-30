@@ -1,9 +1,10 @@
 #!/bin/sh
 # Opt-in physical Secure Enclave and lifecycle acceptance. See acceptance/README.md.
 set -eu
+umask 077
 
 usage() {
-    echo "usage: $0 --factorseal PATH --root ABSOLUTE_PATH --password-file PATH [--event lock|switch|sleep] [--evidence ABSOLUTE_PATH] [--destroy-after]" >&2
+    echo "usage: $0 [--factorseal PATH] [--root ABSOLUTE_PATH] [--password-file PATH] [--event lock|switch|sleep] [--evidence ABSOLUTE_PATH] [--destroy-after]" >&2
     exit "${1:-2}"
 }
 
@@ -26,10 +27,25 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ -n "$factorseal" ] && [ -x "$factorseal" ] || usage
-[ -n "$root" ] && [ "${root#/}" != "$root" ] || usage
+script_dir=$(CDPATH='' cd -P "$(dirname "$0")" && pwd)
+if [ -z "$factorseal" ] && [ -x "$script_dir/Factorseal.app/Contents/MacOS/factorseal" ]; then
+    factorseal="$script_dir/Factorseal.app/Contents/MacOS/factorseal"
+elif [ -z "$factorseal" ] && [ -x /Applications/Factorseal.app/Contents/MacOS/factorseal ]; then
+    factorseal=/Applications/Factorseal.app/Contents/MacOS/factorseal
+elif [ -z "$factorseal" ] && command -v factorseal >/dev/null 2>&1; then
+    factorseal=$(command -v factorseal)
+fi
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+[ -n "$root" ] || root="$HOME/Library/Application Support/Factorseal-acceptance-$run_id"
+[ -n "$evidence" ] || evidence="$(pwd -P)/factorseal-macos-$lifecycle_event-$run_id.acceptance.txt"
+
+[ -n "$factorseal" ] && [ -x "$factorseal" ] || {
+    echo "Factorseal.app was not found beside the runner, in /Applications, or on PATH" >&2
+    usage
+}
+[ "${root#/}" != "$root" ] || usage
 [ ! -e "$root" ] || { echo "acceptance root already exists: $root" >&2; exit 2; }
-[ -n "$password_file" ] && [ -f "$password_file" ] || usage
+[ -z "$password_file" ] || [ -f "$password_file" ] || usage
 case $lifecycle_event in lock|switch|sleep) ;; *) usage ;; esac
 
 hardware_summary=$(/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null \
@@ -42,16 +58,55 @@ case $(printf '%s' "$hardware_summary" | tr '[:upper:]' '[:lower:]') in
         ;;
 esac
 
-[ -n "$evidence" ] || evidence="${root}.acceptance-record"
 [ "${evidence#/}" != "$evidence" ] || { echo "evidence path must be absolute" >&2; exit 2; }
-evidence_partial="${evidence}.partial"
+case $evidence in
+    *.txt) evidence_partial="${evidence%.txt}.partial.txt" ;;
+    *) evidence_partial="${evidence}.partial" ;;
+esac
 [ ! -e "$evidence" ] && [ ! -e "$evidence_partial" ] || {
-    echo "evidence path already exists: $evidence (or its .partial file)" >&2
+    echo "evidence path already exists: $evidence or $evidence_partial" >&2
     exit 2
 }
 [ -d "$(dirname "$evidence")" ] || { echo "evidence parent directory does not exist" >&2; exit 2; }
 
-umask 077
+vault_pid=
+acceptance_passed=false
+generated_password_file=
+cleanup() {
+    if [ -n "$vault_pid" ] && kill -0 "$vault_pid" 2>/dev/null; then
+        kill -TERM "$vault_pid" 2>/dev/null || true
+        wait "$vault_pid" || true
+    fi
+    if [ -n "$generated_password_file" ]; then
+        if [ "$acceptance_passed" = true ] || [ ! -e "$root" ]; then
+            rm -f "$generated_password_file"
+        else
+            echo "Test did not finish; the temporary factor was retained for cleanup: $generated_password_file" >&2
+        fi
+    fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ -z "$password_file" ]; then
+    password_file=$(mktemp "${TMPDIR:-/tmp}/factorseal-acceptance-password.XXXXXX")
+    generated_password_file=$password_file
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$password_file"
+    destroy_after=true
+fi
+
+echo "Factorseal physical macOS acceptance ($lifecycle_event)"
+echo "  Test vault: $root"
+echo "  Evidence:   $evidence"
+echo "Native verification prompts will appear during creation, unseal, recovery, and cleanup."
+if [ -n "$generated_password_file" ]; then
+    echo "The guided run uses a generated test-only factor and removes the test vault after success."
+else
+    echo "The test vault is kept unless --destroy-after is supplied."
+fi
+
 record() {
     record_key=$1
     record_value=$(printf '%s' "$2" | tr '\r\n\t=' '    ')
@@ -68,15 +123,6 @@ record expected_backend secure-enclave
 record physical_host_check pass
 record hardware_summary "$hardware_summary"
 record lifecycle_event "$lifecycle_event"
-
-vault_pid=
-cleanup() {
-    if [ -n "$vault_pid" ] && kill -0 "$vault_pid" 2>/dev/null; then
-        kill -TERM "$vault_pid" 2>/dev/null || true
-        wait "$vault_pid" || true
-    fi
-}
-trap cleanup EXIT HUP INT TERM
 
 status() { "$factorseal" --root "$root" status; }
 wait_for() {
@@ -109,19 +155,16 @@ wait_for_vault_exit() {
 observed_backend=$(status | sed -n 's/.*"hardware_backend": "\([^"]*\)".*/\1/p')
 [ "$observed_backend" = secure-enclave ]
 record observed_backend "$observed_backend"
-printf 'Did you observe the native Touch ID or macOS user-verification prompt? [y/N] '
-read -r prompt_observed
-case $prompt_observed in y|Y|yes|YES|Yes) ;; *) echo "native user verification was not observed" >&2; exit 1 ;; esac
-record native_prompt_create_observed pass
 record test.create pass
 
 "$factorseal" --root "$root" --password-file "$password_file" \
     agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-unseal.log" 2>&1 &
 vault_pid=$!
 wait_for unsealed
-printf 'Did the initial unseal show a native Touch ID or macOS user-verification prompt? [y/N] '
-read -r unseal_prompt_observed
-case $unseal_prompt_observed in y|Y|yes|YES|Yes) ;; *) echo "native user verification was not observed during unseal" >&2; exit 1 ;; esac
+printf 'Did you see native verification for both creation and initial unseal? [y/N] '
+read -r prompts_observed
+case $prompts_observed in y|Y|yes|YES|Yes) ;; *) echo "both native verification prompts must be observed" >&2; exit 1 ;; esac
+record native_prompt_create_observed pass
 record native_prompt_unseal_observed pass
 record native_prompt_observed pass
 record test.initial_unseal pass
@@ -130,8 +173,8 @@ printf '%s' 'hardware-lifecycle-acceptance' | "$factorseal" --root "$root" set a
 record test.ipc_round_trip pass
 
 echo "Trigger the requested macOS lifecycle event now: $lifecycle_event."
-echo "The runner will fail if the real AppKit lifecycle notification does not seal the vault."
-printf 'Press Enter after initiating the lifecycle event: '
+echo "After returning to this session, press Enter."
+printf 'Press Enter after the lifecycle event: '
 read -r _
 wait_for_vault_exit
 wait_for sealed
@@ -163,4 +206,6 @@ else
 fi
 record completed_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mv "$evidence_partial" "$evidence"
-echo "macOS native hardware/lifecycle acceptance passed. Evidence: $evidence"
+acceptance_passed=true
+echo "PASS — send this evidence file to the Factorseal maintainers: $evidence"
+echo "Upload it to https://github.com/domenkozar/factorseal/issues/2"

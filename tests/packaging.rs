@@ -301,3 +301,15 @@ fn every_background_launcher_uses_the_agent_command() {
     assert!(macos.contains("<string>agent</string>"));
     assert!(windows.contains("factorseal-askpass.cmd\" agent"));
 }
+
+#[test]
+fn every_release_archive_ships_a_one_command_acceptance_runner() {
+    let unix = packaging("build-unix.sh");
+    assert!(unix.contains("acceptance/$platform.sh"));
+    assert!(unix.contains("$stage/$archive/run-acceptance.sh"));
+    assert!(unix.contains("$output_dir/$archive-acceptance.sh"));
+
+    let windows = packaging("build-windows.ps1");
+    assert!(windows.contains("acceptance/windows.ps1"));
+    assert!(windows.contains("run-acceptance.ps1"));
+}

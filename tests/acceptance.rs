@@ -37,6 +37,7 @@ fn every_physical_runner_emits_the_same_core_evidence_contract() {
             "test.sealed_read_denied",
             "test.reunseal_recovery",
             "test.delete",
+            "test.destroy",
             "completed_at_utc",
         ] {
             assert!(source.contains(marker), "{name} does not emit `{marker}`");
@@ -58,4 +59,27 @@ fn physical_runners_reject_virtual_hosts_and_require_native_hardware() {
     assert!(windows.contains("Win32_ComputerSystem"));
     assert!(windows.contains("Get-Tpm"));
     assert!(windows.contains("Physical acceptance refuses virtualized hardware"));
+    for cloud_identity in ["amazon ec2", "google compute engine"] {
+        assert!(
+            windows.to_ascii_lowercase().contains(cloud_identity),
+            "windows.ps1 does not reject the cloud VM identity `{cloud_identity}`"
+        );
+    }
+}
+
+#[test]
+fn guided_runs_choose_isolated_defaults_and_clean_up_after_success() {
+    for name in ["linux.sh", "macos.sh"] {
+        let source = runner(name);
+        assert!(source.contains("acceptance-$run_id"));
+        assert!(source.contains("factorseal-acceptance-password.XXXXXX"));
+        assert!(source.contains("destroy_after=true"));
+        assert!(source.contains("send this evidence file"));
+    }
+
+    let windows = runner("windows.ps1");
+    assert!(windows.contains("Factorseal-acceptance-$runId"));
+    assert!(windows.contains("RandomNumberGenerator"));
+    assert!(windows.contains("$destroyAfterRun = $true"));
+    assert!(windows.contains("send this evidence file"));
 }

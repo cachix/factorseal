@@ -20,6 +20,7 @@ try {
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     Copy-Item $factorseal, "LICENSE", "README.md" -Destination $stage
     Copy-Item "packaging/windows/factorseal-task.xml.in", "packaging/windows/factorseal-askpass.ps1", "packaging/windows/factorseal-askpass.cmd" -Destination $stage
+    Copy-Item "acceptance/windows.ps1" -Destination (Join-Path $stage "run-acceptance.ps1")
     $zip = Join-Path $OutputDirectory "$archive.zip"
     Compress-Archive -Path $stage -DestinationPath $zip -Force
     Write-Output $zip

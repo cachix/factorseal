@@ -39,6 +39,8 @@ fi
 
 mkdir -p "$output_dir" "$stage/$archive"
 cp LICENSE README.md "$stage/$archive/"
+cp "acceptance/$platform.sh" "$stage/$archive/run-acceptance.sh"
+chmod 0755 "$stage/$archive/run-acceptance.sh"
 
 if [ "$platform" = linux ]; then
     mkdir -p "$stage/$archive/bin" "$stage/$archive/share/systemd/user"
@@ -66,6 +68,10 @@ fi
 
 tar -C "$stage" -czf "$output_dir/$archive.tar.gz" "$archive"
 echo "$output_dir/$archive.tar.gz"
+
+cp "acceptance/$platform.sh" "$output_dir/$archive-acceptance.sh"
+chmod 0755 "$output_dir/$archive-acceptance.sh"
+echo "$output_dir/$archive-acceptance.sh"
 
 if [ "$platform" = macos ]; then
     package_root="$stage/package-root"

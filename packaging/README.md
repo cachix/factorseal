@@ -10,11 +10,13 @@ The archive builders are reproducible developer packaging, not a claim that an
 artifact is ready to release:
 
 - `build-unix.sh linux` creates a tarball with the binaries, systemd user unit,
-  and interactive session-agent helper;
-- `build-unix.sh macos` creates a tarball and an unsigned `.pkg` containing an
-  app bundle, its askpass helper, and a LaunchAgent property list;
+  interactive session-agent helper, and one-command physical acceptance runner;
+- `build-unix.sh macos` creates a tarball and an unsigned `.pkg`; the tarball
+  also carries the one-command runner beside the app bundle, askpass helper,
+  and LaunchAgent property list;
 - `build-windows.ps1` creates a ZIP containing the executables, the askpass
-  helper, and a Scheduled Task template. Selecting a maintained Windows installer toolchain remains a
+  helper, Scheduled Task template, and one-command physical acceptance runner.
+  Selecting a maintained Windows installer toolchain remains a
   release decision; current WiX releases require explicit OSMF terms and are
   not silently accepted by this repository.
 

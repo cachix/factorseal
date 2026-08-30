@@ -1,9 +1,10 @@
 #!/bin/sh
 # Opt-in physical TPM and lifecycle acceptance. See acceptance/README.md.
 set -eu
+umask 077
 
 usage() {
-    echo "usage: $0 --factorseal PATH --root ABSOLUTE_PATH --password-file PATH [--evidence ABSOLUTE_PATH] [--destroy-after]" >&2
+    echo "usage: $0 [--factorseal PATH] [--root ABSOLUTE_PATH] [--password-file PATH] [--evidence ABSOLUTE_PATH] [--destroy-after]" >&2
     exit "${1:-2}"
 }
 
@@ -24,11 +25,23 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ -n "$factorseal" ] && [ -x "$factorseal" ] || usage
-[ -n "$root" ] && [ "${root#/}" != "$root" ] || usage
+script_dir=$(CDPATH='' cd -P "$(dirname "$0")" && pwd)
+if [ -z "$factorseal" ] && [ -x "$script_dir/bin/factorseal" ]; then
+    factorseal="$script_dir/bin/factorseal"
+elif [ -z "$factorseal" ] && command -v factorseal >/dev/null 2>&1; then
+    factorseal=$(command -v factorseal)
+fi
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+[ -n "$root" ] || root="${XDG_DATA_HOME:-$HOME/.local/share}/factorseal-acceptance-$run_id"
+[ -n "$evidence" ] || evidence="$(pwd -P)/factorseal-linux-$run_id.acceptance.txt"
+
+[ -n "$factorseal" ] && [ -x "$factorseal" ] || {
+    echo "factorseal was not found beside the runner or on PATH" >&2
+    usage
+}
+[ "${root#/}" != "$root" ] || usage
 [ ! -e "$root" ] || { echo "acceptance root already exists: $root" >&2; exit 2; }
-[ -n "$password_file" ] && [ -f "$password_file" ] || usage
-[ -n "${XDG_SESSION_ID:-}" ] || { echo "XDG_SESSION_ID is required for the logind lock test" >&2; exit 2; }
+[ -z "$password_file" ] || [ -f "$password_file" ] || usage
 command -v systemd-detect-virt >/dev/null 2>&1 || { echo "systemd-detect-virt is required" >&2; exit 2; }
 if systemd-detect-virt --quiet; then
     echo "physical acceptance refuses virtualized hosts (detected: $(systemd-detect-virt))" >&2
@@ -36,16 +49,66 @@ if systemd-detect-virt --quiet; then
 fi
 [ -c /dev/tpmrm0 ] || { echo "a physical TPM resource manager (/dev/tpmrm0) is required" >&2; exit 2; }
 
-[ -n "$evidence" ] || evidence="${root}.acceptance-record"
+if [ -z "${XDG_SESSION_ID:-}" ]; then
+    XDG_SESSION_ID=$(loginctl show-user "$(id -u)" --property=Display --value 2>/dev/null || true)
+    export XDG_SESSION_ID
+fi
+[ -n "${XDG_SESSION_ID:-}" ] || {
+    echo "could not identify the active desktop session; run this from its terminal" >&2
+    exit 2
+}
+case $(loginctl show-session "$XDG_SESSION_ID" --property=Remote --value 2>/dev/null || true) in
+    yes) echo "run physical acceptance from the local desktop, not through SSH" >&2; exit 2 ;;
+esac
+
 [ "${evidence#/}" != "$evidence" ] || { echo "evidence path must be absolute" >&2; exit 2; }
-evidence_partial="${evidence}.partial"
+case $evidence in
+    *.txt) evidence_partial="${evidence%.txt}.partial.txt" ;;
+    *) evidence_partial="${evidence}.partial" ;;
+esac
 [ ! -e "$evidence" ] && [ ! -e "$evidence_partial" ] || {
-    echo "evidence path already exists: $evidence (or its .partial file)" >&2
+    echo "evidence path already exists: $evidence or $evidence_partial" >&2
     exit 2
 }
 [ -d "$(dirname "$evidence")" ] || { echo "evidence parent directory does not exist" >&2; exit 2; }
 
-umask 077
+vault_pid=
+acceptance_passed=false
+generated_password_file=
+cleanup() {
+    if [ -n "$vault_pid" ] && kill -0 "$vault_pid" 2>/dev/null; then
+        kill -TERM "$vault_pid" 2>/dev/null || true
+        wait "$vault_pid" || true
+    fi
+    if [ -n "$generated_password_file" ]; then
+        if [ "$acceptance_passed" = true ] || [ ! -e "$root" ]; then
+            rm -f "$generated_password_file"
+        else
+            echo "Test did not finish; the temporary factor was retained for cleanup: $generated_password_file" >&2
+        fi
+    fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ -z "$password_file" ]; then
+    password_file=$(mktemp "${TMPDIR:-/tmp}/factorseal-acceptance-password.XXXXXX")
+    generated_password_file=$password_file
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$password_file"
+    destroy_after=true
+fi
+
+echo "Factorseal physical Linux acceptance"
+echo "  Test vault: $root"
+echo "  Evidence:   $evidence"
+if [ -n "$generated_password_file" ]; then
+    echo "The guided run uses a generated test-only factor and removes the test vault after success."
+else
+    echo "The test vault is kept unless --destroy-after is supplied."
+fi
+
 record() {
     record_key=$1
     record_value=$(printf '%s' "$2" | tr '\r\n\t=' '    ')
@@ -63,15 +126,6 @@ record physical_host_check pass
 record hardware_summary "$(cat /sys/class/tpm/tpm0/device/description 2>/dev/null || printf 'TPM 2.0 at /dev/tpmrm0')"
 record native_prompt_observed not-applicable
 record lifecycle_event logind-lock
-
-vault_pid=
-cleanup() {
-    if [ -n "$vault_pid" ] && kill -0 "$vault_pid" 2>/dev/null; then
-        kill -TERM "$vault_pid" 2>/dev/null || true
-        wait "$vault_pid" || true
-    fi
-}
-trap cleanup EXIT HUP INT TERM
 
 status() { "$factorseal" --root "$root" status; }
 wait_for() {
@@ -115,9 +169,9 @@ printf '%s' 'hardware-lifecycle-acceptance' | "$factorseal" --root "$root" set a
 [ "$("$factorseal" --root "$root" get acceptance --field value)" = "hardware-lifecycle-acceptance" ]
 record test.ipc_round_trip pass
 
-echo "Lock this exact logind session now (for example: loginctl lock-session \"$XDG_SESSION_ID\")."
-echo "The runner will fail if the real Lock signal does not seal the vault."
-printf 'Press Enter after initiating the lock event: '
+echo "Lock this session now (for example: loginctl lock-session \"$XDG_SESSION_ID\")."
+echo "After unlocking again, return here and press Enter."
+printf 'Press Enter after the lock/unlock: '
 read -r _
 wait_for_vault_exit
 wait_for sealed
@@ -149,4 +203,6 @@ else
 fi
 record completed_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mv "$evidence_partial" "$evidence"
-echo "Linux native hardware/lifecycle acceptance passed. Evidence: $evidence"
+acceptance_passed=true
+echo "PASS — send this evidence file to the Factorseal maintainers: $evidence"
+echo "Upload it to https://github.com/domenkozar/factorseal/issues/2"

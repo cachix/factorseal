@@ -60,6 +60,7 @@ jobs:
           packaging/build-unix.sh linux
           tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/share/systemd/user/factorseal.service$'
           tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/bin/factorseal$'
+          tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/run-acceptance.sh$'
       - uses: actions/upload-artifact@v4
         with:
           name: factorseal-linux
@@ -83,6 +84,7 @@ jobs:
         run: |
           packaging/build-unix.sh macos
           tar -tzf dist/factorseal-*-macos-*.tar.gz | grep '/Factorseal.app/Contents/MacOS/factorseal$'
+          tar -tzf dist/factorseal-*-macos-*.tar.gz | grep '/run-acceptance.sh$'
           pkgutil --payload-files dist/factorseal-*-macos-*.pkg | grep 'Applications/Factorseal.app/Contents/MacOS/factorseal$'
           plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist
       - uses: actions/upload-artifact@v4
@@ -121,6 +123,7 @@ jobs:
           try {
             if (-not ($entries.Entries.FullName -match 'factorseal.exe$')) { throw 'Factorseal executable missing from package' }
             if (-not ($entries.Entries.FullName -match 'factorseal-task.xml.in$')) { throw 'task template missing from package' }
+            if (-not ($entries.Entries.FullName -match 'run-acceptance.ps1$')) { throw 'acceptance runner missing from package' }
           } finally { $entries.Dispose() }
           [xml](Get-Content packaging/windows/factorseal-task.xml.in) | Out-Null
       - uses: actions/upload-artifact@v4
