@@ -48,6 +48,60 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 [ -z "$password_file" ] || [ -f "$password_file" ] || usage
 case $lifecycle_event in lock|switch|sleep) ;; *) usage ;; esac
 
+case $factorseal in
+    */Contents/MacOS/*) app_bundle=${factorseal%/Contents/MacOS/*} ;;
+    *)
+        echo "macOS acceptance requires Factorseal inside its signed .app bundle" >&2
+        exit 2
+        ;;
+esac
+if ! /usr/bin/codesign --verify --strict "$app_bundle" 2>/dev/null; then
+    echo "Factorseal.app is unsigned or has an invalid code signature." >&2
+    echo "The Data Protection Keychain requires a provisioned macOS app; unsigned CI artifacts cannot pass this acceptance test." >&2
+    exit 2
+fi
+entitlements=$(/usr/bin/codesign -d --entitlements - --xml "$factorseal" 2>/dev/null) || {
+    echo "could not read the Factorseal code-signing entitlements" >&2
+    exit 2
+}
+application_identifier=$(printf '%s' "$entitlements" \
+    | /usr/bin/plutil -extract 'com\.apple\.application-identifier' raw -o - - 2>/dev/null) || {
+    echo "Factorseal.app lacks com.apple.application-identifier." >&2
+    echo "Sign it with a provisioning profile that authorizes Data Protection Keychain access; unsigned CI artifacts cannot pass this acceptance test." >&2
+    exit 2
+}
+[ -n "$application_identifier" ] || { echo "Factorseal.app has an empty application identifier" >&2; exit 2; }
+[ -f "$app_bundle/Contents/embedded.provisionprofile" ] || {
+    echo "Factorseal.app lacks Contents/embedded.provisionprofile, which must authorize its Data Protection Keychain entitlement." >&2
+    exit 2
+}
+profile=$(/usr/bin/security cms -D -i "$app_bundle/Contents/embedded.provisionprofile" 2>/dev/null) || {
+    echo "Factorseal.app contains an invalid embedded provisioning profile" >&2
+    exit 2
+}
+profile_application_identifier=$(printf '%s' "$profile" \
+    | /usr/bin/plutil -extract 'Entitlements.com\.apple\.application-identifier' raw -o - - 2>/dev/null) || {
+    echo "Factorseal.app's provisioning profile does not authorize an application identifier" >&2
+    exit 2
+}
+case $profile_application_identifier in
+    *'*')
+        profile_application_prefix=${profile_application_identifier%\*}
+        case $application_identifier in
+            "$profile_application_prefix"*) ;;
+            *)
+                echo "Factorseal.app's provisioning profile does not authorize $application_identifier" >&2
+                exit 2
+                ;;
+        esac
+        ;;
+    "$application_identifier") ;;
+    *)
+        echo "Factorseal.app's provisioning profile does not authorize $application_identifier" >&2
+        exit 2
+        ;;
+esac
+
 hardware_summary=$(/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null \
     | awk -F': ' '/Model Name|Model Identifier|Chip|Processor Name/ { printf "%s%s", separator, $2; separator="; " }')
 [ -n "$hardware_summary" ] || { echo "could not identify physical Mac hardware" >&2; exit 2; }
@@ -118,6 +172,7 @@ record started_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 record factorseal_filename "$(basename "$factorseal")"
 record factorseal_sha256 "$(shasum -a 256 "$factorseal" | awk '{print $1}')"
 record factorseal_version "$("$factorseal" --version)"
+record factorseal_application_identifier "$application_identifier"
 record os_summary "macOS $(sw_vers -productVersion); $(uname -m)"
 record expected_backend secure-enclave
 record physical_host_check pass

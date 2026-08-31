@@ -38,6 +38,10 @@ authentication ceremony. No sealed secret or wrapping key depends on P-256.
 Each `seal` writes its own keychain item and returns an envelope naming that
 item, so re-sealing under a label never destroys or silently repoints the
 previous secret, and `delete` removes every generation stored under the label.
+On macOS, the host executable must live in an app-like bundle signed with a
+provisioning profile that authorizes its `com.apple.application-identifier`
+entitlement. An unsigned command-line tool has no Data Protection Keychain
+access group and fails with `errSecMissingEntitlement` (`-34018`).
 Android requires a StrongBox or TEE security level and rejects software-only
 Keystore keys.
 

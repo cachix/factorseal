@@ -22,6 +22,11 @@ checkout can use `nix run .#acceptance-linux` instead.
 
 ### macOS
 
+Use a signed release candidate whose embedded provisioning profile authorizes
+its Data Protection Keychain entitlements. CI does not publish an unsigned
+macOS package; the runner also rejects unsigned or unprovisioned apps during
+preflight.
+
 ```console
 ./run-acceptance.sh
 ```

@@ -313,3 +313,18 @@ fn every_release_archive_ships_a_one_command_acceptance_runner() {
     assert!(windows.contains("acceptance/windows.ps1"));
     assert!(windows.contains("run-acceptance.ps1"));
 }
+
+#[test]
+fn macos_builds_require_a_profile_and_embed_keychain_entitlements_before_signing() {
+    let builder = packaging("build-unix.sh");
+    let entitlements = packaging("macos/Factorseal.entitlements.in");
+
+    assert!(builder.contains("FACTORSEAL_MACOS_SIGNING_IDENTITY"));
+    assert!(builder.contains("FACTORSEAL_MACOS_PROVISIONING_PROFILE"));
+    assert!(builder.contains("macOS packaging requires FACTORSEAL_MACOS_SIGNING_IDENTITY"));
+    assert!(builder.contains("embedded.provisionprofile"));
+    assert!(builder.contains("--entitlements \"$entitlements\""));
+    assert!(entitlements.contains("com.apple.application-identifier"));
+    assert!(entitlements.contains("com.apple.developer.team-identifier"));
+    assert_eq!(entitlements.matches("@TEAM_ID@.dev.factorseal").count(), 1);
+}

@@ -31,6 +31,7 @@ const ENVELOPE_BYTES: usize = MAGIC.len() + 1 + 1 + LABEL_HASH_BYTES + SEAL_ID_B
 const ERR_SEC_USER_CANCELED: i32 = -128;
 const ERR_SEC_NOT_AVAILABLE: i32 = -25291;
 const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
+const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34018;
 
 pub(super) fn ensure_available(policy: AccessPolicy) -> Result<(), Error> {
     // Sealing stores a generic password item in the Data Protection Keychain,
@@ -214,6 +215,10 @@ fn hardware_error(error: SecurityError) -> Error {
         ERR_SEC_INTERACTION_NOT_ALLOWED => Error::Authorization(AuthorizationError::UiUnavailable),
         ERR_SEC_ITEM_NOT_FOUND => Error::Authorization(AuthorizationError::CredentialInvalidated),
         ERR_SEC_NOT_AVAILABLE => Error::NotAvailable,
+        ERR_SEC_MISSING_ENTITLEMENT => Error::Hardware(
+            "the Apple host application is not signed with a provisioning profile that authorizes its Data Protection Keychain entitlements"
+                .to_owned(),
+        ),
         _ => Error::Hardware(error.to_string()),
     }
 }
@@ -245,6 +250,16 @@ mod tests {
         );
         assert!(parse_envelope(&encoded, [8; LABEL_HASH_BYTES], AccessPolicy::None).is_err());
         assert!(parse_envelope(&encoded, label, AccessPolicy::Biometric).is_err());
+    }
+
+    #[test]
+    fn missing_entitlement_names_the_host_signing_requirement() {
+        let error = hardware_error(SecurityError::from_code(ERR_SEC_MISSING_ENTITLEMENT));
+        let Error::Hardware(message) = error else {
+            panic!("missing entitlement was not classified as a hardware operation failure");
+        };
+        assert!(message.contains("provisioning profile"));
+        assert!(message.contains("Data Protection Keychain"));
     }
 
     #[test]

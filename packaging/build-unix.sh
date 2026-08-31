@@ -18,6 +18,21 @@ if [ "$host" != "$platform" ]; then
     exit 2
 fi
 
+signing_identity=
+provisioning_profile=
+if [ "$platform" = macos ]; then
+    signing_identity=${FACTORSEAL_MACOS_SIGNING_IDENTITY:-}
+    provisioning_profile=${FACTORSEAL_MACOS_PROVISIONING_PROFILE:-}
+    [ -n "$signing_identity" ] && [ -n "$provisioning_profile" ] || {
+        echo "macOS packaging requires FACTORSEAL_MACOS_SIGNING_IDENTITY and FACTORSEAL_MACOS_PROVISIONING_PROFILE" >&2
+        exit 2
+    }
+    [ -f "$provisioning_profile" ] || {
+        echo "macOS provisioning profile does not exist: $provisioning_profile" >&2
+        exit 2
+    }
+fi
+
 # Where README.md tells a Linux user to install the Factorseal binary. The systemd
 # unit's ExecStart is generated from this, so the two cannot drift apart.
 linux_install_dir=/usr/local/bin
@@ -64,6 +79,28 @@ else
     sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Info.plist"
     cp packaging/macos/dev.factorseal.plist "$stage/$archive/Library/LaunchAgents/"
     chmod 0755 "$app/MacOS/factorseal" "$app/MacOS/factorseal-askpass"
+
+    # The Data Protection Keychain derives its access groups from restricted
+    # code-signing entitlements. A profile is therefore required even though
+    # Factorseal does not share items with another app.
+    profile_plist="$stage/provisioning-profile.plist"
+    security cms -D -i "$provisioning_profile" >"$profile_plist"
+    team_id=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.team-identifier' "$profile_plist")
+    profile_application_id=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$profile_plist")
+    application_id="$team_id.dev.factorseal"
+    case $profile_application_id in
+        "$application_id"|"$team_id.*") ;;
+        *)
+            echo "provisioning profile authorizes $profile_application_id, not $application_id" >&2
+            exit 2
+            ;;
+    esac
+    entitlements="$stage/Factorseal.entitlements"
+    sed "s/@TEAM_ID@/$team_id/g" packaging/macos/Factorseal.entitlements.in >"$entitlements"
+    cp "$provisioning_profile" "$app/embedded.provisionprofile"
+    codesign --force --options runtime --timestamp \
+        --sign "$signing_identity" --entitlements "$entitlements" "${app%/Contents}"
+    codesign --verify --strict --verbose=2 "${app%/Contents}"
 fi
 
 tar -C "$stage" -czf "$output_dir/$archive.tar.gz" "$archive"

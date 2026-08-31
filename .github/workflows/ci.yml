@@ -80,17 +80,17 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test --all-targets --all-features
-      - name: Build and inspect macOS package
+      - name: Validate macOS packaging inputs and signing gate
         run: |
-          packaging/build-unix.sh macos
-          tar -tzf dist/factorseal-*-macos-*.tar.gz | grep '/Factorseal.app/Contents/MacOS/factorseal$'
-          tar -tzf dist/factorseal-*-macos-*.tar.gz | grep '/run-acceptance.sh$'
-          pkgutil --payload-files dist/factorseal-*-macos-*.pkg | grep 'Applications/Factorseal.app/Contents/MacOS/factorseal$'
-          plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: factorseal-macos
-          path: dist/*
+          plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist packaging/macos/Factorseal.entitlements.in
+          if packaging_output=$(env \
+            -u FACTORSEAL_MACOS_SIGNING_IDENTITY \
+            -u FACTORSEAL_MACOS_PROVISIONING_PROFILE \
+            packaging/build-unix.sh macos 2>&1); then
+            echo "macOS packaging unexpectedly succeeded without signing credentials" >&2
+            exit 1
+          fi
+          printf '%s\n' "$packaging_output" | grep 'macOS packaging requires FACTORSEAL_MACOS_SIGNING_IDENTITY and FACTORSEAL_MACOS_PROVISIONING_PROFILE'
 
   windows:
     name: Windows

@@ -11,9 +11,10 @@ artifact is ready to release:
 
 - `build-unix.sh linux` creates a tarball with the binaries, systemd user unit,
   interactive session-agent helper, and one-command physical acceptance runner;
-- `build-unix.sh macos` creates a tarball and an unsigned `.pkg`; the tarball
-  also carries the one-command runner beside the app bundle, askpass helper,
-  and LaunchAgent property list;
+- `build-unix.sh macos` requires `FACTORSEAL_MACOS_SIGNING_IDENTITY` and
+  `FACTORSEAL_MACOS_PROVISIONING_PROFILE`, then creates a tarball containing a
+  signed app plus an unsigned `.pkg`. The tarball also carries the one-command
+  runner, askpass helper, and LaunchAgent property list;
 - `build-windows.ps1` creates a ZIP containing the executables, the askpass
   helper, Scheduled Task template, and one-command physical acceptance runner.
   Selecting a maintained Windows installer toolchain remains a
@@ -27,15 +28,32 @@ The archives include the endpoint code but do not install a SecretSpec
 registration file; packagers or users must register the absolute executable
 path as described in the repository README.
 
-Official macOS and Windows releases still require platform signing/notarization
-credentials. Linux release jobs must build against the supported deployment
-baseline and publish checksums and provenance. The Linux binaries dynamically
-require glibc and D-Bus; they are not universal static binaries and
-must not be published from a Nix development shell whose loader paths point
-into `/nix/store`. Physical TPM/Secure Enclave acceptance is separate from
-archive smoke testing.
+Official macOS releases still require installer signing and notarization;
+Windows releases require platform signing credentials. Linux release jobs must
+build against the supported deployment baseline and publish checksums and
+provenance. The Linux binaries dynamically require glibc and D-Bus; they are
+not universal static binaries and must not be published from a Nix development
+shell whose loader paths point into `/nix/store`. Physical TPM/Secure Enclave
+acceptance is separate from archive smoke testing.
 Use the release-candidate runners in [`acceptance/`](../acceptance/README.md)
 on physical hosts and attach their redacted output to the release approval.
+
+The macOS profile must authorize the explicit `dev.factorseal` App ID and its
+default keychain access group. This is not optional for native acceptance:
+Apple derives Data Protection Keychain access groups from restricted signing
+entitlements authorized by the embedded profile. For example:
+
+```console
+FACTORSEAL_MACOS_SIGNING_IDENTITY='Developer ID Application: Example (TEAMID)' \
+FACTORSEAL_MACOS_PROVISIONING_PROFILE=/private/path/Factorseal.provisionprofile \
+  packaging/build-unix.sh macos
+```
+
+The builder decodes the profile, derives the team identifier, embeds the
+profile, signs `Factorseal.app` with hardened runtime and the matching
+application/keychain entitlements, and verifies the resulting app signature.
+It deliberately does not claim that the `.pkg` is signed or that either output
+is notarized.
 
 ## Obtaining a password factor
 

@@ -78,6 +78,9 @@ fn physical_runners_reject_virtual_hosts_and_require_native_hardware() {
     let macos = runner("macos.sh");
     assert!(macos.contains("system_profiler SPHardwareDataType"));
     assert!(macos.contains("physical acceptance refuses virtualized hardware"));
+    assert!(macos.contains("codesign --verify --strict"));
+    assert!(macos.contains("com.apple.application-identifier"));
+    assert!(macos.contains("embedded.provisionprofile"));
 
     let windows = runner("windows.ps1");
     assert!(windows.contains("Win32_ComputerSystem"));
