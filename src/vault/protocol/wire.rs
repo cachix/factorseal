@@ -14,6 +14,11 @@ pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
 pub const MAX_PERMISSION_WAIT_MS: u64 = 5_000;
+/// Maximum number of metadata-only entries returned by one list request.
+///
+/// Eight complete native SecretSpec addresses still fit below the one-MiB
+/// response bound even when every address component requires JSON escaping.
+pub const MAX_LIST_PAGE_SIZE: u16 = 8;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_APPLICATION_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_APPLICATION_BASE_DIR_BYTES: usize = 32 * 1024;
@@ -478,6 +483,19 @@ pub enum VaultAction {
         project: String,
         address: SecretSpecAddress,
     },
+    /// List non-empty durable project partitions without returning values.
+    ListProjects {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+        limit: u16,
+    },
+    /// List full addresses in one durable project without returning values.
+    ListProjectAddresses {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+        limit: u16,
+    },
     /// Read from the SecretSpec provider cache.
     GetCache {
         project: String,
@@ -587,6 +605,25 @@ impl VaultAction {
                 project, address, ..
             }
             | Self::DeleteCache { project, address } => validate_project_address(project, address),
+            Self::ListProjects { cursor, limit } => {
+                validate_list_limit(*limit)?;
+                if let Some(cursor) = cursor {
+                    validate_project(cursor)?;
+                }
+                Ok(())
+            }
+            Self::ListProjectAddresses {
+                project,
+                cursor,
+                limit,
+            } => {
+                validate_project(project)?;
+                validate_list_limit(*limit)?;
+                if let Some(cursor) = cursor {
+                    validate_address_cursor(cursor)?;
+                }
+                Ok(())
+            }
             Self::Mutate {
                 namespace,
                 mutations,
@@ -720,6 +757,16 @@ pub enum VaultResponseBody {
     },
     Cleared {
         entries: usize,
+    },
+    Projects {
+        projects: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
+    },
+    ProjectAddresses {
+        addresses: Vec<SecretSpecAddress>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
     },
     Sealed,
     Permissions {
@@ -858,6 +905,27 @@ fn validate_project(project: &str) -> VaultResult<()> {
     if project.is_empty() || project.len() > MAX_APPLICATION_COMPONENT_BYTES {
         return Err(VaultError::Protocol(
             "SecretSpec project is empty or too long".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_list_limit(limit: u16) -> VaultResult<()> {
+    if !(1..=MAX_LIST_PAGE_SIZE).contains(&limit) {
+        return Err(VaultError::Protocol(format!(
+            "list limit must be between one and {MAX_LIST_PAGE_SIZE}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_address_cursor(cursor: &str) -> VaultResult<()> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| VaultError::Protocol("invalid address-list cursor".to_owned()))?;
+    if decoded.len() != 32 {
+        return Err(VaultError::Protocol(
+            "invalid address-list cursor".to_owned(),
         ));
     }
     Ok(())

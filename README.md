@@ -216,8 +216,8 @@ Caller identity comes from the native transport, never from request JSON:
   verification, and the executable digest.
 
 Durable grants bind the complete caller identity to a document kind, partition,
-or exact address, explicit permissions, and an optional expiry. An executable change
-therefore requires a new grant. These grants are defense in depth between
+or exact address, explicit permissions, and an optional expiry. An executable
+change therefore requires a new grant. These grants are defense in depth between
 same-user applications; they do not protect a granted program from debugging,
 preloading, or compromise by that same user.
 
@@ -243,6 +243,14 @@ optional `evict_at` deadline. SecretSpec convention addresses retain project,
 profile, and key; native addresses retain item plus optional field, vault,
 section, and version. The map key is only an index—the record is validated
 against the requested full address on every read.
+
+An authorized management client can enumerate this encrypted metadata through
+paginated `ListProjects` and `ListProjectAddresses` operations. Listing has its
+own grant permission and returns only project names or full addresses—never
+secret values. Pages contain at most eight entries so even maximally escaped
+addresses remain within the protocol's one-MiB response limit. Expired records
+are removed before listing, and concurrent values for one authenticated
+address appear as one metadata entry.
 
 Applications receive domain operations such as get, put, delete, clear, and
 bounded batch mutation; they never receive raw `AutoCommit` access. Reads use

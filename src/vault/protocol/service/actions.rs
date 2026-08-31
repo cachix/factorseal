@@ -23,7 +23,6 @@ struct ActionContext<'a> {
     store: &'a VaultStore,
     caller: &'a CallerIdentity,
     scope: DocumentKind,
-    project: Option<&'a str>,
     now: u64,
 }
 
@@ -31,7 +30,6 @@ pub(super) fn execute_action(
     store: &VaultStore,
     caller: &CallerIdentity,
     action: VaultAction,
-    project: Option<&str>,
     now: u64,
     lease_deadlines: (u64, u64),
 ) -> VaultResult<(VaultResponseBody, bool)> {
@@ -40,7 +38,6 @@ pub(super) fn execute_action(
         store,
         caller,
         scope,
-        project,
         now,
     };
     match action {
@@ -98,6 +95,17 @@ pub(super) fn execute_action(
         | VaultAction::DeleteCache { project, address } => {
             Ok((context.delete_secret_spec(&project, &address)?, true))
         }
+        VaultAction::ListProjects { cursor, limit } => {
+            Ok((context.list_projects(cursor.as_deref(), limit)?, true))
+        }
+        VaultAction::ListProjectAddresses {
+            project,
+            cursor,
+            limit,
+        } => Ok((
+            context.list_project_addresses(&project, cursor.as_deref(), limit)?,
+            true,
+        )),
         VaultAction::ClearCache { project } => Ok((context.clear(project.as_bytes())?, true)),
         VaultAction::SealCache { project } => Ok((context.seal(project.as_bytes())?, false)),
         VaultAction::ListPermissions
@@ -125,7 +133,42 @@ impl ActionContext<'_> {
                 scope: self.scope,
                 namespace,
                 address,
-                project: self.project,
+                project: None,
+                permission,
+            },
+            self.now,
+        )
+    }
+
+    fn require_project(
+        self,
+        project: &str,
+        address: Option<&SecretAddress>,
+        permission: GrantPermission,
+    ) -> VaultResult<()> {
+        require_grant(
+            self.store,
+            self.caller,
+            GrantRequirement {
+                scope: self.scope,
+                namespace: project.as_bytes(),
+                address,
+                project: Some(project),
+                permission,
+            },
+            self.now,
+        )
+    }
+
+    fn require_kind(self, permission: GrantPermission) -> VaultResult<()> {
+        require_grant(
+            self.store,
+            self.caller,
+            GrantRequirement {
+                scope: self.scope,
+                namespace: b"factorseal/document-kind/v1",
+                address: None,
+                project: None,
                 permission,
             },
             self.now,
@@ -149,7 +192,7 @@ impl ActionContext<'_> {
     ) -> VaultResult<VaultResponseBody> {
         let address = SecretAddress::secret_spec(address.clone())?;
         let namespace = project.as_bytes();
-        self.require(namespace, Some(&address), GrantPermission::Get)?;
+        self.require_project(project, Some(&address), GrantPermission::Get)?;
         let value = self
             .store
             .get_at(self.scope, namespace, &address, self.now)?
@@ -181,7 +224,7 @@ impl ActionContext<'_> {
     ) -> VaultResult<VaultResponseBody> {
         let address = SecretAddress::secret_spec(address.clone())?;
         let namespace = project.as_bytes();
-        self.require(namespace, Some(&address), GrantPermission::Put)?;
+        self.require_project(project, Some(&address), GrantPermission::Put)?;
         validate_evict_at(evict_at, self.now)?;
         self.store
             .put_at(self.scope, namespace, &address, value.expose(), evict_at)?;
@@ -216,7 +259,7 @@ impl ActionContext<'_> {
     ) -> VaultResult<VaultResponseBody> {
         let address = SecretAddress::secret_spec(address.clone())?;
         let namespace = project.as_bytes();
-        self.require(namespace, Some(&address), GrantPermission::Delete)?;
+        self.require_project(project, Some(&address), GrantPermission::Delete)?;
         let existed = self.store.delete(self.scope, namespace, &address)?;
         Ok(VaultResponseBody::Deleted { existed })
     }
@@ -225,6 +268,31 @@ impl ActionContext<'_> {
         self.require(namespace, None, GrantPermission::Clear)?;
         let entries = self.store.clear(self.scope, namespace)?;
         Ok(VaultResponseBody::Cleared { entries })
+    }
+
+    fn list_projects(self, cursor: Option<&str>, limit: u16) -> VaultResult<VaultResponseBody> {
+        self.require_kind(GrantPermission::List)?;
+        let page = self.store.list_projects(cursor, limit, self.now)?;
+        Ok(VaultResponseBody::Projects {
+            projects: page.items,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    fn list_project_addresses(
+        self,
+        project: &str,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> VaultResult<VaultResponseBody> {
+        self.require_project(project, None, GrantPermission::List)?;
+        let page = self
+            .store
+            .list_project_addresses(project, cursor, limit, self.now)?;
+        Ok(VaultResponseBody::ProjectAddresses {
+            addresses: page.items,
+            next_cursor: page.next_cursor,
+        })
     }
 
     fn seal(self, namespace: &[u8]) -> VaultResult<VaultResponseBody> {
@@ -270,7 +338,9 @@ pub(super) fn scope_action(action: VaultAction) -> ScopedAction {
     let scope = match action {
         VaultAction::GetProject { .. }
         | VaultAction::PutProject { .. }
-        | VaultAction::DeleteProject { .. } => DocumentKind::SecretSpecProject,
+        | VaultAction::DeleteProject { .. }
+        | VaultAction::ListProjects { .. }
+        | VaultAction::ListProjectAddresses { .. } => DocumentKind::SecretSpecProject,
         VaultAction::GetCache { .. }
         | VaultAction::PutCache { .. }
         | VaultAction::DeleteCache { .. }

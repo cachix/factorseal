@@ -354,6 +354,7 @@ fn project_commands_accept_project_item_field_and_service_override() {
 fn seal_is_a_first_class_cli_command_and_permission() {
     let cli = Cli::try_parse_from(["factorseal", "seal"]).unwrap();
     assert!(matches!(cli.command, Command::Seal));
+    assert!(PROJECT_PERMISSIONS.contains(&GrantPermission::List));
     assert!(!PROJECT_PERMISSIONS.contains(&GrantPermission::Seal));
 }
 

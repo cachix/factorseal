@@ -52,6 +52,7 @@ pub(crate) enum DocumentOperation {
 pub(crate) struct SecretDocument {
     document: AutoCommit,
     entries: ObjId,
+    partition: Vec<u8>,
     persisted_heads: Vec<ChangeHash>,
 }
 
@@ -73,6 +74,7 @@ impl SecretDocument {
         Ok(Self {
             document,
             entries,
+            partition: partition.to_vec(),
             persisted_heads: Vec::new(),
         })
     }
@@ -97,10 +99,14 @@ impl SecretDocument {
             .get(ROOT, PARTITION_KEY)
             .map_err(automerge_error)?
             .and_then(|(value, _)| value.into_bytes().ok());
+        let Some(partition) = partition else {
+            return Err(VaultError::InvalidData(
+                "Automerge document metadata does not match its protected descriptor".to_owned(),
+            ));
+        };
         if format.as_deref() != Some(kind.as_str())
             || version != Some(FORMAT_VERSION)
-            || partition.as_deref().is_none()
-            || expected_partition.is_some_and(|expected| partition.as_deref() != Some(expected))
+            || expected_partition.is_some_and(|expected| partition != expected)
         {
             return Err(VaultError::InvalidData(
                 "Automerge document metadata does not match its protected descriptor".to_owned(),
@@ -121,8 +127,49 @@ impl SecretDocument {
         Ok(Self {
             document,
             entries,
+            partition,
             persisted_heads,
         })
+    }
+
+    pub(crate) fn partition(&self) -> &[u8] {
+        &self.partition
+    }
+
+    /// Enumerate authenticated address metadata without returning values.
+    /// Concurrent secret values for one address collapse to one list entry;
+    /// conflicting addresses under the same digest fail closed.
+    pub(crate) fn addresses(&self) -> VaultResult<Vec<(String, SecretAddress)>> {
+        let mut keys: Vec<String> = self.document.keys(&self.entries).collect();
+        keys.sort_unstable();
+        let mut addresses = Vec::with_capacity(keys.len());
+        for key in keys {
+            let values = self
+                .document
+                .get_all(&self.entries, &key)
+                .map_err(automerge_error)?;
+            let mut address = None;
+            for (value, _) in values {
+                let bytes = value.into_bytes().map_err(|_| {
+                    VaultError::InvalidData("secret document record is not bytes".to_owned())
+                })?;
+                let record: SecretRecord = serde_json::from_slice(&bytes)
+                    .map_err(|error| VaultError::InvalidData(error.to_string()))?;
+                validate_record_key(&record, &key)?;
+                if address
+                    .as_ref()
+                    .is_some_and(|visible| visible != &record.address)
+                {
+                    return Err(VaultError::Conflict);
+                }
+                address = Some(record.address);
+            }
+            let address = address.ok_or_else(|| {
+                VaultError::InvalidData("secret document entry has no visible record".to_owned())
+            })?;
+            addresses.push((key, address));
+        }
+        Ok(addresses)
     }
 
     pub(crate) fn get(&self, address: &SecretAddress, now: u64) -> VaultResult<SecretRead> {
@@ -254,6 +301,7 @@ impl SecretDocument {
                 })?;
                 let record: SecretRecord = serde_json::from_slice(&bytes)
                     .map_err(|error| VaultError::InvalidData(error.to_string()))?;
+                validate_record_key(&record, &key)?;
                 if record.evict_at.is_some_and(|deadline| deadline <= now) {
                     should_delete = true;
                     break;
@@ -316,6 +364,15 @@ fn validate_record(record: &SecretRecord, address: &SecretAddress) -> VaultResul
     Ok(())
 }
 
+fn validate_record_key(record: &SecretRecord, storage_key: &str) -> VaultResult<()> {
+    if record.version != RECORD_VERSION || record.address.storage_key() != storage_key {
+        return Err(VaultError::InvalidData(
+            "secret document record does not match its authenticated index".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn automerge_error(error: impl std::fmt::Display) -> VaultError {
     VaultError::Automerge(error.to_string())
 }
@@ -370,6 +427,42 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn address_listing_collapses_concurrent_values_without_exposing_them() {
+        let address = SecretAddress::secret_spec(
+            SecretSpecAddress::convention("demo", "default", "API_TOKEN").unwrap(),
+        )
+        .unwrap();
+        let base = SecretDocument::new(b"base", DocumentKind::SecretSpecProject, b"demo")
+            .unwrap()
+            .save();
+        let mut left = SecretDocument::load(
+            &base,
+            b"left",
+            DocumentKind::SecretSpecProject,
+            Some(b"demo"),
+        )
+        .unwrap();
+        let mut right = SecretDocument::load(
+            &base,
+            b"right",
+            DocumentKind::SecretSpecProject,
+            Some(b"demo"),
+        )
+        .unwrap();
+        left.put(&address, b"left-secret", None).unwrap();
+        right.put(&address, b"right-secret", None).unwrap();
+        left.document.merge(&mut right.document).unwrap();
+
+        assert!(matches!(
+            left.get(&address, 1).unwrap(),
+            SecretRead::Conflict
+        ));
+        let listed = left.addresses().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].1, address);
     }
 
     fn address() -> SecretAddress {

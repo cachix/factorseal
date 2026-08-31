@@ -16,9 +16,10 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::vault::{DATABASE_FILE, VaultStore};
 use crate::vault::{
     DocumentId, DocumentKind, DocumentOperation, SecretAddress, SecretDocument, SecretRead,
-    UnsealedVault, VaultError, VaultMetadata, VaultResult,
+    SecretSpecAddress, UnsealedVault, VaultError, VaultMetadata, VaultResult,
 };
 
+use super::StorePage;
 use super::bootstrap::open_store;
 #[cfg(all(test, feature = "hardware"))]
 use super::chain::ProtectedCommit;
@@ -129,6 +130,19 @@ pub(super) enum Command {
         partition: Vec<u8>,
         response: mpsc::Sender<VaultResult<usize>>,
     },
+    ListProjects {
+        cursor: Option<String>,
+        limit: u16,
+        now: u64,
+        response: mpsc::Sender<VaultResult<StorePage<String>>>,
+    },
+    ListProjectAddresses {
+        project: String,
+        cursor: Option<String>,
+        limit: u16,
+        now: u64,
+        response: mpsc::Sender<VaultResult<StorePage<SecretSpecAddress>>>,
+    },
     Shutdown,
 }
 
@@ -173,76 +187,110 @@ fn run_worker(
         return;
     }
     while let Ok(command) = receiver.recv() {
-        match command {
-            Command::Get {
-                scope,
-                partition,
-                address,
-                now,
-                response,
-            } => {
-                let document_id = worker.document_id(scope, &partition);
-                let result =
-                    runtime.block_on(worker.get(document_id, scope, &partition, &address, now));
-                let _ = response.send(result);
-            }
-            Command::Put {
-                scope,
-                partition,
-                address,
-                value,
-                evict_at,
-                response,
-            } => {
-                let document_id = worker.document_id(scope, &partition);
-                let result = runtime.block_on(worker.put(
-                    document_id,
-                    scope,
-                    &partition,
-                    &address,
-                    &value,
-                    evict_at,
-                ));
-                let _ = response.send(result);
-            }
-            Command::Mutate {
-                scope,
-                partition,
-                operations,
-                response,
-            } => {
-                let document_id = worker.document_id(scope, &partition);
-                let result =
-                    runtime.block_on(worker.mutate(document_id, scope, &partition, &operations));
-                let _ = response.send(result);
-            }
-            Command::Delete {
-                scope,
-                partition,
-                address,
-                response,
-            } => {
-                let document_id = worker.document_id(scope, &partition);
-                let result =
-                    runtime.block_on(worker.delete(document_id, scope, &partition, &address));
-                let _ = response.send(result);
-            }
-            Command::PurgeExpired { now, response } => {
-                let result = runtime.block_on(worker.purge_expired(now));
-                let _ = response.send(result);
-            }
-            Command::Clear {
-                scope,
-                partition,
-                response,
-            } => {
-                let document_id = worker.document_id(scope, &partition);
-                let result = runtime.block_on(worker.clear(document_id, scope, &partition));
-                let _ = response.send(result);
-            }
-            Command::Shutdown => break,
+        if !execute_command(&runtime, &mut worker, command) {
+            break;
         }
     }
+}
+
+fn execute_command(
+    runtime: &tokio::runtime::Runtime,
+    worker: &mut StoreWorker,
+    command: Command,
+) -> bool {
+    match command {
+        Command::Get {
+            scope,
+            partition,
+            address,
+            now,
+            response,
+        } => {
+            let document_id = worker.document_id(scope, &partition);
+            let result =
+                runtime.block_on(worker.get(document_id, scope, &partition, &address, now));
+            let _ = response.send(result);
+        }
+        Command::Put {
+            scope,
+            partition,
+            address,
+            value,
+            evict_at,
+            response,
+        } => {
+            let document_id = worker.document_id(scope, &partition);
+            let result = runtime.block_on(worker.put(
+                document_id,
+                scope,
+                &partition,
+                &address,
+                &value,
+                evict_at,
+            ));
+            let _ = response.send(result);
+        }
+        Command::Mutate {
+            scope,
+            partition,
+            operations,
+            response,
+        } => {
+            let document_id = worker.document_id(scope, &partition);
+            let result =
+                runtime.block_on(worker.mutate(document_id, scope, &partition, &operations));
+            let _ = response.send(result);
+        }
+        Command::Delete {
+            scope,
+            partition,
+            address,
+            response,
+        } => {
+            let document_id = worker.document_id(scope, &partition);
+            let result = runtime.block_on(worker.delete(document_id, scope, &partition, &address));
+            let _ = response.send(result);
+        }
+        Command::PurgeExpired { now, response } => {
+            let result = runtime.block_on(worker.purge_expired(now));
+            let _ = response.send(result);
+        }
+        Command::Clear {
+            scope,
+            partition,
+            response,
+        } => {
+            let document_id = worker.document_id(scope, &partition);
+            let result = runtime.block_on(worker.clear(document_id, scope, &partition));
+            let _ = response.send(result);
+        }
+        Command::ListProjects {
+            cursor,
+            limit,
+            now,
+            response,
+        } => {
+            let result = runtime.block_on(worker.list_projects(cursor.as_deref(), limit, now));
+            let _ = response.send(result);
+        }
+        Command::ListProjectAddresses {
+            project,
+            cursor,
+            limit,
+            now,
+            response,
+        } => {
+            let result = runtime.block_on(worker.list_project_addresses(
+                &project,
+                cursor.as_deref(),
+                limit,
+                now,
+            ));
+            let _ = response.send(result);
+        }
+        Command::Shutdown => return false,
+    }
+    true
 }
 
 struct StoreWorker {
@@ -477,6 +525,142 @@ impl StoreWorker {
         self.commit_mutation(document_id, scope, Some(generation), key_epoch, mutation)
             .await?;
         Ok(count)
+    }
+
+    async fn list_projects(
+        &mut self,
+        cursor: Option<&str>,
+        limit: u16,
+        now: u64,
+    ) -> VaultResult<StorePage<String>> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT document_id FROM documents WHERE document_kind = 'secretspec-project'",
+                (),
+            )
+            .await
+            .map_err(database_error)?;
+        let mut document_ids = Vec::new();
+        while let Some(row) = rows.next().await.map_err(database_error)? {
+            document_ids.push(document_id_from_blob(&row_blob(&row, 0)?)?);
+        }
+        drop(rows);
+
+        let mut projects = Vec::with_capacity(document_ids.len());
+        for document_id in document_ids {
+            let Some(LoadedDocument {
+                mut document,
+                generation,
+                key_epoch,
+            }) = self
+                .load_document(document_id, DocumentKind::SecretSpecProject, None)
+                .await?
+            else {
+                continue;
+            };
+            let project = String::from_utf8(document.partition().to_vec()).map_err(|_| {
+                VaultError::InvalidData("project document partition is not UTF-8".to_owned())
+            })?;
+            SecretSpecAddress::convention(&project, "default", "validation")?;
+            if let Some(mutation) = document.purge_expired(now)? {
+                self.commit_mutation(
+                    document_id,
+                    DocumentKind::SecretSpecProject,
+                    Some(generation),
+                    key_epoch,
+                    mutation,
+                )
+                .await?;
+            }
+            if !document.addresses()?.is_empty() {
+                projects.push((project.clone(), project));
+            }
+        }
+        projects.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        if projects.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(VaultError::InvalidData(
+                "duplicate durable project partitions".to_owned(),
+            ));
+        }
+        Ok(paginate(projects, cursor, limit))
+    }
+
+    async fn list_project_addresses(
+        &mut self,
+        project: &str,
+        cursor: Option<&str>,
+        limit: u16,
+        now: u64,
+    ) -> VaultResult<StorePage<SecretSpecAddress>> {
+        let document_id = self.document_id(DocumentKind::SecretSpecProject, project.as_bytes());
+        let Some(LoadedDocument {
+            mut document,
+            generation,
+            key_epoch,
+        }) = self
+            .load_document(
+                document_id,
+                DocumentKind::SecretSpecProject,
+                Some(project.as_bytes()),
+            )
+            .await?
+        else {
+            return Ok(StorePage {
+                items: Vec::new(),
+                next_cursor: None,
+            });
+        };
+        if let Some(mutation) = document.purge_expired(now)? {
+            self.commit_mutation(
+                document_id,
+                DocumentKind::SecretSpecProject,
+                Some(generation),
+                key_epoch,
+                mutation,
+            )
+            .await?;
+        }
+        let mut addresses = Vec::new();
+        for (storage_key, address) in document.addresses()? {
+            let address = address.as_secret_spec().cloned().ok_or_else(|| {
+                VaultError::InvalidData(
+                    "durable project document contains a local address".to_owned(),
+                )
+            })?;
+            if address
+                .project()
+                .is_some_and(|address_project| address_project != project)
+            {
+                return Err(VaultError::InvalidData(
+                    "durable project address belongs to another project".to_owned(),
+                ));
+            }
+            addresses.push((storage_key, address));
+        }
+        Ok(paginate(addresses, cursor, limit))
+    }
+}
+
+fn paginate<T>(entries: Vec<(String, T)>, cursor: Option<&str>, limit: u16) -> StorePage<T> {
+    let mut page: Vec<_> = entries
+        .into_iter()
+        .filter(|(key, _)| cursor.is_none_or(|cursor| key.as_str() > cursor))
+        .take(usize::from(limit) + 1)
+        .collect();
+    let has_more = page.len() > usize::from(limit);
+    if has_more {
+        page.pop();
+    }
+    let next_cursor = has_more.then(|| {
+        page.last()
+            .expect("a positive page limit returns an item before a cursor")
+            .0
+            .clone()
+    });
+    StorePage {
+        items: page.into_iter().map(|(_, item)| item).collect(),
+        next_cursor,
     }
 }
 

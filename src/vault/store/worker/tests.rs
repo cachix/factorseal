@@ -230,6 +230,34 @@ fn expiration_is_purged_without_read_and_stays_gone() {
 }
 
 #[test]
+fn project_listing_purges_expired_entries_and_hides_empty_projects() {
+    let (_directory, _root, store) = store();
+    let address = SecretAddress::secret_spec(
+        SecretSpecAddress::convention("demo", "default", "TOKEN").unwrap(),
+    )
+    .unwrap();
+    store
+        .put_at(
+            DocumentKind::SecretSpecProject,
+            b"demo",
+            &address,
+            b"short-lived",
+            Some(50),
+        )
+        .unwrap();
+
+    assert_eq!(store.list_projects(None, 1, 49).unwrap().items, ["demo"]);
+    assert!(
+        store
+            .list_project_addresses("demo", None, 1, 50)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(store.list_projects(None, 1, 50).unwrap().items.is_empty());
+}
+
+#[test]
 fn installation_files_contain_no_secret_or_predictable_name() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("visible-project/default/API_TOKEN", None).unwrap();

@@ -18,6 +18,8 @@ is one authorized way to retrieve and update credentials:
   every durable change and commit is signed by the vault device key;
 - secret names and values exist inside encrypted documents, not plaintext SQL
   columns or filenames;
+- project and address enumeration requires a separate authenticated `List`
+  grant, is available only while unsealed, and never returns secret values;
 - a bounded local protocol authorizes transport-derived user, executable, and
   application identities against durable scoped grants;
 - replayed and oversized requests fail closed, and secret buffers use

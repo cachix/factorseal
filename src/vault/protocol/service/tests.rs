@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::{DocumentKind, SecretSpecAddress, Vault};
+use crate::{DocumentKind, MAX_LIST_PAGE_SIZE, SecretSpecAddress, SecretSpecCoordinates, Vault};
 
 fn service(now: u64, policy: UnsealLeasePolicy) -> (tempfile::TempDir, VaultService) {
     let directory = tempfile::tempdir().unwrap();
@@ -28,6 +28,10 @@ fn address() -> WireSecretAddress {
 
 fn project_address(project: &str) -> SecretSpecAddress {
     SecretSpecAddress::convention(project, "default", "API_KEY").unwrap()
+}
+
+fn project_key(project: &str, key: &str) -> SecretSpecAddress {
+    SecretSpecAddress::convention(project, "default", key).unwrap()
 }
 
 #[test]
@@ -121,6 +125,233 @@ fn durable_project_documents_are_partitioned_and_kind_authorized() {
         other.result,
         Ok(VaultResponseBody::Secret { value: None })
     ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn project_metadata_listing_is_paginated_value_free_and_separately_authorized() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let writer = caller();
+    service
+        .authorize_document_kind(
+            &writer,
+            DocumentKind::SecretSpecProject,
+            [GrantPermission::Put],
+            None,
+            100,
+        )
+        .unwrap();
+    let native = SecretSpecAddress::native(SecretSpecCoordinates {
+        item: "database".to_owned(),
+        field: Some("password".to_owned()),
+        vault: Some("production".to_owned()),
+        section: Some("credentials".to_owned()),
+        version: Some("2".to_owned()),
+    })
+    .unwrap();
+    for (project, address, value) in [
+        (
+            "zeta",
+            project_key("zeta", "TOKEN"),
+            b"zeta-secret".as_slice(),
+        ),
+        ("alpha", project_key("alpha", "TOKEN"), b"alpha-secret"),
+        ("alpha", native.clone(), b"native-secret"),
+    ] {
+        let response = service.handle(
+            &writer,
+            VaultRequest::new(VaultAction::PutProject {
+                project: project.to_owned(),
+                address,
+                value: WireSecret::new(value.to_vec()),
+            })
+            .unwrap(),
+            101,
+        );
+        assert!(matches!(response.result, Ok(VaultResponseBody::Stored)));
+    }
+
+    let browser = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.ui",
+        [11; 32],
+        None,
+    )
+    .unwrap();
+    service
+        .authorize_document_kind(
+            &browser,
+            DocumentKind::SecretSpecProject,
+            [GrantPermission::List],
+            None,
+            101,
+        )
+        .unwrap();
+
+    let first = service.handle(
+        &browser,
+        VaultRequest::new(VaultAction::ListProjects {
+            cursor: None,
+            limit: 1,
+        })
+        .unwrap(),
+        102,
+    );
+    let Ok(VaultResponseBody::Projects {
+        projects,
+        next_cursor: Some(cursor),
+    }) = first.result
+    else {
+        panic!("expected the first project page");
+    };
+    assert_eq!(projects, ["alpha"]);
+    let second = service.handle(
+        &browser,
+        VaultRequest::new(VaultAction::ListProjects {
+            cursor: Some(cursor),
+            limit: 1,
+        })
+        .unwrap(),
+        103,
+    );
+    assert!(matches!(
+        second.result,
+        Ok(VaultResponseBody::Projects {
+            projects,
+            next_cursor: None,
+        }) if projects == ["zeta"]
+    ));
+
+    let mut addresses = Vec::new();
+    let mut cursor = None;
+    loop {
+        let response = service.handle(
+            &browser,
+            VaultRequest::new(VaultAction::ListProjectAddresses {
+                project: "alpha".to_owned(),
+                cursor,
+                limit: 1,
+            })
+            .unwrap(),
+            104,
+        );
+        let encoded = response.encode().unwrap();
+        assert!(
+            !encoded
+                .windows(b"alpha-secret".len())
+                .any(|part| part == b"alpha-secret")
+        );
+        assert!(
+            !encoded
+                .windows(b"native-secret".len())
+                .any(|part| part == b"native-secret")
+        );
+        let Ok(VaultResponseBody::ProjectAddresses {
+            addresses: page,
+            next_cursor,
+        }) = response.result
+        else {
+            panic!("expected an address page");
+        };
+        addresses.extend(page);
+        cursor = next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(addresses.len(), 2);
+    assert!(addresses.contains(&project_key("alpha", "TOKEN")));
+    assert!(addresses.contains(&native));
+
+    let value_read = service.handle(
+        &browser,
+        VaultRequest::new(VaultAction::GetProject {
+            project: "alpha".to_owned(),
+            address: project_key("alpha", "TOKEN"),
+        })
+        .unwrap(),
+        105,
+    );
+    assert_eq!(
+        value_read.result.unwrap_err().code,
+        VaultResponseErrorCode::AuthorizationRequired
+    );
+
+    let cache_browser = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.cache-ui",
+        [12; 32],
+        None,
+    )
+    .unwrap();
+    service
+        .authorize_document_kind(
+            &cache_browser,
+            DocumentKind::SecretSpecProviderCache,
+            [GrantPermission::List],
+            None,
+            105,
+        )
+        .unwrap();
+    let isolated = service.handle(
+        &cache_browser,
+        VaultRequest::new(VaultAction::ListProjects {
+            cursor: None,
+            limit: 1,
+        })
+        .unwrap(),
+        106,
+    );
+    assert_eq!(
+        isolated.result.unwrap_err().code,
+        VaultResponseErrorCode::AuthorizationRequired
+    );
+}
+
+#[test]
+fn list_requests_are_bounded_and_maximum_pages_fit_the_wire_limit() {
+    for limit in [0, MAX_LIST_PAGE_SIZE + 1] {
+        assert!(
+            VaultRequest::new(VaultAction::ListProjects {
+                cursor: None,
+                limit,
+            })
+            .unwrap()
+            .encode()
+            .is_err()
+        );
+    }
+    assert!(
+        VaultRequest::new(VaultAction::ListProjectAddresses {
+            project: "demo".to_owned(),
+            cursor: Some("not-a-digest".to_owned()),
+            limit: 1,
+        })
+        .unwrap()
+        .encode()
+        .is_err()
+    );
+
+    let component = "\u{1}".repeat(4 * 1024);
+    let address = SecretSpecAddress::native(SecretSpecCoordinates {
+        item: component.clone(),
+        field: Some(component.clone()),
+        vault: Some(component.clone()),
+        section: Some(component.clone()),
+        version: Some(component),
+    })
+    .unwrap();
+    let response = VaultResponse::success(
+        RequestId::from_bytes([31; REQUEST_ID_BYTES]),
+        VaultResponseBody::ProjectAddresses {
+            addresses: vec![address; usize::from(MAX_LIST_PAGE_SIZE)],
+            next_cursor: Some("A".repeat(43)),
+        },
+    );
+    let encoded = response.encode().unwrap();
+    assert!(encoded.len() <= MAX_MESSAGE_BYTES);
 }
 
 #[test]

@@ -20,6 +20,11 @@ pub(crate) struct VaultStore {
     device: VaultMetadata,
 }
 
+pub(crate) struct StorePage<T> {
+    pub(crate) items: Vec<T>,
+    pub(crate) next_cursor: Option<String>,
+}
+
 impl VaultStore {
     /// Open the vault's embedded Turso database and consume its
     /// hardware-unwrapped secrets into the worker.
@@ -128,6 +133,38 @@ impl VaultStore {
         request(&self.control.sender, |response| Command::PurgeExpired {
             now,
             response,
+        })
+    }
+
+    pub(crate) fn list_projects(
+        &self,
+        cursor: Option<&str>,
+        limit: u16,
+        now: u64,
+    ) -> VaultResult<StorePage<String>> {
+        request(&self.control.sender, |response| Command::ListProjects {
+            cursor: cursor.map(str::to_owned),
+            limit,
+            now,
+            response,
+        })
+    }
+
+    pub(crate) fn list_project_addresses(
+        &self,
+        project: &str,
+        cursor: Option<&str>,
+        limit: u16,
+        now: u64,
+    ) -> VaultResult<StorePage<super::SecretSpecAddress>> {
+        request(&self.control.sender, |response| {
+            Command::ListProjectAddresses {
+                project: project.to_owned(),
+                cursor: cursor.map(str::to_owned),
+                limit,
+                now,
+                response,
+            }
         })
     }
 }

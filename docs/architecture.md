@@ -130,9 +130,11 @@ claim. Detecting it needs a checkpoint held outside that directory.
 ## Expiry
 
 Storage deadlines are inside encrypted records. Reads delete an expired entry
-before returning a miss. The store also scans every `secretspec-provider-cache` document at
-startup and exposes a purge operation for the live scheduler. Packaged vault services
-must call it at the next deadline or at a short bounded interval; tests prove
+before returning a miss. Metadata listing also purges expired records and hides
+projects left empty by that purge. The store scans every
+`secretspec-provider-cache` document at startup and exposes a purge operation
+for the live scheduler. Packaged vault services must call it at the next
+deadline or at a short bounded interval; tests prove
 that explicit purge removes an entry without a read and that it remains absent
 after restart.
 
@@ -154,10 +156,18 @@ is part of every durable grant.
 
 Grants bind the document kind and can target the entire kind, one exact
 partition/address, or an entire partition. They contain an explicit set of
-get/put/delete/clear/seal permissions and an optional expiry that is also
+list/get/put/delete/clear/seal permissions and an optional expiry that is also
 applied as a storage eviction deadline. A disposable cache grant therefore
 cannot authorize a durable keyring write. Grants are stored in the encrypted
 `authorization` document.
+
+`ListProjects` and `ListProjectAddresses` are metadata-only, cursor-paginated
+operations for a future management UI. They decrypt and validate Automerge
+records inside the sole store worker; they never enumerate SQL hashes or return
+values. `List` is independent from `Get`, and the maximum page size is chosen
+so worst-case JSON escaping remains within the one-MiB wire limit. Concurrent
+values at one authenticated address collapse to one list item; conflicting
+addresses under one index fail closed.
 
 An unseal lease has independent idle and absolute deadlines. Authorized
 operations refresh only the idle deadline and can never pass the absolute

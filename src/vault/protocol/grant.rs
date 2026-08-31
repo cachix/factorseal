@@ -24,6 +24,7 @@ const PERMISSION_REGISTRY_VERSION: u8 = 1;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GrantPermission {
+    List,
     Get,
     Put,
     Delete,
@@ -408,6 +409,7 @@ pub(super) fn grant_address(
 
 fn permission_name(permission: GrantPermission) -> &'static str {
     match permission {
+        GrantPermission::List => "list",
         GrantPermission::Get => "get",
         GrantPermission::Put => "put",
         GrantPermission::Delete => "delete",

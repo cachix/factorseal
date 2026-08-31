@@ -158,9 +158,6 @@ impl VaultService {
         caller.validate()?;
         request.validate()?;
         let application = request.application().cloned();
-        let project = application
-            .as_ref()
-            .and_then(|context| context.project.clone());
         let approval =
             ApprovalCandidate::for_request(caller, application.as_ref(), &request.action);
         let mut state = self.state.lock_live(monotonic_now)?;
@@ -225,14 +222,7 @@ impl VaultService {
                     status: super::PermissionChange::Revoked,
                 });
             }
-            action => execute_action(
-                state.store(),
-                caller,
-                action,
-                project.as_deref(),
-                now,
-                state.lease_deadlines(),
-            ),
+            action => execute_action(state.store(), caller, action, now, state.lease_deadlines()),
         };
         let (result, refresh_lease) = match result {
             Ok(result) => result,
