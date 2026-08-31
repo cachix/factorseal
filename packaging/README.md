@@ -11,10 +11,8 @@ artifact is ready to release:
 
 - `build-unix.sh linux` creates a tarball with the binaries, systemd user unit,
   interactive session-agent helper, and one-command physical acceptance runner;
-- `build-unix.sh macos` requires `FACTORSEAL_MACOS_SIGNING_IDENTITY` and
-  `FACTORSEAL_MACOS_PROVISIONING_PROFILE`, then creates a tarball containing a
-  signed app plus an unsigned `.pkg`. The tarball also carries the one-command
-  runner, askpass helper, and LaunchAgent property list;
+- `build-unix.sh macos` creates a tarball and an unsigned `.pkg`. The app is
+  signed locally unless an Apple identity and profile are supplied;
 - `build-windows.ps1` creates a ZIP containing the executables, the askpass
   helper, Scheduled Task installer, and one-command physical acceptance runner;
 - `build-windows-msix.ps1` creates the CLI-oriented MSIX submitted to the
@@ -112,22 +110,18 @@ terminal and run `factorseal --version`, `factorseal init`, and then
 `factorseal agent`. Automatic login startup is deferred until the interim
 PowerShell password dialog has been replaced by a native prompt.
 
-The macOS profile must authorize the explicit `dev.factorseal` App ID and its
-default keychain access group. This is not optional for native acceptance:
-Apple derives Data Protection Keychain access groups from restricted signing
-entitlements authorized by the embedded profile. For example:
+For physical macOS testing, provide an Apple Development identity and a
+matching profile for `dev.factorseal`:
 
 ```console
-FACTORSEAL_MACOS_SIGNING_IDENTITY='Developer ID Application: Example (TEAMID)' \
+FACTORSEAL_MACOS_SIGNING_IDENTITY='Apple Development: You (TEAMID)' \
 FACTORSEAL_MACOS_PROVISIONING_PROFILE=/private/path/Factorseal.provisionprofile \
-  packaging/build-unix.sh macos
+devenv shell -- packaging/build-unix.sh macos
 ```
 
-The builder decodes the profile, derives the team identifier, embeds the
-profile, signs `Factorseal.app` with hardened runtime and the matching
-application/keychain entitlements, and verifies the resulting app signature.
-It deliberately does not claim that the `.pkg` is signed or that either output
-is notarized.
+Set both variables or neither. Without them, the app cannot use Factorseal's
+protected Keychain storage or pass physical acceptance. Release distribution
+also requires signing the `.pkg` and notarization.
 
 ## Obtaining a password factor
 

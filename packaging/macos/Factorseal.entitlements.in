@@ -3,8 +3,12 @@
 <plist version="1.0">
 <dict>
   <key>com.apple.application-identifier</key>
-  <string>@TEAM_ID@.dev.factorseal</string>
+  <string>@APPLICATION_ID@</string>
   <key>com.apple.developer.team-identifier</key>
   <string>@TEAM_ID@</string>
+  <key>keychain-access-groups</key>
+  <array>
+    <string>@APPLICATION_ID@</string>
+  </array>
 </dict>
 </plist>
