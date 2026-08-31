@@ -72,11 +72,20 @@ creation and unseal; Linux validates the TPM plus nested password. They verify:
    additionally requires `/dev/tpmrm0` while Windows requires a ready TPM);
 2. the backend recorded in `factorseal status` is the expected real hardware
    backend (`tpm` on Linux, `windows-tpm` on Windows, or `secure-enclave` on macOS);
-3. the native transport permits an authorized local CLI to put, get, and delete
+3. the sealing invariants underneath the vault, through
+   `factorseal hardware-self-test`: that re-sealing under one label leaves an
+   earlier envelope openable, that another label cannot open it, and that
+   deleting a protector forgets its secrets without deleting another label.
+   None is observable from a vault that seals once, and these properties have
+   been silently wrong on key-store backends before. The self-test works on
+   reserved scratch state and never touches the vault beside it. macOS and
+   Windows also run its biometric half, which asks for verification several
+   times;
+4. the native transport permits an authorized local CLI to put, get, and delete
    an exact-byte value;
-4. a real OS lock, sleep, shutdown-preparation, or session event causes the
+5. a real OS lock, sleep, shutdown-preparation, or session event causes the
    live vault process to exit and the socket/pipe to become sealed;
-5. the same vault can be unsealed again and recover the stored value.
+6. the same vault can be unsealed again and recover the stored value.
 
 Run the script from the account that will own the release installation. The
 zero-option guided mode is preferred for volunteer testing. Release engineers

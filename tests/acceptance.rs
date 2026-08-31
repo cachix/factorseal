@@ -31,6 +31,7 @@ fn every_physical_runner_emits_the_same_core_evidence_contract() {
             "native_prompt_observed",
             "lifecycle_event",
             "test.create",
+            "test.hardware_self_test",
             "test.initial_unseal",
             "test.ipc_round_trip",
             "test.lifecycle_seal",
@@ -43,6 +44,29 @@ fn every_physical_runner_emits_the_same_core_evidence_contract() {
             assert!(source.contains(marker), "{name} does not emit `{marker}`");
         }
     }
+}
+
+/// The self-test only means something on real hardware, so CI can check that
+/// the runners still invoke it but never that it passes. The biometric half is
+/// required exactly where a gated credential exists to remove.
+#[test]
+fn physical_runners_invoke_the_hardware_self_test() {
+    for name in ["linux.sh", "macos.sh", "windows.ps1"] {
+        assert!(
+            runner(name).contains("hardware-self-test"),
+            "{name} does not run the hardware self-test"
+        );
+    }
+    for name in ["macos.sh", "windows.ps1"] {
+        assert!(
+            runner(name).contains("hardware-self-test --biometric"),
+            "{name} does not exercise the biometric policy it accepts"
+        );
+    }
+    assert!(
+        !runner("linux.sh").contains("--biometric"),
+        "linux.sh must not request a policy the TPM backend refuses"
+    );
 }
 
 #[test]

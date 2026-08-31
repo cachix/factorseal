@@ -17,6 +17,7 @@ vault ID, device key ID, full username, or raw logs containing those values.
 | Generated record artifact hash matches release candidate | pass / fail |
 | Physical-host preflight | pass / fail |
 | Initial hardware-backed create and unseal | pass / fail |
+| Hardware generation, label-isolation, and deletion self-test | pass / fail |
 | Native IPC set/get/delete | pass / fail |
 | Lock/session switch seals the vault | pass / fail |
 | Sleep seals the vault before suspend | pass / fail |

@@ -124,5 +124,13 @@ every generation without reaching another label. Run them on real hardware
 before trusting a change to a key-store backend, since neither property can be
 observed from a build on another platform.
 
+Those invariants are also exposed as [`self_test`], so a machine with no Rust
+toolchain can check them. It additionally proves that another label cannot open
+the envelope and survives deletion of the test label. The `factorseal` release
+archive reaches it through `factorseal hardware-self-test`, which is how the
+physical acceptance runners in `acceptance/` verify them on a volunteer's
+hardware. `self_test` works on reserved scratch state and attempts to remove
+everything it writes, including after a failure.
+
 The selected algorithms are compatible with common compliance profiles, but
 using them does not by itself make this crate or a product FIPS validated.

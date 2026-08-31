@@ -117,6 +117,135 @@ pub enum Error {
     /// A platform hardware operation failed.
     #[error("hardware security operation failed: {0}")]
     Hardware(String),
+    /// A [`self_test`] invariant did not hold on this device.
+    #[error("hardware self-test failed: {0}")]
+    SelfTest(String),
+}
+
+/// Label reserved for [`self_test`].
+///
+/// A protector opened under this label is scratch space: [`self_test`] removes
+/// its state before and after each run, so no real secret may use it.
+pub const SELF_TEST_LABEL: &str = "hardwareseal-self-test";
+const SELF_TEST_CONTROL_LABEL: &str = "hardwareseal-self-test-control";
+
+/// Verify on this device the sealing invariants a single seal cannot observe.
+///
+/// Continuous integration cannot run this. It needs the real TPM, Keychain
+/// item, or platform credential, which no virtual machine or mock provides.
+/// The properties it checks are exactly the ones a create-once flow misses:
+/// that re-sealing under a label leaves an earlier envelope openable, that a
+/// different label cannot open it, and that [`Protector::delete`] forgets only
+/// the secrets it claims to. These have been silently wrong on key-store
+/// backends before.
+///
+/// Cleanup is attempted before returning, including after a failure and after
+/// an earlier run that was interrupted. Returns the backend that served the
+/// test.
+pub fn self_test(policy: AccessPolicy) -> Result<Backend, Error> {
+    let protector = Protector::open(SELF_TEST_LABEL, policy)?;
+    let control = Protector::open(SELF_TEST_CONTROL_LABEL, policy)?;
+    let backend = protector.backend();
+    // An interrupted earlier run may have left scratch state behind.
+    protector.delete()?;
+    control.delete()?;
+
+    let outcome = run_self_test(&protector, &control, backend);
+    // Attempt both cleanups before returning either error.
+    let protector_cleanup = protector.delete();
+    let control_cleanup = control.delete();
+    outcome?;
+    protector_cleanup?;
+    control_cleanup?;
+    Ok(backend)
+}
+
+fn run_self_test(
+    protector: &Protector,
+    control: &Protector,
+    backend: Backend,
+) -> Result<(), Error> {
+    const FIRST: &[u8] = b"hardwareseal-self-test-first";
+    const SECOND: &[u8] = b"hardwareseal-self-test-second";
+    const CONTROL: &[u8] = b"hardwareseal-self-test-control";
+
+    let control_envelope = control.seal(CONTROL)?;
+    check_unseal(control, &control_envelope, CONTROL, "the control envelope")?;
+
+    let first = protector.seal(FIRST)?;
+    check_unseal(protector, &first, FIRST, "the sealed secret")?;
+
+    let second = protector.seal(SECOND)?;
+    if first == second {
+        return Err(Error::SelfTest(
+            "re-sealing produced a byte-identical envelope, so the two secrets \
+             cannot be told apart"
+                .to_owned(),
+        ));
+    }
+    check_unseal(
+        protector,
+        &first,
+        FIRST,
+        "the earlier envelope after re-sealing",
+    )?;
+    check_unseal(protector, &second, SECOND, "the newest envelope")?;
+    match control.unseal(&first) {
+        Err(Error::InvalidEnvelope(_)) => {}
+        Ok(_) => {
+            return Err(Error::SelfTest(
+                "a protector under another label opened the sealed secret".to_owned(),
+            ));
+        }
+        Err(error) => {
+            return Err(Error::SelfTest(format!(
+                "the cross-label check failed for an unrelated reason: {error}"
+            )));
+        }
+    }
+
+    // Linux and the non-biometric Windows policy hold nothing to remove: their
+    // envelopes are self-contained and `delete` is documented as a no-op.
+    // Every other backend must actually forget.
+    if !matches!(backend, Backend::Tpm | Backend::WindowsTpm) {
+        protector.delete()?;
+        check_deleted(protector, &first, "the earlier envelope")?;
+        check_deleted(protector, &second, "the newest envelope")?;
+    }
+    check_unseal(
+        control,
+        &control_envelope,
+        CONTROL,
+        "another label's envelope after deleting the test label",
+    )?;
+    Ok(())
+}
+
+fn check_deleted(protector: &Protector, envelope: &[u8], what: &str) -> Result<(), Error> {
+    match protector.unseal(envelope) {
+        Err(Error::Authorization(AuthorizationError::CredentialInvalidated)) => Ok(()),
+        Ok(_) => Err(Error::SelfTest(format!(
+            "delete reported success but {what} is still recoverable"
+        ))),
+        Err(error) => Err(Error::SelfTest(format!(
+            "{what} failed for an unrelated reason after delete: {error}"
+        ))),
+    }
+}
+
+fn check_unseal(
+    protector: &Protector,
+    envelope: &[u8],
+    expected: &[u8],
+    what: &str,
+) -> Result<(), Error> {
+    match protector.unseal(envelope) {
+        Ok(actual) if actual.as_slice() == expected => Ok(()),
+        Ok(_) => Err(Error::SelfTest(format!(
+            "{what} opened to the wrong secret"
+        ))),
+        Err(error) => Err(Error::SelfTest(format!("{what} did not open: {error}"))),
+    }
 }
 
 /// Handle for sealing secrets under one label and access policy.

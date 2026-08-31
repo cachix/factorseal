@@ -160,6 +160,12 @@ observed_backend=$(status | sed -n 's/.*"hardware_backend": "\([^"]*\)".*/\1/p')
 record observed_backend "$observed_backend"
 record test.create pass
 
+# Sealing invariants that a create-once flow cannot observe: that re-sealing
+# under a label leaves an earlier envelope openable, that another label cannot
+# open it, and that delete is label-scoped. Reserved scratch state only.
+"$factorseal" --root "$root" hardware-self-test
+record test.hardware_self_test pass
+
 "$factorseal" --root "$root" --password-file "$password_file" \
     agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-unseal.log" 2>&1 &
 vault_pid=$!

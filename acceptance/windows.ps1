@@ -137,6 +137,15 @@ if ($metadata.hardware_backend -ne 'windows-tpm') {
 Add-Evidence 'observed_backend' $metadata.hardware_backend
 Add-Evidence 'test.create' 'pass'
 
+# Sealing invariants that a create-once flow cannot observe: that re-sealing
+# under a label leaves an earlier envelope openable, that another label cannot
+# open it, and that delete is label-scoped. Reserved scratch state only. The
+# biometric half prompts several times.
+Write-Host 'The hardware self-test asks for Windows Hello verification several times.'
+& $Factorseal --root $Root hardware-self-test --biometric
+if ($LASTEXITCODE -ne 0) { throw 'factorseal hardware-self-test failed' }
+Add-Evidence 'test.hardware_self_test' 'pass'
+
 $service = Start-Process -FilePath $Factorseal -ArgumentList @(
     '--root', $Root, '--password-file', $PasswordFile,
     'agent', '--idle-seconds', '3600', '--maximum-seconds', '3600'

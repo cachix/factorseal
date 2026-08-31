@@ -112,6 +112,17 @@ pub(super) enum Command {
         unlock: Option<UnlockGroup>,
     },
 
+    /// Verify hardware sealing invariants on this physical device.
+    ///
+    /// Writes and removes scratch state under a reserved label. It never reads
+    /// or modifies a vault, so it is safe to run beside one.
+    HardwareSelfTest {
+        /// Also exercise the biometric-gated policy, which asks for
+        /// verification several times.
+        #[arg(long)]
+        biometric: bool,
+    },
+
     /// List and manage application permissions.
     Permissions {
         #[command(subcommand)]

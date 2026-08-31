@@ -19,8 +19,9 @@ mod provider;
 
 use cli::{Cli, Command};
 use commands::{
-    delete_keyring_value, destroy_vault, get_keyring_value, grant_cli, initialize,
-    manage_permissions, resolve_root, run_agent, seal_vault, set_keyring_value, show_status,
+    delete_keyring_value, destroy_vault, get_keyring_value, grant_cli, hardware_self_test,
+    initialize, manage_permissions, resolve_root, run_agent, seal_vault, set_keyring_value,
+    show_status,
 };
 use factor::FactorSource;
 
@@ -105,6 +106,9 @@ enum CliError {
     #[error("JSON serialization failed: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("{0}")]
+    HardwareSelfTest(String),
+
     #[cfg(feature = "secretspec-provider")]
     #[error("SecretSpec provider protocol failed: {0}")]
     ProviderProtocol(String),
@@ -154,6 +158,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             unlock,
         } => destroy_vault(&root, socket, factor, yes_really_destroy, unlock.as_ref()),
         Command::GrantCli { unlock } => grant_cli(&root, factor, unlock.as_ref()),
+        Command::HardwareSelfTest { biometric } => hardware_self_test(biometric),
         Command::Permissions { action } => manage_permissions(&root, socket, factor, &action),
         #[cfg(feature = "secretspec-provider")]
         Command::Provider => provider::serve(&root, socket),

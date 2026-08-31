@@ -343,6 +343,15 @@ fn seal_is_a_first_class_cli_command_and_permission() {
 }
 
 #[test]
+fn hardware_self_test_is_a_first_class_cli_command() {
+    let cli = Cli::try_parse_from(["factorseal", "hardware-self-test", "--biometric"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::HardwareSelfTest { biometric: true }
+    ));
+}
+
+#[test]
 fn keyring_value_files_preserve_exact_binary_bytes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("value");

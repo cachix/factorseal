@@ -167,6 +167,28 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
     Ok(())
 }
 
+/// Run the hardware sealing self-test and report one line per policy.
+///
+/// This exists in the shipped binary rather than only in the crate's tests
+/// because the machines that can answer it are physical hosts running a
+/// release archive, not a CI runner and not a developer checkout.
+pub(super) fn hardware_self_test(biometric: bool) -> Result<(), CliError> {
+    let mut policies = vec![hardwareseal::AccessPolicy::None];
+    if biometric {
+        policies.push(hardwareseal::AccessPolicy::Biometric);
+    }
+    for policy in policies {
+        match hardwareseal::self_test(policy) {
+            Ok(backend) => println!("{policy:?}: pass, served by {backend:?}"),
+            Err(error) => {
+                println!("{policy:?}: FAIL");
+                return Err(CliError::HardwareSelfTest(error.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn seal_vault(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
     let client = native_client(root, socket)?;
     let request = VaultRequest::new(VaultAction::Seal {
