@@ -383,6 +383,31 @@ mod tests {
         ));
     }
 
+    /// Re-sealing must never invalidate or repoint an envelope already handed
+    /// to a caller. A caller that keeps the previous wrapped blob for rollback,
+    /// or writes a new vault slot before committing it, depends on this.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn real_tpm_generations_are_independent_when_requested() {
+        if std::env::var_os("HARDWARESEAL_REAL_TPM_TEST").is_none() {
+            return;
+        }
+        let protector =
+            Protector::open("hardwareseal-real-generations", AccessPolicy::None).expect("open");
+        let first = protector.seal(b"first-generation").expect("seal first");
+        let second = protector.seal(b"second-generation").expect("seal second");
+
+        assert_ne!(first, second);
+        assert_eq!(
+            protector.unseal(&first).expect("unseal first").as_slice(),
+            b"first-generation"
+        );
+        assert_eq!(
+            protector.unseal(&second).expect("unseal second").as_slice(),
+            b"second-generation"
+        );
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn real_windows_hello_roundtrip_when_requested() {
@@ -401,6 +426,46 @@ mod tests {
         protector.delete().expect("delete Windows Hello credential");
     }
 
+    /// Enrollment must be reused across seals and actually removable.
+    ///
+    /// A non-discoverable credential is invisible to the platform credential
+    /// list, which would make `delete` a silent no-op and leave every seal
+    /// enrolling another orphan. Deleting the enrollment must also make both
+    /// generations unopenable, since the PRF that keys them is gone.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn real_windows_hello_enrollment_is_reused_and_removable_when_requested() {
+        if std::env::var_os("HARDWARESEAL_REAL_WINDOWS_HELLO_TEST").is_none() {
+            return;
+        }
+        let protector = Protector::open(
+            "hardwareseal-real-windows-hello-generations",
+            AccessPolicy::Biometric,
+        )
+        .expect("open Windows Hello");
+        let first = protector.seal(b"first-generation").expect("seal first");
+        let second = protector.seal(b"second-generation").expect("seal second");
+
+        assert_eq!(
+            protector.unseal(&first).expect("unseal first").as_slice(),
+            b"first-generation"
+        );
+        assert_eq!(
+            protector.unseal(&second).expect("unseal second").as_slice(),
+            b"second-generation"
+        );
+
+        protector.delete().expect("delete Windows Hello credential");
+        assert!(
+            protector.unseal(&first).is_err(),
+            "delete must remove the credential the first envelope depends on"
+        );
+        assert!(
+            protector.unseal(&second).is_err(),
+            "delete must remove the credential the second envelope depends on"
+        );
+    }
+
     #[cfg(all(feature = "apple", target_vendor = "apple"))]
     #[test]
     fn real_apple_roundtrip_when_requested() {
@@ -413,6 +478,78 @@ mod tests {
         let actual = protector.unseal(&envelope).expect("unseal");
         assert_eq!(actual.as_slice(), b"hardwareseal-roundtrip");
         protector.delete().expect("delete Keychain item");
+        assert!(
+            protector.unseal(&envelope).is_err(),
+            "delete must remove the keychain item the envelope names"
+        );
+    }
+
+    /// Each seal owns its own keychain item, and `delete` sweeps all of them.
+    ///
+    /// The sweep enumerates the service and matches accounts by label prefix,
+    /// so a wrong attribute key would leave every item in place while still
+    /// reporting success. Asserting that both generations stop unsealing is
+    /// what makes that failure visible.
+    #[cfg(all(feature = "apple", target_vendor = "apple"))]
+    #[test]
+    fn real_apple_generations_are_independent_when_requested() {
+        if std::env::var_os("HARDWARESEAL_REAL_APPLE_TEST").is_none() {
+            return;
+        }
+        let protector = Protector::open("hardwareseal-real-apple-generations", AccessPolicy::None)
+            .expect("open Keychain");
+        let first = protector.seal(b"first-generation").expect("seal first");
+        let second = protector.seal(b"second-generation").expect("seal second");
+
+        assert_ne!(first, second, "each seal must name its own keychain item");
+        assert_eq!(
+            protector.unseal(&first).expect("unseal first").as_slice(),
+            b"first-generation",
+            "re-sealing must not repoint or destroy the previous item"
+        );
+        assert_eq!(
+            protector.unseal(&second).expect("unseal second").as_slice(),
+            b"second-generation"
+        );
+
+        protector.delete().expect("delete Keychain items");
+        assert!(
+            protector.unseal(&first).is_err(),
+            "delete must sweep the superseded generation"
+        );
+        assert!(
+            protector.unseal(&second).is_err(),
+            "delete must sweep the current generation"
+        );
+    }
+
+    /// A protector under another label must not see this label's items.
+    ///
+    /// The Apple sweep deletes by account prefix, so a prefix that is too
+    /// loose would delete another label's secrets.
+    #[cfg(all(feature = "apple", target_vendor = "apple"))]
+    #[test]
+    fn real_apple_delete_is_scoped_to_its_label_when_requested() {
+        if std::env::var_os("HARDWARESEAL_REAL_APPLE_TEST").is_none() {
+            return;
+        }
+        let kept = Protector::open("hardwareseal-real-apple-kept", AccessPolicy::None)
+            .expect("open Keychain");
+        let removed = Protector::open("hardwareseal-real-apple-removed", AccessPolicy::None)
+            .expect("open Keychain");
+        let kept_envelope = kept.seal(b"kept-secret").expect("seal kept");
+        let removed_envelope = removed.seal(b"removed-secret").expect("seal removed");
+
+        removed.delete().expect("delete one label");
+
+        assert!(removed.unseal(&removed_envelope).is_err());
+        assert_eq!(
+            kept.unseal(&kept_envelope)
+                .expect("another label must survive")
+                .as_slice(),
+            b"kept-secret"
+        );
+        kept.delete().expect("clean up");
     }
 
     #[cfg(all(feature = "android", target_os = "android"))]

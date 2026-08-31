@@ -107,8 +107,22 @@ Windows Hello acceptance is also opt-in and presents native enrollment and
 verification UI:
 
 ```console
-HARDWARESEAL_REAL_WINDOWS_HELLO_TEST=1 cargo test real_windows_hello_roundtrip_when_requested
+HARDWARESEAL_REAL_WINDOWS_HELLO_TEST=1 cargo test --features apple real_windows_hello
 ```
+
+Keychain acceptance is opt-in on macOS and iOS, and writes and removes real
+keychain items:
+
+```console
+HARDWARESEAL_REAL_APPLE_TEST=1 cargo test --features apple real_apple
+```
+
+Each backend has a round-trip test and a generations test. The generations
+tests are the ones that cover per-seal isolation and deletion: that re-sealing
+under a label leaves earlier envelopes openable, and that `delete` removes
+every generation without reaching another label. Run them on real hardware
+before trusting a change to a key-store backend, since neither property can be
+observed from a build on another platform.
 
 The selected algorithms are compatible with common compliance profiles, but
 using them does not by itself make this crate or a product FIPS validated.
