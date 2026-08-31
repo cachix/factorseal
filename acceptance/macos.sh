@@ -38,6 +38,7 @@ fi
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 [ -n "$root" ] || root="$HOME/Library/Application Support/Factorseal-acceptance-$run_id"
 [ -n "$evidence" ] || evidence="$(pwd -P)/factorseal-macos-$lifecycle_event-$run_id.acceptance.txt"
+socket="${TMPDIR:-/tmp}/fs-$run_id.sock"
 
 [ -n "$factorseal" ] && [ -x "$factorseal" ] || {
     echo "Factorseal.app was not found beside the runner, in /Applications, or on PATH" >&2
@@ -138,6 +139,7 @@ cleanup() {
             echo "Test did not finish; the temporary factor was retained for cleanup: $generated_password_file" >&2
         fi
     fi
+    rm -f "$socket"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -179,7 +181,8 @@ record physical_host_check pass
 record hardware_summary "$hardware_summary"
 record lifecycle_event "$lifecycle_event"
 
-status() { "$factorseal" --root "$root" status; }
+run_factorseal() { "$factorseal" --root "$root" --socket "$socket" "$@"; }
+status() { run_factorseal status; }
 wait_for() {
     expected=$1
     attempts=0
@@ -206,7 +209,7 @@ wait_for_vault_exit() {
     vault_pid=
 }
 
-"$factorseal" --root "$root" --password-file "$password_file" init --unlock password,biometric
+run_factorseal --password-file "$password_file" init --unlock password,biometric
 observed_backend=$(status | sed -n 's/.*"hardware_backend": "\([^"]*\)".*/\1/p')
 [ "$observed_backend" = secure-enclave ]
 record observed_backend "$observed_backend"
@@ -217,10 +220,10 @@ record test.create pass
 # open it, and that delete is label-scoped. Reserved scratch keychain items
 # only. The biometric half asks for verification several times.
 echo "The hardware self-test asks for verification several times."
-"$factorseal" --root "$root" hardware-self-test --biometric
+run_factorseal hardware-self-test --biometric
 record test.hardware_self_test pass
 
-"$factorseal" --root "$root" --password-file "$password_file" \
+run_factorseal --password-file "$password_file" \
     agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-unseal.log" 2>&1 &
 vault_pid=$!
 wait_for unsealed
@@ -231,8 +234,8 @@ record native_prompt_create_observed pass
 record native_prompt_unseal_observed pass
 record native_prompt_observed pass
 record test.initial_unseal pass
-printf '%s' 'hardware-lifecycle-acceptance' | "$factorseal" --root "$root" set acceptance --field value
-[ "$("$factorseal" --root "$root" get acceptance --field value)" = "hardware-lifecycle-acceptance" ]
+printf '%s' 'hardware-lifecycle-acceptance' | run_factorseal set --project acceptance acceptance --field value
+[ "$(run_factorseal get --project acceptance acceptance --field value)" = "hardware-lifecycle-acceptance" ]
 record test.ipc_round_trip pass
 
 echo "Trigger the requested macOS lifecycle event now: $lifecycle_event."
@@ -242,19 +245,19 @@ read -r _
 wait_for_vault_exit
 wait_for sealed
 record test.lifecycle_seal pass
-if "$factorseal" --root "$root" get acceptance --field value >/dev/null 2>&1; then
+if run_factorseal get --project acceptance acceptance --field value >/dev/null 2>&1; then
     echo "sealed vault returned a secret" >&2
     exit 1
 fi
 record test.sealed_read_denied pass
 
-"$factorseal" --root "$root" --password-file "$password_file" \
+run_factorseal --password-file "$password_file" \
     agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-reunseal.log" 2>&1 &
 vault_pid=$!
 wait_for unsealed
-[ "$("$factorseal" --root "$root" get acceptance --field value)" = "hardware-lifecycle-acceptance" ]
+[ "$(run_factorseal get --project acceptance acceptance --field value)" = "hardware-lifecycle-acceptance" ]
 record test.reunseal_recovery pass
-"$factorseal" --root "$root" delete acceptance --field value
+run_factorseal delete --project acceptance acceptance --field value
 record test.delete pass
 kill -TERM "$vault_pid"
 wait "$vault_pid"
@@ -262,7 +265,7 @@ vault_pid=
 wait_for sealed
 
 if [ "$destroy_after" = true ]; then
-    "$factorseal" --root "$root" --password-file "$password_file" destroy --yes-really-destroy
+    run_factorseal --password-file "$password_file" destroy --yes-really-destroy
     record test.destroy pass
 else
     record test.destroy not-run

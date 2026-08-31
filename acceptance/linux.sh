@@ -171,8 +171,8 @@ record test.hardware_self_test pass
 vault_pid=$!
 wait_for unsealed
 record test.initial_unseal pass
-printf '%s' 'hardware-lifecycle-acceptance' | "$factorseal" --root "$root" set acceptance --field value
-[ "$("$factorseal" --root "$root" get acceptance --field value)" = "hardware-lifecycle-acceptance" ]
+printf '%s' 'hardware-lifecycle-acceptance' | "$factorseal" --root "$root" set --project acceptance acceptance --field value
+[ "$("$factorseal" --root "$root" get --project acceptance acceptance --field value)" = "hardware-lifecycle-acceptance" ]
 record test.ipc_round_trip pass
 
 echo "Lock this session now (for example: loginctl lock-session \"$XDG_SESSION_ID\")."
@@ -182,7 +182,7 @@ read -r _
 wait_for_vault_exit
 wait_for sealed
 record test.lifecycle_seal pass
-if "$factorseal" --root "$root" get acceptance --field value >/dev/null 2>&1; then
+if "$factorseal" --root "$root" get --project acceptance acceptance --field value >/dev/null 2>&1; then
     echo "sealed vault returned a secret" >&2
     exit 1
 fi
@@ -192,9 +192,9 @@ record test.sealed_read_denied pass
     agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-reunseal.log" 2>&1 &
 vault_pid=$!
 wait_for unsealed
-[ "$("$factorseal" --root "$root" get acceptance --field value)" = "hardware-lifecycle-acceptance" ]
+[ "$("$factorseal" --root "$root" get --project acceptance acceptance --field value)" = "hardware-lifecycle-acceptance" ]
 record test.reunseal_recovery pass
-"$factorseal" --root "$root" delete acceptance --field value
+"$factorseal" --root "$root" delete --project acceptance acceptance --field value
 record test.delete pass
 kill -TERM "$vault_pid"
 wait "$vault_pid"
