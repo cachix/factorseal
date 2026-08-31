@@ -41,8 +41,9 @@ lock. Separate sleep and session-switch results are just as simple:
 
 ### Windows
 
-Use a signed release archive on a physical TPM 2.0 machine with Windows Hello
-configured. From an ordinary, non-administrator PowerShell window:
+Use either a signed release archive or a Microsoft Store flight on a physical
+TPM 2.0 machine with Windows Hello configured. From an ordinary,
+non-administrator PowerShell window, an archive runs with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\run-acceptance.ps1
@@ -52,6 +53,17 @@ The runner rejects an unsigned or invalidly signed `factorseal.exe`. A locally
 built archive can be used for development-only hardware bring-up with
 `-AllowUnsignedDevelopmentArtifact`, but its final line begins `DEVELOPMENT
 PASS` and its evidence is not release acceptance.
+
+For a Store flight, download `run-acceptance.ps1` from the matching source
+release and pass the package identity name shown by Partner Center:
+
+```powershell
+.\run-acceptance.ps1 -StorePackageName 'IDENTITY_FROM_PARTNER_CENTER'
+```
+
+This mode requires the installed package status to be `Ok` and its signature
+kind to be `Store`, then tests the `factorseal.exe` inside that exact package.
+It does not treat an unsigned or locally signed MSIX as release evidence.
 
 Approve the Windows Hello dialogs. Administrator privileges are neither needed
 nor recommended.
@@ -179,6 +191,11 @@ if ($signature.Status -ne 'Valid') { throw "Invalid release signature: $($signat
   -PasswordFile "$env:USERPROFILE\.factorseal-acceptance-password" `
   -Evidence "$env:USERPROFILE\factorseal-windows.acceptance.txt"
 ```
+
+For the Store delivery path, use `-StorePackageName` instead of `-Factorseal`.
+The runner records the package full name and Store signature kind in the
+evidence file. Complete this on a private flight before promoting the Store
+submission to public availability.
 
 ### Installed Windows login task
 

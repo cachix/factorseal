@@ -109,7 +109,7 @@ jobs:
       - name: Parse Windows helpers and acceptance runner
         shell: pwsh
         run: |
-          foreach ($path in 'packaging/build-windows.ps1', 'packaging/windows/factorseal-askpass.ps1', 'packaging/windows/install-factorseal-task.ps1', 'acceptance/windows.ps1') {
+          foreach ($path in 'packaging/build-windows.ps1', 'packaging/build-windows-msix.ps1', 'packaging/windows/factorseal-askpass.ps1', 'packaging/windows/install-factorseal-task.ps1', 'acceptance/windows.ps1') {
             $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$null, [ref]$errors)
             if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output $_.ToString() }; throw "$path does not parse" }
@@ -129,6 +129,13 @@ jobs:
             if (-not ($entries.Entries.FullName -match 'run-acceptance.ps1$')) { throw 'acceptance runner missing from package' }
           } finally { $entries.Dispose() }
           [xml](Get-Content packaging/windows/factorseal-task.xml.in) | Out-Null
+      - name: Build and inspect Microsoft Store MSIX
+        shell: pwsh
+        run: |
+          ./packaging/build-windows-msix.ps1
+          $package = Get-ChildItem dist/factorseal-*-windows-store-x64.msix | Select-Object -First 1
+          if ($null -eq $package -or $package.Length -eq 0) { throw 'MSIX package was not created' }
+          [xml](Get-Content packaging/windows/msix/AppxManifest.xml.in) | Out-Null
       - uses: actions/upload-artifact@v4
         with:
           name: factorseal-windows

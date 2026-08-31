@@ -1,0 +1,151 @@
+name: Release Windows Store MSIX
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      identity:
+        description: Identity to put in the test MSIX
+        required: true
+        type: choice
+        default: development
+        options:
+          - development
+          - partner-center
+
+concurrency:
+  group: windows-store-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+  STORE_IDENTITY_NAME: ${{ vars.FACTORSEAL_STORE_IDENTITY_NAME }}
+  STORE_PUBLISHER: ${{ vars.FACTORSEAL_STORE_PUBLISHER }}
+  STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.FACTORSEAL_STORE_PUBLISHER_DISPLAY_NAME }}
+  REQUESTED_IDENTITY: ${{ inputs.identity }}
+
+jobs:
+  msix-x64:
+    name: Microsoft Store MSIX (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Resolve package identity and validate release tag
+        shell: pwsh
+        run: |
+          $useDevelopmentIdentity = $env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and
+            $env:REQUESTED_IDENTITY -eq 'development'
+          if ($useDevelopmentIdentity) {
+            'STORE_IDENTITY_NAME=Factorseal.Development' >> $env:GITHUB_ENV
+            'STORE_PUBLISHER=CN=Factorseal Development' >> $env:GITHUB_ENV
+            'STORE_PUBLISHER_DISPLAY_NAME=Factorseal Development' >> $env:GITHUB_ENV
+            Write-Host 'Using the development identity; this MSIX is not a Store submission.'
+          } else {
+            $missing = @()
+            foreach ($name in 'STORE_IDENTITY_NAME', 'STORE_PUBLISHER', 'STORE_PUBLISHER_DISPLAY_NAME') {
+              if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+                $missing += $name
+              }
+            }
+            if ($missing.Count -gt 0) {
+              throw "Configure these GitHub repository variables from Partner Center Product identity: $($missing -join ', ')"
+            }
+            if ($env:STORE_IDENTITY_NAME -eq 'Factorseal.Development' -or
+                $env:STORE_PUBLISHER -eq 'CN=Factorseal Development') {
+              throw 'Partner Center mode refuses the development MSIX identity'
+            }
+          }
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $versionLine = Select-String -Path 'Cargo.toml' -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+            $crateVersion = $versionLine.Matches[0].Groups[1].Value
+            if ($env:GITHUB_REF_NAME -ne "v$crateVersion") {
+              throw "Release tag '$env:GITHUB_REF_NAME' must match Cargo.toml version 'v$crateVersion'"
+            }
+          }
+
+      - name: Check Windows release inputs
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'cargo fmt failed' }
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'cargo clippy failed' }
+          cargo test --locked --all-targets --all-features
+          if ($LASTEXITCODE -ne 0) { throw 'cargo test failed' }
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'packaging/build-windows-msix.ps1'),
+            [ref]$null,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Output $_.ToString() }
+            throw 'packaging/build-windows-msix.ps1 does not parse'
+          }
+
+      - name: Build Store submission package
+        id: package
+        shell: pwsh
+        run: |
+          ./packaging/build-windows-msix.ps1 `
+            -IdentityName $env:STORE_IDENTITY_NAME `
+            -Publisher $env:STORE_PUBLISHER `
+            -PublisherDisplayName $env:STORE_PUBLISHER_DISPLAY_NAME
+          $package = Get-ChildItem 'dist/factorseal-*-windows-store-x64.msix' | Select-Object -First 1
+          if ($null -eq $package -or $package.Length -eq 0) { throw 'MSIX package was not created' }
+          $hash = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = "$($package.FullName).sha256"
+          [System.IO.File]::WriteAllText(
+            $checksum,
+            "$hash  $($package.Name)`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          "package=$($package.FullName)" >> $env:GITHUB_OUTPUT
+          "checksum=$checksum" >> $env:GITHUB_OUTPUT
+
+      - name: Attest Store submission package
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/*.msix
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: factorseal-windows-store-x64-${{ github.run_id }}
+          path: |
+            ${{ steps.package.outputs.package }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach package to draft GitHub release
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:GITHUB_REF_NAME `
+              --draft `
+              --verify-tag `
+              --generate-notes `
+              --title "Factorseal $env:GITHUB_REF_NAME"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft GitHub release' }
+          }
+          gh release upload $env:GITHUB_REF_NAME `
+            '${{ steps.package.outputs.package }}' `
+            '${{ steps.package.outputs.checksum }}' `
+            --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not attach the MSIX to the GitHub release' }

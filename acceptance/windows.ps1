@@ -4,6 +4,7 @@ param(
     [string]$Root,
     [string]$PasswordFile,
     [string]$Evidence,
+    [string]$StorePackageName,
     [switch]$DestroyAfter,
     [switch]$AllowUnsignedDevelopmentArtifact
 )
@@ -11,6 +12,31 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $runId = "$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))-$PID"
+$storePackage = $null
+if (-not [string]::IsNullOrWhiteSpace($StorePackageName)) {
+    if ($AllowUnsignedDevelopmentArtifact.IsPresent) {
+        throw 'StorePackageName cannot be combined with AllowUnsignedDevelopmentArtifact'
+    }
+    $storePackages = @(Get-AppxPackage -Name $StorePackageName)
+    if ($storePackages.Count -ne 1) {
+        throw "Expected one installed Store package named '$StorePackageName', found $($storePackages.Count)"
+    }
+    $storePackage = $storePackages[0]
+    if ([string]$storePackage.Status -ne 'Ok') {
+        throw "Installed Store package status is not Ok: $($storePackage.Status)"
+    }
+    if ([string]$storePackage.SignatureKind -ne 'Store') {
+        throw "Installed package must have a Microsoft Store signature (kind: $($storePackage.SignatureKind))"
+    }
+    $storeFactorseal = Join-Path $storePackage.InstallLocation 'factorseal.exe'
+    if (-not [string]::IsNullOrWhiteSpace($Factorseal)) {
+        $requestedFactorseal = (Resolve-Path -LiteralPath $Factorseal).Path
+        if ($requestedFactorseal -ne $storeFactorseal) {
+            throw 'Factorseal must identify the executable inside StorePackageName when both are supplied'
+        }
+    }
+    $Factorseal = $storeFactorseal
+}
 if ([string]::IsNullOrWhiteSpace($Factorseal)) {
     $besideRunner = Join-Path $PSScriptRoot 'factorseal.exe'
     $installed = Join-Path $env:ProgramFiles 'Factorseal\factorseal.exe'
@@ -39,8 +65,16 @@ if (-not [string]::IsNullOrWhiteSpace($PasswordFile) -and -not (Test-Path -Liter
     throw "Password file is missing: $PasswordFile"
 }
 
-$signature = Get-AuthenticodeSignature -LiteralPath $Factorseal
-$signatureIsValid = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+$signature = if ($null -eq $storePackage) {
+    Get-AuthenticodeSignature -LiteralPath $Factorseal
+} else {
+    $null
+}
+$signatureIsValid = if ($null -ne $storePackage) {
+    $true
+} else {
+    $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+}
 if (-not $signatureIsValid -and -not $AllowUnsignedDevelopmentArtifact.IsPresent) {
     throw "factorseal.exe must have a valid Authenticode signature for release acceptance (status: $($signature.Status))"
 }
@@ -129,7 +163,12 @@ Add-Evidence 'started_at_utc' ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ
 Add-Evidence 'factorseal_filename' (Split-Path -Leaf $Factorseal)
 Add-Evidence 'factorseal_sha256' $factorsealHash
 Add-Evidence 'factorseal_version' $version
-Add-Evidence 'artifact_signature' $(if ($signatureIsValid) { 'valid' } else { 'unsigned-development-override' })
+Add-Evidence 'artifact_signature' $(if ($null -ne $storePackage) { 'microsoft-store' } elseif ($signatureIsValid) { 'valid' } else { 'unsigned-development-override' })
+if ($null -ne $storePackage) {
+    Add-Evidence 'store_package_name' $storePackage.Name
+    Add-Evidence 'store_package_full_name' $storePackage.PackageFullName
+    Add-Evidence 'store_package_signature_kind' $storePackage.SignatureKind
+}
 Add-Evidence 'os_summary' ([System.Environment]::OSVersion.VersionString)
 Add-Evidence 'expected_backend' 'windows-tpm'
 Add-Evidence 'physical_host_check' 'pass'

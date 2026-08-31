@@ -16,10 +16,11 @@ artifact is ready to release:
   signed app plus an unsigned `.pkg`. The tarball also carries the one-command
   runner, askpass helper, and LaunchAgent property list;
 - `build-windows.ps1` creates a ZIP containing the executables, the askpass
-  helper, Scheduled Task installer, and one-command physical acceptance runner.
-  Selecting a maintained Windows installer toolchain remains a
-  release decision; current WiX releases require explicit OSMF terms and are
-  not silently accepted by this repository.
+  helper, Scheduled Task installer, and one-command physical acceptance runner;
+- `build-windows-msix.ps1` creates the CLI-oriented MSIX submitted to the
+  Microsoft Store. It installs a `factorseal.exe` execution alias and stays out
+  of the Start menu. The Store package intentionally does not install the
+  interim PowerShell askpass helper or a login-start task.
 
 SecretSpec cache permissions are granted per project through `factorseal permissions`;
 there is no installation-wide provider grant. The endpoint, not the SecretSpec
@@ -28,8 +29,9 @@ The archives include the endpoint code but do not install a SecretSpec
 registration file; packagers or users must register the absolute executable
 path as described in the repository README.
 
-Official macOS releases still require installer signing and notarization;
-Windows releases require platform signing credentials. Linux release jobs must
+Official macOS releases still require installer signing and notarization.
+Directly distributed Windows ZIP releases require platform signing credentials;
+the Microsoft Store signs an accepted MSIX. Linux release jobs must
 build against the supported deployment baseline and publish checksums and
 provenance. The Linux binaries dynamically require glibc and D-Bus; they are
 not universal static binaries and must not be published from a Nix development
@@ -54,6 +56,61 @@ by release acceptance. The archive's `install-factorseal-task.ps1` replaces the
 task template placeholders with the current SID and extracted directory; its
 optional `-Root` parameter provides an isolated installed-service acceptance
 vault. It refuses to replace an existing task unless `-Replace` is explicit.
+
+## Microsoft Store MSIX
+
+Reserve the Factorseal product in Partner Center before making a submission.
+Copy the exact package identity name, publisher ID, and publisher display name
+from **Product identity**, then build on Windows with the Windows 10 or 11 SDK:
+
+```powershell
+.\packaging\build-windows-msix.ps1 `
+  -IdentityName 'IDENTITY_FROM_PARTNER_CENTER' `
+  -Publisher 'PUBLISHER_FROM_PARTNER_CENTER' `
+  -PublisherDisplayName 'DISPLAY_NAME_FROM_PARTNER_CENTER'
+```
+
+The result is `dist\factorseal-<version>-windows-store-<architecture>.msix`.
+Submit that unsigned file to Partner Center; the Store applies its own trusted
+signature. Do not use the development identity defaults for a real submission.
+Build on native x64 and Arm64 Windows hosts if both architectures are
+supported; the builder rejects relabeling a binary for another architecture.
+
+Tagged x64 releases are built by `.github/workflows/release-windows-store.yml`.
+Configure these GitHub repository variables with the exact values from Partner
+Center before pushing a `v<crate-version>` tag:
+
+- `FACTORSEAL_STORE_IDENTITY_NAME`
+- `FACTORSEAL_STORE_PUBLISHER`
+- `FACTORSEAL_STORE_PUBLISHER_DISPLAY_NAME`
+
+The workflow refuses development identity values, runs the Windows checks,
+builds and unpacks the MSIX, produces a SHA-256 checksum and build-provenance
+attestation, saves a 30-day workflow artifact, and attaches both files to a
+draft GitHub release. Publishing the draft and submitting its MSIX to Partner
+Center remain explicit release decisions.
+
+The same workflow can be run from **Actions → Release Windows Store MSIX → Run
+workflow**. The default `development` identity needs no repository variables
+and only produces the attested workflow artifact; it never creates a GitHub
+release. Select `partner-center` to test the real configured identity. Manual
+runs never create or modify a GitHub release in either mode.
+
+For local installation before Store submission, sign the package with a test
+certificate whose subject exactly matches `-Publisher`:
+
+```powershell
+.\packaging\build-windows-msix.ps1 `
+  -Publisher 'CN=Factorseal Development' `
+  -SigningCertificateThumbprint '0123456789ABCDEF0123456789ABCDEF01234567'
+```
+
+That test certificate must be trusted on the test machine. A locally signed
+package is for development only; the release acceptance path is a package
+installed from a private Store flight. After installation, open a fresh
+terminal and run `factorseal --version`, `factorseal init`, and then
+`factorseal agent`. Automatic login startup is deferred until the interim
+PowerShell password dialog has been replaced by a native prompt.
 
 The macOS profile must authorize the explicit `dev.factorseal` App ID and its
 default keychain access group. This is not optional for native acceptance:

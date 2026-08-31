@@ -23,6 +23,28 @@ fn packaging_path(relative: &str) -> PathBuf {
         .join(relative)
 }
 
+fn repository_file(relative: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} is missing or unreadable: {error}", path.display()))
+}
+
+fn png_dimensions(relative: &str) -> (u32, u32) {
+    let path = packaging_path(relative);
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("{} is missing or unreadable: {error}", path.display()));
+    assert_eq!(
+        &bytes[..8],
+        b"\x89PNG\r\n\x1a\n",
+        "{} is not a PNG",
+        path.display()
+    );
+    (
+        u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+        u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+    )
+}
+
 /// Read the `<string>` element that follows the `--askpass` element.
 fn plist_askpass_argument(plist: &str) -> String {
     const MARKER: &str = "<string>--askpass</string>";
@@ -299,6 +321,75 @@ fn the_windows_builder_can_sign_and_verify_a_release_binary() {
     assert!(builder.contains("SignatureStatus]::Valid"));
     assert!(builder.contains("unsigned development archive"));
     assert!(builder.contains("if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }"));
+}
+
+#[test]
+fn the_store_msix_has_partner_center_identity_and_a_cli_alias() {
+    let manifest = packaging("windows/msix/AppxManifest.xml.in");
+    let builder = packaging("build-windows-msix.ps1");
+
+    for placeholder in [
+        "@IDENTITY_NAME@",
+        "@PUBLISHER@",
+        "@PUBLISHER_DISPLAY_NAME@",
+        "@VERSION@",
+        "@ARCHITECTURE@",
+    ] {
+        assert!(manifest.contains(placeholder));
+        assert!(builder.contains(placeholder));
+    }
+    assert!(manifest.contains("EntryPoint=\"Windows.FullTrustApplication\""));
+    assert!(manifest.contains("AppListEntry=\"none\""));
+    assert!(manifest.contains("Category=\"windows.appExecutionAlias\""));
+    assert!(manifest.contains("Alias=\"factorseal.exe\""));
+    assert!(manifest.contains("<rescap:Capability Name=\"runFullTrust\""));
+    assert!(builder.contains("makeappx.exe"));
+    assert!(builder.contains("The fourth PackageVersion component must be zero"));
+    assert!(builder.contains("does not match the native build host"));
+    assert!(builder.contains("Microsoft Store ingestion"));
+    assert!(builder.contains("Get-AuthenticodeSignature"));
+
+    // The archive-only login task depends on an interim shell prompt. Do not
+    // silently carry that integration into the Store package.
+    assert!(!builder.contains("factorseal-task.xml.in"));
+    assert!(!builder.contains("factorseal-askpass"));
+
+    for (name, dimensions) in [
+        ("Square150x150Logo.png", (150, 150)),
+        ("Square44x44Logo.png", (44, 44)),
+        ("StoreLogo.png", (50, 50)),
+    ] {
+        assert_eq!(
+            png_dimensions(&format!("windows/msix/Assets/{name}")),
+            dimensions
+        );
+    }
+}
+
+#[test]
+fn tagged_releases_build_and_attest_the_store_msix_in_windows_ci() {
+    let workflow = repository_file(".github/workflows/release-windows-store.yml");
+
+    assert!(workflow.contains("tags:"));
+    assert!(workflow.contains("'v*'"));
+    assert!(workflow.contains("workflow_dispatch:"));
+    assert!(workflow.contains("default: development"));
+    assert!(workflow.contains("- partner-center"));
+    for variable in [
+        "FACTORSEAL_STORE_IDENTITY_NAME",
+        "FACTORSEAL_STORE_PUBLISHER",
+        "FACTORSEAL_STORE_PUBLISHER_DISPLAY_NAME",
+    ] {
+        assert!(workflow.contains(variable));
+    }
+    assert!(workflow.contains("must match Cargo.toml version"));
+    assert!(workflow.contains("./packaging/build-windows-msix.ps1"));
+    assert!(workflow.contains("actions/attest-build-provenance@v3"));
+    assert!(workflow.contains("actions/upload-artifact@v4"));
+    assert!(workflow.contains("gh release create"));
+    assert!(workflow.contains("--draft"));
+    assert!(workflow.contains("gh release upload"));
+    assert!(workflow.contains("if: github.event_name == 'push'"));
 }
 
 #[test]

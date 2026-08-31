@@ -122,6 +122,16 @@ fn windows_release_acceptance_requires_a_signed_artifact() {
 }
 
 #[test]
+fn windows_store_acceptance_requires_the_installed_store_signature() {
+    let windows = runner("windows.ps1");
+    assert!(windows.contains("StorePackageName"));
+    assert!(windows.contains("Get-AppxPackage"));
+    assert!(windows.contains("SignatureKind -ne 'Store'"));
+    assert!(windows.contains("store_package_full_name"));
+    assert!(windows.contains("microsoft-store"));
+}
+
+#[test]
 fn windows_background_agents_preserve_arguments_containing_spaces() {
     let windows = runner("windows.ps1");
     assert!(windows.contains("function ConvertTo-NativeArgument"));
