@@ -209,28 +209,27 @@ fn the_macos_launcher_and_packager_agree_on_the_askpass_helper() {
     let plist = packaging("macos/dev.factorseal.plist");
     let builder = packaging("build-unix.sh");
 
-    // The helper must sit in the same installed directory as the binary the
-    // LaunchAgent starts, so one relocation cannot move only one of them.
+    // Keep the script in Resources so the outer app signature seals it as a
+    // resource instead of treating it as unsigned nested code in MacOS.
     let helper = plist_askpass_argument(&plist);
     let factorseal = "/Applications/Factorseal.app/Contents/MacOS/factorseal";
     assert!(
         plist.contains(factorseal),
         "the LaunchAgent no longer starts the expected binary"
     );
-    assert_eq!(
-        Path::new(&helper).parent(),
-        Path::new(factorseal).parent(),
-        "the askpass helper is not installed beside the Factorseal binary"
+    assert!(
+        helper.starts_with("/Applications/Factorseal.app/Contents/Resources/"),
+        "the askpass helper is not installed as a signed app resource: {helper}"
     );
 
     // ...and the packager must actually put it there.
     let name = Path::new(&helper).file_name().unwrap().to_str().unwrap();
     assert!(
-        builder.contains(&format!("cp packaging/macos/{name} \"$app/MacOS/\"")),
+        builder.contains(&format!("cp packaging/macos/{name} \"$app/Resources/\"")),
         "build-unix.sh does not install {name} into the app bundle"
     );
     assert!(
-        builder.contains(&format!("\"$app/MacOS/{name}\"")),
+        builder.contains(&format!("\"$app/Resources/{name}\"")),
         "build-unix.sh does not make {name} executable"
     );
     assert!(
@@ -435,16 +434,43 @@ fn every_release_archive_ships_a_one_command_acceptance_runner() {
 }
 
 #[test]
-fn macos_builds_require_a_profile_and_embed_keychain_entitlements_before_signing() {
+fn macos_builds_support_local_and_team_signing() {
     let builder = packaging("build-unix.sh");
+    let preparer = packaging("macos/prepare-app.sh");
+    let signer = packaging("macos/sign-app.sh");
     let entitlements = packaging("macos/Factorseal.entitlements.in");
 
     assert!(builder.contains("FACTORSEAL_MACOS_SIGNING_IDENTITY"));
     assert!(builder.contains("FACTORSEAL_MACOS_PROVISIONING_PROFILE"));
-    assert!(builder.contains("macOS packaging requires FACTORSEAL_MACOS_SIGNING_IDENTITY"));
-    assert!(builder.contains("embedded.provisionprofile"));
-    assert!(builder.contains("--entitlements \"$entitlements\""));
+    assert!(builder.contains("FACTORSEAL_MACOS_PROVISIONING_PROFILE is required"));
+    assert!(builder.contains("FACTORSEAL_MACOS_SIGNING_IDENTITY is required"));
+    assert!(builder.contains("signing_identity=-"));
+    assert!(signer.contains("Contents/embedded.provisionprofile"));
+    assert!(signer.contains("rm -f \"$app/Contents/embedded.provisionprofile\""));
+    assert!(signer.contains("--entitlements \"$entitlements\""));
+    assert!(signer.contains("codesign --verify --deep --strict"));
+    assert!(signer.contains("find \"$app/Contents\" -type f"));
+    assert!(signer.contains("find \"$app/Contents\" -depth -type d"));
+    assert!(signer.contains("DeveloperCertificates.$certificate_index"));
+    assert!(signer.contains("This app cannot use Factorseal's protected macOS Keychain storage"));
     assert!(entitlements.contains("com.apple.application-identifier"));
     assert!(entitlements.contains("com.apple.developer.team-identifier"));
-    assert_eq!(entitlements.matches("@TEAM_ID@.dev.factorseal").count(), 1);
+    assert!(entitlements.contains("keychain-access-groups"));
+    assert_eq!(entitlements.matches("@APPLICATION_ID@").count(), 2);
+
+    assert!(builder.contains("macos_deployment_target=11.0"));
+    assert!(builder.contains("MACOSX_DEPLOYMENT_TARGET=$macos_deployment_target"));
+    assert!(preparer.contains("install_name_tool -change"));
+    assert!(preparer.contains("/usr/lib/libiconv.2.dylib"));
+    assert!(preparer.contains("otool -l"));
+    assert!(preparer.contains("/nix/store/"));
+    assert!(preparer.contains("expected macOS deployment target $deployment_target in $candidate"));
+
+    let assemble = builder
+        .find("cp packaging/macos/factorseal-askpass")
+        .unwrap();
+    let prepare = builder.find("sh packaging/macos/prepare-app.sh").unwrap();
+    let sign = builder.find("sh packaging/macos/sign-app.sh").unwrap();
+    let archive = builder.find("tar -C \"$stage\"").unwrap();
+    assert!(assemble < prepare && prepare < sign && sign < archive);
 }

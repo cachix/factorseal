@@ -85,7 +85,7 @@ pub(super) fn delete(
     // Every generation sealed under this label shares one account prefix, so
     // deleting the protector removes the superseded items too.
     let prefix = account_prefix(label_hash, policy);
-    for account in stored_accounts()? {
+    for account in stored_accounts(policy)? {
         if account.starts_with(&prefix) {
             delete_if_present(&account)?;
         }
@@ -102,17 +102,19 @@ fn delete_if_present(account: &str) -> Result<(), Error> {
 }
 
 /// List the accounts of every hardwareseal item in the Data Protection Keychain.
-fn stored_accounts() -> Result<Vec<String>, Error> {
+fn stored_accounts(policy: AccessPolicy) -> Result<Vec<String>, Error> {
     let mut search = ItemSearchOptions::new();
     search
         .class(ItemClass::generic_password())
         .service(SERVICE)
         .load_attributes(true)
         .limit(Limit::All)
-        // Listing must never raise a biometric prompt: deleting a protector is
-        // a management operation, not an unseal.
-        .skip_authenticated_items(true)
         .ignore_legacy_keychains();
+    if policy == AccessPolicy::None {
+        // A non-biometric delete must not prompt because another protector uses
+        // biometric items under the same service.
+        search.skip_authenticated_items(true);
+    }
     let results = match search.search() {
         Ok(results) => results,
         Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => return Ok(Vec::new()),

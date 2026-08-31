@@ -7,7 +7,7 @@
   <array>
     <string>/Applications/Factorseal.app/Contents/MacOS/factorseal</string>
     <string>--askpass</string>
-    <string>/Applications/Factorseal.app/Contents/MacOS/factorseal-askpass</string>
+    <string>/Applications/Factorseal.app/Contents/Resources/factorseal-askpass</string>
     <string>agent</string>
   </array>
   <key>RunAtLoad</key><true/>

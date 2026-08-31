@@ -23,14 +23,22 @@ provisioning_profile=
 if [ "$platform" = macos ]; then
     signing_identity=${FACTORSEAL_MACOS_SIGNING_IDENTITY:-}
     provisioning_profile=${FACTORSEAL_MACOS_PROVISIONING_PROFILE:-}
-    [ -n "$signing_identity" ] && [ -n "$provisioning_profile" ] || {
-        echo "macOS packaging requires FACTORSEAL_MACOS_SIGNING_IDENTITY and FACTORSEAL_MACOS_PROVISIONING_PROFILE" >&2
+    if [ -n "$signing_identity" ] && [ -z "$provisioning_profile" ]; then
+        echo "FACTORSEAL_MACOS_PROVISIONING_PROFILE is required when FACTORSEAL_MACOS_SIGNING_IDENTITY is set" >&2
         exit 2
-    }
-    [ -f "$provisioning_profile" ] || {
-        echo "macOS provisioning profile does not exist: $provisioning_profile" >&2
+    fi
+    if [ -n "$provisioning_profile" ] && [ -z "$signing_identity" ]; then
+        echo "FACTORSEAL_MACOS_SIGNING_IDENTITY is required when FACTORSEAL_MACOS_PROVISIONING_PROFILE is set" >&2
         exit 2
-    }
+    fi
+    if [ -n "$provisioning_profile" ]; then
+        [ -f "$provisioning_profile" ] || {
+            echo "macOS provisioning profile does not exist: $provisioning_profile" >&2
+            exit 2
+        }
+    else
+        signing_identity=-
+    fi
 fi
 
 # Where README.md tells a Linux user to install the Factorseal binary. The systemd
@@ -41,6 +49,16 @@ version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
 archive="factorseal-${version}-${platform}-$(uname -m)"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
+
+if [ "$platform" = macos ]; then
+    # The SDK controls available declarations; the deployment target separately
+    # controls the oldest runnable macOS. Build cleanly so stale metadata cannot
+    # survive a target change.
+    macos_deployment_target=11.0
+    MACOSX_DEPLOYMENT_TARGET=$macos_deployment_target
+    CARGO_TARGET_DIR="$stage/cargo-target"
+    export MACOSX_DEPLOYMENT_TARGET CARGO_TARGET_DIR
+fi
 
 cargo build --locked --release --no-default-features \
     --features vault,cli,hardware \
@@ -73,34 +91,24 @@ if [ "$platform" = linux ]; then
         "$stage/$archive/bin/factorseal-start"
 else
     app="$stage/$archive/Factorseal.app/Contents"
-    mkdir -p "$app/MacOS" "$stage/$archive/Library/LaunchAgents"
+    mkdir -p "$app/MacOS" "$app/Resources" "$stage/$archive/Library/LaunchAgents"
     cp "$target_dir/release/factorseal" "$app/MacOS/"
-    cp packaging/macos/factorseal-askpass "$app/MacOS/"
+    cp packaging/macos/factorseal-askpass "$app/Resources/"
     sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Info.plist"
     cp packaging/macos/dev.factorseal.plist "$stage/$archive/Library/LaunchAgents/"
-    chmod 0755 "$app/MacOS/factorseal" "$app/MacOS/factorseal-askpass"
+    chmod 0755 "$app/MacOS/factorseal" "$app/Resources/factorseal-askpass"
 
-    # The Data Protection Keychain derives its access groups from restricted
-    # code-signing entitlements. A profile is therefore required even though
-    # Factorseal does not share items with another app.
-    profile_plist="$stage/provisioning-profile.plist"
-    security cms -D -i "$provisioning_profile" >"$profile_plist"
-    team_id=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.team-identifier' "$profile_plist")
-    profile_application_id=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$profile_plist")
-    application_id="$team_id.dev.factorseal"
-    case $profile_application_id in
-        "$application_id"|"$team_id.*") ;;
-        *)
-            echo "provisioning profile authorizes $profile_application_id, not $application_id" >&2
-            exit 2
-            ;;
-    esac
-    entitlements="$stage/Factorseal.entitlements"
-    sed "s/@TEAM_ID@/$team_id/g" packaging/macos/Factorseal.entitlements.in >"$entitlements"
-    cp "$provisioning_profile" "$app/embedded.provisionprofile"
-    codesign --force --options runtime --timestamp \
-        --sign "$signing_identity" --entitlements "$entitlements" "${app%/Contents}"
-    codesign --verify --strict --verbose=2 "${app%/Contents}"
+    sh packaging/macos/prepare-app.sh \
+        "${app%/Contents}" \
+        "$macos_deployment_target"
+    if [ -n "$provisioning_profile" ]; then
+        sh packaging/macos/sign-app.sh \
+            "${app%/Contents}" \
+            "$signing_identity" \
+            "$provisioning_profile"
+    else
+        sh packaging/macos/sign-app.sh "${app%/Contents}" -
+    fi
 fi
 
 tar -C "$stage" -czf "$output_dir/$archive.tar.gz" "$archive"
@@ -113,7 +121,9 @@ echo "$output_dir/$archive-acceptance.sh"
 if [ "$platform" = macos ]; then
     package_root="$stage/package-root"
     mkdir -p "$package_root/Applications" "$package_root/Library/LaunchAgents"
-    cp -R "$stage/$archive/Factorseal.app" "$package_root/Applications/"
+    /usr/bin/ditto \
+        "$stage/$archive/Factorseal.app" \
+        "$package_root/Applications/Factorseal.app"
     cp packaging/macos/dev.factorseal.plist "$package_root/Library/LaunchAgents/"
     pkgbuild \
         --root "$package_root" \

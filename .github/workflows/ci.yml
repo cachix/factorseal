@@ -48,7 +48,7 @@ jobs:
       - name: Lint packaged shell scripts
         run: devenv shell -- shellcheck packaging/build-unix.sh packaging/linux/factorseal-start
       - name: Lint packaged POSIX helpers
-        run: devenv shell -- shellcheck -s sh packaging/macos/factorseal-askpass
+        run: devenv shell -- shellcheck -s sh packaging/macos/factorseal-askpass packaging/macos/prepare-app.sh packaging/macos/sign-app.sh
       - name: Lint opt-in native acceptance runners
         run: devenv shell -- shellcheck acceptance/linux.sh acceptance/macos.sh
       - name: Evaluate the physical Linux acceptance app
@@ -80,17 +80,35 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test --all-targets --all-features
-      - name: Validate macOS packaging inputs and signing gate
+      - name: Build and inspect locally signed macOS package
         run: |
           plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist packaging/macos/Factorseal.entitlements.in
-          if packaging_output=$(env \
+          env \
             -u FACTORSEAL_MACOS_SIGNING_IDENTITY \
             -u FACTORSEAL_MACOS_PROVISIONING_PROFILE \
-            packaging/build-unix.sh macos 2>&1); then
-            echo "macOS packaging unexpectedly succeeded without signing credentials" >&2
+            packaging/build-unix.sh macos
+
+          archive=$(find dist -name 'factorseal-*-macos-*.tar.gz' -print -quit)
+          unpacked=$(mktemp -d)
+          tar -xzf "$archive" -C "$unpacked"
+          app=$(find "$unpacked" -name Factorseal.app -type d -print -quit)
+
+          codesign --verify --deep --strict "$app"
+          codesign -dvv "$app" 2>&1 | grep '^Signature=adhoc$'
+          test ! -e "$app/Contents/embedded.provisionprofile"
+          entitlements=$(mktemp)
+          codesign -d --entitlements - --xml "$app" >"$entitlements" 2>/dev/null || true
+          if grep -Eq 'application-identifier|keychain-access-groups' "$entitlements"; then
+            echo "local package unexpectedly contains Team-only Keychain entitlements" >&2
             exit 1
           fi
-          printf '%s\n' "$packaging_output" | grep 'macOS packaging requires FACTORSEAL_MACOS_SIGNING_IDENTITY and FACTORSEAL_MACOS_PROVISIONING_PROFILE'
+          while IFS= read -r candidate; do
+            file -b "$candidate" | grep -q 'Mach-O' || continue
+            if otool -l "$candidate" | grep -F '/nix/store/'; then
+              echo "Nix store reference remains in $candidate" >&2
+              exit 1
+            fi
+          done < <(find "$app/Contents" -type f -print)
 
   windows:
     name: Windows
