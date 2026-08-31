@@ -371,7 +371,13 @@ fn map_vault_error(error: &VaultError) -> RpcError {
         }
         VaultError::AuthorizationRequired => ErrorKind::PermissionDenied,
         VaultError::Sealed => return RpcError::interaction_required(None),
-        VaultError::WorkerUnavailable | VaultError::AgentUnreachable(_) => ErrorKind::Unavailable,
+        // The provider endpoint is intentionally independent of the agent. If
+        // the initialized vault has no live worker or listener, SecretSpec can
+        // only proceed after the user starts/unseals it through Factorseal's
+        // own interaction channel.
+        VaultError::WorkerUnavailable | VaultError::AgentUnreachable(_) => {
+            return RpcError::interaction_required(None);
+        }
         VaultError::Conflict | VaultError::Replay => ErrorKind::Conflict,
         VaultError::Expired
         | VaultError::InvalidData(_)

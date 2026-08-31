@@ -287,6 +287,20 @@ fn provider_maps_pending_approval_to_structured_interaction() {
     assert_eq!(interaction.expires_at_unix_ms, Some(1_800_000_000_000));
 }
 
+#[test]
+fn provider_maps_an_unavailable_agent_to_required_interaction() {
+    for error in [
+        VaultError::Sealed,
+        VaultError::WorkerUnavailable,
+        VaultError::AgentUnreachable("/run/user/1000/factorseal.sock".to_owned()),
+    ] {
+        assert_eq!(
+            map_vault_error(&error).data.kind,
+            ErrorKind::InteractionRequired
+        );
+    }
+}
+
 struct IntegrationProtector {
     key: u8,
 }

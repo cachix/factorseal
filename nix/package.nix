@@ -32,7 +32,7 @@ rustPlatform.buildRustPackage {
 
   cargoBuildFlags = [
     "--no-default-features"
-    "--features=vault,cli,hardware"
+    "--features=vault,cli,hardware,secretspec-provider"
     "--bin=factorseal"
   ];
 

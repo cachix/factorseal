@@ -2,6 +2,7 @@
 
 let
   package = pkgs.callPackage ../package.nix { };
+  secretspec = pkgs.callPackage ../secretspec.nix { };
   # `locked` runs an hour-long lease so nothing but the Lock signal can seal
   # it, and logs alice in on tty1 so there is a real logind session to lock.
   node =
@@ -57,6 +58,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import json
     import shlex
 
     alice_prefix = "runuser -u alice -- env HOME=/home/alice XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
@@ -73,6 +75,91 @@ pkgs.testers.runNixOSTest {
             f"printf %s {shlex.quote(answers)} | "
             f"script -qec {shlex.quote(command)} /dev/null",
         )
+
+    def write_user_file(node, path, contents):
+        parent = path.rsplit("/", 1)[0]
+        as_user(
+            node,
+            f"install -d -m 700 {shlex.quote(parent)}; "
+            f"printf %s {shlex.quote(contents)} > {shlex.quote(path)}; "
+            f"chmod 600 {shlex.quote(path)}",
+        )
+
+    def secretspec_command(project, arguments, environment=""):
+        manifest = f"/home/alice/projects/{project}/secretspec.toml"
+        prefix = f"{environment} " if environment else ""
+        return (
+            f"{prefix}${secretspec}/bin/secretspec "
+            f"--file {shlex.quote(manifest)} --reason nixos-provider-conformance "
+            f"{arguments}"
+        )
+
+    def start_transient(node, unit, command):
+        stdout = f"/tmp/{unit}.stdout"
+        stderr = f"/tmp/{unit}.stderr"
+        as_user(
+            node,
+            f"systemd-run --user --quiet --unit={shlex.quote(unit)} "
+            f"--property=Type=exec --property=StandardOutput=file:{stdout} "
+            f"--property=StandardError=file:{stderr} "
+            f"sh -c {shlex.quote(command)}",
+        )
+
+    def wait_transient(node, unit, expected_status=0):
+        node.wait_until_succeeds(
+            f"{alice_prefix} systemctl --user show {shlex.quote(unit)} "
+            "--property=ActiveState --value | grep -Eq '^(inactive|failed)$'"
+        )
+        status = int(
+            as_user(
+                node,
+                f"systemctl --user show {shlex.quote(unit)} "
+                "--property=ExecMainStatus --value",
+            ).strip()
+        )
+        assert status == expected_status, (
+            f"{unit} exited {status}; stdout:\n"
+            f"{node.succeed(f'cat /tmp/{unit}.stdout')}\nstderr:\n"
+            f"{node.succeed(f'cat /tmp/{unit}.stderr')}"
+        )
+
+    def pending_permission_id(node, project):
+        command = (
+            f"${package}/bin/factorseal --root={root} permissions list --json "
+            f"| jq -er '.[] | select(.state.status == \"pending\" and "
+            f".application.project == {json.dumps(project)}) | .id'"
+        )
+        node.wait_until_succeeds(
+            f"{alice_prefix} sh -c {shlex.quote(command)}",
+            timeout=30,
+        )
+        return as_user(node, command).strip()
+
+    def approve_permission(node, permission_id):
+        password_file = "/home/alice/.factorseal-nixos-test-password"
+        write_user_file(node, password_file, "factorseal-nixos-test\n")
+        command = (
+            f"${package}/bin/factorseal --root={root} "
+            f"--password-file={password_file} permissions approve "
+            f"{shlex.quote(permission_id)}"
+        )
+        as_user(
+            node,
+            f"printf '\\n' | script -qec {shlex.quote(command)} /dev/null",
+        )
+
+    def run_with_approvals(
+        node,
+        unit,
+        project,
+        command,
+        approval_count=1,
+        expected_status=0,
+    ):
+        start_transient(node, unit, command)
+        for _ in range(approval_count):
+            approve_permission(node, pending_permission_id(node, project))
+        wait_transient(node, unit, expected_status=expected_status)
 
     def initialize_on(node):
         with_password(
@@ -199,11 +286,152 @@ pkgs.testers.runNixOSTest {
         )
         locked.wait_until_succeeds(f"test -S {socket}")
 
+        with subtest("installed SecretSpec launches the registered provider"):
+            registration = json.dumps(
+                {
+                    "schema_version": 1,
+                    "scheme": "factorseal",
+                    "executable": "${package}/bin/factorseal",
+                    "arguments": ["provider"],
+                    "credential_names": [],
+                }
+            )
+            write_user_file(
+                locked,
+                "/home/alice/.config/secretspec/providers.d/factorseal.json",
+                registration,
+            )
+            manifest = (
+                '[project]\n'
+                'name = "alpha"\n'
+                'revision = "1.0"\n'
+                '\n'
+                '[profiles.default]\n'
+                'TOKEN = { description = "Factorseal provider conformance token", required = true }\n'
+            )
+            write_user_file(
+                locked,
+                "/home/alice/projects/alpha/secretspec.toml",
+                manifest,
+            )
+            write_user_file(
+                locked,
+                "/home/alice/projects/beta/secretspec.toml",
+                manifest.replace('name = "alpha"', 'name = "beta"'),
+            )
+
+            run_with_approvals(
+                locked,
+                "secretspec-alpha-set",
+                "alpha",
+                secretspec_command(
+                    "alpha",
+                    "set TOKEN alpha-secret --provider factorseal://default",
+                ),
+            )
+            run_with_approvals(
+                locked,
+                "secretspec-alpha-get",
+                "alpha",
+                secretspec_command("alpha", "get TOKEN --provider factorseal://default"),
+            )
+            assert locked.succeed(
+                "cat /tmp/secretspec-alpha-get.stdout"
+            ).strip() == "alpha-secret"
+
+        with subtest("provider grants and values are isolated by project"):
+            run_with_approvals(
+                locked,
+                "secretspec-beta-get",
+                "beta",
+                secretspec_command(
+                    "beta", "get TOKEN --provider factorseal://default"
+                ),
+                expected_status=1,
+            )
+            locked.succeed(
+                "grep -Eqi 'not found|missing|required' "
+                "/tmp/secretspec-beta-get.stderr"
+            )
+
+        with subtest("installed provider supports deletion"):
+            run_with_approvals(
+                locked,
+                "secretspec-alpha-delete",
+                "alpha",
+                secretspec_command(
+                    "alpha", "delete TOKEN --provider factorseal://default"
+                ),
+            )
+            locked.fail(
+                f"{alice_prefix} sh -c "
+                + shlex.quote(
+                    secretspec_command(
+                        "alpha", "get TOKEN --provider factorseal://default"
+                    )
+                )
+            )
+
+        with subtest("SecretSpec cache writes expire inside Factorseal"):
+            expiry_manifest = (
+                '[project]\n'
+                'name = "expiry"\n'
+                'revision = "1.0"\n'
+                '\n'
+                '[providers]\n'
+                'factorseal = "factorseal://default"\n'
+                'source = { uri = "env://", cache = { provider = "factorseal", max_age = "5s" } }\n'
+                '\n'
+                '[profiles.default]\n'
+                'CACHE_TOKEN = { description = "Expiring cache token", required = true }\n'
+            )
+            write_user_file(
+                locked,
+                "/home/alice/projects/expiry/secretspec.toml",
+                expiry_manifest,
+            )
+            run_with_approvals(
+                locked,
+                "secretspec-expiry-first",
+                "expiry",
+                secretspec_command(
+                    "expiry", "get CACHE_TOKEN --provider source", "CACHE_TOKEN=one"
+                ),
+                approval_count=2,
+            )
+            assert locked.succeed(
+                "cat /tmp/secretspec-expiry-first.stdout"
+            ).strip() == "one"
+            assert as_user(
+                locked,
+                secretspec_command(
+                    "expiry", "get CACHE_TOKEN --provider source", "CACHE_TOKEN=two"
+                ),
+            ).strip() == "one"
+            locked.succeed("sleep 7")
+            assert as_user(
+                locked,
+                secretspec_command(
+                    "expiry", "get CACHE_TOKEN --provider source", "CACHE_TOKEN=two"
+                ),
+            ).strip() == "two"
+
         # This node's lease is an hour, so expiry cannot be what ends it below.
         locked.succeed(f"loginctl lock-session {session}")
         locked.wait_until_fails(f"test -e {socket}")
         locked.wait_until_fails(
             f"{alice_prefix} systemctl --user is-active factorseal.service"
         )
+
+        with subtest("a sealed vault is an explicit SecretSpec interaction"):
+            command = secretspec_command(
+                "alpha", "get TOKEN --provider factorseal://default"
+            )
+            locked.fail(f"{alice_prefix} sh -c {shlex.quote(command)}")
+            output = locked.succeed(
+                f"{alice_prefix} sh -c "
+                + shlex.quote(f"{command} 2>&1 || true")
+            )
+            assert "interaction" in output.lower(), output
   '';
 }
