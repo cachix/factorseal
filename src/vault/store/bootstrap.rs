@@ -97,7 +97,7 @@ async fn initialize_schema(connection: &Connection) -> VaultResult<()> {
              );
              CREATE TABLE IF NOT EXISTS documents (
                  document_id BLOB PRIMARY KEY NOT NULL,
-                 scope TEXT NOT NULL,
+                 document_kind TEXT NOT NULL,
                  generation INTEGER NOT NULL,
                  key_epoch INTEGER NOT NULL,
                  current_commit_id BLOB NOT NULL

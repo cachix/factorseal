@@ -6,8 +6,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::vault::{
-    DocumentOperation, DocumentScope, SecretAddress, VaultError, VaultResult, VaultStore,
-    WireSecretAddress,
+    DocumentKind, DocumentOperation, SecretAddress, VaultError, VaultResult, VaultStore,
 };
 
 use super::wire::append_digest_bytes;
@@ -59,17 +58,20 @@ struct StoredPermission {
 }
 #[derive(Clone, Copy)]
 pub(super) enum GrantTarget<'a> {
+    Kind {
+        kind: DocumentKind,
+    },
     Namespace {
-        scope: DocumentScope,
+        scope: DocumentKind,
         namespace: &'a [u8],
     },
     Entry {
-        scope: DocumentScope,
+        scope: DocumentKind,
         namespace: &'a [u8],
         address: &'a SecretAddress,
     },
     Project {
-        scope: DocumentScope,
+        scope: DocumentKind,
         namespace: &'a [u8],
         project: &'a str,
     },
@@ -78,7 +80,7 @@ pub(super) enum GrantTarget<'a> {
 #[cfg(feature = "vault-store")]
 #[derive(Clone, Copy)]
 pub(super) struct GrantRequirement<'a> {
-    pub scope: DocumentScope,
+    pub scope: DocumentKind,
     pub namespace: &'a [u8],
     pub address: Option<&'a SecretAddress>,
     pub project: Option<&'a str>,
@@ -117,7 +119,7 @@ pub(super) fn store_grant(
             serde_json::to_vec(&grant).map_err(|error| VaultError::Protocol(error.to_string()))?,
         );
         store.put_at(
-            DocumentScope::DeviceLocal,
+            DocumentKind::Authorization,
             GRANT_DOCUMENT_NAMESPACE,
             &grant_address(caller_fingerprint, target_digest, permission)?,
             &bytes,
@@ -203,7 +205,7 @@ pub(super) fn revoke_permission(store: &VaultStore, id: &str, now: u64) -> Vault
     )?;
     let bytes = store
         .get_at(
-            DocumentScope::DeviceLocal,
+            DocumentKind::Authorization,
             GRANT_DOCUMENT_NAMESPACE,
             &address,
             now,
@@ -220,7 +222,7 @@ fn permission_registry_address() -> VaultResult<SecretAddress> {
 
 fn load_permission_registry(store: &VaultStore, now: u64) -> VaultResult<PermissionRegistry> {
     let Some(bytes) = store.get_at(
-        DocumentScope::DeviceLocal,
+        DocumentKind::Authorization,
         GRANT_DOCUMENT_NAMESPACE,
         &permission_registry_address()?,
         now,
@@ -270,7 +272,7 @@ fn mutate_grants(
         evict_at: None,
     });
     store.mutate(
-        DocumentScope::DeviceLocal,
+        DocumentKind::Authorization,
         GRANT_DOCUMENT_NAMESPACE,
         operations,
     )
@@ -301,8 +303,11 @@ pub(super) fn require_grant(
     }
     if let Some(project) = project
         && address.is_none_or(|address| {
-            WireSecretAddress::new(address.item(), address.field().map(str::to_owned))
-                .is_scoped_to_project(project)
+            address.as_secret_spec().is_some_and(|address| {
+                address
+                    .project()
+                    .is_none_or(|address_project| address_project == project)
+            })
         })
     {
         targets.push(grant_target_digest(&GrantTarget::Project {
@@ -315,9 +320,10 @@ pub(super) fn require_grant(
         scope,
         namespace,
     }));
+    targets.push(grant_target_digest(&GrantTarget::Kind { kind: scope }));
     for target_digest in targets {
         let Some(bytes) = store.get_at(
-            DocumentScope::DeviceLocal,
+            DocumentKind::Authorization,
             GRANT_DOCUMENT_NAMESPACE,
             &grant_address(caller_fingerprint, target_digest, permission)?,
             now,
@@ -344,11 +350,11 @@ pub(super) fn grant_target_digest(target: &GrantTarget<'_>) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(GRANT_TARGET_DOMAIN);
     match target {
+        GrantTarget::Kind { kind } => {
+            digest.update([0, document_kind_tag(*kind)]);
+        }
         GrantTarget::Namespace { scope, namespace } => {
-            digest.update([match scope {
-                DocumentScope::DeviceLocal => 1,
-                DocumentScope::DeviceCache => 3,
-            }]);
+            digest.update([1, document_kind_tag(*scope)]);
             append_digest_bytes(&mut digest, namespace);
         }
         GrantTarget::Entry {
@@ -356,33 +362,31 @@ pub(super) fn grant_target_digest(target: &GrantTarget<'_>) -> [u8; 32] {
             namespace,
             address,
         } => {
-            digest.update([match scope {
-                DocumentScope::DeviceLocal => 2,
-                DocumentScope::DeviceCache => 4,
-            }]);
+            digest.update([2, document_kind_tag(*scope)]);
             append_digest_bytes(&mut digest, namespace);
-            append_digest_bytes(&mut digest, address.item().as_bytes());
-            if let Some(field) = address.field() {
-                digest.update([1]);
-                append_digest_bytes(&mut digest, field.as_bytes());
-            } else {
-                digest.update([0]);
-            }
+            append_digest_bytes(&mut digest, address.storage_key().as_bytes());
         }
         GrantTarget::Project {
             scope,
             namespace,
             project,
         } => {
-            digest.update([match scope {
-                DocumentScope::DeviceLocal => 5,
-                DocumentScope::DeviceCache => 6,
-            }]);
+            digest.update([3, document_kind_tag(*scope)]);
             append_digest_bytes(&mut digest, namespace);
             append_digest_bytes(&mut digest, project.as_bytes());
         }
     }
     digest.finalize().into()
+}
+
+fn document_kind_tag(kind: DocumentKind) -> u8 {
+    match kind {
+        DocumentKind::Authorization => 1,
+        DocumentKind::LinuxSecretService => 2,
+        DocumentKind::LocalKeyring => 3,
+        DocumentKind::SecretSpecProject => 4,
+        DocumentKind::SecretSpecProviderCache => 5,
+    }
 }
 
 #[cfg(feature = "vault-store")]

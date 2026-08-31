@@ -9,7 +9,7 @@ use factorseal::UnlockGroup;
 #[command(
     name = "factorseal",
     version,
-    about = "Hardware-bound vault with a keyring interface and command-line access"
+    about = "Hardware-bound local vault for project secrets"
 )]
 pub(super) struct Cli {
     /// Vault directory. Defaults to platform-local user data.
@@ -64,8 +64,16 @@ pub(super) enum Command {
     /// Seal the running vault service immediately.
     Seal,
 
-    /// Store or replace one value in the durable local keyring.
+    /// Store or replace one durable project secret.
     Set {
+        /// SecretSpec project owning this secret.
+        #[arg(long, env = "SECRETSPEC_PROJECT")]
+        project: String,
+
+        /// SecretSpec profile containing this conventional key.
+        #[arg(long, default_value = "default")]
+        profile: String,
+
         /// Stable name used to retrieve the value.
         item: String,
 
@@ -78,16 +86,28 @@ pub(super) enum Command {
         value_file: Option<PathBuf>,
     },
 
-    /// Write one keyring value to standard output without adding a newline.
+    /// Write one project secret to standard output without adding a newline.
     Get {
+        #[arg(long, env = "SECRETSPEC_PROJECT")]
+        project: String,
+
+        #[arg(long, default_value = "default")]
+        profile: String,
+
         item: String,
 
         #[arg(long)]
         field: Option<String>,
     },
 
-    /// Delete one value from the durable local keyring.
+    /// Delete one durable project secret.
     Delete {
+        #[arg(long, env = "SECRETSPEC_PROJECT")]
+        project: String,
+
+        #[arg(long, default_value = "default")]
+        profile: String,
+
         item: String,
 
         #[arg(long)]

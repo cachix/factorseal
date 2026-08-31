@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::Vault;
+use crate::{DocumentKind, SecretSpecAddress, Vault};
 
 fn service(now: u64, policy: UnsealLeasePolicy) -> (tempfile::TempDir, VaultService) {
     let directory = tempfile::tempdir().unwrap();
@@ -26,31 +26,39 @@ fn address() -> WireSecretAddress {
     WireSecretAddress::new("secretspec/demo/default/API_KEY", None)
 }
 
+fn project_address(project: &str) -> SecretSpecAddress {
+    SecretSpecAddress::convention(project, "default", "API_KEY").unwrap()
+}
+
 #[test]
-fn cache_actions_normalize_to_cache_scoped_base_actions() {
+fn typed_actions_select_semantic_document_kinds() {
     let actions = [
         VaultAction::GetCache {
-            namespace: vec![],
-            address: address(),
+            project: "demo".to_owned(),
+            address: project_address("demo"),
         },
         VaultAction::PutCache {
-            namespace: vec![],
-            address: address(),
+            project: "demo".to_owned(),
+            address: project_address("demo"),
             value: WireSecret::new(vec![]),
             evict_at: None,
         },
         VaultAction::DeleteCache {
-            namespace: vec![],
-            address: address(),
+            project: "demo".to_owned(),
+            address: project_address("demo"),
         },
-        VaultAction::ClearCache { namespace: vec![] },
-        VaultAction::SealCache { namespace: vec![] },
+        VaultAction::ClearCache {
+            project: "demo".to_owned(),
+        },
+        VaultAction::SealCache {
+            project: "demo".to_owned(),
+        },
     ];
 
     for action in actions {
         let ScopedAction { action, scope } = scope_action(action);
-        assert_eq!(scope, DocumentScope::DeviceCache);
-        assert!(!matches!(
+        assert_eq!(scope, DocumentKind::SecretSpecProviderCache);
+        assert!(matches!(
             action,
             VaultAction::GetCache { .. }
                 | VaultAction::PutCache { .. }
@@ -61,7 +69,7 @@ fn cache_actions_normalize_to_cache_scoped_base_actions() {
     }
     assert_eq!(
         scope_action(VaultAction::Status).scope,
-        DocumentScope::DeviceLocal
+        DocumentKind::LocalKeyring
     );
 }
 
@@ -72,6 +80,46 @@ fn eviction_deadline_may_be_immediate_but_not_in_the_past() {
     assert!(matches!(
         validate_evict_at(Some(99), 100),
         Err(VaultError::Expired)
+    ));
+}
+
+#[test]
+fn durable_project_documents_are_partitioned_and_kind_authorized() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let caller = caller();
+    service
+        .authorize_document_kind(
+            &caller,
+            DocumentKind::SecretSpecProject,
+            [GrantPermission::Get, GrantPermission::Put],
+            None,
+            100,
+        )
+        .unwrap();
+    let stored = service.handle(
+        &caller,
+        VaultRequest::new(VaultAction::PutProject {
+            project: "demo".to_owned(),
+            address: project_address("demo"),
+            value: WireSecret::new(b"secret".to_vec()),
+        })
+        .unwrap(),
+        101,
+    );
+    assert!(matches!(stored.result, Ok(VaultResponseBody::Stored)));
+
+    let other = service.handle(
+        &caller,
+        VaultRequest::new(VaultAction::GetProject {
+            project: "other".to_owned(),
+            address: project_address("other"),
+        })
+        .unwrap(),
+        102,
+    );
+    assert!(matches!(
+        other.result,
+        Ok(VaultResponseBody::Secret { value: None })
     ));
 }
 
@@ -143,8 +191,8 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     let get_scoped = |project: &str, address_project: &str| {
         VaultRequest::new_with_application(
             VaultAction::GetCache {
-                namespace: b"secretspec-cache/v1".to_vec(),
-                address: address().scope_to_project(address_project).unwrap(),
+                project: address_project.to_owned(),
+                address: project_address(address_project),
             },
             application(project),
         )
@@ -447,8 +495,8 @@ fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
     let provider = caller();
     let request = VaultRequest::new_with_application(
         VaultAction::GetCache {
-            namespace: b"secretspec-cache/v1".to_vec(),
-            address: address().scope_to_project("demo").unwrap(),
+            project: "demo".to_owned(),
+            address: project_address("demo"),
         },
         VaultApplicationContext::new(
             Some("demo".to_owned()),
@@ -635,7 +683,7 @@ fn local_keyring_operations_are_separate_from_disposable_cache_entries() {
     service
         .authorize_cache_namespace(
             &caller,
-            b"factorseal/keyring/v1",
+            b"factorseal-keyring",
             [GrantPermission::Get],
             None,
             101,
@@ -644,8 +692,8 @@ fn local_keyring_operations_are_separate_from_disposable_cache_entries() {
     let cache_read = service.handle(
         &caller,
         VaultRequest::new(VaultAction::GetCache {
-            namespace: b"factorseal/keyring/v1".to_vec(),
-            address: address(),
+            project: "factorseal-keyring".to_owned(),
+            address: project_address("factorseal-keyring"),
         })
         .unwrap(),
         102,

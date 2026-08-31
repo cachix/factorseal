@@ -5,7 +5,7 @@ use turso::{Value, params};
 
 use crate::vault::envelope::{EnvelopeContext, encrypt_changes, encrypt_snapshot};
 use crate::vault::{
-    DocumentId, DocumentMutation, DocumentScope, EncryptedSnapshot, SecretDocument, VaultError,
+    DocumentId, DocumentKind, DocumentMutation, EncryptedSnapshot, SecretDocument, VaultError,
     VaultResult, verify_and_decrypt_snapshot,
 };
 
@@ -24,7 +24,7 @@ struct PreparedChange {
 
 struct PreparedCommit {
     document_id: DocumentId,
-    scope: DocumentScope,
+    scope: DocumentKind,
     expected_generation: Option<u64>,
     generation: u64,
     key_epoch: u64,
@@ -38,12 +38,13 @@ impl StoreWorker {
     pub(super) async fn load_document(
         &self,
         document_id: DocumentId,
-        expected_scope: DocumentScope,
+        expected_scope: DocumentKind,
+        expected_partition: Option<&[u8]>,
     ) -> VaultResult<Option<LoadedDocument>> {
         let mut rows = self
             .connection
             .query(
-                "SELECT scope, generation, key_epoch FROM documents WHERE document_id = ?1",
+                "SELECT document_kind, generation, key_epoch FROM documents WHERE document_id = ?1",
                 [document_id.as_bytes().to_vec()],
             )
             .await
@@ -51,12 +52,12 @@ impl StoreWorker {
         let Some(row) = rows.next().await.map_err(database_error)? else {
             return Ok(None);
         };
-        let scope = DocumentScope::parse(&row_text(&row, 0)?)?;
+        let scope = DocumentKind::parse(&row_text(&row, 0)?)?;
         let generation = from_i64(row_integer(&row, 1)?, "document generation")?;
         let key_epoch = from_i64(row_integer(&row, 2)?, "document key epoch")?;
         if scope != expected_scope {
             return Err(VaultError::InvalidData(
-                "document scope does not match requested operation".to_owned(),
+                "document kind does not match requested operation".to_owned(),
             ));
         }
         drop(rows);
@@ -86,7 +87,8 @@ impl StoreWorker {
             self.device.public_signing_key(),
             &self.data_key,
         )?;
-        let document = SecretDocument::load(&snapshot, self.device.actor_id())?;
+        let document =
+            SecretDocument::load(&snapshot, self.device.actor_id(), scope, expected_partition)?;
         Ok(Some(LoadedDocument {
             document,
             generation,
@@ -97,7 +99,7 @@ impl StoreWorker {
     pub(super) async fn commit_mutation(
         &mut self,
         document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
         expected_generation: Option<u64>,
         key_epoch: u64,
         mutation: DocumentMutation,
@@ -113,7 +115,7 @@ impl StoreWorker {
     async fn prepare_commit(
         &self,
         document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
         expected_generation: Option<u64>,
         key_epoch: u64,
         mutation: DocumentMutation,
@@ -233,7 +235,7 @@ impl StoreWorker {
                     .execute(
                         "UPDATE documents SET generation = ?1, key_epoch = ?2,
                               current_commit_id = ?3
-                         WHERE document_id = ?4 AND generation = ?5 AND scope = ?6",
+                         WHERE document_id = ?4 AND generation = ?5 AND document_kind = ?6",
                         params![
                             to_i64(prepared.generation)?,
                             to_i64(prepared.key_epoch)?,
@@ -255,7 +257,7 @@ impl StoreWorker {
                 transaction
                     .execute(
                         "INSERT INTO documents(
-                             document_id, scope, generation, key_epoch, current_commit_id
+                             document_id, document_kind, generation, key_epoch, current_commit_id
                          ) VALUES (?1, ?2, ?3, ?4, ?5)",
                         params![
                             prepared.document_id.as_bytes().to_vec(),

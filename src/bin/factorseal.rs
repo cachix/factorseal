@@ -1,9 +1,7 @@
 use std::time::Duration;
 
 use clap::Parser;
-use factorseal::{
-    GrantPermission, KeyringError, UnsealLeasePolicy, VaultError, VaultResponseErrorCode,
-};
+use factorseal::{GrantPermission, UnsealLeasePolicy, VaultError, VaultResponseErrorCode};
 
 #[path = "factorseal/cli.rs"]
 mod cli;
@@ -19,32 +17,27 @@ mod provider;
 
 use cli::{Cli, Command};
 use commands::{
-    delete_keyring_value, destroy_vault, get_keyring_value, grant_cli, hardware_self_test,
-    initialize, manage_permissions, resolve_root, run_agent, seal_vault, set_keyring_value,
+    delete_project_value, destroy_vault, get_project_value, grant_cli, hardware_self_test,
+    initialize, manage_permissions, resolve_root, run_agent, seal_vault, set_project_value,
     show_status,
 };
 use factor::FactorSource;
 
 const MAX_FACTOR_BYTES: u64 = 64 * 1024;
-const MAX_KEYRING_VALUE_BYTES: u64 = 64 * 1024;
+const MAX_PROJECT_VALUE_BYTES: u64 = 64 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const DEFAULT_UNIX_SOCKET: &str = "factorseal.sock";
-const SECRETSPEC_CACHE_NAMESPACE: &[u8] = b"secretspec-cache/v1";
-const KEYRING_NAMESPACE: &[u8] = b"factorseal/keyring/v1";
-const KEYRING_PERMISSIONS: [GrantPermission; 4] = [
+const CLI_CONTROL_NAMESPACE: &[u8] = b"factorseal/cli-control/v1";
+const PROJECT_PERMISSIONS: [GrantPermission; 3] = [
     GrantPermission::Get,
     GrantPermission::Put,
     GrantPermission::Delete,
-    GrantPermission::Seal,
 ];
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(transparent)]
     Vault(#[from] VaultError),
-
-    #[error(transparent)]
-    Keyring(#[from] KeyringError),
 
     #[error("could not determine the platform user-data directory; pass --root")]
     NoDefaultRoot,
@@ -55,11 +48,11 @@ enum CliError {
     #[error("askpass helper failed: {0}")]
     Askpass(String),
 
-    #[error("keyring value input failed: {0}")]
-    KeyringInput(String),
+    #[error("project value input failed: {0}")]
+    ProjectInput(String),
 
-    #[error("keyring entry was not found")]
-    KeyringEntryNotFound,
+    #[error("project secret was not found")]
+    ProjectEntryNotFound,
 
     #[error("unlock group `{0}` is not configured for this vault")]
     UnlockGroupNotConfigured(String),
@@ -147,12 +140,32 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Status => show_status(&root, socket),
         Command::Seal => seal_vault(&root, socket),
         Command::Set {
+            project,
+            profile,
             item,
             field,
             value_file,
-        } => set_keyring_value(&root, socket, item, field, value_file.as_deref()),
-        Command::Get { item, field } => get_keyring_value(&root, socket, item, field),
-        Command::Delete { item, field } => delete_keyring_value(&root, socket, item, field),
+        } => set_project_value(
+            &root,
+            socket,
+            project,
+            &profile,
+            item,
+            field,
+            value_file.as_deref(),
+        ),
+        Command::Get {
+            project,
+            profile,
+            item,
+            field,
+        } => get_project_value(&root, socket, project, &profile, item, field),
+        Command::Delete {
+            project,
+            profile,
+            item,
+            field,
+        } => delete_project_value(&root, socket, project, &profile, item, field),
         Command::Destroy {
             yes_really_destroy,
             unlock,

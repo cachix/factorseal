@@ -43,7 +43,7 @@ fn put_two_generations(store: &VaultStore) -> SecretAddress {
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"first",
@@ -52,7 +52,7 @@ fn put_two_generations(store: &VaultStore) -> SecretAddress {
         .unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"second",
@@ -88,7 +88,7 @@ fn turso_round_trip_restart_and_idempotent_delete() {
     let address = SecretAddress::new("demo/default/API_TOKEN", None).unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"classified",
@@ -97,7 +97,12 @@ fn turso_round_trip_restart_and_idempotent_delete() {
         .unwrap();
     assert_eq!(
         store
-            .get_at(DocumentScope::DeviceCache, b"secretspec", &address, 10,)
+            .get_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address,
+                10,
+            )
             .unwrap()
             .unwrap()
             .as_slice(),
@@ -111,7 +116,12 @@ fn turso_round_trip_restart_and_idempotent_delete() {
     assert_eq!(store.device(), &expected_device);
     assert_eq!(
         store
-            .get_at(DocumentScope::DeviceCache, b"secretspec", &address, 10,)
+            .get_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address,
+                10,
+            )
             .unwrap()
             .unwrap()
             .as_slice(),
@@ -119,12 +129,20 @@ fn turso_round_trip_restart_and_idempotent_delete() {
     );
     assert!(
         store
-            .delete(DocumentScope::DeviceCache, b"secretspec", &address)
+            .delete(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address
+            )
             .unwrap()
     );
     assert!(
         !store
-            .delete(DocumentScope::DeviceCache, b"secretspec", &address)
+            .delete(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address
+            )
             .unwrap()
     );
 }
@@ -136,7 +154,7 @@ fn batch_mutation_commits_related_records_in_one_generation() {
     let index = SecretAddress::new("secret-service/index", None).unwrap();
     store
         .mutate(
-            DocumentScope::DeviceLocal,
+            DocumentKind::LinuxSecretService,
             b"secret-service",
             vec![
                 DocumentOperation::Put {
@@ -166,7 +184,12 @@ fn batch_mutation_commits_related_records_in_one_generation() {
     for (address, expected) in [(first, b"secret".as_slice()), (index, b"index")] {
         assert_eq!(
             store
-                .get_at(DocumentScope::DeviceLocal, b"secret-service", &address, 10)
+                .get_at(
+                    DocumentKind::LinuxSecretService,
+                    b"secret-service",
+                    &address,
+                    10
+                )
                 .unwrap()
                 .unwrap()
                 .as_slice(),
@@ -181,7 +204,7 @@ fn expiration_is_purged_without_read_and_stays_gone() {
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"short-lived",
@@ -195,7 +218,12 @@ fn expiration_is_purged_without_read_and_stays_gone() {
     let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
     assert!(
         store
-            .get_at(DocumentScope::DeviceCache, b"secretspec", &address, 50,)
+            .get_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address,
+                50,
+            )
             .unwrap()
             .is_none()
     );
@@ -207,7 +235,7 @@ fn installation_files_contain_no_secret_or_predictable_name() {
     let address = SecretAddress::new("visible-project/default/API_TOKEN", None).unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"needle-secret-value",
@@ -267,7 +295,7 @@ fn protected_chain_detects_snapshot_tamper() {
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"value",
@@ -305,7 +333,7 @@ fn protected_chain_detects_a_missing_document_row() {
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"value",
@@ -388,7 +416,7 @@ fn compaction_bounds_the_chain_and_keeps_every_document_readable() {
         let value = generation.to_string();
         store
             .put_at(
-                DocumentScope::DeviceCache,
+                DocumentKind::SecretSpecProviderCache,
                 namespaces[index],
                 &address,
                 value.as_bytes(),
@@ -414,7 +442,12 @@ fn compaction_bounds_the_chain_and_keeps_every_document_readable() {
     for (namespace, expected) in namespaces.iter().zip(&latest) {
         assert_eq!(
             store
-                .get_at(DocumentScope::DeviceCache, namespace, &address, 10)
+                .get_at(
+                    DocumentKind::SecretSpecProviderCache,
+                    namespace,
+                    &address,
+                    10
+                )
                 .unwrap()
                 .unwrap()
                 .as_slice(),
@@ -430,7 +463,7 @@ fn a_compacted_chain_still_detects_snapshot_tamper() {
     for generation in 0..=MAX_RETAINED_COMMITS {
         store
             .put_at(
-                DocumentScope::DeviceCache,
+                DocumentKind::SecretSpecProviderCache,
                 b"secretspec",
                 &address,
                 generation.to_string().as_bytes(),
@@ -454,7 +487,7 @@ fn protected_chain_detects_missing_change() {
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"value",
@@ -469,12 +502,12 @@ fn protected_chain_detects_missing_change() {
 }
 
 #[test]
-fn protected_chain_detects_document_scope_tamper() {
+fn protected_chain_detects_document_kind_tamper() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"value",
@@ -482,7 +515,7 @@ fn protected_chain_detects_document_scope_tamper() {
         )
         .unwrap();
     drop(store);
-    execute_database_mutation(&root, "UPDATE documents SET scope = 'device-local'");
+    execute_database_mutation(&root, "UPDATE documents SET document_kind = 'invalid-kind'");
 
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
     assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
@@ -494,7 +527,7 @@ fn protected_chain_detects_commit_record_tamper() {
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
         .put_at(
-            DocumentScope::DeviceCache,
+            DocumentKind::SecretSpecProviderCache,
             b"secretspec",
             &address,
             b"value",

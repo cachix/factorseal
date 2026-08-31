@@ -18,7 +18,7 @@ use secretspec_ipc::provider::{ProvidedSecret, ProviderHandler, SecretValue, ser
 use secretspec_ipc::server::{RequestContext, RpcResult, ServerConfig};
 use zeroize::Zeroizing;
 
-use super::{CliError, SECRETSPEC_CACHE_NAMESPACE};
+use super::CliError;
 
 #[path = "provider/address.rs"]
 mod address;
@@ -117,15 +117,23 @@ impl FactorsealProvider {
         }
     }
 
-    fn wire_address(&self, address: Address) -> RpcResult<factorseal::WireSecretAddress> {
-        let project = self
-            .application
+    fn project(&self) -> RpcResult<&str> {
+        self.application
             .get()
             .and_then(|application| application.project.as_deref())
-            .ok_or_else(|| RpcError::new(ErrorKind::InvalidParams))?;
-        address::wire_address(address)?
-            .scope_to_project(project)
-            .map_err(|_| RpcError::new(ErrorKind::InvalidParams))
+            .ok_or_else(|| RpcError::new(ErrorKind::InvalidParams))
+    }
+
+    fn wire_address(&self, address: Address) -> RpcResult<factorseal::SecretSpecAddress> {
+        let project = self.project()?;
+        let address = address::wire_address(address)?;
+        if address
+            .project()
+            .is_some_and(|address_project| address_project != project)
+        {
+            return Err(RpcError::new(ErrorKind::InvalidParams));
+        }
+        Ok(address)
     }
 }
 
@@ -182,7 +190,12 @@ impl ProviderHandler for FactorsealProvider {
         Ok(Metadata {
             name: "factorseal".to_owned(),
             display_uri: PROVIDER_URI.to_owned(),
-            supported_coordinates: vec![CoordinateName::Field],
+            supported_coordinates: vec![
+                CoordinateName::Field,
+                CoordinateName::Vault,
+                CoordinateName::Section,
+                CoordinateName::Version,
+            ],
             generated_value_persistence: Persistence::Persist,
             prompted_value_persistence: Persistence::Persist,
             storage_identity: PROVIDER_URI.to_owned(),
@@ -197,7 +210,7 @@ impl ProviderHandler for FactorsealProvider {
         address: Address,
     ) -> RpcResult<ResolveAddressResult> {
         Ok(ResolveAddressResult {
-            coordinates: address::coordinates(address)?,
+            coordinates: address::coordinates(address),
         })
     }
 
@@ -207,9 +220,10 @@ impl ProviderHandler for FactorsealProvider {
         address: Address,
     ) -> RpcResult<Option<ProvidedSecret>> {
         let address = self.wire_address(address)?;
+        let project = self.project()?.to_owned();
         match self
             .request(&context, || VaultAction::GetCache {
-                namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
+                project: project.clone(),
                 address: address.clone(),
             })
             .await?
@@ -236,9 +250,10 @@ impl ProviderHandler for FactorsealProvider {
         value: SecretValue,
     ) -> RpcResult<()> {
         let address = self.wire_address(address)?;
+        let project = self.project()?.to_owned();
         let response = self
             .request(&context, || VaultAction::PutCache {
-                namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
+                project: project.clone(),
                 address: address.clone(),
                 value: WireSecret::new(value.expose().as_bytes().to_vec()),
                 evict_at: None,
@@ -266,9 +281,10 @@ impl ProviderHandler for FactorsealProvider {
             .ok_or_else(|| RpcError::new(ErrorKind::InvalidParams))?
             / 1_000;
         let address = self.wire_address(address)?;
+        let project = self.project()?.to_owned();
         let response = self
             .request(&context, || VaultAction::PutCache {
-                namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
+                project: project.clone(),
                 address: address.clone(),
                 value: WireSecret::new(value.expose().as_bytes().to_vec()),
                 evict_at: Some(evict_at),
@@ -281,9 +297,10 @@ impl ProviderHandler for FactorsealProvider {
 
     async fn delete(&self, context: RequestContext, address: Address) -> RpcResult<bool> {
         let address = self.wire_address(address)?;
+        let project = self.project()?.to_owned();
         match self
             .request(&context, || VaultAction::DeleteCache {
-                namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
+                project: project.clone(),
                 address: address.clone(),
             })
             .await?

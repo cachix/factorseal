@@ -78,7 +78,8 @@ resolution, so a reused process ID cannot inherit another process's grant.
   rollback detection.
 - The implemented `factorseal provider` endpoint uses SecretSpec's typed IPC
   protocol over private standard-I/O pipes and translates requests into the
-  disposable `device-cache` scope through the native `VaultClient`. The
+  disposable, project-partitioned `secretspec-provider-cache` document kind
+  through the native `VaultClient`. The
   endpoint executable—not the SecretSpec CLI or embedding application—is the
   authenticated vault principal. Its IPC dependency is still pinned to an
   unpublished Git revision, registration is not installed by the packages,

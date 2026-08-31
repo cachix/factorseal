@@ -52,21 +52,31 @@ vault memory during the lease. A later native adapter may implement signatures
 with a non-exportable platform key while keeping the `DeviceKeyId` and envelope
 contract stable.
 
-## Document scopes
+## Automerge documents
 
-| Scope | MVP use | Replication |
-| --- | --- | --- |
-| `device-cache` | SecretSpec cache documents | never |
-| `device-local` | durable CLI/application keyring, caller grants, and local policy | never |
+| Document kind | Partition | Use | Replication |
+| --- | --- | --- | --- |
+| `secretspec-project` | project name | durable CLI project secrets | never |
+| `secretspec-provider-cache` | project name | disposable SecretSpec provider cache | never |
+| `local-keyring` | native namespace | Rust keyring clients | never |
+| `linux-secret-service` | service namespace | Linux Secret Service collections | never |
+| `authorization` | authorization namespace | caller grants and local policy | never |
 
-A document ID is a domain-separated digest of vault ID, scope, and
-namespace. It is opaque in SQL. The namespace and secret item/field live only
-inside the encrypted Automerge document.
+A document ID is HMAC-SHA-256 under the vault data key over the document kind
+and partition. It is opaque in SQL and does not expose guessable project names.
+The partition and secret address live only inside the encrypted Automerge
+document.
+
+The version-1 Automerge root contains `format` (the document kind),
+`format-version`, `partition` bytes, and an `entries` map. Loading checks this
+descriptor against the protected document metadata before serving a value.
 
 The secret domain stores one serialized record as an Automerge byte value. A
-record binds its item, optional field, value, format version, and optional
-eviction deadline. The map key is a separate digest of item and field. On read,
-Factorseal checks that the record and requested coordinates match. Automerge's
+record binds its complete typed address, value, format version, and optional
+eviction deadline. A SecretSpec convention address contains project, profile,
+and key. A native address contains item and optional field, vault, section, and
+version. The map key is a separate digest of the full address. On read,
+Factorseal checks that the record and requested address match. Automerge's
 `get_all` is used so concurrent values cannot be hidden by its deterministic
 display winner. Different visible values return `Conflict`.
 
@@ -77,7 +87,7 @@ nonce and ML-DSA-65 signatures cover a domain-separated
 transcript including:
 
 - envelope version;
-- document ID and scope;
+- document ID and kind;
 - device key and Automerge actor;
 - generation and data-key epoch;
 - Automerge dependencies and change hash for a change;
@@ -99,7 +109,7 @@ The schema contains:
 
 - `store_meta` for schema version and current protected head;
 - `vault_identity` for the checked public vault identity;
-- `documents` for opaque ID, scope, generation, epoch, and current commit;
+- `documents` for opaque ID, document kind, generation, epoch, and current commit;
 - `document_snapshots` for encrypted signed snapshots;
 - `document_changes` for encrypted signed changes;
 - `protected_commits` for the signed global commit chain;
@@ -120,7 +130,7 @@ claim. Detecting it needs a checkpoint held outside that directory.
 ## Expiry
 
 Storage deadlines are inside encrypted records. Reads delete an expired entry
-before returning a miss. The store also scans every `device-cache` document at
+before returning a miss. The store also scans every `secretspec-provider-cache` document at
 startup and exposes a purge operation for the live scheduler. Packaged vault services
 must call it at the next deadline or at a short bounded interval; tests prove
 that explicit purge removes an entry without a read and that it remains absent
@@ -142,12 +152,12 @@ executable digest, and optional signing identity. These values are supplied by
 the authenticated transport adapter. A digest of the complete caller identity
 is part of every durable grant.
 
-Grants bind the document scope and can target one exact namespace/item/field or
-an entire namespace. They contain an explicit set of
+Grants bind the document kind and can target the entire kind, one exact
+partition/address, or an entire partition. They contain an explicit set of
 get/put/delete/clear/seal permissions and an optional expiry that is also
 applied as a storage eviction deadline. A disposable cache grant therefore
 cannot authorize a durable keyring write. Grants are stored in the encrypted
-`device-local` document.
+`authorization` document.
 
 An unseal lease has independent idle and absolute deadlines. Authorized
 operations refresh only the idle deadline and can never pass the absolute
@@ -161,15 +171,15 @@ the typed IPC wire contract. Factorseal implements its `factorseal provider`
 subcommand against the Rust IPC crate, which is the external-provider endpoint
 SecretSpec launches over private stdin/stdout pipes.
 
-The endpoint translates convention and native addresses into a versioned
-Factorseal address beneath a derived project prefix and sends get, set,
-expiring set, and delete as `device-cache` requests in the
-`secretspec-cache/v1` namespace. The service verifies that prefix before it
-considers a project grant, preventing an approved project context from naming
-another project's cached secrets. The endpoint never opens the embedded
-database, handles vault keys, or performs durable `Keyring` operations. The
-`vault-client` feature remains the lightweight native seam for Factorseal-aware
-applications.
+The endpoint sends get, set, expiring set, and delete as typed
+`secretspec-provider-cache` requests partitioned by project. It preserves
+SecretSpec convention addresses (`project`, `profile`, `key`) and native
+coordinates (`item` plus optional `field`, `vault`, `section`, and `version`)
+without flattening. The service rejects a convention address whose project
+does not match the request partition before it considers a project grant. The
+endpoint never opens the embedded database, handles vault keys, or performs
+durable project or `Keyring` operations. The `vault-client` feature remains the
+lightweight native seam for Factorseal-aware applications.
 
 The endpoint executable, not the SecretSpec CLI or embedding application, is
 the principal authenticated by Factorseal's Unix socket or Windows named pipe.

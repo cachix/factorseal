@@ -1,11 +1,11 @@
-use factorseal::WireSecretAddress;
+use factorseal::{SecretSpecAddress, SecretSpecCoordinates};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use secretspec_ipc::error::{ErrorKind, RpcError};
 use secretspec_ipc::protocol::provider::{Address, Coordinates};
 use secretspec_ipc::server::RpcResult;
 
-pub(super) fn coordinates(address: Address) -> RpcResult<Coordinates> {
-    let coordinates = match address {
+pub(super) fn coordinates(address: Address) -> Coordinates {
+    match address {
         Address::Convention {
             project,
             profile,
@@ -26,19 +26,23 @@ pub(super) fn coordinates(address: Address) -> RpcResult<Coordinates> {
             }
         }
         Address::Native { coordinates } => coordinates,
-    };
-    if coordinates.vault.is_some() || coordinates.section.is_some() || coordinates.version.is_some()
-    {
-        return Err(RpcError::new(ErrorKind::InvalidParams));
     }
-    let address = WireSecretAddress::new(coordinates.item.clone(), coordinates.field.clone());
-    address
-        .validate()
-        .map_err(|_| RpcError::new(ErrorKind::InvalidParams))?;
-    Ok(coordinates)
 }
 
-pub(super) fn wire_address(address: Address) -> RpcResult<WireSecretAddress> {
-    let coordinates = coordinates(address)?;
-    Ok(WireSecretAddress::new(coordinates.item, coordinates.field))
+pub(super) fn wire_address(address: Address) -> RpcResult<SecretSpecAddress> {
+    let address = match address {
+        Address::Convention {
+            project,
+            profile,
+            key,
+        } => SecretSpecAddress::convention(project, profile, key),
+        Address::Native { coordinates } => SecretSpecAddress::native(SecretSpecCoordinates {
+            item: coordinates.item,
+            field: coordinates.field,
+            vault: coordinates.vault,
+            section: coordinates.section,
+            version: coordinates.version,
+        }),
+    };
+    address.map_err(|_| RpcError::new(ErrorKind::InvalidParams))
 }

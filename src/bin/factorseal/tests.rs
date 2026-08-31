@@ -1,9 +1,9 @@
 use super::cli::{Cli, Command, PermissionCommand};
 use super::commands::{
     ApprovalDecision, ParsedGrantDuration, parse_grant_duration, read_approval_decision,
-    read_bounded, read_grant_duration, read_init_unlock_groups, read_keyring_value,
-    read_password_for_groups, read_unlock_group_choice, require_prompt_terminal,
-    resolve_unlock_group, wait_for_initialization,
+    read_bounded, read_grant_duration, read_init_unlock_groups, read_password_for_groups,
+    read_project_value, read_unlock_group_choice, require_prompt_terminal, resolve_unlock_group,
+    wait_for_initialization,
 };
 use super::factor::read_factor;
 use super::*;
@@ -301,12 +301,14 @@ fn agent_uses_the_preferred_group_unless_unlock_is_explicit() {
 }
 
 #[test]
-fn keyring_commands_accept_item_field_and_service_override() {
+fn project_commands_accept_project_item_field_and_service_override() {
     let cli = Cli::try_parse_from([
         "factorseal",
         "--socket",
         "/tmp/factorseal.sock",
         "set",
+        "--project",
+        "demo",
         "github",
         "--field",
         "token",
@@ -316,6 +318,8 @@ fn keyring_commands_accept_item_field_and_service_override() {
     .unwrap();
     assert_eq!(cli.socket.unwrap(), PathBuf::from("/tmp/factorseal.sock"));
     let Command::Set {
+        project,
+        profile,
         item,
         field,
         value_file,
@@ -324,14 +328,25 @@ fn keyring_commands_accept_item_field_and_service_override() {
         panic!("expected set command");
     };
     assert_eq!(item, "github");
+    assert_eq!(project, "demo");
+    assert_eq!(profile, "default");
     assert_eq!(field.as_deref(), Some("token"));
     assert_eq!(value_file.unwrap(), PathBuf::from("/tmp/value"));
 
-    let cli = Cli::try_parse_from(["factorseal", "get", "github", "--field", "token"]).unwrap();
+    let cli = Cli::try_parse_from([
+        "factorseal",
+        "get",
+        "--project",
+        "demo",
+        "github",
+        "--field",
+        "token",
+    ])
+    .unwrap();
     assert!(matches!(
         cli.command,
-        Command::Get { item, field }
-            if item == "github" && field.as_deref() == Some("token")
+        Command::Get { project, profile, item, field }
+            if project == "demo" && profile == "default" && item == "github" && field.as_deref() == Some("token")
     ));
 }
 
@@ -339,7 +354,7 @@ fn keyring_commands_accept_item_field_and_service_override() {
 fn seal_is_a_first_class_cli_command_and_permission() {
     let cli = Cli::try_parse_from(["factorseal", "seal"]).unwrap();
     assert!(matches!(cli.command, Command::Seal));
-    assert!(KEYRING_PERMISSIONS.contains(&GrantPermission::Seal));
+    assert!(!PROJECT_PERMISSIONS.contains(&GrantPermission::Seal));
 }
 
 #[test]
@@ -352,13 +367,13 @@ fn hardware_self_test_is_a_first_class_cli_command() {
 }
 
 #[test]
-fn keyring_value_files_preserve_exact_binary_bytes() {
+fn project_value_files_preserve_exact_binary_bytes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("value");
     fs::write(&path, b"secret\0with\nbytes").unwrap();
 
     assert_eq!(
-        read_keyring_value(Some(&path)).unwrap().as_slice(),
+        read_project_value(Some(&path)).unwrap().as_slice(),
         b"secret\0with\nbytes"
     );
 }

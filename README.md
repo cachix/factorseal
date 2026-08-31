@@ -33,8 +33,8 @@ vault's encryption and signing keys.
 
 Factorseal provides:
 
-- a durable [keyring](#interfaces-and-scopes) for the CLI and Factorseal-aware
-  applications;
+- durable, project-partitioned secrets for the CLI, plus a local
+  [keyring](#interfaces-and-document-kinds) for Factorseal-aware applications;
 - a separate disposable [provider cache](https://secretspec.dev/concepts/providers/caching/)
   for [SecretSpec](https://secretspec.dev/);
 - the standard
@@ -106,25 +106,28 @@ initialization instruction, and continues automatically after `factorseal init`
 creates it. Packaged background launchers use this same behavior on every
 desktop platform.
 
-Then use the keyring from another terminal:
+Then store a durable project secret from another terminal:
 
 ```console
-$ factorseal set github --field token
-$ factorseal get github --field token
-$ factorseal delete github --field token
+$ factorseal set --project my-app github --field token
+$ factorseal get --project my-app github --field token
+$ factorseal delete --project my-app github --field token
 ```
 
 `set` prompts without echo when standard input is a terminal. It can also read
 exact bytes from standard input or `--value-file`:
 
 ```console
-$ printf '%s' 'secret value' | factorseal set github --field token
-$ factorseal set github --field token --value-file ./token.bin
+$ printf '%s' 'secret value' | factorseal set --project my-app github --field token
+$ factorseal set --project my-app github --field token --value-file ./token.bin
 ```
 
-`get` writes the exact stored bytes without adding a newline. `factorseal
-status` reads validated public metadata without unsealing and reports whether a
-matching service is reachable.
+`--project` may also come from `SECRETSPEC_PROJECT`. Without `--field`, the CLI
+stores a conventional SecretSpec address using `--profile` (which defaults to
+`default`). With `--field`, it stores a native SecretSpec address. `get` writes
+the exact stored bytes without adding a newline. `factorseal status` reads
+validated public metadata without unsealing and reports whether a matching
+service is reachable.
 
 Replacing or upgrading the binary changes its executable digest. Stop the
 service and run `factorseal grant-cli` to authorize the new CLI executable. The
@@ -212,17 +215,34 @@ Caller identity comes from the native transport, never from request JSON:
 - Windows uses a same-user named pipe, client impersonation, SID and PID
   verification, and the executable digest.
 
-Durable grants bind the complete caller identity to a scope, namespace or exact
-item/field, explicit permissions, and an optional expiry. An executable change
+Durable grants bind the complete caller identity to a document kind, partition,
+or exact address, explicit permissions, and an optional expiry. An executable change
 therefore requires a new grant. These grants are defense in depth between
 same-user applications; they do not protect a granted program from debugging,
 preloading, or compromise by that same user.
 
 ### Documents and persistence
 
-Each vault namespace maps to an opaque document ID derived from the vault ID,
-scope, and namespace. Secret names and values live only inside the encrypted
-Automerge document, not in SQL columns or filenames.
+Factorseal stores multiple encrypted Automerge documents. A document ID is an
+HMAC under the vault data key over its semantic kind and private partition, so
+SQL does not reveal or permit offline guessing of project names. Secret names,
+addresses, project partitions, and values live only inside encrypted Automerge
+snapshots, not in SQL columns or filenames.
+
+Every Automerge document has this version-1 root shape:
+
+```text
+format:          <document-kind>
+format-version:  1
+partition:       <bytes>
+entries:         { <address-digest>: <serialized-record> }
+```
+
+Each record contains `version`, the complete typed address, `value`, and an
+optional `evict_at` deadline. SecretSpec convention addresses retain project,
+profile, and key; native addresses retain item plus optional field, vault,
+section, and version. The map key is only an index—the record is validated
+against the requested full address on every read.
 
 Applications receive domain operations such as get, put, delete, clear, and
 bounded batch mutation; they never receive raw `AutoCommit` access. Reads use
@@ -230,8 +250,8 @@ all visible Automerge values. Different concurrent values return an explicit
 conflict rather than silently selecting Automerge's display winner.
 
 Every mutation produces an encrypted snapshot and encrypted Automerge changes
-using fresh XChaCha20-Poly1305 nonces. ML-DSA-65 signatures bind their document,
-scope, device, actor, generation, key epoch, dependencies, and ciphertext.
+using fresh XChaCha20-Poly1305 nonces. ML-DSA-65 signatures bind their document
+kind, device, actor, generation, key epoch, dependencies, and ciphertext.
 
 One worker thread owns the Turso connection, exclusive `factorseal.lock`,
 plaintext vault keys, and all decrypted document state. A mutation uses one
@@ -243,19 +263,19 @@ a tamper check, not an audit log.
 For the full storage and verification invariants, see
 [Architecture](docs/architecture.md).
 
-## Interfaces and scopes
+## Interfaces and document kinds
 
-| Interface | Scope | Persistence | Authenticated principal |
+| Interface | Document kind | Partition | Persistence |
 | --- | --- | --- | --- |
-| CLI and Rust `Keyring` | `device-local` | durable | exact native client executable |
-| SecretSpec provider | `device-cache` | disposable, optionally expiring | exact `factorseal provider` executable |
-| Linux Secret Service | dedicated `device-local` namespace | durable | Factorseal service mediating its D-Bus clients |
+| Factorseal CLI | `secretspec-project` | project name | durable |
+| SecretSpec provider | `secretspec-provider-cache` | project name | disposable, optionally expiring |
+| Rust `Keyring` | `local-keyring` | caller namespace | durable |
+| Linux Secret Service | `linux-secret-service` | service namespace | durable |
+| Grants | `authorization` | authorization namespace | durable |
 
-The two document scopes are intentionally separate. A cache grant cannot read
-or modify durable keyring data:
-
-- `device-local` stores keyring entries, caller grants, and local policy;
-- `device-cache` stores disposable application caches and is never replicated.
+Each row is a separate authorization domain. In particular, a provider-cache
+grant cannot read or modify a durable project document, even when both use the
+same project name.
 
 In the Rust API, `Keyring` is the credential capability implemented by a
 `VaultClient`; it does not refer to Linux's in-kernel `keyctl` keyrings.
@@ -263,10 +283,12 @@ In the Rust API, `Keyring` is the credential capability implemented by a
 ### SecretSpec provider
 
 `factorseal provider` implements SecretSpec's typed external-provider protocol
-over private stdin/stdout pipes. The endpoint translates SecretSpec addresses
-into cache-only Factorseal requests and connects to the already-running native
-vault service. It never opens the database, receives vault keys, or accepts the
-embedding application's identity as authority.
+over private stdin/stdout pipes. SecretSpec's existing IPC already carries the
+application project context and complete convention or native address. The
+endpoint preserves that structure in cache-only Factorseal requests and
+connects to the already-running native vault service. It never opens the
+database, receives vault keys, or accepts the embedding application's identity
+as authority.
 
 Register the installed binary as the `factorseal` scheme using an absolute
 path:
@@ -317,18 +339,18 @@ permission for the declared project. Before asking for the factor, Factorseal
 prompts for the permission lifetime; Enter accepts the app-requested default (or one
 hour when the app supplied none), and values such as `30m`, `8h`, `7d`, and
 `forever` override it. The chosen lifetime is bound into the vault signature,
-so it cannot be changed after factor confirmation. Factorseal derives a
-project-specific cache address and verifies it before accepting the project
-permission, so declaring an approved project cannot reach another project's secrets.
+so it cannot be changed after factor confirmation. Factorseal verifies the
+typed address and project partition before accepting the project permission,
+so declaring an approved project cannot reach another project's secrets.
 Interactive prompts distinguish the transport-authenticated executable identity
 and digest from caller-declared project, profile, base directory, and reason.
 They require a terminal and never approve by default. A vault with multiple
 unlock groups asks which one to use only after the user chooses Approve.
 
 Factorseal currently follows the SecretSpec IPC API from the sibling
-`../secretspec` checkout. Release packaging still depends on publishing and
-pinning that API, then passing installed end-to-end conformance on Linux,
-macOS, and Windows.
+`../secretspec` checkout. No IPC schema change is required for this storage
+model. Release packaging still depends on publishing and pinning that API,
+then passing installed end-to-end conformance on Linux, macOS, and Windows.
 
 ### Linux Secret Service
 

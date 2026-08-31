@@ -3,7 +3,8 @@
 use zeroize::Zeroizing;
 
 use crate::vault::{
-    DocumentOperation, DocumentScope, SecretAddress, VaultError, VaultResult, VaultStore,
+    DocumentKind, DocumentOperation, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
+    VaultStore,
 };
 
 use super::super::grant::{GrantRequirement, require_grant};
@@ -14,14 +15,14 @@ use super::super::{
 
 pub(super) struct ScopedAction {
     pub(super) action: VaultAction,
-    pub(super) scope: DocumentScope,
+    pub(super) scope: DocumentKind,
 }
 
 #[derive(Clone, Copy)]
 struct ActionContext<'a> {
     store: &'a VaultStore,
     caller: &'a CallerIdentity,
-    scope: DocumentScope,
+    scope: DocumentKind,
     project: Option<&'a str>,
     now: u64,
 }
@@ -72,12 +73,34 @@ pub(super) fn execute_action(
         }
         VaultAction::Clear { namespace } => Ok((context.clear(&namespace)?, true)),
         VaultAction::Seal { namespace } => Ok((context.seal(&namespace)?, false)),
-        VaultAction::GetCache { .. }
-        | VaultAction::PutCache { .. }
-        | VaultAction::DeleteCache { .. }
-        | VaultAction::ClearCache { .. }
-        | VaultAction::SealCache { .. }
-        | VaultAction::ListPermissions
+        VaultAction::GetProject { project, address }
+        | VaultAction::GetCache { project, address } => {
+            Ok((context.get_secret_spec(&project, &address)?, true))
+        }
+        VaultAction::PutProject {
+            project,
+            address,
+            value,
+        } => Ok((
+            context.put_secret_spec(&project, &address, &value, None)?,
+            true,
+        )),
+        VaultAction::PutCache {
+            project,
+            address,
+            value,
+            evict_at,
+        } => Ok((
+            context.put_secret_spec(&project, &address, &value, evict_at)?,
+            true,
+        )),
+        VaultAction::DeleteProject { project, address }
+        | VaultAction::DeleteCache { project, address } => {
+            Ok((context.delete_secret_spec(&project, &address)?, true))
+        }
+        VaultAction::ClearCache { project } => Ok((context.clear(project.as_bytes())?, true)),
+        VaultAction::SealCache { project } => Ok((context.seal(project.as_bytes())?, false)),
+        VaultAction::ListPermissions
         | VaultAction::WaitPermissions { .. }
         | VaultAction::WaitPermission { .. }
         | VaultAction::ApprovePermission { .. }
@@ -119,6 +142,21 @@ impl ActionContext<'_> {
         Ok(VaultResponseBody::Secret { value })
     }
 
+    fn get_secret_spec(
+        self,
+        project: &str,
+        address: &SecretSpecAddress,
+    ) -> VaultResult<VaultResponseBody> {
+        let address = SecretAddress::secret_spec(address.clone())?;
+        let namespace = project.as_bytes();
+        self.require(namespace, Some(&address), GrantPermission::Get)?;
+        let value = self
+            .store
+            .get_at(self.scope, namespace, &address, self.now)?
+            .map(|value| WireSecret::new(value.to_vec()));
+        Ok(VaultResponseBody::Secret { value })
+    }
+
     fn put(
         self,
         namespace: &[u8],
@@ -127,6 +165,22 @@ impl ActionContext<'_> {
         evict_at: Option<u64>,
     ) -> VaultResult<VaultResponseBody> {
         let address = address.resolve()?;
+        self.require(namespace, Some(&address), GrantPermission::Put)?;
+        validate_evict_at(evict_at, self.now)?;
+        self.store
+            .put_at(self.scope, namespace, &address, value.expose(), evict_at)?;
+        Ok(VaultResponseBody::Stored)
+    }
+
+    fn put_secret_spec(
+        self,
+        project: &str,
+        address: &SecretSpecAddress,
+        value: &WireSecret,
+        evict_at: Option<u64>,
+    ) -> VaultResult<VaultResponseBody> {
+        let address = SecretAddress::secret_spec(address.clone())?;
+        let namespace = project.as_bytes();
         self.require(namespace, Some(&address), GrantPermission::Put)?;
         validate_evict_at(evict_at, self.now)?;
         self.store
@@ -150,6 +204,18 @@ impl ActionContext<'_> {
         address: &WireSecretAddress,
     ) -> VaultResult<VaultResponseBody> {
         let address = address.resolve()?;
+        self.require(namespace, Some(&address), GrantPermission::Delete)?;
+        let existed = self.store.delete(self.scope, namespace, &address)?;
+        Ok(VaultResponseBody::Deleted { existed })
+    }
+
+    fn delete_secret_spec(
+        self,
+        project: &str,
+        address: &SecretSpecAddress,
+    ) -> VaultResult<VaultResponseBody> {
+        let address = SecretAddress::secret_spec(address.clone())?;
+        let namespace = project.as_bytes();
         self.require(namespace, Some(&address), GrantPermission::Delete)?;
         let existed = self.store.delete(self.scope, namespace, &address)?;
         Ok(VaultResponseBody::Deleted { existed })
@@ -201,36 +267,26 @@ impl ActionContext<'_> {
 }
 
 pub(super) fn scope_action(action: VaultAction) -> ScopedAction {
-    let (action, scope) = match action {
-        VaultAction::GetCache { namespace, address } => (
-            VaultAction::Get { namespace, address },
-            DocumentScope::DeviceCache,
-        ),
-        VaultAction::PutCache {
-            namespace,
-            address,
-            value,
-            evict_at,
-        } => (
-            VaultAction::Put {
-                namespace,
-                address,
-                value,
-                evict_at,
-            },
-            DocumentScope::DeviceCache,
-        ),
-        VaultAction::DeleteCache { namespace, address } => (
-            VaultAction::Delete { namespace, address },
-            DocumentScope::DeviceCache,
-        ),
-        VaultAction::ClearCache { namespace } => {
-            (VaultAction::Clear { namespace }, DocumentScope::DeviceCache)
+    let scope = match action {
+        VaultAction::GetProject { .. }
+        | VaultAction::PutProject { .. }
+        | VaultAction::DeleteProject { .. } => DocumentKind::SecretSpecProject,
+        VaultAction::GetCache { .. }
+        | VaultAction::PutCache { .. }
+        | VaultAction::DeleteCache { .. }
+        | VaultAction::ClearCache { .. }
+        | VaultAction::SealCache { .. } => DocumentKind::SecretSpecProviderCache,
+        VaultAction::Get { ref namespace, .. }
+        | VaultAction::Put { ref namespace, .. }
+        | VaultAction::Mutate { ref namespace, .. }
+        | VaultAction::Delete { ref namespace, .. }
+        | VaultAction::Clear { ref namespace }
+        | VaultAction::Seal { ref namespace }
+            if namespace == b"factorseal/secret-service/v1" =>
+        {
+            DocumentKind::LinuxSecretService
         }
-        VaultAction::SealCache { namespace } => {
-            (VaultAction::Seal { namespace }, DocumentScope::DeviceCache)
-        }
-        action => (action, DocumentScope::DeviceLocal),
+        _ => DocumentKind::LocalKeyring,
     };
     ScopedAction { action, scope }
 }

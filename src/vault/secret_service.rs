@@ -55,7 +55,7 @@ pub(crate) fn serve_secret_service(
         VaultError::Protocol(format!("could not resolve Factorseal executable: {error}"))
     })?;
     let caller = linux_caller_identity_for_executable(executable)?;
-    service.authorize_namespace(
+    service.authorize_secret_service_namespace(
         &caller,
         NAMESPACE,
         [
@@ -332,7 +332,7 @@ mod tests {
         )
         .unwrap();
         service
-            .authorize_namespace(
+            .authorize_secret_service_namespace(
                 &caller,
                 NAMESPACE,
                 [

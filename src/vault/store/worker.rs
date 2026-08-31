@@ -5,6 +5,8 @@ use std::sync::{Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use turso::Connection;
 #[cfg(all(test, feature = "hardware"))]
 use turso::params;
@@ -13,7 +15,7 @@ use zeroize::{Zeroize, Zeroizing};
 #[cfg(all(test, feature = "hardware"))]
 use crate::vault::{DATABASE_FILE, VaultStore};
 use crate::vault::{
-    DocumentId, DocumentOperation, DocumentScope, SecretAddress, SecretDocument, SecretRead,
+    DocumentId, DocumentKind, DocumentOperation, SecretAddress, SecretDocument, SecretRead,
     UnsealedVault, VaultError, VaultMetadata, VaultResult,
 };
 
@@ -92,29 +94,29 @@ impl Drop for WorkerControl {
 
 pub(super) enum Command {
     Get {
-        document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
+        partition: Vec<u8>,
         address: SecretAddress,
         now: u64,
         response: mpsc::Sender<VaultResult<Option<Zeroizing<Vec<u8>>>>>,
     },
     Put {
-        document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
+        partition: Vec<u8>,
         address: SecretAddress,
         value: Zeroizing<Vec<u8>>,
         evict_at: Option<u64>,
         response: mpsc::Sender<VaultResult<()>>,
     },
     Mutate {
-        document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
+        partition: Vec<u8>,
         operations: Vec<DocumentOperation>,
         response: mpsc::Sender<VaultResult<()>>,
     },
     Delete {
-        document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
+        partition: Vec<u8>,
         address: SecretAddress,
         response: mpsc::Sender<VaultResult<bool>>,
     },
@@ -123,8 +125,8 @@ pub(super) enum Command {
         response: mpsc::Sender<VaultResult<usize>>,
     },
     Clear {
-        document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
+        partition: Vec<u8>,
         response: mpsc::Sender<VaultResult<usize>>,
     },
     Shutdown,
@@ -173,43 +175,56 @@ fn run_worker(
     while let Ok(command) = receiver.recv() {
         match command {
             Command::Get {
-                document_id,
                 scope,
+                partition,
                 address,
                 now,
                 response,
             } => {
-                let result = runtime.block_on(worker.get(document_id, scope, &address, now));
+                let document_id = worker.document_id(scope, &partition);
+                let result =
+                    runtime.block_on(worker.get(document_id, scope, &partition, &address, now));
                 let _ = response.send(result);
             }
             Command::Put {
-                document_id,
                 scope,
+                partition,
                 address,
                 value,
                 evict_at,
                 response,
             } => {
-                let result =
-                    runtime.block_on(worker.put(document_id, scope, &address, &value, evict_at));
+                let document_id = worker.document_id(scope, &partition);
+                let result = runtime.block_on(worker.put(
+                    document_id,
+                    scope,
+                    &partition,
+                    &address,
+                    &value,
+                    evict_at,
+                ));
                 let _ = response.send(result);
             }
             Command::Mutate {
-                document_id,
                 scope,
+                partition,
                 operations,
                 response,
             } => {
-                let result = runtime.block_on(worker.mutate(document_id, scope, &operations));
+                let document_id = worker.document_id(scope, &partition);
+                let result =
+                    runtime.block_on(worker.mutate(document_id, scope, &partition, &operations));
                 let _ = response.send(result);
             }
             Command::Delete {
-                document_id,
                 scope,
+                partition,
                 address,
                 response,
             } => {
-                let result = runtime.block_on(worker.delete(document_id, scope, &address));
+                let document_id = worker.document_id(scope, &partition);
+                let result =
+                    runtime.block_on(worker.delete(document_id, scope, &partition, &address));
                 let _ = response.send(result);
             }
             Command::PurgeExpired { now, response } => {
@@ -217,11 +232,12 @@ fn run_worker(
                 let _ = response.send(result);
             }
             Command::Clear {
-                document_id,
                 scope,
+                partition,
                 response,
             } => {
-                let result = runtime.block_on(worker.clear(document_id, scope));
+                let document_id = worker.document_id(scope, &partition);
+                let result = runtime.block_on(worker.clear(document_id, scope, &partition));
                 let _ = response.send(result);
             }
             Command::Shutdown => break,
@@ -242,7 +258,7 @@ struct StoreWorker {
 /// state rather than any earlier generation.
 struct DocumentRow {
     document_id: DocumentId,
-    scope: DocumentScope,
+    scope: DocumentKind,
     generation: u64,
     key_epoch: u64,
     current_commit_id: [u8; 32],
@@ -255,6 +271,16 @@ struct LoadedDocument {
 }
 
 impl StoreWorker {
+    fn document_id(&self, kind: DocumentKind, partition: &[u8]) -> DocumentId {
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.data_key.as_ref())
+            .expect("HMAC accepts a 256-bit vault index key");
+        mac.update(b"factorseal/document-id/v1\0");
+        mac.update(kind.as_str().as_bytes());
+        mac.update(&(partition.len() as u64).to_be_bytes());
+        mac.update(partition);
+        DocumentId::from_bytes(mac.finalize().into_bytes().into())
+    }
+
     async fn open(root: &Path, unsealed: UnsealedVault) -> VaultResult<Self> {
         let opened = open_store(root, unsealed).await?;
         let mut worker = Self {
@@ -276,7 +302,8 @@ impl StoreWorker {
     async fn get(
         &mut self,
         document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
+        partition: &[u8],
         address: &SecretAddress,
         now: u64,
     ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
@@ -284,7 +311,9 @@ impl StoreWorker {
             mut document,
             generation,
             key_epoch,
-        }) = self.load_document(document_id, scope).await?
+        }) = self
+            .load_document(document_id, scope, Some(partition))
+            .await?
         else {
             return Ok(None);
         };
@@ -306,20 +335,23 @@ impl StoreWorker {
     async fn put(
         &mut self,
         document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
+        partition: &[u8],
         address: &SecretAddress,
         value: &[u8],
         evict_at: Option<u64>,
     ) -> VaultResult<()> {
-        let (mut document, expected_generation, key_epoch) =
-            match self.load_document(document_id, scope).await? {
-                Some(loaded) => (loaded.document, Some(loaded.generation), loaded.key_epoch),
-                None => (
-                    SecretDocument::new(self.device.actor_id())?,
-                    None,
-                    self.device.key_epoch(),
-                ),
-            };
+        let (mut document, expected_generation, key_epoch) = match self
+            .load_document(document_id, scope, Some(partition))
+            .await?
+        {
+            Some(loaded) => (loaded.document, Some(loaded.generation), loaded.key_epoch),
+            None => (
+                SecretDocument::new(self.device.actor_id(), scope, partition)?,
+                None,
+                self.device.key_epoch(),
+            ),
+        };
         let mutation = document.put(address, value, evict_at)?;
         self.commit_mutation(document_id, scope, expected_generation, key_epoch, mutation)
             .await
@@ -328,24 +360,27 @@ impl StoreWorker {
     async fn mutate(
         &mut self,
         document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
+        partition: &[u8],
         operations: &[DocumentOperation],
     ) -> VaultResult<()> {
-        let (mut document, expected_generation, key_epoch) =
-            match self.load_document(document_id, scope).await? {
-                Some(loaded) => (loaded.document, Some(loaded.generation), loaded.key_epoch),
-                None if operations
-                    .iter()
-                    .any(|operation| matches!(operation, DocumentOperation::Put { .. })) =>
-                {
-                    (
-                        SecretDocument::new(self.device.actor_id())?,
-                        None,
-                        self.device.key_epoch(),
-                    )
-                }
-                None => return Ok(()),
-            };
+        let (mut document, expected_generation, key_epoch) = match self
+            .load_document(document_id, scope, Some(partition))
+            .await?
+        {
+            Some(loaded) => (loaded.document, Some(loaded.generation), loaded.key_epoch),
+            None if operations
+                .iter()
+                .any(|operation| matches!(operation, DocumentOperation::Put { .. })) =>
+            {
+                (
+                    SecretDocument::new(self.device.actor_id(), scope, partition)?,
+                    None,
+                    self.device.key_epoch(),
+                )
+            }
+            None => return Ok(()),
+        };
         let Some(mutation) = document.apply(operations)? else {
             return Ok(());
         };
@@ -356,14 +391,17 @@ impl StoreWorker {
     async fn delete(
         &mut self,
         document_id: DocumentId,
-        scope: DocumentScope,
+        scope: DocumentKind,
+        partition: &[u8],
         address: &SecretAddress,
     ) -> VaultResult<bool> {
         let Some(LoadedDocument {
             mut document,
             generation,
             key_epoch,
-        }) = self.load_document(document_id, scope).await?
+        }) = self
+            .load_document(document_id, scope, Some(partition))
+            .await?
         else {
             return Ok(false);
         };
@@ -379,7 +417,7 @@ impl StoreWorker {
         let mut rows = self
             .connection
             .query(
-                "SELECT document_id FROM documents WHERE scope = 'device-cache'",
+                "SELECT document_id FROM documents WHERE document_kind = 'secretspec-provider-cache'",
                 (),
             )
             .await
@@ -397,7 +435,7 @@ impl StoreWorker {
                 generation,
                 key_epoch,
             }) = self
-                .load_document(document_id, DocumentScope::DeviceCache)
+                .load_document(document_id, DocumentKind::SecretSpecProviderCache, None)
                 .await?
             else {
                 continue;
@@ -405,7 +443,7 @@ impl StoreWorker {
             if let Some(mutation) = document.purge_expired(now)? {
                 self.commit_mutation(
                     document_id,
-                    DocumentScope::DeviceCache,
+                    DocumentKind::SecretSpecProviderCache,
                     Some(generation),
                     key_epoch,
                     mutation,
@@ -417,12 +455,19 @@ impl StoreWorker {
         Ok(changed)
     }
 
-    async fn clear(&mut self, document_id: DocumentId, scope: DocumentScope) -> VaultResult<usize> {
+    async fn clear(
+        &mut self,
+        document_id: DocumentId,
+        scope: DocumentKind,
+        partition: &[u8],
+    ) -> VaultResult<usize> {
         let Some(LoadedDocument {
             mut document,
             generation,
             key_epoch,
-        }) = self.load_document(document_id, scope).await?
+        }) = self
+            .load_document(document_id, scope, Some(partition))
+            .await?
         else {
             return Ok(0);
         };

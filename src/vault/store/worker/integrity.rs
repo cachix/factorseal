@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use turso::{Value, params};
 
-use crate::vault::{DocumentId, DocumentScope, SignedChangeEnvelope, VaultError, VaultResult};
+use crate::vault::{DocumentId, DocumentKind, SignedChangeEnvelope, VaultError, VaultResult};
 
 use super::{DocumentRow, MAX_COMMIT_CHAIN, MAX_RETAINED_COMMITS, StoreWorker};
 use crate::vault::store::chain::{
@@ -202,7 +202,7 @@ impl StoreWorker {
         let mut rows = self
             .connection
             .query(
-                "SELECT document_id, scope, generation, key_epoch, current_commit_id
+                "SELECT document_id, document_kind, generation, key_epoch, current_commit_id
                  FROM documents ORDER BY document_id",
                 (),
             )
@@ -212,7 +212,7 @@ impl StoreWorker {
         while let Some(row) = rows.next().await.map_err(database_error)? {
             documents.push(DocumentRow {
                 document_id: document_id_from_blob(&row_blob(&row, 0)?)?,
-                scope: DocumentScope::parse(&row_text(&row, 1)?)?,
+                scope: DocumentKind::parse(&row_text(&row, 1)?)?,
                 generation: from_i64(row_integer(&row, 2)?, "document generation")?,
                 key_epoch: from_i64(row_integer(&row, 3)?, "document key epoch")?,
                 current_commit_id: array_from_blob(&row_blob(&row, 4)?, "document commit ID")?,

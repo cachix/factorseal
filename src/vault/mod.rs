@@ -326,31 +326,40 @@ impl fmt::Display for DeviceKeyId {
     }
 }
 
-/// Replication and authorization class for one Automerge document.
+/// Semantic type of one encrypted Automerge document.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
-pub enum DocumentScope {
-    DeviceCache,
-    DeviceLocal,
+pub enum DocumentKind {
+    Authorization,
+    LinuxSecretService,
+    LocalKeyring,
+    SecretSpecProject,
+    SecretSpecProviderCache,
 }
 
-impl DocumentScope {
+impl DocumentKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::DeviceCache => "device-cache",
-            Self::DeviceLocal => "device-local",
+            Self::Authorization => "authorization",
+            Self::LinuxSecretService => "linux-secret-service",
+            Self::LocalKeyring => "local-keyring",
+            Self::SecretSpecProject => "secretspec-project",
+            Self::SecretSpecProviderCache => "secretspec-provider-cache",
         }
     }
 
     #[cfg(feature = "vault-store")]
     pub(crate) fn parse(value: &str) -> VaultResult<Self> {
         match value {
-            "device-cache" => Ok(Self::DeviceCache),
-            "device-local" => Ok(Self::DeviceLocal),
+            "authorization" => Ok(Self::Authorization),
+            "linux-secret-service" => Ok(Self::LinuxSecretService),
+            "local-keyring" => Ok(Self::LocalKeyring),
+            "secretspec-project" => Ok(Self::SecretSpecProject),
+            "secretspec-provider-cache" => Ok(Self::SecretSpecProviderCache),
             _ => Err(VaultError::InvalidData(format!(
-                "unknown document scope `{value}`"
+                "unknown document kind `{value}`"
             ))),
         }
     }
@@ -362,15 +371,17 @@ impl DocumentScope {
 pub struct DocumentId([u8; DOCUMENT_ID_BYTES]);
 
 impl DocumentId {
-    /// Derive an opaque document ID without exposing `namespace` to SQL.
+    /// Deterministic fixture helper. Production IDs are keyed inside the sole
+    /// database worker so project names cannot be guessed from SQL metadata.
+    #[cfg(test)]
     #[must_use]
-    pub fn derive(vault_id: VaultId, scope: DocumentScope, namespace: &[u8]) -> Self {
+    pub(crate) fn derive_for_test(vault_id: VaultId, kind: DocumentKind, partition: &[u8]) -> Self {
         let mut digest = Sha256::new();
         digest.update(b"factorseal/document-id/v1\0");
         digest.update(vault_id.as_bytes());
-        digest.update(scope.as_str().as_bytes());
-        digest.update((namespace.len() as u64).to_be_bytes());
-        digest.update(namespace);
+        digest.update(kind.as_str().as_bytes());
+        digest.update((partition.len() as u64).to_be_bytes());
+        digest.update(partition);
         Self(digest.finalize().into())
     }
 
@@ -400,16 +411,137 @@ impl fmt::Display for DocumentId {
     }
 }
 
-/// Factorseal's native secret coordinates.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct SecretAddress {
-    item: String,
-    field: Option<String>,
+/// Complete SecretSpec address supplied to a provider after routing.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SecretSpecAddress {
+    Convention {
+        project: String,
+        profile: String,
+        key: String,
+    },
+    Native {
+        coordinates: SecretSpecCoordinates,
+    },
+}
+
+/// Native provider coordinates supported by the SecretSpec protocol.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretSpecCoordinates {
+    pub item: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+impl SecretSpecAddress {
+    pub fn convention(
+        project: impl Into<String>,
+        profile: impl Into<String>,
+        key: impl Into<String>,
+    ) -> VaultResult<Self> {
+        let address = Self::Convention {
+            project: project.into(),
+            profile: profile.into(),
+            key: key.into(),
+        };
+        address.validate()?;
+        Ok(address)
+    }
+
+    pub fn native(coordinates: SecretSpecCoordinates) -> VaultResult<Self> {
+        let address = Self::Native { coordinates };
+        address.validate()?;
+        Ok(address)
+    }
+
+    pub fn validate(&self) -> VaultResult<()> {
+        match self {
+            Self::Convention {
+                project,
+                profile,
+                key,
+            } => {
+                validate_address_component("project", project)?;
+                validate_address_component("profile", profile)?;
+                validate_address_component("key", key)
+            }
+            Self::Native { coordinates } => {
+                validate_address_component("item", &coordinates.item)?;
+                for (name, value) in [
+                    ("field", &coordinates.field),
+                    ("vault", &coordinates.vault),
+                    ("section", &coordinates.section),
+                    ("version", &coordinates.version),
+                ] {
+                    if let Some(value) = value {
+                        validate_address_component(name, value)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn project(&self) -> Option<&str> {
+        match self {
+            Self::Convention { project, .. } => Some(project),
+            Self::Native { .. } => None,
+        }
+    }
+
+    fn update_digest(&self, digest: &mut Sha256) {
+        match self {
+            Self::Convention {
+                project,
+                profile,
+                key,
+            } => {
+                digest.update([1]);
+                update_digest_string(digest, project);
+                update_digest_string(digest, profile);
+                update_digest_string(digest, key);
+            }
+            Self::Native { coordinates } => {
+                digest.update([2]);
+                update_digest_string(digest, &coordinates.item);
+                for value in [
+                    &coordinates.field,
+                    &coordinates.vault,
+                    &coordinates.section,
+                    &coordinates.version,
+                ] {
+                    update_digest_option(digest, value.as_deref());
+                }
+            }
+        }
+    }
+}
+
+/// Address stored atomically in an encrypted Automerge entry.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "domain", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SecretAddress {
+    Local {
+        item: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
+    SecretSpec {
+        address: SecretSpecAddress,
+    },
 }
 
 impl SecretAddress {
     pub fn new(item: impl Into<String>, field: Option<String>) -> VaultResult<Self> {
-        let address = Self {
+        let address = Self::Local {
             item: item.into(),
             field,
         };
@@ -417,39 +549,72 @@ impl SecretAddress {
         Ok(address)
     }
 
+    /// Return the native keyring coordinates when this is a local address.
     #[must_use]
-    pub fn item(&self) -> &str {
-        &self.item
+    pub fn as_local(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::Local { item, field } => Some((item, field.as_deref())),
+            Self::SecretSpec { .. } => None,
+        }
+    }
+
+    pub fn secret_spec(address: SecretSpecAddress) -> VaultResult<Self> {
+        address.validate()?;
+        Ok(Self::SecretSpec { address })
     }
 
     #[must_use]
-    pub fn field(&self) -> Option<&str> {
-        self.field.as_deref()
+    pub fn as_secret_spec(&self) -> Option<&SecretSpecAddress> {
+        match self {
+            Self::SecretSpec { address } => Some(address),
+            Self::Local { .. } => None,
+        }
     }
 
     #[cfg(any(feature = "vault-store", test))]
     pub(crate) fn storage_key(&self) -> String {
         let mut digest = Sha256::new();
         digest.update(b"factorseal/secret-address/v1\0");
-        digest.update((self.item.len() as u64).to_be_bytes());
-        digest.update(self.item.as_bytes());
-        match &self.field {
-            Some(field) => {
+        match self {
+            Self::Local { item, field } => {
                 digest.update([1]);
-                digest.update((field.len() as u64).to_be_bytes());
-                digest.update(field.as_bytes());
+                update_digest_string(&mut digest, item);
+                update_digest_option(&mut digest, field.as_deref());
             }
-            None => digest.update([0]),
+            Self::SecretSpec { address } => {
+                digest.update([2]);
+                address.update_digest(&mut digest);
+            }
         }
         URL_SAFE_NO_PAD.encode(digest.finalize())
     }
 
     fn validate(&self) -> VaultResult<()> {
-        validate_address_component("item", &self.item)?;
-        if let Some(field) = &self.field {
-            validate_address_component("field", field)?;
+        match self {
+            Self::Local { item, field } => {
+                validate_address_component("item", item)?;
+                if let Some(field) = field {
+                    validate_address_component("field", field)?;
+                }
+                Ok(())
+            }
+            Self::SecretSpec { address } => address.validate(),
         }
-        Ok(())
+    }
+}
+
+fn update_digest_string(digest: &mut Sha256, value: &str) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value.as_bytes());
+}
+
+fn update_digest_option(digest: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            digest.update([1]);
+            update_digest_string(digest, value);
+        }
+        None => digest.update([0]),
     }
 }
 
@@ -471,18 +636,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn document_ids_are_scoped_and_installation_specific() {
+    fn document_ids_are_kind_partitioned_and_installation_specific() {
         let first = VaultId::from_bytes([1; VAULT_ID_BYTES]);
         let second = VaultId::from_bytes([2; VAULT_ID_BYTES]);
-        let cache = DocumentId::derive(first, DocumentScope::DeviceCache, b"secretspec");
+        let cache = DocumentId::derive_for_test(
+            first,
+            DocumentKind::SecretSpecProviderCache,
+            b"secretspec",
+        );
 
         assert_ne!(
             cache,
-            DocumentId::derive(first, DocumentScope::DeviceLocal, b"secretspec")
+            DocumentId::derive_for_test(first, DocumentKind::LocalKeyring, b"secretspec")
         );
         assert_ne!(
             cache,
-            DocumentId::derive(second, DocumentScope::DeviceCache, b"secretspec")
+            DocumentId::derive_for_test(
+                second,
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec"
+            )
         );
     }
 

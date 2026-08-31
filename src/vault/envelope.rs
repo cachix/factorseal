@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::signature;
-use super::{DeviceKeyId, DocumentId, DocumentScope, VaultError, VaultResult};
+use super::{DeviceKeyId, DocumentId, DocumentKind, VaultError, VaultResult};
 
 const ENVELOPE_VERSION: u8 = 2;
 const NONCE_BYTES: usize = 24;
@@ -47,7 +47,7 @@ pub struct EncryptedSnapshot {
     version: u8,
     signature_algorithm: SignatureAlgorithm,
     document_id: DocumentId,
-    scope: DocumentScope,
+    scope: DocumentKind,
     device_key_id: DeviceKeyId,
     generation: u64,
     key_epoch: u64,
@@ -70,7 +70,7 @@ impl EncryptedSnapshot {
     }
 
     #[must_use]
-    pub const fn scope(&self) -> DocumentScope {
+    pub const fn scope(&self) -> DocumentKind {
         self.scope
     }
 
@@ -97,7 +97,7 @@ pub struct SignedChangeEnvelope {
     version: u8,
     signature_algorithm: SignatureAlgorithm,
     document_id: DocumentId,
-    scope: DocumentScope,
+    scope: DocumentKind,
     device_key_id: DeviceKeyId,
     actor_id: Vec<u8>,
     generation: u64,
@@ -122,7 +122,7 @@ impl SignedChangeEnvelope {
     }
 
     #[must_use]
-    pub const fn scope(&self) -> DocumentScope {
+    pub const fn scope(&self) -> DocumentKind {
         self.scope
     }
 
@@ -159,7 +159,7 @@ impl SignedChangeEnvelope {
 
 pub(crate) struct EnvelopeContext<'a> {
     pub(crate) document_id: DocumentId,
-    pub(crate) scope: DocumentScope,
+    pub(crate) scope: DocumentKind,
     pub(crate) device_key_id: DeviceKeyId,
     pub(crate) actor_id: &'a [u8],
     pub(crate) generation: u64,
@@ -527,16 +527,16 @@ mod tests {
     use automerge::{ActorId, AutoCommit, ROOT};
 
     use super::*;
-    use crate::vault::VaultId;
+    use crate::vault::{DocumentKind, VaultId};
 
     fn context<'a>(actor_id: &'a [u8], public_key: &[u8]) -> EnvelopeContext<'a> {
         EnvelopeContext {
-            document_id: DocumentId::derive(
+            document_id: DocumentId::derive_for_test(
                 VaultId::from_bytes([7; 16]),
-                DocumentScope::DeviceCache,
+                DocumentKind::SecretSpecProviderCache,
                 b"secretspec",
             ),
-            scope: DocumentScope::DeviceCache,
+            scope: DocumentKind::SecretSpecProviderCache,
             device_key_id: DeviceKeyId::for_public_key(public_key),
             actor_id,
             generation: 3,
@@ -572,7 +572,7 @@ mod tests {
         );
 
         let mut changed_scope = envelope.clone();
-        changed_scope.scope = DocumentScope::DeviceLocal;
+        changed_scope.scope = DocumentKind::LocalKeyring;
         assert!(matches!(
             verify_and_decrypt_snapshot(
                 &changed_scope,

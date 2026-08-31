@@ -952,6 +952,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hardwareseal",
  "hex",
+ "hmac",
  "interprocess",
  "ml-dsa",
  "nix",

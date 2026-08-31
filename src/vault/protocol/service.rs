@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::vault::{DocumentScope, UnsealedVault, VaultError, VaultResult, VaultStore};
+use crate::vault::{DocumentKind, UnsealedVault, VaultError, VaultResult, VaultStore};
 
 use super::wire::PROTOCOL_VERSION;
 #[cfg(all(test, feature = "hardware"))]
@@ -262,7 +262,7 @@ fn require_permission_manager(
         state.store(),
         caller,
         GrantRequirement {
-            scope: DocumentScope::DeviceLocal,
+            scope: DocumentKind::Authorization,
             namespace: PERMISSION_CONTROL_NAMESPACE,
             address: None,
             project: None,

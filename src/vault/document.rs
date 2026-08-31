@@ -3,17 +3,20 @@ use automerge::{ActorId, AutoCommit, Change, ChangeHash, ObjId, ObjType, ROOT, R
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use super::{SecretAddress, VaultError, VaultResult};
+use super::{DocumentKind, SecretAddress, VaultError, VaultResult};
 
 const ENTRIES_KEY: &str = "entries";
+const FORMAT_KEY: &str = "format";
+const FORMAT_VERSION_KEY: &str = "format-version";
+const PARTITION_KEY: &str = "partition";
+const FORMAT_VERSION: u64 = 1;
 const RECORD_VERSION: u8 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SecretRecord {
     version: u8,
-    item: String,
-    field: Option<String>,
+    address: SecretAddress,
     value: Vec<u8>,
     evict_at: Option<u64>,
 }
@@ -53,8 +56,17 @@ pub(crate) struct SecretDocument {
 }
 
 impl SecretDocument {
-    pub(crate) fn new(actor_id: &[u8]) -> VaultResult<Self> {
+    pub(crate) fn new(actor_id: &[u8], kind: DocumentKind, partition: &[u8]) -> VaultResult<Self> {
         let mut document = AutoCommit::new().with_actor(ActorId::from(actor_id));
+        document
+            .put(ROOT, FORMAT_KEY, kind.as_str())
+            .map_err(automerge_error)?;
+        document
+            .put(ROOT, FORMAT_VERSION_KEY, FORMAT_VERSION)
+            .map_err(automerge_error)?;
+        document
+            .put(ROOT, PARTITION_KEY, partition.to_vec())
+            .map_err(automerge_error)?;
         let entries = document
             .put_object(ROOT, ENTRIES_KEY, ObjType::Map)
             .map_err(automerge_error)?;
@@ -65,9 +77,35 @@ impl SecretDocument {
         })
     }
 
-    pub(crate) fn load(snapshot: &[u8], actor_id: &[u8]) -> VaultResult<Self> {
+    pub(crate) fn load(
+        snapshot: &[u8],
+        actor_id: &[u8],
+        kind: DocumentKind,
+        expected_partition: Option<&[u8]>,
+    ) -> VaultResult<Self> {
         let mut document = AutoCommit::load(snapshot).map_err(automerge_error)?;
         document.set_actor(ActorId::from(actor_id));
+        let format = document
+            .get(ROOT, FORMAT_KEY)
+            .map_err(automerge_error)?
+            .and_then(|(value, _)| value.to_str().map(str::to_owned));
+        let version = document
+            .get(ROOT, FORMAT_VERSION_KEY)
+            .map_err(automerge_error)?
+            .and_then(|(value, _)| value.to_u64());
+        let partition = document
+            .get(ROOT, PARTITION_KEY)
+            .map_err(automerge_error)?
+            .and_then(|(value, _)| value.into_bytes().ok());
+        if format.as_deref() != Some(kind.as_str())
+            || version != Some(FORMAT_VERSION)
+            || partition.as_deref().is_none()
+            || expected_partition.is_some_and(|expected| partition.as_deref() != Some(expected))
+        {
+            return Err(VaultError::InvalidData(
+                "Automerge document metadata does not match its protected descriptor".to_owned(),
+            ));
+        }
         let Some((value, entries)) = document.get(ROOT, ENTRIES_KEY).map_err(automerge_error)?
         else {
             return Err(VaultError::InvalidData(
@@ -164,8 +202,7 @@ impl SecretDocument {
     ) -> VaultResult<()> {
         let record = SecretRecord {
             version: RECORD_VERSION,
-            item: address.item().to_owned(),
-            field: address.field().map(ToOwned::to_owned),
+            address: address.clone(),
             value: value.to_vec(),
             evict_at,
         };
@@ -271,10 +308,7 @@ impl SecretDocument {
 }
 
 fn validate_record(record: &SecretRecord, address: &SecretAddress) -> VaultResult<()> {
-    if record.version != RECORD_VERSION
-        || record.item != address.item()
-        || record.field.as_deref() != address.field()
-    {
+    if record.version != RECORD_VERSION || record.address != *address {
         return Err(VaultError::InvalidData(
             "secret document record does not match its authenticated address".to_owned(),
         ));
@@ -289,6 +323,54 @@ fn automerge_error(error: impl std::fmt::Display) -> VaultError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::{SecretSpecAddress, SecretSpecCoordinates};
+
+    fn new_document() -> SecretDocument {
+        SecretDocument::new(b"device-a", DocumentKind::LocalKeyring, b"test").unwrap()
+    }
+
+    #[test]
+    fn project_document_preserves_the_complete_secretspec_address() {
+        let address = SecretAddress::secret_spec(
+            SecretSpecAddress::native(SecretSpecCoordinates {
+                item: "database".to_owned(),
+                field: Some("password".to_owned()),
+                vault: Some("Production".to_owned()),
+                section: Some("credentials".to_owned()),
+                version: Some("3".to_owned()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut document = SecretDocument::new(
+            b"device-a",
+            DocumentKind::SecretSpecProject,
+            b"payments-api",
+        )
+        .unwrap();
+        document.put(&address, b"secret", None).unwrap();
+        let snapshot = document.save();
+        let loaded = SecretDocument::load(
+            &snapshot,
+            b"device-a",
+            DocumentKind::SecretSpecProject,
+            Some(b"payments-api"),
+        )
+        .unwrap();
+        assert!(matches!(
+            loaded.get(&address, 1).unwrap(),
+            SecretRead::Value(value) if value == b"secret"
+        ));
+        assert!(
+            SecretDocument::load(
+                &snapshot,
+                b"device-a",
+                DocumentKind::SecretSpecProject,
+                Some(b"another-project"),
+            )
+            .is_err()
+        );
+    }
 
     fn address() -> SecretAddress {
         SecretAddress::new("project/default/API_TOKEN", Some("value".to_owned())).unwrap()
@@ -296,11 +378,17 @@ mod tests {
 
     #[test]
     fn document_round_trips_secret_and_expiry() {
-        let mut document = SecretDocument::new(b"device-a").unwrap();
+        let mut document = new_document();
         document.put(&address(), b"classified", Some(100)).unwrap();
         let snapshot = document.save();
 
-        let loaded = SecretDocument::load(&snapshot, b"device-a").unwrap();
+        let loaded = SecretDocument::load(
+            &snapshot,
+            b"device-a",
+            DocumentKind::LocalKeyring,
+            Some(b"test"),
+        )
+        .unwrap();
         assert!(matches!(
             loaded.get(&address(), 99).unwrap(),
             SecretRead::Value(value) if value == b"classified"
@@ -313,7 +401,7 @@ mod tests {
 
     #[test]
     fn delete_is_idempotent() {
-        let mut document = SecretDocument::new(b"device-a").unwrap();
+        let mut document = new_document();
         assert!(document.delete(&address()).unwrap().is_none());
         document.put(&address(), b"value", None).unwrap();
         assert!(document.delete(&address()).unwrap().is_some());
@@ -322,7 +410,7 @@ mod tests {
 
     #[test]
     fn purge_removes_entries_at_deadline() {
-        let mut document = SecretDocument::new(b"device-a").unwrap();
+        let mut document = new_document();
         document.put(&address(), b"value", Some(5)).unwrap();
 
         assert!(document.purge_expired(4).unwrap().is_none());
@@ -335,7 +423,7 @@ mod tests {
 
     #[test]
     fn clear_reports_and_removes_every_entry() {
-        let mut document = SecretDocument::new(b"device-a").unwrap();
+        let mut document = new_document();
         document.put(&address(), b"value", None).unwrap();
         let second = SecretAddress::new("another", None).unwrap();
         document.put(&second, b"value", None).unwrap();

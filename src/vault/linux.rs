@@ -534,10 +534,13 @@ mod tests {
             .request(
                 &VaultRequest::new_with_application(
                     VaultAction::GetCache {
-                        namespace: b"approval-transport-test".to_vec(),
-                        address: WireSecretAddress::new("TOKEN", None)
-                            .scope_to_project("transport-project")
-                            .unwrap(),
+                        project: "transport-project".to_owned(),
+                        address: crate::vault::SecretSpecAddress::convention(
+                            "transport-project",
+                            "default",
+                            "TOKEN",
+                        )
+                        .unwrap(),
                     },
                     application,
                 )

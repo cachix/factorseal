@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use crate::vault::signature;
 use crate::vault::{
-    DeviceKeyId, DocumentId, DocumentScope, SignedChangeEnvelope, VaultError, VaultResult,
+    DeviceKeyId, DocumentId, DocumentKind, SignedChangeEnvelope, VaultError, VaultResult,
 };
 
 const COMMIT_VERSION: u8 = 2;
@@ -14,7 +14,7 @@ const COMMIT_SIGNATURE_DOMAIN: &[u8] = b"factorseal/protected-commit-signature/v
 pub(super) struct CommitContents {
     pub(super) previous_commit_id: Option<[u8; 32]>,
     pub(super) document_id: DocumentId,
-    pub(super) scope: DocumentScope,
+    pub(super) scope: DocumentKind,
     pub(super) generation: u64,
     pub(super) key_epoch: u64,
     pub(super) snapshot_digest: [u8; 32],
@@ -29,7 +29,7 @@ pub(super) struct ProtectedCommit {
     pub(super) commit_id: [u8; 32],
     pub(super) previous_commit_id: Option<[u8; 32]>,
     pub(super) document_id: DocumentId,
-    pub(super) scope: DocumentScope,
+    pub(super) scope: DocumentKind,
     pub(super) generation: u64,
     pub(super) key_epoch: u64,
     pub(super) snapshot_digest: [u8; 32],

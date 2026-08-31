@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-use crate::vault::{DocumentScope, VaultError, VaultResult, VaultStore};
+use crate::vault::{DocumentKind, VaultError, VaultResult, VaultStore};
 
 use super::super::grant::{GrantTarget, promote_permission};
 use super::super::{
@@ -22,7 +22,7 @@ pub(super) const PERMISSION_CONTROL_NAMESPACE: &[u8] = b"factorseal/permissions/
 pub(super) struct ApprovalCandidate {
     caller: CallerIdentity,
     application: VaultApplicationContext,
-    scope: DocumentScope,
+    scope: DocumentKind,
     namespace: Vec<u8>,
     permission: GrantPermission,
     operation: PermissionOperation,
@@ -31,7 +31,7 @@ pub(super) struct ApprovalCandidate {
 struct ApprovalRecord {
     summary: Permission,
     caller: CallerIdentity,
-    scope: DocumentScope,
+    scope: DocumentKind,
     namespace: Vec<u8>,
     permission: GrantPermission,
 }
@@ -59,30 +59,48 @@ impl ApprovalCandidate {
         let application = application?.clone();
         let project = application.project.as_deref()?;
         let (scope, namespace, permission, operation) = match action {
-            VaultAction::GetCache { namespace, address }
-                if address.is_scoped_to_project(project) =>
+            VaultAction::GetCache {
+                project: requested,
+                address,
+            } if requested == project
+                && address
+                    .project()
+                    .is_none_or(|address_project| address_project == project) =>
             {
                 (
-                    DocumentScope::DeviceCache,
-                    namespace,
+                    DocumentKind::SecretSpecProviderCache,
+                    requested.as_bytes(),
                     GrantPermission::Get,
                     PermissionOperation::Get,
                 )
             }
             VaultAction::PutCache {
-                namespace, address, ..
-            } if address.is_scoped_to_project(project) => (
-                DocumentScope::DeviceCache,
-                namespace,
-                GrantPermission::Put,
-                PermissionOperation::Put,
-            ),
-            VaultAction::DeleteCache { namespace, address }
-                if address.is_scoped_to_project(project) =>
+                project: requested,
+                address,
+                ..
+            } if requested == project
+                && address
+                    .project()
+                    .is_none_or(|address_project| address_project == project) =>
             {
                 (
-                    DocumentScope::DeviceCache,
-                    namespace,
+                    DocumentKind::SecretSpecProviderCache,
+                    requested.as_bytes(),
+                    GrantPermission::Put,
+                    PermissionOperation::Put,
+                )
+            }
+            VaultAction::DeleteCache {
+                project: requested,
+                address,
+            } if requested == project
+                && address
+                    .project()
+                    .is_none_or(|address_project| address_project == project) =>
+            {
+                (
+                    DocumentKind::SecretSpecProviderCache,
+                    requested.as_bytes(),
                     GrantPermission::Delete,
                     PermissionOperation::Delete,
                 )
@@ -95,7 +113,7 @@ impl ApprovalCandidate {
             caller: caller.clone(),
             application,
             scope,
-            namespace: namespace.clone(),
+            namespace: namespace.to_vec(),
             permission,
             operation,
         })

@@ -1,4 +1,4 @@
-//! Command implementations for vault lifecycle, keyring, and grant operations.
+//! Command implementations for vault lifecycle, project secrets, and grants.
 
 use std::collections::HashSet;
 use std::fs;
@@ -9,10 +9,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
-    Keyring, MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionState,
-    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealLeasePolicy,
-    UnsealedVault, Vault, VaultAction, VaultClient, VaultError, VaultMetadata, VaultRequest,
-    VaultResponseBody, VaultResponseErrorCode, VaultService, WireSecretAddress,
+    DocumentKind, GrantPermission, MAX_PERMISSION_WAIT_MS, Permission, PermissionChange,
+    PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind, UnlockGroup,
+    UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient, VaultError,
+    VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 use super::cli::PermissionCommand;
 use super::factor::{FactorSource, read_factor};
 use super::platform::{caller_identity_for_executable, native_client, serve_vault};
-use super::{CliError, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, MAX_KEYRING_VALUE_BYTES};
+use super::{CLI_CONTROL_NAMESPACE, CliError, MAX_PROJECT_VALUE_BYTES, PROJECT_PERMISSIONS};
 
 #[derive(Serialize)]
 struct Status<'a> {
@@ -192,7 +192,7 @@ pub(super) fn hardware_self_test(biometric: bool) -> Result<(), CliError> {
 pub(super) fn seal_vault(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
     let client = native_client(root, socket)?;
     let request = VaultRequest::new(VaultAction::Seal {
-        namespace: KEYRING_NAMESPACE.to_vec(),
+        namespace: CLI_CONTROL_NAMESPACE.to_vec(),
     })?;
     let response = client.request(&request)?;
     match response.result {
@@ -243,51 +243,133 @@ fn live_state(root: &Path, socket: Option<&Path>, device: &VaultMetadata) -> &'s
     }
 }
 
-pub(super) fn set_keyring_value(
+pub(super) fn set_project_value(
     root: &Path,
     socket: Option<&Path>,
+    project: String,
+    profile: &str,
     item: String,
     field: Option<String>,
     value_file: Option<&Path>,
 ) -> Result<(), CliError> {
-    let value = read_keyring_value(value_file)?;
+    let value = read_project_value(value_file)?;
     let client = native_client(root, socket)?;
-    client.set(
-        KEYRING_NAMESPACE,
-        &WireSecretAddress::new(item, field),
-        &value,
-    )?;
-    Ok(())
+    let address = project_address(&project, profile, item, field)?;
+    expect_response(
+        &client,
+        VaultAction::PutProject {
+            project,
+            address,
+            value: factorseal::WireSecret::new(value.to_vec()),
+        },
+        |body| matches!(body, VaultResponseBody::Stored),
+    )
 }
 
-pub(super) fn get_keyring_value(
+pub(super) fn get_project_value(
     root: &Path,
     socket: Option<&Path>,
+    project: String,
+    profile: &str,
     item: String,
     field: Option<String>,
 ) -> Result<(), CliError> {
     let client = native_client(root, socket)?;
-    let value = client.get(KEYRING_NAMESPACE, &WireSecretAddress::new(item, field))?;
-    let value = value.ok_or(CliError::KeyringEntryNotFound)?;
+    let address = project_address(&project, profile, item, field)?;
+    let request = VaultRequest::new(VaultAction::GetProject { project, address })?;
+    let response = client.request(&request)?;
+    let value = match response.result {
+        Ok(VaultResponseBody::Secret { value: Some(value) }) => value,
+        Ok(VaultResponseBody::Secret { value: None }) => {
+            return Err(CliError::ProjectEntryNotFound);
+        }
+        Ok(_) => {
+            return Err(
+                VaultError::Protocol("vault returned an unexpected response".to_owned()).into(),
+            );
+        }
+        Err(error) => {
+            return Err(CliError::VaultRequest {
+                code: error.code,
+                message: error.message,
+            });
+        }
+    };
     let mut stdout = std::io::stdout().lock();
     stdout
         .write_all(value.expose())
         .and_then(|()| stdout.flush())
-        .map_err(|error| CliError::KeyringInput(error.to_string()))
+        .map_err(|error| CliError::ProjectInput(error.to_string()))
 }
 
-pub(super) fn delete_keyring_value(
+pub(super) fn delete_project_value(
     root: &Path,
     socket: Option<&Path>,
+    project: String,
+    profile: &str,
     item: String,
     field: Option<String>,
 ) -> Result<(), CliError> {
     let client = native_client(root, socket)?;
-    let existed = client.delete(KEYRING_NAMESPACE, &WireSecretAddress::new(item, field))?;
+    let address = project_address(&project, profile, item, field)?;
+    let request = VaultRequest::new(VaultAction::DeleteProject { project, address })?;
+    let response = client.request(&request)?;
+    let existed = match response.result {
+        Ok(VaultResponseBody::Deleted { existed }) => existed,
+        Ok(_) => {
+            return Err(
+                VaultError::Protocol("vault returned an unexpected response".to_owned()).into(),
+            );
+        }
+        Err(error) => {
+            return Err(CliError::VaultRequest {
+                code: error.code,
+                message: error.message,
+            });
+        }
+    };
     if !existed {
-        return Err(CliError::KeyringEntryNotFound);
+        return Err(CliError::ProjectEntryNotFound);
     }
     Ok(())
+}
+
+fn project_address(
+    project: &str,
+    profile: &str,
+    item: String,
+    field: Option<String>,
+) -> Result<SecretSpecAddress, CliError> {
+    if let Some(field) = field {
+        return SecretSpecAddress::native(factorseal::SecretSpecCoordinates {
+            item,
+            field: Some(field),
+            vault: None,
+            section: None,
+            version: None,
+        })
+        .map_err(Into::into);
+    }
+    SecretSpecAddress::convention(project, profile, item).map_err(Into::into)
+}
+
+fn expect_response(
+    client: &dyn VaultClient,
+    action: VaultAction,
+    accepted: impl FnOnce(&VaultResponseBody) -> bool,
+) -> Result<(), CliError> {
+    let request = VaultRequest::new(action)?;
+    let response = client.request(&request)?;
+    match response.result {
+        Ok(body) if accepted(&body) => Ok(()),
+        Ok(_) => {
+            Err(VaultError::Protocol("vault returned an unexpected response".to_owned()).into())
+        }
+        Err(error) => Err(CliError::VaultRequest {
+            code: error.code,
+            message: error.message,
+        }),
+    }
 }
 
 pub(super) fn destroy_vault(
@@ -317,36 +399,36 @@ pub(super) fn destroy_vault(
     Ok(())
 }
 
-pub(super) fn read_keyring_value(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliError> {
+pub(super) fn read_project_value(path: Option<&Path>) -> Result<Zeroizing<Vec<u8>>, CliError> {
     let value = if let Some(path) = path {
         let metadata = fs::symlink_metadata(path)
-            .map_err(|error| CliError::KeyringInput(format!("{}: {error}", path.display())))?;
-        if !metadata.file_type().is_file() || metadata.len() > MAX_KEYRING_VALUE_BYTES {
-            return Err(CliError::KeyringInput(format!(
+            .map_err(|error| CliError::ProjectInput(format!("{}: {error}", path.display())))?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_PROJECT_VALUE_BYTES {
+            return Err(CliError::ProjectInput(format!(
                 "{} must be a regular file no larger than 64 KiB",
                 path.display()
             )));
         }
         let file = fs::File::open(path)
-            .map_err(|error| CliError::KeyringInput(format!("{}: {error}", path.display())))?;
-        read_bounded(file, MAX_KEYRING_VALUE_BYTES)
-            .map_err(|error| CliError::KeyringInput(format!("{}: {error}", path.display())))?
+            .map_err(|error| CliError::ProjectInput(format!("{}: {error}", path.display())))?;
+        read_bounded(file, MAX_PROJECT_VALUE_BYTES)
+            .map_err(|error| CliError::ProjectInput(format!("{}: {error}", path.display())))?
     } else if std::io::stdin().is_terminal() {
-        rpassword::prompt_password("Keyring value: ")
+        rpassword::prompt_password("Project secret value: ")
             .map(|secret| Zeroizing::new(secret.into_bytes()))
-            .map_err(|error| CliError::KeyringInput(error.to_string()))?
+            .map_err(|error| CliError::ProjectInput(error.to_string()))?
     } else {
-        read_bounded(std::io::stdin().lock(), MAX_KEYRING_VALUE_BYTES)
-            .map_err(|error| CliError::KeyringInput(error.to_string()))?
+        read_bounded(std::io::stdin().lock(), MAX_PROJECT_VALUE_BYTES)
+            .map_err(|error| CliError::ProjectInput(error.to_string()))?
     };
     if value.is_empty() {
-        return Err(CliError::KeyringInput(
-            "the keyring value must not be empty".to_owned(),
+        return Err(CliError::ProjectInput(
+            "the project value must not be empty".to_owned(),
         ));
     }
-    if value.len() as u64 > MAX_KEYRING_VALUE_BYTES {
-        return Err(CliError::KeyringInput(
-            "the keyring value must not exceed 64 KiB".to_owned(),
+    if value.len() as u64 > MAX_PROJECT_VALUE_BYTES {
+        return Err(CliError::ProjectInput(
+            "the project value must not exceed 64 KiB".to_owned(),
         ));
     }
     Ok(value)
@@ -400,7 +482,7 @@ pub(super) fn grant_cli(
     let service = VaultService::open(root, unsealed, now, UnsealLeasePolicy::default())?;
     authorize_cli(&service, now)?;
     service.seal()?;
-    println!("Authorized this Factorseal CLI for the local keyring");
+    println!("Authorized this Factorseal CLI for durable project secrets");
     Ok(())
 }
 
@@ -408,7 +490,20 @@ fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
     let executable =
         std::env::current_exe().map_err(|error| CliError::CurrentExecutable(error.to_string()))?;
     let caller = caller_identity_for_executable(&executable)?;
-    service.authorize_namespace(&caller, KEYRING_NAMESPACE, KEYRING_PERMISSIONS, None, now)?;
+    service.authorize_document_kind(
+        &caller,
+        DocumentKind::SecretSpecProject,
+        PROJECT_PERMISSIONS,
+        None,
+        now,
+    )?;
+    service.authorize_namespace(
+        &caller,
+        CLI_CONTROL_NAMESPACE,
+        [GrantPermission::Seal],
+        None,
+        now,
+    )?;
     service.authorize_permission_manager(&caller, now)?;
     Ok(())
 }

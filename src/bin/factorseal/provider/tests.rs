@@ -1,9 +1,9 @@
 use super::*;
 use factorseal::{
     CallerIdentity, CallerPlatform, HardwareBackend, KeyProtector, KeyProtectorFactory,
-    PermissionChange, PermissionState, UnlockCredentials, UnlockFactorKind, UnlockGroup,
-    UnlockPolicy, UnsealLeasePolicy, Vault, VaultInteractionReference, VaultPlatform,
-    VaultResponse, VaultResponseError, VaultService, WireSecretAddress,
+    PermissionChange, PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind,
+    UnlockGroup, UnlockPolicy, UnsealLeasePolicy, Vault, VaultInteractionReference, VaultPlatform,
+    VaultResponse, VaultResponseError, VaultService,
 };
 use secretspec_ipc::client::Client;
 use secretspec_ipc::protocol::provider::{
@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroizing;
 
-type CacheKey = (String, Option<String>);
+type CacheKey = (String, SecretSpecAddress);
 
 fn application_context() -> VaultApplicationContext {
     VaultApplicationContext::new(
@@ -46,39 +46,39 @@ impl VaultClient for MemoryVault {
     fn request(&self, request: &VaultRequest) -> factorseal::VaultResult<VaultResponse> {
         assert_eq!(request.application(), Some(&application_context()));
         let body = match &request.action {
-            VaultAction::GetCache { namespace, address } => {
-                assert_eq!(namespace, SECRETSPEC_CACHE_NAMESPACE);
+            VaultAction::GetCache { project, address } => {
+                assert_eq!(project, "demo");
                 VaultResponseBody::Secret {
                     value: self
                         .values
                         .lock()
                         .unwrap()
-                        .get(&(address.item.clone(), address.field.clone()))
+                        .get(&(project.clone(), address.clone()))
                         .cloned()
                         .map(WireSecret::new),
                 }
             }
             VaultAction::PutCache {
-                namespace,
+                project,
                 address,
                 value,
                 evict_at,
             } => {
-                assert_eq!(namespace, SECRETSPEC_CACHE_NAMESPACE);
-                self.values.lock().unwrap().insert(
-                    (address.item.clone(), address.field.clone()),
-                    value.expose().to_vec(),
-                );
+                assert_eq!(project, "demo");
+                self.values
+                    .lock()
+                    .unwrap()
+                    .insert((project.clone(), address.clone()), value.expose().to_vec());
                 *self.last_evict_at.lock().unwrap() = *evict_at;
                 VaultResponseBody::Stored
             }
-            VaultAction::DeleteCache { namespace, address } => {
-                assert_eq!(namespace, SECRETSPEC_CACHE_NAMESPACE);
+            VaultAction::DeleteCache { project, address } => {
+                assert_eq!(project, "demo");
                 let existed = self
                     .values
                     .lock()
                     .unwrap()
-                    .remove(&(address.item.clone(), address.field.clone()))
+                    .remove(&(project.clone(), address.clone()))
                     .is_some();
                 VaultResponseBody::Deleted { existed }
             }
@@ -109,9 +109,9 @@ fn native_address() -> Address {
         coordinates: Coordinates {
             item: "database".to_owned(),
             field: Some("password".to_owned()),
-            vault: None,
-            section: None,
-            version: None,
+            vault: Some("Production".to_owned()),
+            section: Some("credentials".to_owned()),
+            version: Some("3".to_owned()),
         },
     }
 }
@@ -240,14 +240,12 @@ fn convention_addresses_are_versioned_and_unambiguous() {
         project: "a/b".to_owned(),
         profile: "c".to_owned(),
         key: "d".to_owned(),
-    })
-    .unwrap();
+    });
     let second = address::coordinates(Address::Convention {
         project: "a".to_owned(),
         profile: "b/c".to_owned(),
         key: "d".to_owned(),
-    })
-    .unwrap();
+    });
 
     assert_eq!(first.item, "v1/a%2Fb/c/d");
     assert_eq!(second.item, "v1/a/b%2Fc/d");
@@ -277,8 +275,8 @@ fn provider_maps_pending_approval_to_structured_interaction() {
     let error = request(
         &ApprovalVault,
         VaultAction::GetCache {
-            namespace: SECRETSPEC_CACHE_NAMESPACE.to_vec(),
-            address: WireSecretAddress::new("demo/default/TOKEN", None),
+            project: "demo".to_owned(),
+            address: SecretSpecAddress::convention("demo", "default", "TOKEN").unwrap(),
         },
         application_context(),
     )

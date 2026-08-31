@@ -4,8 +4,7 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use super::{
-    DocumentId, DocumentOperation, DocumentScope, SecretAddress, UnsealedVault, VaultMetadata,
-    VaultResult,
+    DocumentKind, DocumentOperation, SecretAddress, UnsealedVault, VaultMetadata, VaultResult,
 };
 
 mod bootstrap;
@@ -53,40 +52,37 @@ impl VaultStore {
     /// Delete one secret idempotently.
     pub(crate) fn delete(
         &self,
-        scope: DocumentScope,
+        scope: DocumentKind,
         namespace: &[u8],
         address: &SecretAddress,
     ) -> VaultResult<bool> {
-        let document_id = self.document_id(scope, namespace);
         request(&self.control.sender, |response| Command::Delete {
-            document_id,
             scope,
+            partition: namespace.to_vec(),
             address: address.clone(),
             response,
         })
     }
 
     /// Clear every secret from one scoped document.
-    pub(crate) fn clear(&self, scope: DocumentScope, namespace: &[u8]) -> VaultResult<usize> {
-        let document_id = self.document_id(scope, namespace);
+    pub(crate) fn clear(&self, scope: DocumentKind, namespace: &[u8]) -> VaultResult<usize> {
         request(&self.control.sender, |response| Command::Clear {
-            document_id,
             scope,
+            partition: namespace.to_vec(),
             response,
         })
     }
 
     pub(crate) fn get_at(
         &self,
-        scope: DocumentScope,
+        scope: DocumentKind,
         namespace: &[u8],
         address: &SecretAddress,
         now: u64,
     ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
-        let document_id = self.document_id(scope, namespace);
         request(&self.control.sender, |response| Command::Get {
-            document_id,
             scope,
+            partition: namespace.to_vec(),
             address: address.clone(),
             now,
             response,
@@ -95,16 +91,15 @@ impl VaultStore {
 
     pub(crate) fn put_at(
         &self,
-        scope: DocumentScope,
+        scope: DocumentKind,
         namespace: &[u8],
         address: &SecretAddress,
         value: &[u8],
         evict_at: Option<u64>,
     ) -> VaultResult<()> {
-        let document_id = self.document_id(scope, namespace);
         request(&self.control.sender, |response| Command::Put {
-            document_id,
             scope,
+            partition: namespace.to_vec(),
             address: address.clone(),
             value: Zeroizing::new(value.to_vec()),
             evict_at,
@@ -117,14 +112,13 @@ impl VaultStore {
     /// related records that must not become independently durable.
     pub(crate) fn mutate(
         &self,
-        scope: DocumentScope,
+        scope: DocumentKind,
         namespace: &[u8],
         operations: Vec<DocumentOperation>,
     ) -> VaultResult<()> {
-        let document_id = self.document_id(scope, namespace);
         request(&self.control.sender, |response| Command::Mutate {
-            document_id,
             scope,
+            partition: namespace.to_vec(),
             operations,
             response,
         })
@@ -135,9 +129,5 @@ impl VaultStore {
             now,
             response,
         })
-    }
-
-    fn document_id(&self, scope: DocumentScope, namespace: &[u8]) -> DocumentId {
-        DocumentId::derive(self.device.vault_id(), scope, namespace)
     }
 }

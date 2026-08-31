@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::vault::{SecretAddress, VaultError, VaultResult};
+use crate::vault::{SecretAddress, SecretSpecAddress, VaultError, VaultResult};
 
 pub(super) const PROTOCOL_VERSION: u8 = 7;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
@@ -22,7 +22,6 @@ const MAX_MUTATIONS_PER_REQUEST: usize = 64;
 const MAX_PERMISSION_ID_BYTES: usize = 128;
 #[cfg(feature = "vault-store")]
 const CALLER_FINGERPRINT_DOMAIN: &[u8] = b"factorseal/caller-identity/v1\0";
-const PROJECT_ADDRESS_DOMAIN: &[u8] = b"factorseal/project-address/v1\0";
 
 /// Platform that authenticated one local IPC caller.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -175,39 +174,9 @@ impl WireSecretAddress {
         self.resolve().map(|_| ())
     }
 
-    /// Bind a cache address to one caller-declared project. The service checks
-    /// this prefix before considering a project-scoped grant.
-    pub fn scope_to_project(mut self, project: &str) -> VaultResult<Self> {
-        if project.is_empty() || project.len() > MAX_APPLICATION_COMPONENT_BYTES {
-            return Err(VaultError::Protocol(
-                "application project is empty or too long".to_owned(),
-            ));
-        }
-        self.item = format!(
-            "{}{item}",
-            project_address_prefix(project),
-            item = self.item
-        );
-        self.validate()?;
-        Ok(self)
-    }
-
-    #[cfg(feature = "vault-store")]
-    pub(super) fn is_scoped_to_project(&self, project: &str) -> bool {
-        self.item.starts_with(&project_address_prefix(project))
-    }
-
     pub(super) fn resolve(&self) -> VaultResult<SecretAddress> {
         SecretAddress::new(self.item.clone(), self.field.clone())
     }
-}
-
-fn project_address_prefix(project: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(PROJECT_ADDRESS_DOMAIN);
-    digest.update((project.len() as u64).to_be_bytes());
-    digest.update(project.as_bytes());
-    format!("project/v1/{}/", URL_SAFE_NO_PAD.encode(digest.finalize()))
 }
 
 /// Secret bytes that wipe their allocation on drop.
@@ -494,34 +463,49 @@ pub enum VaultAction {
     Clear {
         namespace: Vec<u8>,
     },
-    /// Read from the disposable application cache.
-    GetCache {
-        namespace: Vec<u8>,
-        address: WireSecretAddress,
+    /// Read one durable project secret using its full SecretSpec address.
+    GetProject {
+        project: String,
+        address: SecretSpecAddress,
     },
-    /// Write to the disposable application cache.
+    /// Write one durable project secret using its full SecretSpec address.
+    PutProject {
+        project: String,
+        address: SecretSpecAddress,
+        value: WireSecret,
+    },
+    DeleteProject {
+        project: String,
+        address: SecretSpecAddress,
+    },
+    /// Read from the SecretSpec provider cache.
+    GetCache {
+        project: String,
+        address: SecretSpecAddress,
+    },
+    /// Write to the SecretSpec provider cache.
     PutCache {
-        namespace: Vec<u8>,
-        address: WireSecretAddress,
+        project: String,
+        address: SecretSpecAddress,
         value: WireSecret,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         evict_at: Option<u64>,
     },
     /// Delete from the disposable application cache.
     DeleteCache {
-        namespace: Vec<u8>,
-        address: WireSecretAddress,
+        project: String,
+        address: SecretSpecAddress,
     },
     /// Clear one disposable application-cache namespace.
     ClearCache {
-        namespace: Vec<u8>,
+        project: String,
     },
     Seal {
         namespace: Vec<u8>,
     },
     /// Seal the vault using a disposable-cache namespace grant.
     SealCache {
-        namespace: Vec<u8>,
+        project: String,
     },
     ListPermissions,
     /// Wait until the permission revision changes or the bounded timeout elapses.
@@ -586,18 +570,23 @@ impl VaultAction {
                 validate_permission_id(id)
             }
             Self::Get { namespace, address }
-            | Self::GetCache { namespace, address }
             | Self::Delete { namespace, address }
-            | Self::DeleteCache { namespace, address }
             | Self::Put {
-                namespace, address, ..
-            }
-            | Self::PutCache {
                 namespace, address, ..
             } => {
                 validate_namespace(namespace)?;
                 address.resolve().map(|_| ())
             }
+            Self::GetProject { project, address }
+            | Self::PutProject {
+                project, address, ..
+            }
+            | Self::DeleteProject { project, address }
+            | Self::GetCache { project, address }
+            | Self::PutCache {
+                project, address, ..
+            }
+            | Self::DeleteCache { project, address } => validate_project_address(project, address),
             Self::Mutate {
                 namespace,
                 mutations,
@@ -613,10 +602,8 @@ impl VaultAction {
                 }
                 Ok(())
             }
-            Self::Clear { namespace }
-            | Self::ClearCache { namespace }
-            | Self::Seal { namespace }
-            | Self::SealCache { namespace } => validate_namespace(namespace),
+            Self::Clear { namespace } | Self::Seal { namespace } => validate_namespace(namespace),
+            Self::ClearCache { project } | Self::SealCache { project } => validate_project(project),
         }
     }
 }
@@ -862,6 +849,29 @@ fn validate_namespace(namespace: &[u8]) -> VaultResult<()> {
     if namespace.is_empty() || namespace.len() > MAX_NAMESPACE_BYTES {
         return Err(VaultError::Protocol(
             "document namespace is empty or too long".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_project(project: &str) -> VaultResult<()> {
+    if project.is_empty() || project.len() > MAX_APPLICATION_COMPONENT_BYTES {
+        return Err(VaultError::Protocol(
+            "SecretSpec project is empty or too long".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_project_address(project: &str, address: &SecretSpecAddress) -> VaultResult<()> {
+    validate_project(project)?;
+    address.validate()?;
+    if address
+        .project()
+        .is_some_and(|address_project| address_project != project)
+    {
+        return Err(VaultError::Protocol(
+            "SecretSpec convention address belongs to a different project".to_owned(),
         ));
     }
     Ok(())
