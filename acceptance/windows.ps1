@@ -250,9 +250,9 @@ Add-Evidence 'native_prompt_create_observed' 'pass'
 Add-Evidence 'native_prompt_unseal_observed' 'pass'
 Add-Evidence 'native_prompt_observed' 'pass'
 Add-Evidence 'test.initial_unseal' 'pass'
-'hardware-lifecycle-acceptance' | & $Factorseal --root $Root set acceptance --field value
+'hardware-lifecycle-acceptance' | & $Factorseal --root $Root set --project acceptance acceptance --field value
 if ($LASTEXITCODE -ne 0) { throw 'factorseal set failed' }
-$value = & $Factorseal --root $Root get acceptance --field value
+$value = & $Factorseal --root $Root get --project acceptance acceptance --field value
 if ($LASTEXITCODE -ne 0 -or $value -ne 'hardware-lifecycle-acceptance') {
     throw 'Keyring round trip failed'
 }
@@ -265,7 +265,7 @@ $service.WaitForExit(180000)
 if (-not $service.HasExited) { throw 'Vault did not exit after the lifecycle event' }
 Wait-ForState 'sealed'
 Add-Evidence 'test.lifecycle_seal' 'pass'
-$sealedValue = & $Factorseal --root $Root get acceptance --field value 2>$null
+$sealedValue = & $Factorseal --root $Root get --project acceptance acceptance --field value 2>$null
 if ($LASTEXITCODE -eq 0 -or $sealedValue) {
     throw 'Sealed vault returned a secret'
 }
@@ -275,12 +275,12 @@ $service = Start-FactorsealAgent `
     (Join-Path $Root 'acceptance-reunseal.log') `
     (Join-Path $Root 'acceptance-reunseal-error.log')
 Wait-ForState 'unsealed'
-$value = & $Factorseal --root $Root get acceptance --field value
+$value = & $Factorseal --root $Root get --project acceptance acceptance --field value
 if ($LASTEXITCODE -ne 0 -or $value -ne 'hardware-lifecycle-acceptance') {
     throw 'Hardware re-unseal did not recover the stored value'
 }
 Add-Evidence 'test.reunseal_recovery' 'pass'
-& $Factorseal --root $Root delete acceptance --field value
+& $Factorseal --root $Root delete --project acceptance acceptance --field value
 if ($LASTEXITCODE -ne 0) { throw 'factorseal delete failed' }
 Add-Evidence 'test.delete' 'pass'
 Stop-Process -Id $service.Id
