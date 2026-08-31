@@ -131,6 +131,7 @@ impl VaultService {
     }
 
     /// Persist approval for the built-in Linux Secret Service adapter.
+    #[cfg(target_os = "linux")]
     pub(crate) fn authorize_secret_service_namespace(
         &self,
         caller: &CallerIdentity,

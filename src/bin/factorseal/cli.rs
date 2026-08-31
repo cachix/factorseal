@@ -114,6 +114,23 @@ pub(super) enum Command {
         field: Option<String>,
     },
 
+    /// List durable projects without reading their secret values.
+    Projects {
+        /// Emit one JSON array instead of one quoted project per line.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List full addresses in one durable project without reading values.
+    List {
+        #[arg(long, env = "SECRETSPEC_PROJECT")]
+        project: String,
+
+        /// Emit one JSON array instead of one address object per line.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Permanently delete this vault and all of its hardware keys.
     Destroy {
         /// Required acknowledgement because this cannot be undone.

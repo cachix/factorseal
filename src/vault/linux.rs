@@ -331,8 +331,9 @@ mod tests {
     use super::*;
     #[cfg(feature = "hardware")]
     use crate::{
-        GrantPermission, UnsealLeasePolicy, Vault, VaultAction, VaultApplicationContext,
-        VaultResponseBody, WireSecret, WireSecretAddress, vault::VaultStore,
+        DocumentKind, GrantPermission, SecretSpecAddress, UnsealLeasePolicy, Vault, VaultAction,
+        VaultApplicationContext, VaultResponseBody, WireSecret, WireSecretAddress,
+        vault::VaultStore,
     };
     #[test]
     fn peer_identity_comes_from_socket_credentials() {
@@ -481,6 +482,7 @@ mod tests {
             panic!("expected secret response");
         };
         assert_eq!(value.expose(), b"transport-secret");
+        assert_project_listing_round_trips(&service, &caller, &client, now);
 
         let sealed = client
             .request(
@@ -492,6 +494,65 @@ mod tests {
             .unwrap();
         assert!(matches!(sealed.result, Ok(VaultResponseBody::Sealed)));
         server.join().unwrap().unwrap();
+    }
+
+    #[cfg(feature = "hardware")]
+    fn assert_project_listing_round_trips(
+        service: &VaultService,
+        caller: &CallerIdentity,
+        client: &LinuxVaultClient,
+        now: u64,
+    ) {
+        service
+            .authorize_document_kind(
+                caller,
+                DocumentKind::SecretSpecProject,
+                [GrantPermission::List, GrantPermission::Put],
+                None,
+                now,
+            )
+            .unwrap();
+        let address = SecretSpecAddress::convention("transport", "default", "TOKEN").unwrap();
+        let stored = client
+            .request(
+                &VaultRequest::new(VaultAction::PutProject {
+                    project: "transport".to_owned(),
+                    address: address.clone(),
+                    value: WireSecret::new(b"project-secret".to_vec()),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(stored.result, Ok(VaultResponseBody::Stored)));
+
+        let projects = client
+            .request(
+                &VaultRequest::new(VaultAction::ListProjects {
+                    cursor: None,
+                    limit: 1,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            projects.result,
+            Ok(VaultResponseBody::Projects { projects, .. }) if projects == ["transport"]
+        ));
+
+        let addresses = client
+            .request(
+                &VaultRequest::new(VaultAction::ListProjectAddresses {
+                    project: "transport".to_owned(),
+                    cursor: None,
+                    limit: 1,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            addresses.result,
+            Ok(VaultResponseBody::ProjectAddresses { addresses, .. }) if addresses == [address]
+        ));
     }
 
     #[cfg(feature = "hardware")]

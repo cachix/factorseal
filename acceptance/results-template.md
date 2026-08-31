@@ -13,11 +13,15 @@ vault ID, device key ID, full username, or raw logs containing those values.
 | Installed artifact signature/notarization verification | |
 | Factorseal recorded platform and hardware backend | |
 | Native verification prompt observed (where policy requires it) | |
+| Native prompt cancellation leaves the vault sealed | pass / fail / not applicable |
+| Native prompt timeout leaves the vault sealed | pass / fail / not applicable |
 | Generated `factorseal-physical-acceptance-v1` record attached | yes / no |
 | Generated record artifact hash matches release candidate | pass / fail |
 | Physical-host preflight | pass / fail |
 | Initial hardware-backed create and unseal | pass / fail |
 | Hardware generation, label-isolation, and deletion self-test | pass / fail |
+| Tampered vault or envelope fails closed | pass / fail |
+| Vault copied to different hardware fails to unseal | pass / fail |
 | Native IPC set/get/delete | pass / fail |
 | Lock/session switch seals the vault | pass / fail |
 | Sleep seals the vault before suspend | pass / fail |

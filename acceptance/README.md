@@ -41,11 +41,17 @@ lock. Separate sleep and session-switch results are just as simple:
 
 ### Windows
 
-From an ordinary, non-administrator PowerShell window:
+Use a signed release archive on a physical TPM 2.0 machine with Windows Hello
+configured. From an ordinary, non-administrator PowerShell window:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\run-acceptance.ps1
 ```
+
+The runner rejects an unsigned or invalidly signed `factorseal.exe`. A locally
+built archive can be used for development-only hardware bring-up with
+`-AllowUnsignedDevelopmentArtifact`, but its final line begins `DEVELOPMENT
+PASS` and its evidence is not release acceptance.
 
 Approve the Windows Hello dialogs. Administrator privileges are neither needed
 nor recommended.
@@ -158,9 +164,13 @@ The archive runner prefers its sibling app bundle, then the app installed in
 Run from an interactive, standard-user PowerShell session on a TPM 2.0 machine.
 The runner asks you to lock the current session, then waits for the vault
 process to exit. It must visibly exercise Windows Hello user verification and
-confirm the platform credential reports PRF support. Separately install the
-signed release candidate, register the Scheduled Task template, log out/in,
-and verify the masked askpass dialog and Windows Hello UX.
+confirm the platform credential reports PRF support. Verify the candidate's
+Authenticode status before creating any test state:
+
+```powershell
+$signature = Get-AuthenticodeSignature -LiteralPath .\factorseal.exe
+if ($signature.Status -ne 'Valid') { throw "Invalid release signature: $($signature.Status)" }
+```
 
 ```powershell
 ./run-acceptance.ps1 `
@@ -169,6 +179,44 @@ and verify the masked askpass dialog and Windows Hello UX.
   -PasswordFile "$env:USERPROFILE\.factorseal-acceptance-password" `
   -Evidence "$env:USERPROFILE\factorseal-windows.acceptance.txt"
 ```
+
+### Installed Windows login task
+
+The release archive includes an installer that resolves the current user's SID,
+the extracted installation directory, and an optional isolated acceptance root
+into the Scheduled Task XML. Keep the signed archive in its final location,
+then use a fresh root which is not an existing Factorseal vault:
+
+```powershell
+$taskRoot = Join-Path $env:LOCALAPPDATA 'Factorseal-installed-acceptance'
+if (Test-Path -LiteralPath $taskRoot) { throw "Test root already exists: $taskRoot" }
+powershell -ExecutionPolicy Bypass -File .\install-factorseal-task.ps1 -Root $taskRoot
+Start-ScheduledTask -TaskName Factorseal
+.\factorseal.exe --root $taskRoot init --unlock password,biometric
+```
+
+The task waits for initialization, then shows the masked askpass dialog and the
+Windows Hello UI. Enter the same test-only password used during initialization.
+Confirm `factorseal.exe --root $taskRoot status` reports `unsealed`, lock and
+unlock the session, and confirm the task process exited and status reports
+`sealed`. Start the task again, approve both prompts, and confirm re-unseal.
+Record the installed-task result in `results-template.md`.
+
+After recording the result, seal the agent, destroy the isolated test vault,
+and remove only the acceptance task you installed:
+
+```powershell
+Stop-ScheduledTask -TaskName Factorseal -ErrorAction SilentlyContinue
+.\factorseal.exe --root $taskRoot destroy --yes-really-destroy
+Unregister-ScheduledTask -TaskName Factorseal -Confirm:$false
+```
+
+Repeat the installed-service observation for sleep, logout/disconnect, and
+shutdown preparation. Shutdown and cross-device copied-vault tests necessarily
+resume after a reboot or on a second physical machine; record them in the
+template rather than treating the guided lock runner as the entire release
+matrix. Also verify that cancelling and allowing the Windows Hello ceremony to
+time out leave the vault sealed.
 
 ## Release evidence
 

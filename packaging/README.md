@@ -16,7 +16,7 @@ artifact is ready to release:
   signed app plus an unsigned `.pkg`. The tarball also carries the one-command
   runner, askpass helper, and LaunchAgent property list;
 - `build-windows.ps1` creates a ZIP containing the executables, the askpass
-  helper, Scheduled Task template, and one-command physical acceptance runner.
+  helper, Scheduled Task installer, and one-command physical acceptance runner.
   Selecting a maintained Windows installer toolchain remains a
   release decision; current WiX releases require explicit OSMF terms and are
   not silently accepted by this repository.
@@ -37,6 +37,23 @@ shell whose loader paths point into `/nix/store`. Physical TPM/Secure Enclave
 acceptance is separate from archive smoke testing.
 Use the release-candidate runners in [`acceptance/`](../acceptance/README.md)
 on physical hosts and attach their redacted output to the release approval.
+
+A Windows release build signs `factorseal.exe` with `signtool.exe`, requires an
+RFC 3161 timestamp URL, and verifies the resulting Authenticode signature before
+packaging it:
+
+```powershell
+.\packaging\build-windows.ps1 `
+  -SigningCertificateThumbprint '0123456789ABCDEF0123456789ABCDEF01234567' `
+  -TimestampUrl 'https://timestamp.example.invalid'
+```
+
+Omitting the certificate deliberately produces an unsigned development archive
+and prints a warning. Such an archive can exercise CI packaging but is rejected
+by release acceptance. The archive's `install-factorseal-task.ps1` replaces the
+task template placeholders with the current SID and extracted directory; its
+optional `-Root` parameter provides an isolated installed-service acceptance
+vault. It refuses to replace an existing task unless `-Replace` is explicit.
 
 The macOS profile must authorize the explicit `dev.factorseal` App ID and its
 default keychain access group. This is not optional for native acceptance:

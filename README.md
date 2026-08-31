@@ -114,6 +114,19 @@ $ factorseal get --project my-app github --field token
 $ factorseal delete --project my-app github --field token
 ```
 
+Browse project and address metadata without retrieving any values:
+
+```console
+$ factorseal projects
+"my-app"
+$ factorseal list --project my-app
+{"kind":"native","coordinates":{"item":"github","field":"token"}}
+```
+
+Both commands follow every bounded vault cursor automatically. Pass `--json`
+to emit one JSON array instead of JSON-quoted projects or one compact address
+object per line.
+
 `set` prompts without echo when standard input is a terminal. It can also read
 exact bytes from standard input or `--value-file`:
 
@@ -250,7 +263,8 @@ own grant permission and returns only project names or full addresses—never
 secret values. Pages contain at most eight entries so even maximally escaped
 addresses remain within the protocol's one-MiB response limit. Expired records
 are removed before listing, and concurrent values for one authenticated
-address appear as one metadata entry.
+address appear as one metadata entry. The `projects` and `list --project`
+commands consume these pages through the native vault transport.
 
 Applications receive domain operations such as get, put, delete, clear, and
 bounded batch mutation; they never receive raw `AutoCommit` access. Reads use

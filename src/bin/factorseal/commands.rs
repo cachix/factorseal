@@ -9,10 +9,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
-    DocumentKind, GrantPermission, MAX_PERMISSION_WAIT_MS, Permission, PermissionChange,
-    PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind, UnlockGroup,
-    UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient, VaultError,
-    VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService,
+    DocumentKind, GrantPermission, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
+    PermissionChange, PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind,
+    UnlockGroup, UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient,
+    VaultError, VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode,
+    VaultService,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -332,6 +333,180 @@ pub(super) fn delete_project_value(
         return Err(CliError::ProjectEntryNotFound);
     }
     Ok(())
+}
+
+pub(super) fn list_projects(
+    root: &Path,
+    socket: Option<&Path>,
+    json: bool,
+) -> Result<(), CliError> {
+    let client = native_client(root, socket)?;
+    let projects = fetch_projects(&client)?;
+    write_metadata(&mut std::io::stdout().lock(), &projects, json)
+}
+
+pub(super) fn list_project_addresses(
+    root: &Path,
+    socket: Option<&Path>,
+    project: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let client = native_client(root, socket)?;
+    let addresses = fetch_project_addresses(&client, project)?;
+    write_metadata(&mut std::io::stdout().lock(), &addresses, json)
+}
+
+pub(super) fn fetch_projects(client: &dyn VaultClient) -> Result<Vec<String>, CliError> {
+    let mut projects = Vec::new();
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    loop {
+        let request = VaultRequest::new(VaultAction::ListProjects {
+            cursor: cursor.clone(),
+            limit: MAX_LIST_PAGE_SIZE,
+        })?;
+        let response = client.request(&request)?;
+        let (page, next_cursor) = match response.result {
+            Ok(VaultResponseBody::Projects {
+                projects,
+                next_cursor,
+            }) => (projects, next_cursor),
+            Ok(_) => {
+                return Err(VaultError::Protocol(
+                    "vault returned an unexpected project-list response".to_owned(),
+                )
+                .into());
+            }
+            Err(error) => return Err(vault_request_error(error)),
+        };
+        if page.len() > usize::from(MAX_LIST_PAGE_SIZE) {
+            return Err(VaultError::Protocol("project-list page is too large".to_owned()).into());
+        }
+        let page_is_empty = page.is_empty();
+        for project in page {
+            SecretSpecAddress::convention(&project, "default", "validation")?;
+            if projects.last().is_some_and(|previous| previous >= &project) {
+                return Err(VaultError::Protocol(
+                    "project-list response is not strictly ordered".to_owned(),
+                )
+                .into());
+            }
+            projects.push(project);
+        }
+        cursor = advance_cursor(
+            cursor.as_deref(),
+            next_cursor,
+            &mut seen_cursors,
+            page_is_empty,
+        )?;
+        if cursor.is_none() {
+            return Ok(projects);
+        }
+    }
+}
+
+pub(super) fn fetch_project_addresses(
+    client: &dyn VaultClient,
+    project: &str,
+) -> Result<Vec<SecretSpecAddress>, CliError> {
+    let mut addresses = Vec::new();
+    let mut seen_addresses = HashSet::new();
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    loop {
+        let request = VaultRequest::new(VaultAction::ListProjectAddresses {
+            project: project.to_owned(),
+            cursor: cursor.clone(),
+            limit: MAX_LIST_PAGE_SIZE,
+        })?;
+        let response = client.request(&request)?;
+        let (page, next_cursor) = match response.result {
+            Ok(VaultResponseBody::ProjectAddresses {
+                addresses,
+                next_cursor,
+            }) => (addresses, next_cursor),
+            Ok(_) => {
+                return Err(VaultError::Protocol(
+                    "vault returned an unexpected project-address response".to_owned(),
+                )
+                .into());
+            }
+            Err(error) => return Err(vault_request_error(error)),
+        };
+        if page.len() > usize::from(MAX_LIST_PAGE_SIZE) {
+            return Err(
+                VaultError::Protocol("project-address page is too large".to_owned()).into(),
+            );
+        }
+        let page_is_empty = page.is_empty();
+        for address in page {
+            address.validate()?;
+            if address
+                .project()
+                .is_some_and(|address_project| address_project != project)
+            {
+                return Err(VaultError::Protocol(
+                    "project-address response contains another project's address".to_owned(),
+                )
+                .into());
+            }
+            if !seen_addresses.insert(address.clone()) {
+                return Err(VaultError::Protocol(
+                    "project-address response contains a duplicate".to_owned(),
+                )
+                .into());
+            }
+            addresses.push(address);
+        }
+        cursor = advance_cursor(
+            cursor.as_deref(),
+            next_cursor,
+            &mut seen_cursors,
+            page_is_empty,
+        )?;
+        if cursor.is_none() {
+            return Ok(addresses);
+        }
+    }
+}
+
+fn advance_cursor(
+    current: Option<&str>,
+    next: Option<String>,
+    seen: &mut HashSet<String>,
+    page_is_empty: bool,
+) -> Result<Option<String>, CliError> {
+    let Some(next) = next else {
+        return Ok(None);
+    };
+    if page_is_empty || current == Some(next.as_str()) || !seen.insert(next.clone()) {
+        return Err(VaultError::Protocol("vault returned a stalled list cursor".to_owned()).into());
+    }
+    Ok(Some(next))
+}
+
+pub(super) fn write_metadata<T: Serialize>(
+    output: &mut impl Write,
+    values: &[T],
+    json: bool,
+) -> Result<(), CliError> {
+    if json {
+        serde_json::to_writer(&mut *output, values)?;
+        writeln!(output).map_err(|error| CliError::ProjectOutput(error.to_string()))?;
+        return Ok(());
+    }
+    for value in values {
+        serde_json::to_writer(&mut *output, value)?;
+        writeln!(output).map_err(|error| CliError::ProjectOutput(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn vault_request_error(error: factorseal::VaultResponseError) -> CliError {
+    CliError::VaultRequest {
+        code: error.code,
+        message: error.message,
+    }
 }
 
 fn project_address(

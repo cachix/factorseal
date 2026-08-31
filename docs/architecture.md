@@ -167,7 +167,9 @@ records inside the sole store worker; they never enumerate SQL hashes or return
 values. `List` is independent from `Get`, and the maximum page size is chosen
 so worst-case JSON escaping remains within the one-MiB wire limit. Concurrent
 values at one authenticated address collapse to one list item; conflicting
-addresses under one index fail closed.
+addresses under one index fail closed. The Factorseal CLI's `projects` and
+`list --project` commands exercise the same native protocol and transparently
+consume every page.
 
 An unseal lease has independent idle and absolute deadlines. Authorized
 operations refresh only the idle deadline and can never pass the absolute

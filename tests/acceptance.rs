@@ -110,3 +110,25 @@ fn guided_runs_choose_isolated_defaults_and_clean_up_after_success() {
     assert!(windows.contains("$destroyAfterRun = $true"));
     assert!(windows.contains("send this evidence file"));
 }
+
+#[test]
+fn windows_release_acceptance_requires_a_signed_artifact() {
+    let windows = runner("windows.ps1");
+    assert!(windows.contains("Get-AuthenticodeSignature"));
+    assert!(windows.contains("SignatureStatus]::Valid"));
+    assert!(windows.contains("artifact_signature"));
+    assert!(windows.contains("AllowUnsignedDevelopmentArtifact"));
+    assert!(windows.contains("DEVELOPMENT PASS"));
+}
+
+#[test]
+fn windows_background_agents_preserve_arguments_containing_spaces() {
+    let windows = runner("windows.ps1");
+    assert!(windows.contains("function ConvertTo-NativeArgument"));
+    assert!(windows.contains("function Start-FactorsealAgent"));
+    assert!(windows.contains("-ArgumentList ($quotedArguments -join ' ')"));
+    assert!(
+        !windows.contains("-ArgumentList @("),
+        "Start-Process must not flatten unquoted path arguments"
+    );
+}

@@ -4,7 +4,8 @@ param(
     [string]$Root,
     [string]$PasswordFile,
     [string]$Evidence,
-    [switch]$DestroyAfter
+    [switch]$DestroyAfter,
+    [switch]$AllowUnsignedDevelopmentArtifact
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,11 +30,22 @@ if ([string]::IsNullOrWhiteSpace($Evidence)) {
     $Evidence = Join-Path (Get-Location).Path "factorseal-windows-$runId.acceptance.txt"
 }
 
-if (-not (Test-Path -LiteralPath $Factorseal -PathType Leaf)) { throw "factorseal.exe is missing: $Factorseal" }
+if ([string]::IsNullOrWhiteSpace($Factorseal) -or -not (Test-Path -LiteralPath $Factorseal -PathType Leaf)) {
+    throw "factorseal.exe is missing: $Factorseal"
+}
 if (-not [System.IO.Path]::IsPathRooted($Root)) { throw 'Root must be absolute' }
 if (Test-Path -LiteralPath $Root) { throw "Acceptance root already exists: $Root" }
 if (-not [string]::IsNullOrWhiteSpace($PasswordFile) -and -not (Test-Path -LiteralPath $PasswordFile -PathType Leaf)) {
     throw "Password file is missing: $PasswordFile"
+}
+
+$signature = Get-AuthenticodeSignature -LiteralPath $Factorseal
+$signatureIsValid = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+if (-not $signatureIsValid -and -not $AllowUnsignedDevelopmentArtifact.IsPresent) {
+    throw "factorseal.exe must have a valid Authenticode signature for release acceptance (status: $($signature.Status))"
+}
+if (-not $signatureIsValid) {
+    Write-Warning 'Unsigned development override enabled. This run cannot count as release acceptance evidence.'
 }
 
 $computer = Get-CimInstance -ClassName Win32_ComputerSystem
@@ -66,6 +78,48 @@ function Add-Evidence([string]$Key, [object]$Value) {
     Add-Content -LiteralPath $evidencePartial -Encoding UTF8 -Value "$Key=$safeValue"
 }
 
+# Start-Process joins an ArgumentList array with spaces and removes the
+# PowerShell string quotes. Quote each native argument according to the Windows
+# command-line rules so custom roots and password paths containing spaces stay
+# one argument under Windows PowerShell 5.1 as well as modern PowerShell.
+function ConvertTo-NativeArgument([string]$Value) {
+    if ($null -eq $Value -or $Value.Length -eq 0) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+
+    $quoted = New-Object System.Text.StringBuilder
+    [void]$quoted.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$quoted.Append(('\' * (($backslashes * 2) + 1)))
+            [void]$quoted.Append('"')
+        } else {
+            if ($backslashes -gt 0) { [void]$quoted.Append(('\' * $backslashes)) }
+            [void]$quoted.Append($character)
+        }
+        $backslashes = 0
+    }
+    if ($backslashes -gt 0) { [void]$quoted.Append(('\' * ($backslashes * 2))) }
+    [void]$quoted.Append('"')
+    $quoted.ToString()
+}
+
+function Start-FactorsealAgent([string]$StandardOutput, [string]$StandardError) {
+    $arguments = @(
+        '--root', $Root, '--password-file', $PasswordFile,
+        'agent', '--idle-seconds', '3600', '--maximum-seconds', '3600'
+    )
+    $quotedArguments = foreach ($argument in $arguments) {
+        ConvertTo-NativeArgument ([string]$argument)
+    }
+    Start-Process -FilePath $Factorseal -ArgumentList ($quotedArguments -join ' ') `
+        -PassThru -RedirectStandardOutput $StandardOutput -RedirectStandardError $StandardError
+}
+
 $version = & $Factorseal --version
 if ($LASTEXITCODE -ne 0) { throw 'factorseal --version failed' }
 $factorsealHash = (Get-FileHash -LiteralPath $Factorseal -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -75,6 +129,7 @@ Add-Evidence 'started_at_utc' ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ
 Add-Evidence 'factorseal_filename' (Split-Path -Leaf $Factorseal)
 Add-Evidence 'factorseal_sha256' $factorsealHash
 Add-Evidence 'factorseal_version' $version
+Add-Evidence 'artifact_signature' $(if ($signatureIsValid) { 'valid' } else { 'unsigned-development-override' })
 Add-Evidence 'os_summary' ([System.Environment]::OSVersion.VersionString)
 Add-Evidence 'expected_backend' 'windows-tpm'
 Add-Evidence 'physical_host_check' 'pass'
@@ -146,10 +201,9 @@ Write-Host 'The hardware self-test asks for Windows Hello verification several t
 if ($LASTEXITCODE -ne 0) { throw 'factorseal hardware-self-test failed' }
 Add-Evidence 'test.hardware_self_test' 'pass'
 
-$service = Start-Process -FilePath $Factorseal -ArgumentList @(
-    '--root', $Root, '--password-file', $PasswordFile,
-    'agent', '--idle-seconds', '3600', '--maximum-seconds', '3600'
-) -PassThru -RedirectStandardOutput (Join-Path $Root 'acceptance-unseal.log') -RedirectStandardError (Join-Path $Root 'acceptance-unseal-error.log')
+$service = Start-FactorsealAgent `
+    (Join-Path $Root 'acceptance-unseal.log') `
+    (Join-Path $Root 'acceptance-unseal-error.log')
 Wait-ForState 'unsealed'
 $promptsObserved = Read-Host 'Did you see native Windows Hello verification for both creation and initial unseal? [y/N]'
 if ($promptsObserved -notmatch '^(?i:y|yes)$') { throw 'Both native verification prompts must be observed' }
@@ -178,10 +232,9 @@ if ($LASTEXITCODE -eq 0 -or $sealedValue) {
 }
 Add-Evidence 'test.sealed_read_denied' 'pass'
 
-$service = Start-Process -FilePath $Factorseal -ArgumentList @(
-    '--root', $Root, '--password-file', $PasswordFile,
-    'agent', '--idle-seconds', '3600', '--maximum-seconds', '3600'
-) -PassThru -RedirectStandardOutput (Join-Path $Root 'acceptance-reunseal.log') -RedirectStandardError (Join-Path $Root 'acceptance-reunseal-error.log')
+$service = Start-FactorsealAgent `
+    (Join-Path $Root 'acceptance-reunseal.log') `
+    (Join-Path $Root 'acceptance-reunseal-error.log')
 Wait-ForState 'unsealed'
 $value = & $Factorseal --root $Root get acceptance --field value
 if ($LASTEXITCODE -ne 0 -or $value -ne 'hardware-lifecycle-acceptance') {
@@ -205,8 +258,12 @@ if ($destroyAfterRun) {
 Add-Evidence 'completed_at_utc' ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
 Move-Item -LiteralPath $evidencePartial -Destination $Evidence
 $acceptancePassed = $true
-Write-Host "PASS - send this evidence file to the Factorseal maintainers: $Evidence"
-Write-Host 'Upload it to https://github.com/domenkozar/factorseal/issues/2'
+if ($signatureIsValid) {
+    Write-Host "PASS - send this evidence file to the Factorseal maintainers: $Evidence"
+    Write-Host 'Upload it to https://github.com/domenkozar/factorseal/issues/2'
+} else {
+    Write-Host "DEVELOPMENT PASS - unsigned evidence is not release acceptance: $Evidence"
+}
 } finally {
     if ($null -ne $service -and -not $service.HasExited) {
         Stop-Process -Id $service.Id -ErrorAction SilentlyContinue

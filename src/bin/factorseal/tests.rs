@@ -3,7 +3,7 @@ use super::commands::{
     ApprovalDecision, ParsedGrantDuration, parse_grant_duration, read_approval_decision,
     read_bounded, read_grant_duration, read_init_unlock_groups, read_password_for_groups,
     read_project_value, read_unlock_group_choice, require_prompt_terminal, resolve_unlock_group,
-    wait_for_initialization,
+    wait_for_initialization, write_metadata,
 };
 use super::factor::read_factor;
 use super::*;
@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
-use factorseal::{UnlockFactorKind, UnlockGroup};
+use factorseal::{
+    MAX_LIST_PAGE_SIZE, SecretSpecAddress, SecretSpecCoordinates, UnlockFactorKind, UnlockGroup,
+    VaultAction, VaultClient, VaultRequest, VaultResponse, VaultResponseBody, VaultResult,
+};
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -348,6 +351,93 @@ fn project_commands_accept_project_item_field_and_service_override() {
         Command::Get { project, profile, item, field }
             if project == "demo" && profile == "default" && item == "github" && field.as_deref() == Some("token")
     ));
+}
+
+#[test]
+fn metadata_list_commands_are_explicit_and_project_aware() {
+    let projects = Cli::try_parse_from(["factorseal", "projects", "--json"]).unwrap();
+    assert!(matches!(projects.command, Command::Projects { json: true }));
+
+    let list = Cli::try_parse_from(["factorseal", "list", "--project", "demo", "--json"]).unwrap();
+    assert!(matches!(
+        list.command,
+        Command::List { project, json: true } if project == "demo"
+    ));
+}
+
+struct ListingClient;
+
+impl VaultClient for ListingClient {
+    fn request(&self, request: &VaultRequest) -> VaultResult<VaultResponse> {
+        let body = match &request.action {
+            VaultAction::ListProjects { cursor, limit } => {
+                assert_eq!(*limit, MAX_LIST_PAGE_SIZE);
+                if cursor.is_none() {
+                    VaultResponseBody::Projects {
+                        projects: vec!["alpha".to_owned()],
+                        next_cursor: Some("alpha".to_owned()),
+                    }
+                } else {
+                    assert_eq!(cursor.as_deref(), Some("alpha"));
+                    VaultResponseBody::Projects {
+                        projects: vec!["zeta".to_owned()],
+                        next_cursor: None,
+                    }
+                }
+            }
+            VaultAction::ListProjectAddresses {
+                project,
+                cursor,
+                limit,
+            } => {
+                assert_eq!(project, "alpha");
+                assert_eq!(*limit, MAX_LIST_PAGE_SIZE);
+                if cursor.is_none() {
+                    VaultResponseBody::ProjectAddresses {
+                        addresses: vec![
+                            SecretSpecAddress::convention("alpha", "default", "TOKEN").unwrap(),
+                        ],
+                        next_cursor: Some("A".repeat(43)),
+                    }
+                } else {
+                    assert_eq!(cursor.as_deref(), Some("A".repeat(43).as_str()));
+                    VaultResponseBody::ProjectAddresses {
+                        addresses: vec![
+                            SecretSpecAddress::native(SecretSpecCoordinates {
+                                item: "database".to_owned(),
+                                field: Some("password".to_owned()),
+                                vault: Some("production".to_owned()),
+                                section: None,
+                                version: None,
+                            })
+                            .unwrap(),
+                        ],
+                        next_cursor: None,
+                    }
+                }
+            }
+            _ => panic!("listing client received an unexpected request"),
+        };
+        Ok(VaultResponse::success(request.request_id(), body))
+    }
+}
+
+#[test]
+fn metadata_commands_consume_every_page_and_emit_unambiguous_json() {
+    let client = ListingClient;
+    let projects = super::commands::fetch_projects(&client).unwrap();
+    assert_eq!(projects, ["alpha", "zeta"]);
+    let addresses = super::commands::fetch_project_addresses(&client, "alpha").unwrap();
+    assert_eq!(addresses.len(), 2);
+
+    let mut human = Vec::new();
+    write_metadata(&mut human, &projects, false).unwrap();
+    assert_eq!(human, b"\"alpha\"\n\"zeta\"\n");
+
+    let mut json = Vec::new();
+    write_metadata(&mut json, &addresses, true).unwrap();
+    let decoded: Vec<SecretSpecAddress> = serde_json::from_slice(&json).unwrap();
+    assert_eq!(decoded, addresses);
 }
 
 #[test]

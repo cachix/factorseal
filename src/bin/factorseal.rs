@@ -18,8 +18,8 @@ mod provider;
 use cli::{Cli, Command};
 use commands::{
     delete_project_value, destroy_vault, get_project_value, grant_cli, hardware_self_test,
-    initialize, manage_permissions, resolve_root, run_agent, seal_vault, set_project_value,
-    show_status,
+    initialize, list_project_addresses, list_projects, manage_permissions, resolve_root, run_agent,
+    seal_vault, set_project_value, show_status,
 };
 use factor::FactorSource;
 
@@ -54,6 +54,9 @@ enum CliError {
 
     #[error("project secret was not found")]
     ProjectEntryNotFound,
+
+    #[error("project metadata output failed: {0}")]
+    ProjectOutput(String),
 
     #[error("unlock group `{0}` is not configured for this vault")]
     UnlockGroupNotConfigured(String),
@@ -167,6 +170,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
             item,
             field,
         } => delete_project_value(&root, socket, project, &profile, item, field),
+        Command::Projects { json } => list_projects(&root, socket, json),
+        Command::List { project, json } => list_project_addresses(&root, socket, &project, json),
         Command::Destroy {
             yes_really_destroy,
             unlock,

@@ -274,6 +274,34 @@ fn the_windows_wrapper_invokes_its_own_powershell_companion() {
 }
 
 #[test]
+fn the_windows_package_ships_a_reproducible_login_task_installer() {
+    let installer = packaging("windows/install-factorseal-task.ps1");
+    let builder = packaging("build-windows.ps1");
+
+    assert!(builder.contains("packaging/windows/install-factorseal-task.ps1"));
+    assert!(packaging_path("windows/install-factorseal-task.ps1").is_file());
+    assert!(installer.contains(".Replace('@INSTALL_DIR@'"));
+    assert!(installer.contains(".Replace('@USER_SID@'"));
+    assert!(installer.contains(".Replace('@ROOT_ARGUMENTS@'"));
+    assert!(installer.contains("Register-ScheduledTask"));
+    assert!(installer.contains("Get-AuthenticodeSignature"));
+    assert!(installer.contains("AllowUnsignedDevelopmentArtifact"));
+}
+
+#[test]
+fn the_windows_builder_can_sign_and_verify_a_release_binary() {
+    let builder = packaging("build-windows.ps1");
+
+    assert!(builder.contains("SigningCertificateThumbprint"));
+    assert!(builder.contains("TimestampUrl"));
+    assert!(builder.contains("signtool.exe"));
+    assert!(builder.contains("Get-AuthenticodeSignature"));
+    assert!(builder.contains("SignatureStatus]::Valid"));
+    assert!(builder.contains("unsigned development archive"));
+    assert!(builder.contains("if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }"));
+}
+
+#[test]
 fn both_desktop_launchers_start_the_agent_at_login() {
     // Login start is only safe because a helper can prompt without a console.
     // If either trigger is removed, the askpass wiring has become pointless
@@ -312,6 +340,7 @@ fn every_release_archive_ships_a_one_command_acceptance_runner() {
     let windows = packaging("build-windows.ps1");
     assert!(windows.contains("acceptance/windows.ps1"));
     assert!(windows.contains("run-acceptance.ps1"));
+    assert!(windows.contains("install-factorseal-task.ps1"));
 }
 
 #[test]
