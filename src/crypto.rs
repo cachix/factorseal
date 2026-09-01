@@ -10,34 +10,14 @@ use aes_gcm::{
 };
 #[cfg(feature = "key-protection")]
 use pbkdf2::pbkdf2_hmac;
-use serde::{Deserialize, Serialize};
 #[cfg(feature = "key-protection")]
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::{Error, Result};
+use crate::{EncryptionAlgorithm, Error, Result};
 
 pub(crate) const KEY_BYTES: usize = 32;
-pub(crate) const NONCE_BYTES: usize = 12;
-
-/// Authenticated-encryption algorithm recorded in every protected payload.
-///
-/// This is an algorithm identifier, not a claim that the linked provider or
-/// Factorseal itself has completed FIPS 140-3 validation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-#[non_exhaustive]
-pub enum EncryptionAlgorithm {
-    Aes256Gcm,
-}
-
-impl EncryptionAlgorithm {
-    pub(crate) const fn code(self) -> u8 {
-        match self {
-            Self::Aes256Gcm => 1,
-        }
-    }
-}
+pub(crate) const NONCE_BYTES: usize = crate::algorithm::AES_GCM_NONCE_BYTES;
 
 pub(crate) const CURRENT_ENCRYPTION_ALGORITHM: EncryptionAlgorithm = EncryptionAlgorithm::Aes256Gcm;
 
@@ -70,7 +50,7 @@ trait CryptoProvider: Sync {
     ) -> std::result::Result<Zeroizing<Vec<u8>>, AuthenticationError>;
 
     #[cfg(feature = "key-protection")]
-    fn derive_password_key(
+    fn derive_pbkdf2_password_key(
         &self,
         password: &[u8],
         salt: &[u8],
@@ -123,7 +103,7 @@ impl CryptoProvider for RustCryptoAes256Gcm {
     }
 
     #[cfg(feature = "key-protection")]
-    fn derive_password_key(
+    fn derive_pbkdf2_password_key(
         &self,
         password: &[u8],
         salt: &[u8],
@@ -148,12 +128,12 @@ fn provider_for(
 }
 
 #[cfg(feature = "key-protection")]
-pub(crate) fn derive_password_key(
+pub(crate) fn derive_pbkdf2_password_key(
     password: &[u8],
     salt: &[u8],
     iterations: u32,
 ) -> Zeroizing<[u8; KEY_BYTES]> {
-    DEFAULT_PROVIDER.derive_password_key(password, salt, iterations)
+    DEFAULT_PROVIDER.derive_pbkdf2_password_key(password, salt, iterations)
 }
 
 pub(crate) fn supports_algorithm(algorithm: EncryptionAlgorithm) -> bool {
@@ -250,7 +230,7 @@ mod tests {
     #[cfg(feature = "key-protection")]
     #[test]
     fn pbkdf2_hmac_sha256_matches_known_answer() {
-        let output = derive_password_key(b"password", b"salt", 1);
+        let output = derive_pbkdf2_password_key(b"password", b"salt", 1);
         assert_eq!(
             hex::encode(output.as_slice()),
             "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"

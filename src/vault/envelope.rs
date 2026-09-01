@@ -2,7 +2,8 @@ use automerge::{Change, ChangeHash};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::crypto::{self, EncryptionAlgorithm, NONCE_BYTES};
+use crate::EncryptionAlgorithm;
+use crate::crypto::{self, NONCE_BYTES};
 
 use super::signature;
 use super::{DeviceKeyId, DocumentId, DocumentKind, VaultError, VaultResult};

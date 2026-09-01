@@ -12,16 +12,17 @@ use super::filesystem::path_error;
 #[cfg(feature = "key-protection")]
 use super::filesystem::write_new_private_file;
 use super::policy::{UnlockFactorKind, UnlockGroup, UnlockPolicy};
-use super::{KEY_BYTES, VaultMetadata, VaultPlatform};
+use super::{KEY_BYTES, VaultCryptoProfile, VaultMetadata, VaultPlatform};
 use crate::vault::{DeviceKeyId, VaultError, VaultId, VaultResult};
 
 pub(super) const VAULT_FILE: &str = "factorseal.json";
 pub(super) const PENDING_VAULT_FILE: &str = ".factorseal.json.pending";
 const VAULT_FORMAT: &str = "factorseal-vault";
-// Version 4 replaces Argon2id/XChaCha bootstrap protection with the
-// PBKDF2-HMAC-SHA-256/AES-256-GCM approved-algorithm profile. There are no
-// released vaults to migrate; older versions are rejected explicitly.
-const VAULT_VERSION: u32 = 4;
+// Version 5 records whether password slots use the default Argon2id profile or
+// the FIPS-oriented PBKDF2-HMAC-SHA-256 profile. Version 4 had no profile field
+// and is interpreted as FIPS because it always used PBKDF2.
+const VAULT_VERSION: u32 = 5;
+const LEGACY_FIPS_VAULT_VERSION: u32 = 4;
 const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,6 +36,8 @@ pub(super) struct VaultFile {
     pub(super) actor_id: Vec<u8>,
     pub(super) platform: VaultPlatform,
     pub(super) hardware_backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cryptographic_profile: Option<VaultCryptoProfile>,
     pub(super) unlock_policy: UnlockPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) preferred_unlock_group: Option<UnlockGroup>,
@@ -62,6 +65,7 @@ pub(super) struct NewVaultFile {
     pub(super) actor_id: Vec<u8>,
     pub(super) platform: VaultPlatform,
     pub(super) hardware_backend: String,
+    pub(super) cryptographic_profile: VaultCryptoProfile,
     pub(super) unlock_policy: UnlockPolicy,
     pub(super) unlock_slots: Vec<UnlockSlot>,
     pub(super) created_at: u64,
@@ -77,6 +81,7 @@ impl VaultFile {
             actor_id,
             platform,
             hardware_backend,
+            cryptographic_profile,
             unlock_policy,
             unlock_slots,
             created_at,
@@ -90,6 +95,7 @@ impl VaultFile {
             actor_id,
             platform,
             hardware_backend,
+            cryptographic_profile: Some(cryptographic_profile),
             preferred_unlock_group: unlock_policy.groups().first().cloned(),
             unlock_policy,
             unlock_slots,
@@ -111,6 +117,7 @@ impl VaultFile {
             actor_id: self.actor_id.clone(),
             platform: self.platform,
             hardware_backend: self.hardware_backend.clone(),
+            cryptographic_profile: self.cryptographic_profile(),
             unlock_policy: self.unlock_policy.clone(),
             preferred_unlock_group,
             key_epoch: self.key_epoch,
@@ -119,7 +126,11 @@ impl VaultFile {
     }
 
     pub(super) fn validate(&self) -> VaultResult<()> {
-        if self.format != VAULT_FORMAT || self.version != VAULT_VERSION {
+        if self.format != VAULT_FORMAT
+            || !matches!(self.version, LEGACY_FIPS_VAULT_VERSION | VAULT_VERSION)
+            || (self.version == LEGACY_FIPS_VAULT_VERSION && self.cryptographic_profile.is_some())
+            || (self.version == VAULT_VERSION && self.cryptographic_profile.is_none())
+        {
             return Err(VaultError::Protection(
                 "unsupported vault metadata format or version".to_owned(),
             ));
@@ -147,8 +158,9 @@ impl VaultFile {
             ));
         }
         let mut labels = Vec::with_capacity(self.unlock_slots.len() * 2);
+        let cryptographic_profile = self.cryptographic_profile();
         for (slot, group) in self.unlock_slots.iter().zip(self.unlock_policy.groups()) {
-            slot.validate()?;
+            slot.validate(cryptographic_profile)?;
             if &slot.group != group {
                 return Err(VaultError::Protection(
                     "unlock policy and wrapping slot order do not match".to_owned(),
@@ -165,10 +177,21 @@ impl VaultFile {
         }
         Ok(())
     }
+
+    pub(super) const fn cryptographic_profile(&self) -> VaultCryptoProfile {
+        if self.version == LEGACY_FIPS_VAULT_VERSION {
+            VaultCryptoProfile::Fips
+        } else {
+            match self.cryptographic_profile {
+                Some(profile) => profile,
+                None => VaultCryptoProfile::Default,
+            }
+        }
+    }
 }
 
 impl UnlockSlot {
-    fn validate(&self) -> VaultResult<()> {
+    fn validate(&self, cryptographic_profile: VaultCryptoProfile) -> VaultResult<()> {
         self.group.validate()?;
         if self.wrapping_key_label.is_empty()
             || self.signing_key_label.is_empty()
@@ -183,6 +206,11 @@ impl UnlockSlot {
         }
         if let Some(protection) = &self.password_protection {
             protection.validate()?;
+            if !protection.matches_profile(cryptographic_profile) {
+                return Err(VaultError::Protection(
+                    "password KDF does not match the vault cryptographic profile".to_owned(),
+                ));
+            }
         }
         Ok(())
     }

@@ -30,8 +30,9 @@ is one authorized way to retrieve and update credentials:
 
 Every unlock group is hardware-bound. Factors inside a group are AND
 requirements and independently wrapped groups are OR alternatives. Password
-groups use PBKDF2-HMAC-SHA-256 with 600,000 iterations, then separately encrypt
-the DEK and device-signing seed with AES-256-GCM before hardware wrapping.
+groups use memory-hard Argon2id by default. The opt-in FIPS profile instead
+uses PBKDF2-HMAC-SHA-256 with 600,000 iterations. Both separately encrypt the
+DEK and device-signing seed with AES-256-GCM before hardware wrapping.
 Biometric groups gate their hardware keys with the platform biometric policy;
 biometric-only groups do not contain a password layer. Password files are
 accepted only as private
@@ -47,18 +48,20 @@ treated as a prompt success or silently downgraded.
 
 ## Cryptographic profile and FIPS status
 
-The persisted vault profile uses AES-256-GCM for authenticated encryption,
-SHA-256 and HMAC-SHA-256 for digests and keyed identifiers,
-PBKDF2-HMAC-SHA-256 for password-containing unlock groups, and FIPS 204
-ML-DSA-65 for device signatures. These NIST-standardized symmetric and
-post-quantum algorithms are intended to make a future validated provider and
-deployment boundary possible.
+Every persisted vault profile uses AES-256-GCM for authenticated encryption,
+SHA-256 and HMAC-SHA-256 for digests and keyed identifiers, and FIPS 204
+ML-DSA-65 for device signatures. The default profile uses Argon2id for
+password-containing unlock groups because it is memory-hard. The opt-in FIPS
+profile uses PBKDF2-HMAC-SHA-256 instead. Its NIST-standardized symmetric,
+password-derivation, and post-quantum algorithms are intended to make a future
+validated provider and deployment boundary possible.
 
 The current RustCrypto implementations have not been validated through CAVP or
 CMVP, Factorseal has no FIPS 140-3 certificate, and algorithm selection alone
-does not make a product FIPS compliant or validated. Deployment status also
-depends on the exact TPM, operating-system module, device configuration, build,
-entropy source, approved operating mode, and product boundary. Platform
+does not make a product FIPS compliant or validated. Argon2id is not a
+FIPS-approved KDF and is therefore excluded from the FIPS profile. Deployment
+status also depends on the exact TPM, operating-system module, device
+configuration, build, entropy source, approved operating mode, and product boundary. Platform
 biometric ceremonies may depend on classical algorithms and are not claimed to
 be completely post-quantum certified.
 

@@ -24,8 +24,8 @@ mobile-safe layers are:
 
 - `vault-store`: encrypted Automerge documents, Turso persistence, and the
   in-process service/domain API;
-- `key-protection`: PBKDF2-HMAC-SHA-256/AES-256-GCM nesting plus the
-  `KeyProtectorFactory` boundary;
+- `key-protection`: default Argon2id or FIPS-profile PBKDF2-HMAC-SHA-256 key
+  derivation, AES-256-GCM nesting, and the `KeyProtectorFactory` boundary;
 - `vault-client`: the desktop local-IPC protocol and clients, not needed by an
   app that embeds `VaultService` directly.
 
@@ -56,6 +56,10 @@ For explicit AND/OR policies, call
 `VaultService` in the application process with `VaultService::open`. Grant the
 app's authenticated caller identity only the operations it needs, then route
 all app actions through `VaultRequest`; the raw encrypted store is not public.
+The standard creation method uses `VaultCryptoProfile::Default`; call
+`Vault::create_with_key_protector_policy_and_profile` with
+`VaultCryptoProfile::Fips` when the embedding deployment requires the
+standardized-algorithm profile.
 
 Each policy group creates two distinct native keys. Factors inside a group are
 AND requirements and groups are OR alternatives. The same password credential
@@ -82,8 +86,8 @@ The host application must also:
   states;
 - keep the vault in an OS backup-excluded application directory;
 - serialize access to one `VaultService` per root;
-- benchmark the recorded PBKDF2-HMAC-SHA-256 parameters on supported devices
-  without silently weakening an existing vault;
+- benchmark the recorded Argon2id or PBKDF2-HMAC-SHA-256 parameters on
+  supported devices without silently weakening an existing vault;
 - test reboot, app upgrade, biometric enrollment changes, cancellation,
   background suspension, and tampered vault files on physical devices.
 

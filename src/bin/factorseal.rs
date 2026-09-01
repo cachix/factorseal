@@ -130,7 +130,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         askpass: cli.askpass.as_deref(),
     };
     match cli.command {
-        Command::Init { unlock } => initialize(&root, unlock, factor),
+        Command::Init { unlock, fips } => initialize(&root, unlock, factor, fips),
         Command::Agent {
             unlock,
             idle_seconds,

@@ -232,8 +232,11 @@ fn unlock_cli_uses_and_inside_groups_and_or_between_repetitions() {
     let default = Cli::try_parse_from(["factorseal", "init"]).unwrap();
     assert!(matches!(
         default.command,
-        Command::Init { unlock } if unlock.is_empty()
+        Command::Init { unlock, fips: false } if unlock.is_empty()
     ));
+
+    let fips = Cli::try_parse_from(["factorseal", "init", "--fips"]).unwrap();
+    assert!(matches!(fips.command, Command::Init { fips: true, .. }));
 
     let cli = Cli::try_parse_from([
         "factorseal",
@@ -244,7 +247,11 @@ fn unlock_cli_uses_and_inside_groups_and_or_between_repetitions() {
         "biometric",
     ])
     .unwrap();
-    let Command::Init { unlock } = cli.command else {
+    let Command::Init {
+        unlock,
+        fips: false,
+    } = cli.command
+    else {
         panic!("expected init command");
     };
     assert_eq!(unlock.len(), 2);

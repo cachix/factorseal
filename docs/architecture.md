@@ -31,17 +31,20 @@ bootstrap material:
 - random permanent `VaultId`;
 - `DeviceKeyId`, ML-DSA-65 public key, and stable Automerge actor ID;
 - recorded TPM/Secure Enclave backend and a versioned unlock policy;
+- persisted `default` or `fips` cryptographic profile;
 - one independently labeled wrapping/signing key pair for each OR group;
 - one wrapped 256-bit DEK and ML-DSA-65 seed payload per group;
-- PBKDF2-HMAC-SHA-256 parameters, an explicit AES-256-GCM identifier, and
-  separate AEAD nonces for groups containing password;
+- Argon2id parameters by default or PBKDF2-HMAC-SHA-256 parameters in the FIPS
+  profile, an explicit AES-256-GCM identifier, and separate AEAD nonces for
+  groups containing password;
 - local key epoch and creation time.
 
 Factors inside one unlock group are AND requirements; groups are OR
 alternatives. Hardware binding is implicit in every group. Creation opens two
 distinct `hardwareseal` protectors per group and rejects unsupported or
-software-only backends. Password groups apply PBKDF2-HMAC-SHA-256 and separate
-AES-256-GCM layers before hardware wrapping. Biometric groups create
+software-only backends. Password groups apply Argon2id by default or
+PBKDF2-HMAC-SHA-256 in the FIPS profile, followed by separate AES-256-GCM
+layers before hardware wrapping. Biometric groups create
 their pair with the platform biometric policy; biometric-only groups have no
 password layer. Unsealing opens only the selected group's labels, checks its
 backend and policy, unwraps both values, applies its password layer when
@@ -100,11 +103,12 @@ Verification checks the signature before accepting data, decrypts with the
 same associated data, decodes the Automerge change, and compares its actor,
 hash, and dependencies to the signed header.
 
-The symmetric operations are routed through one internal provider boundary.
-The current provider is RustCrypto and has not itself been CMVP validated; the
-persisted AES-256-GCM identifier permits a later validated provider without
-changing the algorithm contract. Algorithm selection alone is not a FIPS
-140-3 validation claim.
+The symmetric operations and FIPS-profile PBKDF2 are routed through one
+internal provider boundary. The current provider is RustCrypto and has not
+itself been CMVP validated; the persisted AES-256-GCM and password-KDF choices
+permit a later validated provider without changing the algorithm contract.
+Argon2id is deliberately outside the FIPS profile. Algorithm selection alone
+is not a FIPS 140-3 validation claim.
 
 ## Turso persistence
 

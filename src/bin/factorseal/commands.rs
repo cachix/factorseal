@@ -14,8 +14,8 @@ use factorseal::{
     DocumentKind, GrantPermission, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
     PermissionChange, PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind,
     UnlockGroup, UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient,
-    VaultError, VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode,
-    VaultService,
+    VaultCryptoProfile, VaultError, VaultMetadata, VaultRequest, VaultResponseBody,
+    VaultResponseErrorCode, VaultService,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -36,6 +36,7 @@ struct Status<'a> {
     actor_id: String,
     platform: &'a str,
     hardware_backend: &'a str,
+    cryptographic_profile: &'a str,
     unlock_policy: Vec<String>,
     preferred_unlock_group: String,
     key_epoch: u64,
@@ -58,16 +59,23 @@ pub(super) fn initialize(
     root: &Path,
     unlock_groups: Vec<UnlockGroup>,
     factor: FactorSource<'_>,
+    fips: bool,
 ) -> Result<(), CliError> {
     #[cfg(feature = "secretspec-provider")]
     publish_secretspec_claim_for_default_root(root)?;
     let unlock_groups = init_unlock_groups(unlock_groups)?;
     let policy = UnlockPolicy::new(unlock_groups)?;
     let password = read_password_for_groups(policy.groups(), factor, true)?;
-    let unsealed = Vault::prepare_with_unlock_policy(
+    let cryptographic_profile = if fips {
+        VaultCryptoProfile::Fips
+    } else {
+        VaultCryptoProfile::Default
+    };
+    let unsealed = Vault::prepare_with_unlock_policy_and_profile(
         root,
         &policy,
         credentials(password.as_ref().map(|value| value.as_slice())),
+        cryptographic_profile,
     )?;
     let device = unsealed.public().clone();
     let initialized = (|| -> Result<(), CliError> {
@@ -167,6 +175,7 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
         actor_id: hex::encode(device.actor_id()),
         platform: device.platform(),
         hardware_backend: device.hardware_backend(),
+        cryptographic_profile: device.cryptographic_profile().as_str(),
         unlock_policy: device
             .unlock_policy()
             .groups()

@@ -36,9 +36,11 @@ const TEST_PASSWORD: &[u8] = b"factorseal-test-password";
 
 mod factor;
 mod policy;
+mod profile;
 
 pub use factor::{NestedFactorKind, UnsealFactor};
 pub use policy::{UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy};
+pub use profile::VaultCryptoProfile;
 
 #[cfg(feature = "hardware")]
 fn validate_native_unlock_policy(policy: &UnlockPolicy) -> VaultResult<()> {
@@ -57,6 +59,7 @@ pub struct VaultMetadata {
     actor_id: Vec<u8>,
     platform: VaultPlatform,
     hardware_backend: String,
+    cryptographic_profile: VaultCryptoProfile,
     unlock_policy: UnlockPolicy,
     preferred_unlock_group: UnlockGroup,
     key_epoch: u64,
@@ -87,6 +90,12 @@ impl VaultMetadata {
     #[must_use]
     pub fn hardware_backend(&self) -> &str {
         &self.hardware_backend
+    }
+
+    /// Persisted algorithm profile selected when this vault was created.
+    #[must_use]
+    pub const fn cryptographic_profile(&self) -> VaultCryptoProfile {
+        self.cryptographic_profile
     }
 
     /// Versioned AND/OR policy accepted by this vault.
@@ -291,12 +300,29 @@ impl Vault {
         policy: &UnlockPolicy,
         credentials: UnlockCredentials<'_>,
     ) -> VaultResult<UnsealedVault> {
+        Self::create_with_unlock_policy_and_profile(
+            root,
+            policy,
+            credentials,
+            VaultCryptoProfile::Default,
+        )
+    }
+
+    /// Create a native desktop vault with an explicit cryptographic profile.
+    #[cfg(feature = "hardware")]
+    pub fn create_with_unlock_policy_and_profile(
+        root: impl AsRef<Path>,
+        policy: &UnlockPolicy,
+        credentials: UnlockCredentials<'_>,
+        cryptographic_profile: VaultCryptoProfile,
+    ) -> VaultResult<UnsealedVault> {
         validate_native_unlock_policy(policy)?;
-        Self::create_with_key_protector_policy(
+        Self::create_with_key_protector_policy_and_profile(
             root,
             current_platform()?,
             policy,
             credentials,
+            cryptographic_profile,
             &PlatformProtectorFactory,
         )
     }
@@ -312,12 +338,29 @@ impl Vault {
         policy: &UnlockPolicy,
         credentials: UnlockCredentials<'_>,
     ) -> VaultResult<UnsealedVault> {
+        Self::prepare_with_unlock_policy_and_profile(
+            root,
+            policy,
+            credentials,
+            VaultCryptoProfile::Default,
+        )
+    }
+
+    /// Prepare a native desktop vault with an explicit cryptographic profile.
+    #[cfg(feature = "hardware")]
+    pub fn prepare_with_unlock_policy_and_profile(
+        root: impl AsRef<Path>,
+        policy: &UnlockPolicy,
+        credentials: UnlockCredentials<'_>,
+        cryptographic_profile: VaultCryptoProfile,
+    ) -> VaultResult<UnsealedVault> {
         validate_native_unlock_policy(policy)?;
         Self::create_with_key_protector_policy_mode(
             root,
             current_platform()?,
             policy,
             credentials,
+            cryptographic_profile,
             &PlatformProtectorFactory,
             true,
         )
@@ -348,11 +391,32 @@ impl Vault {
         credentials: UnlockCredentials<'_>,
         factory: &dyn KeyProtectorFactory,
     ) -> VaultResult<UnsealedVault> {
+        Self::create_with_key_protector_policy_and_profile(
+            root,
+            platform,
+            policy,
+            credentials,
+            VaultCryptoProfile::Default,
+            factory,
+        )
+    }
+
+    /// Create an injected-adapter vault with an explicit cryptographic profile.
+    #[cfg(feature = "key-protection")]
+    pub fn create_with_key_protector_policy_and_profile(
+        root: impl AsRef<Path>,
+        platform: VaultPlatform,
+        policy: &UnlockPolicy,
+        credentials: UnlockCredentials<'_>,
+        cryptographic_profile: VaultCryptoProfile,
+        factory: &dyn KeyProtectorFactory,
+    ) -> VaultResult<UnsealedVault> {
         Self::create_with_key_protector_policy_mode(
             root,
             platform,
             policy,
             credentials,
+            cryptographic_profile,
             factory,
             false,
         )
@@ -364,6 +428,7 @@ impl Vault {
         platform: VaultPlatform,
         policy: &UnlockPolicy,
         credentials: UnlockCredentials<'_>,
+        cryptographic_profile: VaultCryptoProfile,
         factory: &dyn KeyProtectorFactory,
         pending: bool,
     ) -> VaultResult<UnsealedVault> {
@@ -419,6 +484,7 @@ impl Vault {
                     vault_id,
                     created_at: unix_time()?,
                     platform,
+                    cryptographic_profile,
                 },
                 policy.clone(),
                 &slot_protectors,
@@ -580,6 +646,7 @@ impl Vault {
                 vault_id: VaultId::random()?,
                 created_at: 1_700_000_000,
                 platform: VaultPlatform::Test,
+                cryptographic_profile: VaultCryptoProfile::Default,
             },
             policy,
             &[SlotProtectors {

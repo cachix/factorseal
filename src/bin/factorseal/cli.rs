@@ -41,6 +41,12 @@ pub(super) enum Command {
         /// AND-separated factors in one unlock group; repeat for OR alternatives.
         #[arg(long, value_name = "FACTORS")]
         unlock: Vec<UnlockGroup>,
+
+        /// Use PBKDF2-HMAC-SHA-256 instead of the default Argon2id password KDF.
+        /// This selects FIPS-standardized algorithms but is not a claim of
+        /// FIPS 140-3 validation.
+        #[arg(long)]
+        fips: bool,
     },
 
     /// Run the vault agent, waiting for initialization before serving requests.

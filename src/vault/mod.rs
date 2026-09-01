@@ -87,7 +87,7 @@ pub use protocol::{
 pub use protocol::{GrantPermission, UnsealLeasePolicy, VaultService};
 pub use seal::{
     NestedFactorKind, UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealFactor,
-    UnsealedVault, Vault, VaultMetadata, VaultPlatform,
+    UnsealedVault, Vault, VaultCryptoProfile, VaultMetadata, VaultPlatform,
 };
 #[cfg(feature = "vault-store")]
 pub(crate) use store::VaultStore;

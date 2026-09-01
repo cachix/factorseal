@@ -5,14 +5,14 @@ All notable changes to FactorSeal will be documented in this file.
 ## Unreleased
 
 - Replace XChaCha20-Poly1305 vault envelopes with version-3 AES-256-GCM
-  envelopes and replace Argon2id bootstrap protection with
-  PBKDF2-HMAC-SHA-256 plus AES-256-GCM. Envelope and bootstrap metadata record
-  the encryption algorithm and reject unknown or missing identifiers. Route
-  vault AEAD through a replaceable provider boundary for a future validated
-  implementation. This selects NIST-standardized algorithms but does not claim
-  that the current RustCrypto build or Factorseal product is FIPS 140-3
-  validated. Pre-release vault metadata is bumped to version 4 and older
-  prototype vaults must be recreated.
+  envelopes and add persisted `default` and `fips` vault profiles. The default
+  password KDF is memory-hard Argon2id; `factorseal init --fips` selects
+  PBKDF2-HMAC-SHA-256 with 600,000 iterations. Both profiles retain
+  AES-256-GCM and ML-DSA-65. Existing version-4 PBKDF2 vaults reopen as the
+  FIPS profile; new metadata is version 5. Route vault AEAD and PBKDF2 through
+  a replaceable provider boundary. The FIPS profile selects standardized
+  algorithms but does not claim that the RustCrypto build or Factorseal
+  product is FIPS 140-3 validated.
 - Bump the native protocol to version 7 and forward SecretSpec's declared
   project, profile, base directory, reason, and requested permission
   duration through each provider request, supporting contextual audit and

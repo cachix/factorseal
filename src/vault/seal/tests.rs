@@ -117,6 +117,7 @@ fn prepared_vault_metadata_is_published_atomically_on_completion() {
         VaultPlatform::Android,
         &policy,
         UnlockCredentials::with_password(TEST_PASSWORD),
+        VaultCryptoProfile::Default,
         &TestProtectorFactory,
         true,
     )
@@ -252,6 +253,70 @@ fn older_metadata_versions_are_rejected_cleanly() {
 }
 
 #[test]
+fn version_four_pbkdf2_metadata_is_treated_as_the_fips_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    let group = UnlockGroup::new([UnlockFactorKind::Password]).unwrap();
+    let policy = UnlockPolicy::new([group]).unwrap();
+    Vault::create_with_key_protector_policy_and_profile(
+        &root,
+        VaultPlatform::Test,
+        &policy,
+        UnlockCredentials::with_password(TEST_PASSWORD),
+        VaultCryptoProfile::Fips,
+        &TestProtectorFactory,
+    )
+    .unwrap();
+
+    let stored = read_vault(&root).unwrap();
+    let mut json = serde_json::to_value(&stored).unwrap();
+    json["version"] = serde_json::json!(4);
+    json.as_object_mut()
+        .unwrap()
+        .remove("cryptographic_profile");
+    let compatible: super::metadata::VaultFile = serde_json::from_value(json).unwrap();
+
+    compatible.validate().unwrap();
+    assert_eq!(
+        compatible.public().cryptographic_profile(),
+        VaultCryptoProfile::Fips
+    );
+    fs::write(
+        root.join(VAULT_FILE),
+        serde_json::to_vec(&compatible).unwrap(),
+    )
+    .unwrap();
+    let unsealed = Vault::unseal_with_key_protector_group(
+        &root,
+        &policy.groups()[0],
+        UnlockCredentials::with_password(TEST_PASSWORD),
+        &TestProtectorFactory,
+    )
+    .unwrap();
+    assert_eq!(
+        unsealed.public().cryptographic_profile(),
+        VaultCryptoProfile::Fips
+    );
+}
+
+#[test]
+fn profile_and_password_kdf_must_agree() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    Vault::create_for_test(&root).unwrap();
+    let mut stored = read_vault(&root).unwrap();
+    stored.cryptographic_profile = Some(VaultCryptoProfile::Fips);
+
+    assert!(
+        stored
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("password KDF")
+    );
+}
+
+#[test]
 fn mobile_vault_rejects_a_backend_from_another_platform() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("factorseal");
@@ -266,6 +331,7 @@ fn mobile_vault_rejects_a_backend_from_another_platform() {
             vault_id: VaultId::random().unwrap(),
             created_at: 1_700_000_000,
             platform: VaultPlatform::Ios,
+            cryptographic_profile: VaultCryptoProfile::Default,
         },
         UnlockPolicy::new([group.clone()]).unwrap(),
         &[SlotProtectors {
@@ -427,6 +493,7 @@ fn every_platform_requires_a_nested_factor_and_hardware() {
                 vault_id: VaultId::random().unwrap(),
                 created_at: 1_700_000_000,
                 platform,
+                cryptographic_profile: VaultCryptoProfile::Default,
             },
             UnlockPolicy::new([group.clone()]).unwrap(),
             &[SlotProtectors {

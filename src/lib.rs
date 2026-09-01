@@ -7,6 +7,7 @@
 //! interface over authenticated local IPC and never open the database or
 //! receive its keys.
 //!
+mod algorithm;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod crypto;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
@@ -25,8 +26,7 @@ pub mod vault;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 pub(crate) use error::{Error, Result};
 
-#[cfg(any(feature = "key-protection", feature = "vault-store"))]
-pub use crypto::EncryptionAlgorithm;
+pub use algorithm::EncryptionAlgorithm;
 
 #[cfg(feature = "vault-client")]
 pub use keyring::{Keyring, KeyringError, KeyringResult};
@@ -39,8 +39,8 @@ pub use keyring::{Keyring, KeyringError, KeyringResult};
 pub use vault::{
     DeviceKeyId, DocumentId, DocumentKind, NativeAuthorizationError, NestedFactorKind, RequestId,
     SecretAddress, SecretSpecAddress, SecretSpecCoordinates, UnlockCredentials, UnlockFactorKind,
-    UnlockGroup, UnlockPolicy, UnsealFactor, UnsealedVault, Vault, VaultError, VaultId,
-    VaultMetadata, VaultPlatform, VaultResult,
+    UnlockGroup, UnlockPolicy, UnsealFactor, UnsealedVault, Vault, VaultCryptoProfile, VaultError,
+    VaultId, VaultMetadata, VaultPlatform, VaultResult,
 };
 
 #[cfg(feature = "vault-client")]

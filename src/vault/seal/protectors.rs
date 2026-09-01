@@ -11,7 +11,7 @@ use super::metadata::{
 };
 use super::{
     KEY_BYTES, UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealFactor,
-    UnsealedVault, VaultPlatform,
+    UnsealedVault, VaultCryptoProfile, VaultPlatform,
 };
 use crate::vault::signature::{SIGNING_SEED_BYTES, public_key_for_seed};
 use crate::vault::{DeviceKeyId, KeyProtector, VaultError, VaultId, VaultResult};
@@ -21,6 +21,7 @@ pub(super) struct VaultCreation {
     pub(super) vault_id: VaultId,
     pub(super) created_at: u64,
     pub(super) platform: VaultPlatform,
+    pub(super) cryptographic_profile: VaultCryptoProfile,
 }
 
 pub(super) struct LabeledProtector<'a> {
@@ -52,6 +53,7 @@ pub(super) fn create_with_protectors(
         vault_id,
         created_at,
         platform,
+        cryptographic_profile,
     } = creation;
     let mut data_key = Zeroizing::new([0_u8; KEY_BYTES]);
     let mut signing_seed = Zeroizing::new([0_u8; SIGNING_SEED_BYTES]);
@@ -78,6 +80,7 @@ pub(super) fn create_with_protectors(
                 &data_key,
                 &signing_seed,
                 UnsealFactor::Password(password),
+                cryptographic_profile,
             )?;
             (data, signing, Some(protection))
         } else {
@@ -114,6 +117,7 @@ pub(super) fn create_with_protectors(
         hardware_backend: hardware_backend.ok_or_else(|| {
             VaultError::Protection("unlock policy has no hardware protector".to_owned())
         })?,
+        cryptographic_profile,
         unlock_policy: policy,
         unlock_slots: slots,
         created_at,
