@@ -4,6 +4,9 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Enable the `zeroize` feature on `aes-gcm`, `aes`, `ghash`, and `polyval` in
+  both the vault and `hardwareseal` so an expanded AES-256-GCM key schedule and
+  the GHASH authentication key are wiped when a cipher instance is dropped.
 - Replace XChaCha20-Poly1305 vault envelopes with version-3 AES-256-GCM
   envelopes and add persisted `default` and `fips` vault profiles. The default
   password KDF is memory-hard Argon2id; `factorseal init --fips` selects

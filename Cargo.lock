@@ -37,6 +37,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -51,6 +52,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -912,6 +914,7 @@ dependencies = [
 name = "factorseal"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "argon2",
  "async-trait",
@@ -925,6 +928,7 @@ dependencies = [
  "fs2",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
+ "ghash",
  "hardwareseal",
  "hex",
  "hmac",
@@ -937,6 +941,7 @@ dependencies = [
  "objc2-foundation",
  "pbkdf2",
  "percent-encoding",
+ "polyval",
  "rpassword",
  "secret-service-protocol",
  "secretspec-ipc",
@@ -1159,6 +1164,7 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -1171,11 +1177,14 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "hardwareseal"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "base64",
  "getrandom 0.3.4",
+ "ghash",
  "jni",
  "ndk-context",
+ "polyval",
  "security-framework",
  "security-framework-sys",
  "sha2 0.10.9",
@@ -2135,6 +2144,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]
