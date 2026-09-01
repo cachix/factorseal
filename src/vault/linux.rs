@@ -523,6 +523,10 @@ fn caller_identity(
     // been replaced since. Reading the start time on both sides of the
     // resolution rejects a reused PID.
     let start_time = process_start_time(pid)?;
+    // The executable digest only describes the image on disk. A traced peer or
+    // a peer started under loader injection runs code that digest never saw,
+    // so it is rejected before its executable is resolved.
+    reject_untrusted_peer_image(pid)?;
     let executable_path =
         fs::read_link(&executable_link).map_err(|error| path_io_error(&executable_link, &error))?;
     // Everything below reads one opened descriptor rather than the path, so
@@ -573,6 +577,56 @@ fn process_start_time(pid: i32) -> VaultResult<u64> {
         .map_err(|_| VaultError::Protocol("peer process start time is invalid".to_owned()))
 }
 
+/// Environment variables that make the dynamic loader run objects the
+/// executable digest does not cover before the peer's own `main`.
+const LOADER_INJECTION_VARIABLES: [&str; 2] = ["LD_PRELOAD", "LD_AUDIT"];
+
+/// Reject a peer whose in-memory image may not be the executable its digest
+/// describes: a process under a tracer can have arbitrary code injected, and a
+/// process started with a loader injection variable has already run foreign
+/// objects. Both signals stay readable to the same user, so this closes the
+/// direct debugger and preload paths only; a same-user process that injects
+/// code and scrubs these signals before connecting is still not distinguished
+/// from the granted executable.
+fn reject_untrusted_peer_image(pid: i32) -> VaultResult<()> {
+    let status_path = PathBuf::from(format!("/proc/{pid}/status"));
+    let status =
+        fs::read_to_string(&status_path).map_err(|error| path_io_error(&status_path, &error))?;
+    if tracer_pid(&status)? != 0 {
+        return Err(VaultError::AuthorizationRequired);
+    }
+    let environ_path = PathBuf::from(format!("/proc/{pid}/environ"));
+    let environ = fs::read(&environ_path).map_err(|error| path_io_error(&environ_path, &error))?;
+    if loader_injection_variable(&environ).is_some() {
+        return Err(VaultError::AuthorizationRequired);
+    }
+    Ok(())
+}
+
+/// The `TracerPid` field of a `/proc/<pid>/status` document; zero when no
+/// process is tracing the peer.
+fn tracer_pid(status: &str) -> VaultResult<i32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("TracerPid:"))
+        .ok_or_else(|| VaultError::Protocol("peer process status has no tracer field".to_owned()))?
+        .trim()
+        .parse()
+        .map_err(|_| VaultError::Protocol("peer process tracer field is invalid".to_owned()))
+}
+
+/// The first loader injection variable assigned in a NUL-separated
+/// `/proc/<pid>/environ` block, matched on the exact variable name.
+fn loader_injection_variable(environ: &[u8]) -> Option<&'static str> {
+    environ.split(|byte| *byte == 0).find_map(|entry| {
+        LOADER_INJECTION_VARIABLES.into_iter().find(|variable| {
+            entry
+                .strip_prefix(variable.as_bytes())
+                .is_some_and(|rest| rest.first() == Some(&b'='))
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,6 +652,72 @@ mod tests {
         let peer = caller_identity(&left, &CallerIdentityCache::default()).unwrap();
         let offline = linux_caller_identity_for_executable(peer.application_id()).unwrap();
         assert_eq!(offline, peer);
+    }
+
+    #[test]
+    fn tracer_pid_is_parsed_from_process_status() {
+        assert_eq!(
+            tracer_pid("Name:\tcat\nTracerPid:\t0\nUid:\t1000\n").unwrap(),
+            0
+        );
+        assert_eq!(tracer_pid("TracerPid:\t4242\n").unwrap(), 4242);
+        assert!(tracer_pid("Name:\tcat\nUid:\t1000\n").is_err());
+        assert!(tracer_pid("TracerPid:\tnone\n").is_err());
+    }
+
+    #[test]
+    fn loader_injection_matches_exact_variable_names_only() {
+        assert_eq!(
+            loader_injection_variable(b"PATH=/bin\0LD_PRELOAD=/tmp/x.so\0"),
+            Some("LD_PRELOAD")
+        );
+        assert_eq!(loader_injection_variable(b"LD_AUDIT=\0"), Some("LD_AUDIT"));
+        assert_eq!(
+            loader_injection_variable(
+                b"PATH=/bin\0XLD_PRELOAD=1\0LD_PRELOADX=1\0LD_LIBRARY_PATH=/x\0LD_PRELOAD\0"
+            ),
+            None
+        );
+        assert_eq!(loader_injection_variable(b""), None);
+    }
+
+    /// A child that blocks on its standard input until the test closes it.
+    fn blocked_child(configure: impl FnOnce(&mut std::process::Command)) -> std::process::Child {
+        let mut command = std::process::Command::new("cat");
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .env_remove("LD_PRELOAD")
+            .env_remove("LD_AUDIT");
+        configure(&mut command);
+        command.spawn().unwrap()
+    }
+
+    fn release(mut child: std::process::Child) {
+        drop(child.stdin.take());
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_peer_started_with_loader_injection_is_rejected() {
+        let child = blocked_child(|command| {
+            command.env("LD_PRELOAD", "");
+        });
+        let pid = i32::try_from(child.id()).unwrap();
+        assert!(matches!(
+            reject_untrusted_peer_image(pid),
+            Err(VaultError::AuthorizationRequired)
+        ));
+        release(child);
+    }
+
+    #[test]
+    fn an_untraced_peer_without_loader_injection_is_accepted() {
+        let child = blocked_child(|_| {});
+        let pid = i32::try_from(child.id()).unwrap();
+        reject_untrusted_peer_image(pid).unwrap();
+        release(child);
     }
 
     #[test]

@@ -294,4 +294,6 @@ unprivileged systemd user service make that link unreadable on the tested
 NixOS configuration, so the current unit deliberately retains non-namespace
 hardening only. A future IPC principal based on a verified sandbox/application
 identity, or a privileged broker design, is required before mount-namespace
-isolation can be restored without weakening caller authentication.
+isolation can be restored without weakening caller authentication. The same
+`/proc` access lets the vault reject a peer that is being traced or that carries
+`LD_PRELOAD` or `LD_AUDIT` in its initial environment.

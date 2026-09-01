@@ -241,7 +241,10 @@ Durable grants bind the complete caller identity to a document kind, partition,
 or exact address, explicit permissions, and an optional expiry. An executable
 change therefore requires a new grant. These grants are defense in depth between
 same-user applications; they do not protect a granted program from debugging,
-preloading, or compromise by that same user.
+preloading, or compromise by that same user. The Linux transport rejects a peer
+that is being traced or was started with `LD_PRELOAD` or `LD_AUDIT` set, which
+stops the direct forms of that access but not a same-user process that injects
+code and hides the evidence before it connects.
 
 ### Documents and persistence
 

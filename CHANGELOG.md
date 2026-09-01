@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Reject a Linux vault peer that is being traced or that was started with
+  `LD_PRELOAD` or `LD_AUDIT` in its environment before its executable identity
+  is resolved, closing the direct debugger and preload paths to a granted
+  executable's identity.
 - Enable the `zeroize` feature on `aes-gcm`, `aes`, `ghash`, and `polyval` in
   both the vault and `hardwareseal` so an expanded AES-256-GCM key schedule and
   the GHASH authentication key are wiped when a cipher instance is dropped.

@@ -68,7 +68,9 @@ be completely post-quantum certified.
 ## Authenticated transports
 
 - Linux uses a mode-0600 Unix socket, `SO_PEERCRED`, same-UID enforcement, peer
-  PID, and a digest of `/proc/<pid>/exe`.
+  PID, and a digest of `/proc/<pid>/exe`. A peer that is being traced, or that
+  was started with `LD_PRELOAD` or `LD_AUDIT` in its environment, is rejected
+  before its executable is resolved.
 - macOS uses a mode-0600 Unix socket, kernel peer credentials, peer PID, and an
   audit token, then binds the grant to the executable digest.
 - Windows uses a local-only named pipe with a current-user/System/admin DACL,
@@ -117,7 +119,11 @@ resolution, so a reused process ID cannot inherit another process's grant.
   granted binary. Executable grants are defense in depth against the wrong
   program reaching the vault, not a boundary between same-user processes: a
   process that can execute a granted binary can also debug or preload it. The
-  boundary the vault does enforce is the Unix user or Windows SID.
+  Linux transport rejects a peer that is under a tracer or carries a loader
+  injection variable when it connects, which closes the direct debugger and
+  `LD_PRELOAD` paths, but a same-user process can inject code and scrub those
+  signals before it connects. The boundary the vault does enforce is the Unix
+  user or Windows SID.
 - Physical TPM/Secure Enclave matrices, official code signing/notarization,
   process-dump protection, locked memory, recovery, and independent audit are
   not complete.
