@@ -247,11 +247,19 @@ The shared core implements the following native adapters:
   impersonation, SID, PID, and executable digest, plus a per-user Scheduled
   Task template.
 
-- Linux subscribes to logind session-lock and pre-sleep/pre-shutdown signals
-  while holding a delay inhibitor until the vault is sealed;
-- macOS observes AppKit sleep, power-off, and session-resign notifications;
-- Windows registers a hidden-window power/session listener and seals directly
-  from suspend, shutdown, session-lock, logout, and disconnect callbacks.
+- Linux watches `LockedHint` for every logind session owned by the user, with
+  session-lock signals as an eager fallback, and holds a delay inhibitor across
+  pre-sleep/pre-shutdown sealing;
+- macOS checks the Core Graphics login-session lock state and observes AppKit
+  sleep, wake, power-off, and session-resign notifications;
+- Windows registers a hidden-window power/session listener, checks the initial
+  WTS lock state, and seals on suspend/resume, shutdown, session lock, logout,
+  and disconnect. A suspend deadline aborts the process if synchronous store
+  shutdown cannot finish inside Windows' callback window.
+
+All three lifecycle subscriptions are installed and armed before native
+authorization begins. Events during authorization or database opening latch;
+the new service seals before its IPC listener can accept a request.
 
 The transports, lifecycle monitors, and developer packaging inputs are
 implemented. Code-signature identities, official signing/notarization, and

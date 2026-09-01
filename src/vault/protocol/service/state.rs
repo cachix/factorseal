@@ -62,6 +62,10 @@ impl ServiceState {
         self.seal_handle.is_sealed()
     }
 
+    pub(super) fn is_seal_complete(&self) -> bool {
+        self.seal_handle.is_shutdown_complete()
+    }
+
     pub(super) fn seal(&self) {
         self.seal_handle.seal();
         self.approval_changed.notify_all();

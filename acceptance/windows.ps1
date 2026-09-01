@@ -173,7 +173,7 @@ Add-Evidence 'os_summary' ([System.Environment]::OSVersion.VersionString)
 Add-Evidence 'expected_backend' 'windows-tpm'
 Add-Evidence 'physical_host_check' 'pass'
 Add-Evidence 'hardware_summary' "$hardwareSummary; TPM present and ready"
-Add-Evidence 'lifecycle_event' 'windows-session-lock'
+Add-Evidence 'lifecycle_event' 'windows-session-lock,windows-suspend'
 
 $generatedPasswordFile = $false
 $destroyAfterRun = $DestroyAfter.IsPresent
@@ -264,11 +264,33 @@ Write-Host 'After unlocking again, return here and press Enter.'
 $service.WaitForExit(180000)
 if (-not $service.HasExited) { throw 'Vault did not exit after the lifecycle event' }
 Wait-ForState 'sealed'
-Add-Evidence 'test.lifecycle_seal' 'pass'
+Add-Evidence 'test.screen_lock_seal' 'pass'
 $sealedValue = & $Factorseal --root $Root get --project acceptance acceptance --field value 2>$null
 if ($LASTEXITCODE -eq 0 -or $sealedValue) {
     throw 'Sealed vault returned a secret'
 }
+
+$service = Start-FactorsealAgent `
+    (Join-Path $Root 'acceptance-after-lock.log') `
+    (Join-Path $Root 'acceptance-after-lock-error.log')
+Wait-ForState 'unsealed'
+$value = & $Factorseal --root $Root get --project acceptance acceptance --field value
+if ($LASTEXITCODE -ne 0 -or $value -ne 'hardware-lifecycle-acceptance') {
+    throw 'Re-unseal after screen lock did not recover the stored value'
+}
+
+Write-Host 'Put this machine to sleep now (Start > Power > Sleep).'
+Write-Host 'After it resumes, return here and press Enter.'
+[void](Read-Host 'Press Enter after suspend/resume')
+$service.WaitForExit(180000)
+if (-not $service.HasExited) { throw 'Vault did not exit after suspend/resume' }
+Wait-ForState 'sealed'
+Add-Evidence 'test.suspend_seal' 'pass'
+$sealedValue = & $Factorseal --root $Root get --project acceptance acceptance --field value 2>$null
+if ($LASTEXITCODE -eq 0 -or $sealedValue) {
+    throw 'Suspended vault returned a secret after resume'
+}
+Add-Evidence 'test.lifecycle_seal' 'pass'
 Add-Evidence 'test.sealed_read_denied' 'pass'
 
 $service = Start-FactorsealAgent `
@@ -277,7 +299,7 @@ $service = Start-FactorsealAgent `
 Wait-ForState 'unsealed'
 $value = & $Factorseal --root $Root get --project acceptance acceptance --field value
 if ($LASTEXITCODE -ne 0 -or $value -ne 'hardware-lifecycle-acceptance') {
-    throw 'Hardware re-unseal did not recover the stored value'
+    throw 'Hardware re-unseal after suspend did not recover the stored value'
 }
 Add-Evidence 'test.reunseal_recovery' 'pass'
 & $Factorseal --root $Root delete --project acceptance acceptance --field value

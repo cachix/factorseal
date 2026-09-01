@@ -125,7 +125,7 @@ record expected_backend tpm
 record physical_host_check pass
 record hardware_summary "$(cat /sys/class/tpm/tpm0/device/description 2>/dev/null || printf 'TPM 2.0 at /dev/tpmrm0')"
 record native_prompt_observed not-applicable
-record lifecycle_event logind-lock
+record lifecycle_event logind-lock,logind-suspend
 
 status() { "$factorseal" --root "$root" status; }
 wait_for() {
@@ -181,11 +181,30 @@ printf 'Press Enter after the lock/unlock: '
 read -r _
 wait_for_vault_exit
 wait_for sealed
-record test.lifecycle_seal pass
+record test.screen_lock_seal pass
 if "$factorseal" --root "$root" get --project acceptance acceptance --field value >/dev/null 2>&1; then
     echo "sealed vault returned a secret" >&2
     exit 1
 fi
+
+"$factorseal" --root "$root" --password-file "$password_file" \
+    agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-after-lock.log" 2>&1 &
+vault_pid=$!
+wait_for unsealed
+[ "$("$factorseal" --root "$root" get --project acceptance acceptance --field value)" = "hardware-lifecycle-acceptance" ]
+
+echo "Suspend this machine now using the desktop power menu (or: systemctl suspend)."
+echo "After the machine resumes, return here and press Enter."
+printf 'Press Enter after suspend/resume: '
+read -r _
+wait_for_vault_exit
+wait_for sealed
+record test.suspend_seal pass
+if "$factorseal" --root "$root" get --project acceptance acceptance --field value >/dev/null 2>&1; then
+    echo "suspended vault returned a secret after resume" >&2
+    exit 1
+fi
+record test.lifecycle_seal pass
 record test.sealed_read_denied pass
 
 "$factorseal" --root "$root" --password-file "$password_file" \

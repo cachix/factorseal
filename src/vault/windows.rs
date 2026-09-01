@@ -30,18 +30,20 @@ use windows::Win32::System::Power::{
     HPOWERNOTIFY, RegisterSuspendResumeNotification, UnregisterSuspendResumeNotification,
 };
 use windows::Win32::System::RemoteDesktop::{
-    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+    NOTIFY_FOR_THIS_SESSION, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNLOCK,
+    WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW, WTSRegisterSessionNotification,
+    WTSSessionInfoEx, WTSUnRegisterSessionNotification,
 };
 use windows::Win32::System::Threading::{GetCurrentThread, GetCurrentThreadId, OpenThreadToken};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, MSG, PBT_APMSUSPEND, PostThreadMessageW,
-    RegisterClassW, SetWindowLongPtrW, TranslateMessage, UnregisterClassW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_ENDSESSION, WM_NCCREATE, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_QUIT,
-    WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT,
-    WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
+    GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, MSG, PBT_APMRESUMEAUTOMATIC,
+    PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PostThreadMessageW, RegisterClassW, SetWindowLongPtrW,
+    TranslateMessage, UnregisterClassW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ENDSESSION, WM_NCCREATE,
+    WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_QUIT, WM_WTSSESSION_CHANGE, WNDCLASSW,
+    WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
 };
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, PWSTR};
 
 use super::transport::{
     IPC_FRAME_IO_TIMEOUT, IoBudget, MAX_ACTIVE_CONNECTIONS, hash_file, hash_open_file,
@@ -49,13 +51,14 @@ use super::transport::{
 };
 use super::windows_client::validate_pipe_name;
 use super::{
-    CallerIdentity, CallerIdentityCache, CallerPlatform, VaultError, VaultRequest, VaultResult,
-    VaultService,
+    CallerIdentity, CallerIdentityCache, CallerPlatform, LifecycleSignal, VaultError, VaultRequest,
+    VaultResult, VaultService,
 };
 #[cfg(test)]
 use super::{VaultClient, WindowsVaultClient};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const WINDOWS_SUSPEND_SEAL_DEADLINE: Duration = Duration::from_millis(1_500);
 
 type BytePipe = DuplexPipeStream<pipe_mode::Bytes>;
 type ByteListener = PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>;
@@ -68,8 +71,9 @@ pub struct WindowsVaultOptions {
     /// Install console termination handlers. Disable only when an embedding
     /// process supplies equivalent lifecycle handling.
     pub install_signal_handler: bool,
-    /// Require native suspend, shutdown, logout, disconnect, and session-lock
-    /// notifications. Disable only when an embedding process supplies them.
+    /// Require native suspend/resume, shutdown, logout, disconnect, and
+    /// session-lock notifications. Disable only when an embedding process
+    /// supplies them.
     pub install_lifecycle_monitor: bool,
 }
 
@@ -94,6 +98,27 @@ pub fn serve_windows_vault(
     service: &Arc<VaultService>,
     options: &WindowsVaultOptions,
 ) -> VaultResult<()> {
+    let lifecycle = options
+        .install_lifecycle_monitor
+        .then(WindowsVaultLifecycle::new)
+        .transpose()?;
+    if let Some(lifecycle) = lifecycle.as_ref() {
+        lifecycle.arm()?;
+    }
+    let result = serve_windows_vault_with_lifecycle(service, options, lifecycle.as_ref());
+    if let Some(lifecycle) = lifecycle.as_ref() {
+        lifecycle.disarm();
+    }
+    result
+}
+
+/// Serve with native lifecycle notifications registered before unsealing.
+#[doc(hidden)]
+pub fn serve_windows_vault_with_lifecycle(
+    service: &Arc<VaultService>,
+    options: &WindowsVaultOptions,
+    lifecycle_monitor: Option<&WindowsVaultLifecycle>,
+) -> VaultResult<()> {
     validate_options(options)?;
     let security_descriptor = same_user_security_descriptor()?;
     let listener = PipeListenerOptions::new()
@@ -104,11 +129,17 @@ pub fn serve_windows_vault(
         .create_duplex::<pipe_mode::Bytes>()
         .map_err(|error| io_error("create named pipe", &error))?;
 
-    let stopping = Arc::new(AtomicBool::new(false));
-    let _lifecycle_monitor = options
-        .install_lifecycle_monitor
-        .then(|| WindowsLifecycleMonitor::new(Arc::clone(service), Arc::clone(&stopping)))
-        .transpose()?;
+    let stopping = lifecycle_monitor.map_or_else(
+        || Arc::new(AtomicBool::new(false)),
+        |monitor| Arc::clone(&monitor.stopping),
+    );
+    if let Some(monitor) = lifecycle_monitor {
+        monitor.attach(service)?;
+    } else if options.install_lifecycle_monitor {
+        return Err(VaultError::Protocol(
+            "Windows lifecycle monitor was not prepared".to_owned(),
+        ));
+    }
     if options.install_signal_handler {
         let signal_stopping = Arc::clone(&stopping);
         ctrlc::set_handler(move || signal_stopping.store(true, Ordering::Release)).map_err(
@@ -181,17 +212,24 @@ impl Drop for ActiveConnection<'_> {
     }
 }
 
-struct WindowsLifecycleMonitor {
+#[doc(hidden)]
+pub struct WindowsVaultLifecycle {
     thread_id: u32,
     thread: Option<JoinHandle<()>>,
+    signal: Arc<LifecycleSignal>,
+    stopping: Arc<AtomicBool>,
 }
 
-impl WindowsLifecycleMonitor {
-    fn new(service: Arc<VaultService>, stopping: Arc<AtomicBool>) -> VaultResult<Self> {
+impl WindowsVaultLifecycle {
+    pub fn new() -> VaultResult<Self> {
         let (ready_sender, ready_receiver) = sync_channel(1);
+        let signal = Arc::new(LifecycleSignal::new());
+        let stopping = Arc::new(AtomicBool::new(false));
+        let thread_signal = Arc::clone(&signal);
+        let thread_stopping = Arc::clone(&stopping);
         let thread = std::thread::Builder::new()
             .name("factorseal-windows-lifecycle".to_owned())
-            .spawn(move || lifecycle_message_loop(service, stopping, &ready_sender))
+            .spawn(move || lifecycle_message_loop(&thread_signal, thread_stopping, &ready_sender))
             .map_err(|error| {
                 VaultError::Protocol(format!("could not start lifecycle monitor: {error}"))
             })?;
@@ -204,11 +242,30 @@ impl WindowsLifecycleMonitor {
         Ok(Self {
             thread_id,
             thread: Some(thread),
+            signal,
+            stopping,
         })
+    }
+
+    pub fn arm(&self) -> VaultResult<()> {
+        self.signal.arm()
+    }
+
+    pub fn disarm(&self) {
+        self.signal.disarm();
+    }
+
+    #[must_use]
+    pub fn requested(&self) -> bool {
+        self.signal.requested()
+    }
+
+    fn attach(&self, service: &Arc<VaultService>) -> VaultResult<()> {
+        self.signal.attach(service)
     }
 }
 
-impl Drop for WindowsLifecycleMonitor {
+impl Drop for WindowsVaultLifecycle {
     fn drop(&mut self) {
         // SAFETY: `thread_id` is reported only after the lifecycle thread has
         // created its message queue. WM_QUIT owns no pointer payload.
@@ -220,12 +277,12 @@ impl Drop for WindowsLifecycleMonitor {
 }
 
 struct WindowsLifecycleContext {
-    service: Arc<VaultService>,
+    signal: Arc<LifecycleSignal>,
     stopping: Arc<AtomicBool>,
 }
 
 fn lifecycle_message_loop(
-    service: Arc<VaultService>,
+    signal: &Arc<LifecycleSignal>,
     stopping: Arc<AtomicBool>,
     ready: &SyncSender<Result<u32, String>>,
 ) {
@@ -263,7 +320,10 @@ fn lifecycle_message_loop(
             return;
         }
 
-        let context = Box::new(WindowsLifecycleContext { service, stopping });
+        let context = Box::new(WindowsLifecycleContext {
+            signal: Arc::clone(signal),
+            stopping,
+        });
         let context_ptr = Box::into_raw(context);
         let window = match windows::Win32::UI::WindowsAndMessaging::CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -309,20 +369,78 @@ fn lifecycle_message_loop(
             }
         };
 
+        match current_session_is_locked() {
+            Ok(true) => signal.trigger(),
+            Ok(false) => {}
+            Err(error) => {
+                cleanup_lifecycle_window(window, Some(power), context_ptr, &class_name, instance);
+                let _ = ready.send(Err(error));
+                return;
+            }
+        }
+
         if ready.send(Ok(GetCurrentThreadId())).is_err() {
             cleanup_lifecycle_window(window, Some(power), context_ptr, &class_name, instance);
             return;
         }
-        let mut message = MSG::default();
-        loop {
-            let result = GetMessageW(&raw mut message, None, 0, 0).0;
-            if result <= 0 {
-                break;
-            }
-            let _ = TranslateMessage(&raw const message);
-            DispatchMessageW(&raw const message);
-        }
+        dispatch_lifecycle_messages();
         cleanup_lifecycle_window(window, Some(power), context_ptr, &class_name, instance);
+    }
+}
+
+unsafe fn dispatch_lifecycle_messages() {
+    let mut message = MSG::default();
+    loop {
+        let result = unsafe { GetMessageW(&raw mut message, None, 0, 0) }.0;
+        if result <= 0 {
+            break;
+        }
+        let _ = unsafe { TranslateMessage(&raw const message) };
+        unsafe { DispatchMessageW(&raw const message) };
+    }
+}
+
+unsafe fn current_session_is_locked() -> Result<bool, String> {
+    let mut buffer = PWSTR::null();
+    let mut bytes = 0;
+    // SAFETY: WTS allocates `buffer` on success and reports its byte length.
+    unsafe {
+        WTSQuerySessionInformationW(
+            None,
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &raw mut buffer,
+            &raw mut bytes,
+        )
+    }
+    .map_err(|error| format!("could not read the current Windows session state: {error}"))?;
+    let expected_bytes = u32::try_from(std::mem::size_of::<WTSINFOEXW>())
+        .map_err(|_| "Windows session-state structure is too large".to_owned())?;
+    if buffer.is_null() || bytes < expected_bytes {
+        if !buffer.is_null() {
+            unsafe { WTSFreeMemory(buffer.as_ptr().cast()) };
+        }
+        return Err("Windows returned an invalid current-session state".to_owned());
+    }
+    // SAFETY: The successful query returned at least one complete WTSINFOEXW.
+    let information = unsafe { buffer.as_ptr().cast::<WTSINFOEXW>().read_unaligned() };
+    unsafe { WTSFreeMemory(buffer.as_ptr().cast()) };
+    if information.Level != 1 {
+        return Err(format!(
+            "Windows returned unsupported session-state level {}",
+            information.Level
+        ));
+    }
+    // SAFETY: Level 1 selects the sole WTSInfoExLevel1 union member.
+    let flags = unsafe { information.Data.WTSInfoExLevel1.SessionFlags };
+    if flags == WTS_SESSIONSTATE_LOCK.cast_signed() {
+        Ok(true)
+    } else if flags == WTS_SESSIONSTATE_UNLOCK.cast_signed() {
+        Ok(false)
+    } else {
+        Err(format!(
+            "Windows returned unknown current-session state {flags}"
+        ))
     }
 }
 
@@ -364,7 +482,14 @@ unsafe extern "system" fn lifecycle_window_proc(
     if !context.is_null() && lifecycle_message_requires_lock(message, wparam.0) {
         // SAFETY: The pointer remains owned until after DestroyWindow returns.
         let context = unsafe { &*context };
-        let _ = context.service.seal();
+        let suspend = message == WM_POWERBROADCAST && wparam.0 == PBT_APMSUSPEND as usize;
+        if suspend {
+            start_suspend_deadline(Arc::clone(&context.signal));
+        }
+        context.signal.trigger();
+        if !suspend && context.signal.needs_emergency_exit() {
+            std::process::abort();
+        }
         context.stopping.store(true, Ordering::Release);
     }
     // SAFETY: Messages not otherwise consumed retain default Win32 behavior.
@@ -373,7 +498,11 @@ unsafe extern "system" fn lifecycle_window_proc(
 
 const fn lifecycle_message_requires_lock(message: u32, parameter: usize) -> bool {
     match message {
-        WM_POWERBROADCAST => parameter == PBT_APMSUSPEND as usize,
+        WM_POWERBROADCAST => {
+            parameter == PBT_APMSUSPEND as usize
+                || parameter == PBT_APMRESUMEAUTOMATIC as usize
+                || parameter == PBT_APMRESUMESUSPEND as usize
+        }
         WM_QUERYENDSESSION => true,
         WM_ENDSESSION => parameter != 0,
         WM_WTSSESSION_CHANGE => {
@@ -383,6 +512,24 @@ const fn lifecycle_message_requires_lock(message: u32, parameter: usize) -> bool
                 || parameter == WTS_REMOTE_DISCONNECT as usize
         }
         _ => false,
+    }
+}
+
+fn start_suspend_deadline(signal: Arc<LifecycleSignal>) {
+    if std::thread::Builder::new()
+        .name("factorseal-suspend-deadline".to_owned())
+        .spawn(move || {
+            std::thread::sleep(WINDOWS_SUSPEND_SEAL_DEADLINE);
+            if signal.needs_emergency_exit() {
+                // Windows allows only a very short suspend callback. If the
+                // store cannot finish synchronously, terminating the process
+                // drops all remaining key-bearing memory before suspend.
+                std::process::abort();
+            }
+        })
+        .is_err()
+    {
+        std::process::abort();
     }
 }
 
@@ -594,9 +741,10 @@ mod tests {
         let service = Arc::new(
             VaultService::new(store, unix_time().unwrap(), UnsealLeasePolicy::default()).unwrap(),
         );
-        let stopping = Arc::new(AtomicBool::new(false));
-        let monitor = WindowsLifecycleMonitor::new(service, Arc::clone(&stopping)).unwrap();
-        assert!(!stopping.load(Ordering::Acquire));
+        let monitor = WindowsVaultLifecycle::new().unwrap();
+        monitor.arm().unwrap();
+        monitor.attach(&service).unwrap();
+        assert!(!monitor.requested());
         drop(monitor);
     }
 

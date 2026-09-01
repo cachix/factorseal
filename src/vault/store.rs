@@ -54,6 +54,11 @@ impl VaultStore {
         self.control.is_sealed()
     }
 
+    #[must_use]
+    pub(crate) fn is_shutdown_complete(&self) -> bool {
+        self.control.is_shutdown_complete()
+    }
+
     /// Delete one secret idempotently.
     pub(crate) fn delete(
         &self,
