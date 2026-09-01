@@ -190,8 +190,9 @@ device-signed data.
 
 Every configured OR alternative has an independent pair of hardware-wrapping
 keys. A biometric factor gates those keys through the platform policy; a
-password factor additionally encrypts the wrapped payload with Argon2id and
-XChaCha20-Poly1305. Enclave operations are not in the database write path.
+password factor additionally derives a key with PBKDF2-HMAC-SHA-256 and
+encrypts the wrapped payload with AES-256-GCM. Enclave operations are not in
+the database write path.
 Once unsealed, the data-encryption key and signing seed exist only in zeroizing
 memory owned by the store worker until the vault seals.
 
@@ -202,10 +203,11 @@ ML-DSA-65 signing seed. The signing identity also determines the permanent
 `DeviceKeyId` and stable Automerge actor ID.
 
 Factors inside a group are all required; each repeated group is an independent
-OR alternative. Password groups harden the shared password with Argon2id and
-separately encrypt the data key and signing seed with XChaCha20-Poly1305 before
-two distinct enclave keys wrap them. Biometric-only groups wrap those keys
-directly with a separate pair whose use requires platform biometric approval.
+OR alternative. Password groups derive an encryption key with
+PBKDF2-HMAC-SHA-256 and separately encrypt the data key and signing seed with
+AES-256-GCM before two distinct enclave keys wrap them. Biometric-only groups
+wrap those keys directly with a separate pair whose use requires platform
+biometric approval.
 
 Unsealing reverses those layers, derives the public signing identity again, and
 rejects any mismatch before opening the database. The store then verifies its
@@ -272,8 +274,9 @@ all visible Automerge values. Different concurrent values return an explicit
 conflict rather than silently selecting Automerge's display winner.
 
 Every mutation produces an encrypted snapshot and encrypted Automerge changes
-using fresh XChaCha20-Poly1305 nonces. ML-DSA-65 signatures bind their document
-kind, device, actor, generation, key epoch, dependencies, and ciphertext.
+using AES-256-GCM with fresh 96-bit nonces. ML-DSA-65 signatures bind their
+document kind, device, actor, generation, key epoch, dependencies, and
+ciphertext.
 
 One worker thread owns the Turso connection, exclusive `factorseal.lock`,
 plaintext vault keys, and all decrypted document state. A mutation uses one
@@ -428,11 +431,19 @@ The design does not detect rollback of the complete vault directory. Doing so
 requires a trusted checkpoint stored elsewhere. The offline MVP deliberately
 excludes whole-directory rollback from its security claim.
 
-Password groups remain limited by password entropy: Argon2id raises offline
-guessing cost but cannot turn a human-memorable password into a high-entropy
-post-quantum recovery secret. An OR policy is only as strong as its weakest
-group. ML-DSA-65 protects state authenticity, while the current platform
-wrapping mechanisms have their own cryptographic assumptions.
+Password groups remain limited by password entropy: PBKDF2-HMAC-SHA-256 raises
+offline guessing cost but cannot turn a human-memorable password into a
+high-entropy post-quantum recovery secret. An OR policy is only as strong as
+its weakest group. ML-DSA-65 protects state authenticity, while the current
+platform wrapping mechanisms have their own cryptographic assumptions.
+
+AES-256-GCM, SHA-256/HMAC, PBKDF2, and ML-DSA-65 are selected from NIST
+standards so a future deployment can place them behind a validated provider.
+The current RustCrypto implementations and Factorseal product boundary have
+not completed CAVP or CMVP validation, so Factorseal is not FIPS 140-3
+validated. Platform biometric paths inherit the algorithms and certification
+properties of their TPM, Secure Enclave, Windows Hello, or Keystore components
+and are not claimed to be completely post-quantum certified.
 
 The signing seed is enclave-wrapped but exists in zeroizing process memory
 while unsealed; signing is not yet performed by a non-exportable native signing

@@ -240,12 +240,12 @@ fn preferred_group_must_belong_to_the_unlock_policy() {
 }
 
 #[test]
-fn older_single_factor_metadata_versions_are_rejected_cleanly() {
+fn older_metadata_versions_are_rejected_cleanly() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("factorseal");
     Vault::create_for_test(&root).unwrap();
     let mut stored = read_vault(&root).unwrap();
-    stored.version = 2;
+    stored.version = 3;
 
     let error = stored.validate().unwrap_err();
     assert!(error.to_string().contains("unsupported vault metadata"));

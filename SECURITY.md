@@ -14,7 +14,7 @@ is one authorized way to retrieve and update credentials:
 
 - one per-user process is the sole owner of the embedded Turso database and
   plaintext vault keys;
-- every Automerge snapshot and change is encrypted with XChaCha20-Poly1305 and
+- every Automerge snapshot and change is encrypted with AES-256-GCM and
   every durable change and commit is signed by the vault device key;
 - secret names and values exist inside encrypted documents, not plaintext SQL
   columns or filenames;
@@ -30,10 +30,11 @@ is one authorized way to retrieve and update credentials:
 
 Every unlock group is hardware-bound. Factors inside a group are AND
 requirements and independently wrapped groups are OR alternatives. Password
-groups use Argon2id with 64 MiB and three iterations, then separately encrypt
-the DEK and device-signing seed before hardware wrapping. Biometric groups gate
-their hardware keys with the platform biometric policy; biometric-only groups
-do not contain a password layer. Password files are accepted only as private
+groups use PBKDF2-HMAC-SHA-256 with 600,000 iterations, then separately encrypt
+the DEK and device-signing seed with AES-256-GCM before hardware wrapping.
+Biometric groups gate their hardware keys with the platform biometric policy;
+biometric-only groups do not contain a password layer. Password files are
+accepted only as private
 bounded regular files and are intended for short-lived session launch handoff.
 Software keyring and DPAPI-only fallbacks are rejected.
 
@@ -43,6 +44,23 @@ bounded idle and absolute lease. Native cancellation, denial, unavailable UI,
 locked session, and invalidated credentials remain distinct vault errors;
 unavailable hardware and unsupported policy are distinct as well. None is
 treated as a prompt success or silently downgraded.
+
+## Cryptographic profile and FIPS status
+
+The persisted vault profile uses AES-256-GCM for authenticated encryption,
+SHA-256 and HMAC-SHA-256 for digests and keyed identifiers,
+PBKDF2-HMAC-SHA-256 for password-containing unlock groups, and FIPS 204
+ML-DSA-65 for device signatures. These NIST-standardized symmetric and
+post-quantum algorithms are intended to make a future validated provider and
+deployment boundary possible.
+
+The current RustCrypto implementations have not been validated through CAVP or
+CMVP, Factorseal has no FIPS 140-3 certificate, and algorithm selection alone
+does not make a product FIPS compliant or validated. Deployment status also
+depends on the exact TPM, operating-system module, device configuration, build,
+entropy source, approved operating mode, and product boundary. Platform
+biometric ceremonies may depend on classical algorithms and are not claimed to
+be completely post-quantum certified.
 
 ## Authenticated transports
 

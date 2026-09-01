@@ -4,6 +4,15 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Replace XChaCha20-Poly1305 vault envelopes with version-3 AES-256-GCM
+  envelopes and replace Argon2id bootstrap protection with
+  PBKDF2-HMAC-SHA-256 plus AES-256-GCM. Envelope and bootstrap metadata record
+  the encryption algorithm and reject unknown or missing identifiers. Route
+  vault AEAD through a replaceable provider boundary for a future validated
+  implementation. This selects NIST-standardized algorithms but does not claim
+  that the current RustCrypto build or Factorseal product is FIPS 140-3
+  validated. Pre-release vault metadata is bumped to version 4 and older
+  prototype vaults must be recreated.
 - Bump the native protocol to version 7 and forward SecretSpec's declared
   project, profile, base directory, reason, and requested permission
   duration through each provider request, supporting contextual audit and
@@ -67,7 +76,7 @@ All notable changes to FactorSeal will be documented in this file.
   whole encrypted document snapshot, so an unpruned chain grew both the
   database and unseal latency without bound in the number of writes. The chain
   is a tamper check, not an audit log.
-- Add the Argon2id password factor used by password-containing unlock groups.
+- Add the password factor used by password-containing unlock groups.
   Nested secret factors must derive their keys from hash or symmetric
   primitives so they do not introduce a separate public-key ciphertext around
   the platform's opaque native sealed-data mechanism.

@@ -1,17 +1,16 @@
 use automerge::{Change, ChangeHash};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::crypto::{self, EncryptionAlgorithm, NONCE_BYTES};
 
 use super::signature;
 use super::{DeviceKeyId, DocumentId, DocumentKind, VaultError, VaultResult};
 
-const ENVELOPE_VERSION: u8 = 2;
-const NONCE_BYTES: usize = 24;
+const ENVELOPE_VERSION: u8 = 3;
 const DIGEST_BYTES: usize = 32;
-const SNAPSHOT_DOMAIN: &[u8] = b"factorseal/encrypted-snapshot/v1\0";
-const CHANGE_DOMAIN: &[u8] = b"factorseal/signed-change/v1\0";
+const SNAPSHOT_DOMAIN: &[u8] = b"factorseal/encrypted-snapshot/v2\0";
+const CHANGE_DOMAIN: &[u8] = b"factorseal/signed-change/v2\0";
 const CURRENT_SIGNATURE_ALGORITHM: SignatureAlgorithm = SignatureAlgorithm::MlDsa65;
 
 /// Algorithm that authenticates an envelope's device signature.
@@ -45,6 +44,7 @@ impl SignatureAlgorithm {
 #[serde(deny_unknown_fields)]
 pub struct EncryptedSnapshot {
     version: u8,
+    encryption_algorithm: EncryptionAlgorithm,
     signature_algorithm: SignatureAlgorithm,
     document_id: DocumentId,
     scope: DocumentKind,
@@ -59,6 +59,11 @@ pub struct EncryptedSnapshot {
 }
 
 impl EncryptedSnapshot {
+    #[must_use]
+    pub const fn encryption_algorithm(&self) -> EncryptionAlgorithm {
+        self.encryption_algorithm
+    }
+
     #[must_use]
     pub const fn signature_algorithm(&self) -> SignatureAlgorithm {
         self.signature_algorithm
@@ -95,6 +100,7 @@ impl EncryptedSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct SignedChangeEnvelope {
     version: u8,
+    encryption_algorithm: EncryptionAlgorithm,
     signature_algorithm: SignatureAlgorithm,
     document_id: DocumentId,
     scope: DocumentKind,
@@ -111,6 +117,11 @@ pub struct SignedChangeEnvelope {
 }
 
 impl SignedChangeEnvelope {
+    #[must_use]
+    pub const fn encryption_algorithm(&self) -> EncryptionAlgorithm {
+        self.encryption_algorithm
+    }
+
     #[must_use]
     pub const fn signature_algorithm(&self) -> SignatureAlgorithm {
         self.signature_algorithm
@@ -174,17 +185,22 @@ pub(crate) fn encrypt_snapshot(
     signing_seed: &[u8; 32],
 ) -> VaultResult<EncryptedSnapshot> {
     let heads: Vec<[u8; DIGEST_BYTES]> = heads.iter().map(|head| head.0).collect();
-    let mut nonce = [0_u8; NONCE_BYTES];
-    getrandom::fill(&mut nonce)?;
-    let aad = snapshot_header(context, CURRENT_SIGNATURE_ALGORITHM, &heads);
-    let ciphertext = encrypt(data_key, &nonce, &aad, plaintext)?;
-    let ciphertext_digest = digest(&ciphertext);
+    let encryption_algorithm = crypto::CURRENT_ENCRYPTION_ALGORITHM;
+    let aad = snapshot_header(
+        context,
+        encryption_algorithm,
+        CURRENT_SIGNATURE_ALGORITHM,
+        &heads,
+    );
+    let encrypted = crypto::encrypt(data_key, &aad, plaintext).map_err(|_| VaultError::Crypto)?;
+    let ciphertext_digest = digest(&encrypted.ciphertext);
     let signature = signature::sign(
         signing_seed,
-        &signed_payload(SNAPSHOT_DOMAIN, &aad, &nonce, &ciphertext_digest),
+        &signed_payload(SNAPSHOT_DOMAIN, &aad, &encrypted.nonce, &ciphertext_digest),
     )?;
     Ok(EncryptedSnapshot {
         version: ENVELOPE_VERSION,
+        encryption_algorithm,
         signature_algorithm: CURRENT_SIGNATURE_ALGORITHM,
         document_id: context.document_id,
         scope: context.scope,
@@ -192,8 +208,8 @@ pub(crate) fn encrypt_snapshot(
         generation: context.generation,
         key_epoch: context.key_epoch,
         heads,
-        nonce,
-        ciphertext,
+        nonce: encrypted.nonce,
+        ciphertext: encrypted.ciphertext,
         ciphertext_digest,
         signature,
     })
@@ -228,22 +244,24 @@ fn encrypt_change(
         .map(|dependency| dependency.0)
         .collect();
     let change_hash = change.hash().0;
-    let mut nonce = [0_u8; NONCE_BYTES];
-    getrandom::fill(&mut nonce)?;
+    let encryption_algorithm = crypto::CURRENT_ENCRYPTION_ALGORITHM;
     let aad = change_header(
         context,
+        encryption_algorithm,
         CURRENT_SIGNATURE_ALGORITHM,
         &dependencies,
         &change_hash,
     );
-    let ciphertext = encrypt(data_key, &nonce, &aad, change.raw_bytes())?;
-    let ciphertext_digest = digest(&ciphertext);
+    let encrypted =
+        crypto::encrypt(data_key, &aad, change.raw_bytes()).map_err(|_| VaultError::Crypto)?;
+    let ciphertext_digest = digest(&encrypted.ciphertext);
     let signature = signature::sign(
         signing_seed,
-        &signed_payload(CHANGE_DOMAIN, &aad, &nonce, &ciphertext_digest),
+        &signed_payload(CHANGE_DOMAIN, &aad, &encrypted.nonce, &ciphertext_digest),
     )?;
     Ok(SignedChangeEnvelope {
         version: ENVELOPE_VERSION,
+        encryption_algorithm,
         signature_algorithm: CURRENT_SIGNATURE_ALGORITHM,
         document_id: context.document_id,
         scope: context.scope,
@@ -253,8 +271,8 @@ fn encrypt_change(
         key_epoch: context.key_epoch,
         dependencies,
         change_hash,
-        nonce,
-        ciphertext,
+        nonce: encrypted.nonce,
+        ciphertext: encrypted.ciphertext,
         ciphertext_digest,
         signature,
     })
@@ -279,7 +297,12 @@ pub fn verify_and_decrypt_snapshot(
         generation: envelope.generation,
         key_epoch: envelope.key_epoch,
     };
-    let aad = snapshot_header(&context, envelope.signature_algorithm, &envelope.heads);
+    let aad = snapshot_header(
+        &context,
+        envelope.encryption_algorithm,
+        envelope.signature_algorithm,
+        &envelope.heads,
+    );
     verify_signature(
         envelope.signature_algorithm,
         public_key,
@@ -291,7 +314,15 @@ pub fn verify_and_decrypt_snapshot(
         ),
         &envelope.signature,
     )?;
-    decrypt(data_key, &envelope.nonce, &aad, &envelope.ciphertext)
+    crypto::decrypt(
+        envelope.encryption_algorithm,
+        data_key,
+        &envelope.nonce,
+        &aad,
+        &envelope.ciphertext,
+    )
+    .map(|plaintext| plaintext.to_vec())
+    .map_err(|_| VaultError::Crypto)
 }
 
 /// Verify and decrypt one change, including its Automerge hash, dependencies,
@@ -316,6 +347,7 @@ pub fn verify_and_decrypt_change(
     };
     let aad = change_header(
         &context,
+        envelope.encryption_algorithm,
         envelope.signature_algorithm,
         &envelope.dependencies,
         &envelope.change_hash,
@@ -331,8 +363,15 @@ pub fn verify_and_decrypt_change(
         ),
         &envelope.signature,
     )?;
-    let plaintext = decrypt(data_key, &envelope.nonce, &aad, &envelope.ciphertext)?;
-    let change = Change::from_bytes(plaintext).map_err(|error| {
+    let plaintext = crypto::decrypt(
+        envelope.encryption_algorithm,
+        data_key,
+        &envelope.nonce,
+        &aad,
+        &envelope.ciphertext,
+    )
+    .map_err(|_| VaultError::Crypto)?;
+    let change = Change::from_bytes(plaintext.to_vec()).map_err(|error| {
         VaultError::InvalidData(format!("invalid encrypted Automerge change: {error}"))
     })?;
     let dependencies: Vec<[u8; DIGEST_BYTES]> = change
@@ -347,40 +386,6 @@ pub fn verify_and_decrypt_change(
         return Err(VaultError::Signature);
     }
     Ok(change)
-}
-
-fn encrypt(
-    data_key: &[u8; 32],
-    nonce: &[u8; NONCE_BYTES],
-    aad: &[u8],
-    plaintext: &[u8],
-) -> VaultResult<Vec<u8>> {
-    XChaCha20Poly1305::new(data_key.into())
-        .encrypt(
-            XNonce::from_slice(nonce),
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
-        .map_err(|_| VaultError::Crypto)
-}
-
-fn decrypt(
-    data_key: &[u8; 32],
-    nonce: &[u8; NONCE_BYTES],
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> VaultResult<Vec<u8>> {
-    XChaCha20Poly1305::new(data_key.into())
-        .decrypt(
-            XNonce::from_slice(nonce),
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
-        .map_err(|_| VaultError::Crypto)
 }
 
 fn verify_ciphertext_digest(ciphertext: &[u8], expected: &[u8; DIGEST_BYTES]) -> VaultResult<()> {
@@ -404,21 +409,33 @@ fn verify_signature(
 
 fn snapshot_header(
     context: &EnvelopeContext<'_>,
-    algorithm: SignatureAlgorithm,
+    encryption_algorithm: EncryptionAlgorithm,
+    signature_algorithm: SignatureAlgorithm,
     heads: &[[u8; DIGEST_BYTES]],
 ) -> Vec<u8> {
-    let mut bytes = common_header(SNAPSHOT_DOMAIN, algorithm, context);
+    let mut bytes = common_header(
+        SNAPSHOT_DOMAIN,
+        encryption_algorithm,
+        signature_algorithm,
+        context,
+    );
     append_array_list(&mut bytes, heads);
     bytes
 }
 
 fn change_header(
     context: &EnvelopeContext<'_>,
-    algorithm: SignatureAlgorithm,
+    encryption_algorithm: EncryptionAlgorithm,
+    signature_algorithm: SignatureAlgorithm,
     dependencies: &[[u8; DIGEST_BYTES]],
     change_hash: &[u8; DIGEST_BYTES],
 ) -> Vec<u8> {
-    let mut bytes = common_header(CHANGE_DOMAIN, algorithm, context);
+    let mut bytes = common_header(
+        CHANGE_DOMAIN,
+        encryption_algorithm,
+        signature_algorithm,
+        context,
+    );
     append_bytes(&mut bytes, context.actor_id);
     append_array_list(&mut bytes, dependencies);
     bytes.extend_from_slice(change_hash);
@@ -427,13 +444,15 @@ fn change_header(
 
 fn common_header(
     domain: &[u8],
-    algorithm: SignatureAlgorithm,
+    encryption_algorithm: EncryptionAlgorithm,
+    signature_algorithm: SignatureAlgorithm,
     context: &EnvelopeContext<'_>,
 ) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(160);
     bytes.extend_from_slice(domain);
     bytes.push(ENVELOPE_VERSION);
-    bytes.push(algorithm.code());
+    bytes.push(encryption_algorithm.code());
+    bytes.push(signature_algorithm.code());
     bytes.extend_from_slice(context.document_id.as_bytes());
     append_bytes(&mut bytes, context.scope.as_str().as_bytes());
     bytes.extend_from_slice(context.device_key_id.as_bytes());
@@ -477,7 +496,7 @@ mod tests {
     use automerge::transaction::Transactable;
 
     #[test]
-    fn envelopes_declare_their_signature_algorithm() {
+    fn envelopes_declare_their_algorithms() {
         let signing = [7; 32];
         let verifying = signature::public_key_for_seed(&signing).unwrap();
         let data_key = [9; 32];
@@ -491,6 +510,10 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            envelope.encryption_algorithm(),
+            EncryptionAlgorithm::Aes256Gcm
+        );
         assert_eq!(envelope.signature_algorithm(), SignatureAlgorithm::MlDsa65);
     }
 
@@ -521,6 +544,33 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("signature_algorithm");
+        assert!(serde_json::from_value::<EncryptedSnapshot>(absent).is_err());
+    }
+
+    #[test]
+    fn an_unknown_or_missing_encryption_algorithm_is_refused() {
+        let signing = [8; 32];
+        let verifying = signature::public_key_for_seed(&signing).unwrap();
+        let data_key = [10; 32];
+        let context = context(b"device-a", &verifying);
+        let envelope = encrypt_snapshot(
+            &context,
+            &[ChangeHash([1; 32])],
+            b"payload",
+            &data_key,
+            &signing,
+        )
+        .unwrap();
+
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        json["encryption_algorithm"] = serde_json::Value::String("unknown-encryption".to_owned());
+        assert!(serde_json::from_value::<EncryptedSnapshot>(json).is_err());
+
+        let mut absent = serde_json::to_value(&envelope).unwrap();
+        absent
+            .as_object_mut()
+            .unwrap()
+            .remove("encryption_algorithm");
         assert!(serde_json::from_value::<EncryptedSnapshot>(absent).is_err());
     }
 

@@ -1,7 +1,5 @@
 //! Nested-factor representation and cryptography for sealed vaults.
 
-#[cfg(feature = "key-protection")]
-use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "key-protection")]
 use zeroize::Zeroizing;
@@ -15,20 +13,12 @@ use super::super::{VaultError, VaultResult};
 #[cfg(feature = "key-protection")]
 const KEY_BYTES: usize = 32;
 const SALT_BYTES: usize = 16;
-const FACTOR_NONCE_BYTES: usize = 24;
 #[cfg(all(feature = "key-protection", not(test)))]
-const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
+const PBKDF2_ITERATIONS: u32 = 600_000;
 #[cfg(all(feature = "key-protection", test))]
-const ARGON2_MEMORY_KIB: u32 = 8 * 1024;
-#[cfg(all(feature = "key-protection", not(test)))]
-const ARGON2_ITERATIONS: u32 = 3;
-#[cfg(all(feature = "key-protection", test))]
-const ARGON2_ITERATIONS: u32 = 1;
-#[cfg(feature = "key-protection")]
-const ARGON2_PARALLELISM: u32 = 1;
-const MAX_ARGON2_MEMORY_KIB: u32 = 256 * 1024;
-const MAX_ARGON2_ITERATIONS: u32 = 10;
-const MAX_ARGON2_PARALLELISM: u32 = 16;
+const PBKDF2_ITERATIONS: u32 = 1_000;
+const MIN_PBKDF2_ITERATIONS: u32 = 1_000;
+const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
 #[cfg(feature = "key-protection")]
 pub(super) type ProtectedKeyPayloads = (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>, NestedProtection);
 #[cfg(feature = "key-protection")]
@@ -40,21 +30,18 @@ pub(super) type UnsealedVaultKeys = (
 /// Parameters of the secret-bearing factor nested inside the platform
 /// hardware wrapping.
 ///
-/// Every variant derives its key from a hash or symmetric primitive. This
-/// avoids adding a public-key ciphertext that creates a separate
-/// store-now/decrypt-later exposure around HardwareSeal's opaque native
-/// sealed-data mechanisms. A password remains entropy-limited: Argon2id raises
-/// offline-guessing cost but cannot turn a human-memorable password into a
-/// post-quantum-strength factor.
+/// Every variant derives its key from a NIST-approved hash or symmetric
+/// primitive. This avoids adding a public-key ciphertext that creates a
+/// separate store-now/decrypt-later exposure around HardwareSeal's opaque
+/// native sealed-data mechanisms. A password remains entropy-limited: PBKDF2
+/// raises offline-guessing cost but cannot turn a human-memorable password into
+/// a post-quantum-strength factor.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "algorithm", rename_all = "kebab-case")]
 #[serde(deny_unknown_fields)]
 enum FactorParameters {
-    Argon2id {
-        version: u32,
-        memory_kib: u32,
+    Pbkdf2HmacSha256 {
         iterations: u32,
-        parallelism: u32,
         salt: [u8; SALT_BYTES],
     },
 }
@@ -62,19 +49,20 @@ enum FactorParameters {
 impl FactorParameters {
     const fn kind(&self) -> NestedFactorKind {
         match self {
-            Self::Argon2id { .. } => NestedFactorKind::Argon2idPassword,
+            Self::Pbkdf2HmacSha256 { .. } => NestedFactorKind::Pbkdf2HmacSha256Password,
         }
     }
 }
 
-/// The nested factor recorded for an vault, with the nonces that
+/// The nested factor recorded for a vault, with the nonces that
 /// bind its derived key to the wrapped data key and signing seed.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NestedProtection {
     factor: FactorParameters,
-    data_key_nonce: [u8; FACTOR_NONCE_BYTES],
-    signing_seed_nonce: [u8; FACTOR_NONCE_BYTES],
+    encryption_algorithm: crate::EncryptionAlgorithm,
+    data_key_nonce: [u8; crate::crypto::NONCE_BYTES],
+    signing_seed_nonce: [u8; crate::crypto::NONCE_BYTES],
 }
 
 impl NestedProtection {
@@ -84,25 +72,30 @@ impl NestedProtection {
     }
 
     pub(super) fn validate(&self) -> VaultResult<()> {
+        if !crate::crypto::supports_algorithm(self.encryption_algorithm) {
+            return Err(VaultError::Protection(
+                "unsupported nested-factor encryption algorithm".to_owned(),
+            ));
+        }
         validate_factor_parameters(&self.factor)
     }
 }
 
-/// Which nested factor an vault requires in addition to its platform
+/// Which nested factor a vault requires in addition to its platform
 /// hardware key. Exactly one is always required.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum NestedFactorKind {
-    /// An Argon2id-derived Factorseal password.
-    Argon2idPassword,
+    /// A PBKDF2-HMAC-SHA-256-derived Factorseal password.
+    Pbkdf2HmacSha256Password,
 }
 
 impl NestedFactorKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Argon2idPassword => "argon2id-password",
+            Self::Pbkdf2HmacSha256Password => "pbkdf2-hmac-sha256-password",
         }
     }
 }
@@ -117,7 +110,7 @@ impl std::fmt::Display for NestedFactorKind {
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub enum UnsealFactor<'a> {
-    /// A Factorseal password stretched with Argon2id.
+    /// A Factorseal password stretched with PBKDF2-HMAC-SHA-256.
     Password(&'a [u8]),
 }
 
@@ -125,7 +118,7 @@ impl UnsealFactor<'_> {
     #[must_use]
     pub const fn kind(&self) -> NestedFactorKind {
         match self {
-            Self::Password(_) => NestedFactorKind::Argon2idPassword,
+            Self::Password(_) => NestedFactorKind::Pbkdf2HmacSha256Password,
         }
     }
 }
@@ -161,11 +154,13 @@ pub(super) fn protect_with_factor(
         signing_seed,
     )
     .map_err(|_| VaultError::Crypto)?;
+    debug_assert_eq!(data.algorithm, signing.algorithm);
     Ok((
         Zeroizing::new(data.ciphertext),
         Zeroizing::new(signing.ciphertext),
         NestedProtection {
             factor: parameters,
+            encryption_algorithm: data.algorithm,
             data_key_nonce: data.nonce,
             signing_seed_nonce: signing.nonce,
         },
@@ -181,11 +176,8 @@ fn new_factor_parameters(factor: UnsealFactor<'_>) -> VaultResult<FactorParamete
             }
             let mut salt = [0_u8; SALT_BYTES];
             getrandom::fill(&mut salt)?;
-            Ok(FactorParameters::Argon2id {
-                version: 0x13,
-                memory_kib: ARGON2_MEMORY_KIB,
-                iterations: ARGON2_ITERATIONS,
-                parallelism: ARGON2_PARALLELISM,
+            Ok(FactorParameters::Pbkdf2HmacSha256 {
+                iterations: PBKDF2_ITERATIONS,
                 salt,
             })
         }
@@ -202,6 +194,7 @@ pub(super) fn unprotect_with_factor(
 ) -> VaultResult<UnsealedVaultKeys> {
     let factor_key = derive_factor_key(factor, &protection.factor)?;
     let data_key = crate::crypto::decrypt(
+        protection.encryption_algorithm,
         &factor_key,
         &protection.data_key_nonce,
         &factor_aad(vault_id, b"data-encryption-key"),
@@ -209,6 +202,7 @@ pub(super) fn unprotect_with_factor(
     )
     .map_err(|_| factor_incorrect_error(protection.factor.kind()))?;
     let signing_seed = crate::crypto::decrypt(
+        protection.encryption_algorithm,
         &factor_key,
         &protection.signing_seed_nonce,
         &factor_aad(vault_id, b"device-signing-seed"),
@@ -238,49 +232,23 @@ fn derive_factor_key(
     match (factor, parameters) {
         (
             UnsealFactor::Password(password),
-            FactorParameters::Argon2id {
-                memory_kib,
-                iterations,
-                parallelism,
-                salt,
-                ..
-            },
+            FactorParameters::Pbkdf2HmacSha256 { iterations, salt },
         ) => {
             if password.is_empty() {
                 return Err(factor_empty_error(factor.kind()));
             }
-            let params = Params::new(*memory_kib, *iterations, *parallelism, Some(KEY_BYTES))
-                .map_err(|error| {
-                    VaultError::Protection(format!("invalid Argon2 parameters: {error}"))
-                })?;
-            let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-            let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
-            argon2
-                .hash_password_into(password, salt, &mut *key)
-                .map_err(|error| {
-                    VaultError::Protection(format!("factor derivation failed: {error}"))
-                })?;
-            Ok(key)
+            Ok(crate::crypto::derive_password_key(
+                password,
+                salt,
+                *iterations,
+            ))
         }
     }
 }
 
 fn validate_factor_parameters(parameters: &FactorParameters) -> VaultResult<()> {
-    let FactorParameters::Argon2id {
-        version,
-        memory_kib,
-        iterations,
-        parallelism,
-        ..
-    } = parameters;
-    if *version != 0x13
-        || *memory_kib < 8 * 1024
-        || *memory_kib > MAX_ARGON2_MEMORY_KIB
-        || *iterations == 0
-        || *iterations > MAX_ARGON2_ITERATIONS
-        || *parallelism == 0
-        || *parallelism > MAX_ARGON2_PARALLELISM
-    {
+    let FactorParameters::Pbkdf2HmacSha256 { iterations, .. } = parameters;
+    if !(MIN_PBKDF2_ITERATIONS..=MAX_PBKDF2_ITERATIONS).contains(iterations) {
         return Err(VaultError::Protection(
             "unsupported or unsafe nested-factor parameters".to_owned(),
         ));
@@ -291,7 +259,7 @@ fn validate_factor_parameters(parameters: &FactorParameters) -> VaultResult<()> 
 #[cfg(feature = "key-protection")]
 fn factor_aad(vault_id: VaultId, purpose: &[u8]) -> Vec<u8> {
     let mut aad = Vec::with_capacity(64 + purpose.len());
-    aad.extend_from_slice(b"factorseal/vault-factor/v1\0");
+    aad.extend_from_slice(b"factorseal/vault-factor/v2\0");
     aad.extend_from_slice(vault_id.as_bytes());
     aad.extend_from_slice(&(purpose.len() as u64).to_be_bytes());
     aad.extend_from_slice(purpose);
@@ -386,15 +354,13 @@ mod tests {
         ));
 
         let protection = NestedProtection {
-            factor: FactorParameters::Argon2id {
-                version: 0x13,
-                memory_kib: 8 * 1024 - 1,
-                iterations: 1,
-                parallelism: 1,
+            factor: FactorParameters::Pbkdf2HmacSha256 {
+                iterations: MIN_PBKDF2_ITERATIONS - 1,
                 salt: [0; SALT_BYTES],
             },
-            data_key_nonce: [0; FACTOR_NONCE_BYTES],
-            signing_seed_nonce: [0; FACTOR_NONCE_BYTES],
+            encryption_algorithm: crate::EncryptionAlgorithm::Aes256Gcm,
+            data_key_nonce: [0; crate::crypto::NONCE_BYTES],
+            signing_seed_nonce: [0; crate::crypto::NONCE_BYTES],
         };
         assert!(matches!(
             protection.validate(),

@@ -17,7 +17,7 @@ const MAX_UNLOCK_GROUPS: usize = 8;
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum UnlockFactorKind {
-    /// An Argon2id-stretched Factorseal password.
+    /// A PBKDF2-HMAC-SHA-256-stretched Factorseal password.
     Password,
     /// Platform biometric approval gates use of the hardware wrapping key.
     Biometric,

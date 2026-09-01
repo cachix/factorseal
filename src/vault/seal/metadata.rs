@@ -18,10 +18,10 @@ use crate::vault::{DeviceKeyId, VaultError, VaultId, VaultResult};
 pub(super) const VAULT_FILE: &str = "factorseal.json";
 pub(super) const PENDING_VAULT_FILE: &str = ".factorseal.json.pending";
 const VAULT_FORMAT: &str = "factorseal-vault";
-// Version 3 replaces the single password/biometric tuple with a versioned
-// unlock policy and one independently wrapped slot per OR alternative. There
-// are no released vaults to migrate; older versions are rejected explicitly.
-const VAULT_VERSION: u32 = 3;
+// Version 4 replaces Argon2id/XChaCha bootstrap protection with the
+// PBKDF2-HMAC-SHA-256/AES-256-GCM approved-algorithm profile. There are no
+// released vaults to migrate; older versions are rejected explicitly.
+const VAULT_VERSION: u32 = 4;
 const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]

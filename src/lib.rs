@@ -7,9 +7,9 @@
 //! interface over authenticated local IPC and never open the database or
 //! receive its keys.
 //!
-#[cfg(feature = "key-protection")]
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod crypto;
-#[cfg(feature = "key-protection")]
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod error;
 
 #[cfg(feature = "vault-client")]
@@ -22,8 +22,11 @@ pub mod keyring;
 ))]
 pub mod vault;
 
-#[cfg(feature = "key-protection")]
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
 pub(crate) use error::{Error, Result};
+
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
+pub use crypto::EncryptionAlgorithm;
 
 #[cfg(feature = "vault-client")]
 pub use keyring::{Keyring, KeyringError, KeyringResult};
