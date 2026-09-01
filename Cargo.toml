@@ -62,8 +62,10 @@ key-protection = [
     "dep:argon2",
     "dep:ghash",
     "dep:ml-dsa",
+    "dep:nt-token",
     "dep:pbkdf2",
     "dep:polyval",
+    "dep:windows",
 ]
 hardware = ["key-protection", "dep:hardwareseal"]
 
@@ -132,6 +134,8 @@ windows = { version = "0.61.3", optional = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
     "Win32_System_Power",
     "Win32_System_RemoteDesktop",

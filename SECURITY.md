@@ -18,6 +18,9 @@ is one authorized way to retrieve and update credentials:
   every durable change and commit is signed by the vault device key;
 - secret names and values exist inside encrypted documents, not plaintext SQL
   columns or filenames;
+- the vault root directory is created mode 0700 on Unix and with a protected,
+  owner-only DACL on Windows, and both are re-validated every time the vault
+  is opened;
 - project and address enumeration requires a separate authenticated `List`
   grant, is available only while unsealed, and never returns secret values;
 - a bounded local protocol authorizes transport-derived user, executable, and

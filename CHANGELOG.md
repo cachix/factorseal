@@ -4,6 +4,11 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Create the Windows vault root with a protected DACL that grants access to the
+  current user only, and reject a root at open time whose DACL inherits from
+  its parent or grants access to any other trustee. Vault roots created by
+  earlier builds must be recreated or repaired with `icacls` as the error
+  message describes.
 - Reject a Linux vault peer that is being traced or that was started with
   `LD_PRELOAD` or `LD_AUDIT` in its environment before its executable identity
   is resolved, closing the direct debugger and preload paths to a granted

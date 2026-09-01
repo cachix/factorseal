@@ -9,6 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::vault::{VaultError, VaultResult};
 
+#[cfg(all(feature = "key-protection", windows))]
+mod dacl;
+
 #[cfg(feature = "key-protection")]
 pub(super) fn prepare_root(root: &Path) -> VaultResult<()> {
     if let Some(parent) = root.parent()
@@ -37,7 +40,12 @@ pub(super) fn create_private_root(root: &Path) -> std::io::Result<()> {
     builder.mode(0o700).create(root)
 }
 
-#[cfg(all(feature = "key-protection", not(unix)))]
+#[cfg(all(feature = "key-protection", windows))]
+pub(super) fn create_private_root(root: &Path) -> std::io::Result<()> {
+    dacl::create_owner_only_directory(root)
+}
+
+#[cfg(all(feature = "key-protection", not(any(unix, windows))))]
 pub(super) fn create_private_root(root: &Path) -> std::io::Result<()> {
     fs::create_dir(root)
 }
@@ -96,7 +104,15 @@ pub(super) fn validate_private_permissions(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(feature = "key-protection", windows))]
+pub(super) fn validate_private_permissions(
+    path: &Path,
+    _metadata: &fs::Metadata,
+) -> VaultResult<()> {
+    dacl::validate_owner_only_directory(path)
+}
+
+#[cfg(not(any(unix, all(feature = "key-protection", windows))))]
 #[allow(clippy::unnecessary_wraps)]
 pub(super) fn validate_private_permissions(
     _path: &Path,
