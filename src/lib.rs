@@ -59,7 +59,7 @@ pub use vault::{CallerIdentity, CallerPlatform, GrantPermission, UnsealLeasePoli
 pub use vault::{HardwareBackend, KeyProtector, KeyProtectorFactory};
 
 #[cfg(all(feature = "vault-client", target_os = "linux"))]
-pub use vault::LinuxVaultClient;
+pub use vault::{LINUX_SECRET_PORTAL_NAMESPACE, LinuxVaultClient};
 #[cfg(all(feature = "vault-client", target_os = "linux"))]
 pub type NativeVaultClient = LinuxVaultClient;
 

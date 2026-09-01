@@ -76,7 +76,11 @@ cp "acceptance/$platform.sh" "$stage/$archive/run-acceptance.sh"
 chmod 0755 "$stage/$archive/run-acceptance.sh"
 
 if [ "$platform" = linux ]; then
-    mkdir -p "$stage/$archive/bin" "$stage/$archive/share/systemd/user"
+    mkdir -p \
+        "$stage/$archive/bin" \
+        "$stage/$archive/share/dbus-1/services" \
+        "$stage/$archive/share/systemd/user" \
+        "$stage/$archive/share/xdg-desktop-portal/portals"
     cp "$target_dir/release/factorseal" "$stage/$archive/bin/"
     cp packaging/linux/factorseal-start "$stage/$archive/bin/"
     # systemd needs an absolute ExecStart, so the unit is written for the
@@ -86,6 +90,14 @@ if [ "$platform" = linux ]; then
         packaging/linux/factorseal.service.in \
         > "$stage/$archive/share/systemd/user/factorseal.service"
     cp packaging/linux/factorseal.service.in "$stage/$archive/share/systemd/user/"
+    sed "s|@INSTALL_DIR@|$linux_install_dir|g" \
+        packaging/linux/factorseal-portal.service.in \
+        > "$stage/$archive/share/systemd/user/factorseal-portal.service"
+    sed "s|@INSTALL_DIR@|$linux_install_dir|g" \
+        packaging/linux/org.freedesktop.impl.portal.desktop.factorseal.service.in \
+        > "$stage/$archive/share/dbus-1/services/org.freedesktop.impl.portal.desktop.factorseal.service"
+    cp packaging/linux/factorseal.portal \
+        "$stage/$archive/share/xdg-desktop-portal/portals/"
     chmod 0755 \
         "$stage/$archive/bin/factorseal" \
         "$stage/$archive/bin/factorseal-start"

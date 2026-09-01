@@ -387,6 +387,7 @@ fn document_kind_tag(kind: DocumentKind) -> u8 {
         DocumentKind::LocalKeyring => 3,
         DocumentKind::SecretSpecProject => 4,
         DocumentKind::SecretSpecProviderCache => 5,
+        DocumentKind::LinuxSecretPortal => 6,
     }
 }
 

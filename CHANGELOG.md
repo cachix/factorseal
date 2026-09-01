@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Add an opt-in `org.freedesktop.impl.portal.Secret` backend on Linux, with a
+  durable random master key isolated per portal-authenticated application ID,
+  D-Bus activation metadata, and fail-closed behavior while the vault is
+  sealed.
 - Replace XChaCha20-Poly1305 vault envelopes with version-3 AES-256-GCM
   envelopes and add persisted `default` and `fips` vault profiles. The default
   password KDF is memory-hard Argon2id; `factorseal init --fips` selects

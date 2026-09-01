@@ -3,8 +3,8 @@
 use zeroize::Zeroizing;
 
 use crate::vault::{
-    DocumentKind, DocumentOperation, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
-    VaultStore,
+    DocumentKind, DocumentOperation, LINUX_SECRET_PORTAL_NAMESPACE, SecretAddress,
+    SecretSpecAddress, VaultError, VaultResult, VaultStore,
 };
 
 use super::super::grant::{GrantRequirement, require_grant};
@@ -355,6 +355,16 @@ pub(super) fn scope_action(action: VaultAction) -> ScopedAction {
             if namespace == b"factorseal/secret-service/v1" =>
         {
             DocumentKind::LinuxSecretService
+        }
+        VaultAction::Get { ref namespace, .. }
+        | VaultAction::Put { ref namespace, .. }
+        | VaultAction::Mutate { ref namespace, .. }
+        | VaultAction::Delete { ref namespace, .. }
+        | VaultAction::Clear { ref namespace }
+        | VaultAction::Seal { ref namespace }
+            if namespace == LINUX_SECRET_PORTAL_NAMESPACE =>
+        {
+            DocumentKind::LinuxSecretPortal
         }
         _ => DocumentKind::LocalKeyring,
     };

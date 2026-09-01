@@ -303,6 +303,7 @@ For the full storage and verification invariants, see
 | SecretSpec provider | `secretspec-provider-cache` | project name | disposable, optionally expiring |
 | Rust `Keyring` | `local-keyring` | caller namespace | durable |
 | Linux Secret Service | `linux-secret-service` | service namespace | durable |
+| XDG Secret portal | `linux-secret-portal` | portal namespace | durable |
 | Grants | `authorization` | authorization namespace | durable |
 
 Each row is a separate authorization domain. In particular, a provider-cache
@@ -390,6 +391,20 @@ session bus and back its default collection with the same encrypted vault. Do
 not run another provider that owns that bus name, such as GNOME Keyring or oo7,
 at the same time. macOS Keychain and Windows Credential Manager remain separate
 platform interfaces.
+
+### XDG Secret portal
+
+On Linux, Factorseal also provides an opt-in
+`org.freedesktop.impl.portal.Secret` backend for sandboxed applications. The
+desktop's `xdg-desktop-portal` frontend supplies the authenticated application
+ID; Factorseal returns one stable random master secret for that application
+through the portal's file descriptor. Portal secrets use a document kind and
+authorization domain separate from the full Secret Service collection.
+
+The package registers the backend but does not select it automatically because
+switching from GNOME Keyring, KWallet, or another backend changes the master
+key and can make an existing sandbox-local keyring unreadable. See
+[Packaging](packaging/README.md#xdg-secret-portal) for the opt-in configuration.
 
 ## Vault lifecycle
 

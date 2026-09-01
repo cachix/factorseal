@@ -186,6 +186,13 @@ fn agent_policy_and_root_are_explicitly_configurable() {
     assert_eq!(maximum_seconds, 20);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn secret_portal_backend_is_an_internal_cli_command() {
+    let cli = Cli::try_parse_from(["factorseal", "portal"]).unwrap();
+    assert!(matches!(cli.command, Command::Portal));
+}
+
 #[test]
 fn agent_waits_for_initialization_metadata() {
     let directory = tempfile::tempdir().unwrap();
