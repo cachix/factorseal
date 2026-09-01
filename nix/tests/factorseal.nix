@@ -267,6 +267,12 @@ pkgs.testers.runNixOSTest {
         locked.wait_for_unit("multi-user.target")
         locked.wait_for_unit("user@1000.service")
         initialize_on(locked)
+        claim = "/home/alice/.config/secretspec/providers.d/factorseal.secretspec.json"
+        locked.succeed(f"test $(stat -c %a {claim}) = 600")
+        locked.succeed(
+            f"jq -e 'keys == [\"executable\"] and "
+            f".executable == \"${package}/bin/factorseal\"' {claim}"
+        )
 
         # The unit lives in the user manager, which sits outside every logind
         # session, so it cannot infer which session to watch. `factorseal-start`
@@ -286,21 +292,7 @@ pkgs.testers.runNixOSTest {
         )
         locked.wait_until_succeeds(f"test -S {socket}")
 
-        with subtest("installed SecretSpec launches the registered provider"):
-            registration = json.dumps(
-                {
-                    "schema_version": 1,
-                    "scheme": "factorseal",
-                    "executable": "${package}/bin/factorseal",
-                    "arguments": ["provider"],
-                    "credential_names": [],
-                }
-            )
-            write_user_file(
-                locked,
-                "/home/alice/.config/secretspec/providers.d/factorseal.json",
-                registration,
-            )
+        with subtest("installed SecretSpec discovers Factorseal after init"):
             manifest = (
                 '[project]\n'
                 'name = "alpha"\n'

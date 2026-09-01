@@ -183,6 +183,12 @@ the typed IPC wire contract. Factorseal implements its `factorseal provider`
 subcommand against the Rust IPC crate, which is the external-provider endpoint
 SecretSpec launches over private stdin/stdout pipes.
 
+Provider discovery is published automatically as
+`factorseal.secretspec.json` in SecretSpec's per-user provider directory. The
+claim contains only Factorseal's canonical executable path; its filename names
+the scheme and SecretSpec supplies the fixed `provider` argument. Initialization
+creates the claim and agent startup refreshes it after executable upgrades.
+
 The endpoint sends get, set, expiring set, and delete as typed
 `secretspec-provider-cache` requests partitioned by project. It preserves
 SecretSpec convention addresses (`project`, `profile`, `key`) and native

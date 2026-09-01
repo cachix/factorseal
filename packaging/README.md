@@ -23,9 +23,9 @@ artifact is ready to release:
 SecretSpec cache permissions are granted per project through `factorseal permissions`;
 there is no installation-wide provider grant. The endpoint, not the SecretSpec
 CLI or embedding application, remains the principal seen by the native vault.
-The archives include the endpoint code but do not install a SecretSpec
-registration file; packagers or users must register the absolute executable
-path as described in the repository README.
+The archives include the endpoint code. `factorseal init` publishes the
+minimal `factorseal.secretspec.json` claim automatically, and the agent
+refreshes its canonical executable path after packaged upgrades.
 
 Official macOS releases still require installer signing and notarization.
 Directly distributed Windows ZIP releases require platform signing credentials;

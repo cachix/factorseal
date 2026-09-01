@@ -6,14 +6,14 @@
 
 rustPlatform.buildRustPackage {
   pname = "secretspec";
-  version = "0.20.0-dev-c780280";
+  version = "0.20.0-dev-8adfdb4";
 
   # Keep the installed client on the exact revision used by Factorseal's
   # Secret Provider Protocol dependency. nixpkgs 0.18 predates external
   # provider discovery and cannot exercise this integration.
   src = fetchurl {
-    url = "https://github.com/cachix/secretspec/archive/c7802807e776a70419f98826cfb06e82171b81e7.tar.gz";
-    hash = "sha256-clT8QT1ncCgmDOtI10rnmAAxFymSIFySJsRXMfzWl8I=";
+    url = "https://github.com/cachix/secretspec/archive/8adfdb4815889d4739af4f92cebf1537e5d30ef8.tar.gz";
+    hash = "sha256-qYNhXkCfl40sh6riZ9eQgeFTp+6XAQYpIGcNAKpJC1A=";
   };
 
   cargoHash = "sha256-H9atiLKLAQ0co8mpkNFzh8j8fIZFu1bwSnE1wfgG8Cg=";

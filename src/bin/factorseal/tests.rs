@@ -1,4 +1,6 @@
 use super::cli::{Cli, Command, PermissionCommand};
+#[cfg(feature = "secretspec-provider")]
+use super::commands::write_secretspec_claim;
 use super::commands::{
     ApprovalDecision, ParsedGrantDuration, parse_grant_duration, read_approval_decision,
     read_bounded, read_grant_duration, read_init_unlock_groups, read_password_for_groups,
@@ -200,6 +202,29 @@ fn agent_waits_for_initialization_metadata() {
         Duration::from_millis(1),
     );
     writer.join().unwrap();
+}
+
+#[cfg(feature = "secretspec-provider")]
+#[test]
+fn secretspec_claim_contains_only_the_canonical_executable() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+
+    write_secretspec_claim(directory.path(), &executable).unwrap();
+
+    let claim = fs::read_to_string(directory.path().join("factorseal.secretspec.json")).unwrap();
+    let claim: serde_json::Value = serde_json::from_str(&claim).unwrap();
+    assert_eq!(claim, serde_json::json!({ "executable": executable }));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(directory.path().join("factorseal.secretspec.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 }
 
 #[test]

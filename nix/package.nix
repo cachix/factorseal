@@ -23,7 +23,7 @@ rustPlatform.buildRustPackage {
   cargoLock = {
     lockFile = ../Cargo.lock;
     outputHashes = {
-      "secretspec-ipc-0.19.1" = "sha256-uMemqk3LJo8InszQcjoFY7o3WyySd1feQZKf7Afg97E=";
+      "secretspec-ipc-0.19.1" = "sha256-QZ0RyffatI1ulF+jzZEHlUsjQeDoiIRV6nX4x3OkpIo=";
     };
   };
 

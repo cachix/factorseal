@@ -109,6 +109,10 @@ enum CliError {
     #[cfg(feature = "secretspec-provider")]
     #[error("SecretSpec provider protocol failed: {0}")]
     ProviderProtocol(String),
+
+    #[cfg(feature = "secretspec-provider")]
+    #[error("could not publish SecretSpec provider discovery: {0}")]
+    SecretSpecDiscovery(String),
 }
 
 fn main() {

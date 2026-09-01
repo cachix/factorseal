@@ -312,22 +312,21 @@ connects to the already-running native vault service. It never opens the
 database, receives vault keys, or accepts the embedding application's identity
 as authority.
 
-Register the installed binary as the `factorseal` scheme using an absolute
-path:
+`factorseal init` publishes the installed binary as the `factorseal` scheme in
+SecretSpec's user provider directory:
 
 ```json
 {
-  "schema_version": 1,
-  "scheme": "factorseal",
-  "executable": "/absolute/path/to/factorseal",
-  "arguments": ["provider"],
-  "credential_names": []
+  "executable": "/absolute/path/to/factorseal"
 }
 ```
 
-Place this registration at `factorseal.json` in SecretSpec's provider
-registration directory. The provider URI is `factorseal://default`. Factorseal
-requires SecretSpec to supply a project context so cache access can be isolated.
+The public claim is named `factorseal.secretspec.json`; users do not create or
+manage it. The agent refreshes its canonical executable path at startup so
+packaged upgrades remain discoverable. SecretSpec always launches the claimed
+executable with the fixed `provider` argument. The provider URI is
+`factorseal://default`. Factorseal requires SecretSpec to supply a project
+context so cache access can be isolated.
 
 Start the service with `factorseal agent`. Because the endpoint cannot prompt
 on its protocol streams, a sealed service is reported to SecretSpec as
@@ -370,9 +369,9 @@ They require a terminal and never approve by default. A vault with multiple
 unlock groups asks which one to use only after the user chooses Approve.
 
 Factorseal currently follows the SecretSpec IPC API from the sibling
-`../secretspec` checkout. No IPC schema change is required for this storage
-model. Release packaging still depends on publishing and pinning that API,
-then passing installed end-to-end conformance on Linux, macOS, and Windows.
+`../secretspec` checkout. Release packaging still depends on publishing and
+pinning that API, then passing installed end-to-end conformance on Linux,
+macOS, and Windows.
 
 ### Linux Secret Service
 

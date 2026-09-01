@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 use std::fs;
+#[cfg(all(feature = "secretspec-provider", unix))]
+use std::fs::OpenOptions;
 use std::io::{BufRead, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,13 +44,23 @@ struct Status<'a> {
 }
 
 const VAULT_METADATA_FILE: &str = "factorseal.json";
+#[cfg(feature = "secretspec-provider")]
+const SECRETSPEC_CLAIM_FILE: &str = "factorseal.secretspec.json";
 const INITIALIZATION_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+#[cfg(feature = "secretspec-provider")]
+#[derive(Serialize)]
+struct SecretSpecProviderClaim<'a> {
+    executable: &'a Path,
+}
 
 pub(super) fn initialize(
     root: &Path,
     unlock_groups: Vec<UnlockGroup>,
     factor: FactorSource<'_>,
 ) -> Result<(), CliError> {
+    #[cfg(feature = "secretspec-provider")]
+    publish_secretspec_claim_for_default_root(root)?;
     let unlock_groups = init_unlock_groups(unlock_groups)?;
     let policy = UnlockPolicy::new(unlock_groups)?;
     let password = read_password_for_groups(policy.groups(), factor, true)?;
@@ -626,6 +638,10 @@ pub(super) fn run_agent(
     policy: UnsealLeasePolicy,
     requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
+    #[cfg(feature = "secretspec-provider")]
+    if let Err(error) = publish_secretspec_claim_for_default_root(root) {
+        eprintln!("factorseal: warning: {error}");
+    }
     wait_for_initialization(root, INITIALIZATION_POLL_INTERVAL);
     let device = Vault::inspect(root)?;
     let lifecycle = prepare_lifecycle()?;
@@ -637,6 +653,107 @@ pub(super) fn run_agent(
     })();
     lifecycle.disarm();
     result
+}
+
+#[cfg(feature = "secretspec-provider")]
+fn publish_secretspec_claim_for_default_root(root: &Path) -> Result<(), CliError> {
+    let default_root = ProjectDirs::from("dev", "Factorseal", "Factorseal")
+        .ok_or(CliError::NoDefaultRoot)?
+        .data_local_dir()
+        .to_owned();
+    if root != default_root {
+        return Ok(());
+    }
+    let executable = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .map_err(|error| CliError::CurrentExecutable(error.to_string()))?;
+    let directory = secretspec_provider_directory().ok_or_else(|| {
+        CliError::SecretSpecDiscovery("the user configuration directory is unavailable".to_owned())
+    })?;
+    write_secretspec_claim(&directory, &executable)
+}
+
+#[cfg(feature = "secretspec-provider")]
+fn secretspec_provider_directory() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .map(|base| base.join("secretspec/providers.d"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Library/Application Support/SecretSpec/providers.d"))
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|base| base.join("SecretSpec/providers.d"))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        None
+    }
+}
+
+#[cfg(feature = "secretspec-provider")]
+pub(super) fn write_secretspec_claim(directory: &Path, executable: &Path) -> Result<(), CliError> {
+    fs::create_dir_all(directory)
+        .map_err(|error| CliError::SecretSpecDiscovery(error.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+            .map_err(|error| CliError::SecretSpecDiscovery(error.to_string()))?;
+        let destination = directory.join(SECRETSPEC_CLAIM_FILE);
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let temporary = directory.join(format!(
+            ".{SECRETSPEC_CLAIM_FILE}.{}.{nonce}.tmp",
+            std::process::id(),
+        ));
+        let result = (|| -> Result<(), CliError> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&temporary)
+                .map_err(|error| CliError::SecretSpecDiscovery(error.to_string()))?;
+            serde_json::to_writer(&mut file, &SecretSpecProviderClaim { executable })?;
+            file.write_all(b"\n")
+                .map_err(|error| CliError::SecretSpecDiscovery(error.to_string()))?;
+            file.sync_all()
+                .map_err(|error| CliError::SecretSpecDiscovery(error.to_string()))?;
+            fs::rename(&temporary, &destination)
+                .map_err(|error| CliError::SecretSpecDiscovery(error.to_string()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+    #[cfg(windows)]
+    {
+        let destination = directory.join(SECRETSPEC_CLAIM_FILE);
+        let bytes = serde_json::to_vec(&SecretSpecProviderClaim { executable })?;
+        fs::write(destination, bytes)
+            .map_err(|error| CliError::SecretSpecDiscovery(error.to_string()))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (directory, executable);
+        Err(CliError::SecretSpecDiscovery(
+            "this platform has no provider discovery location".to_owned(),
+        ))
+    }
 }
 
 pub(super) fn wait_for_initialization(root: &Path, poll_interval: Duration) {
