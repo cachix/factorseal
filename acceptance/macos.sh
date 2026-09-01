@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 usage() {
-    echo "usage: $0 [--factorseal PATH] [--root ABSOLUTE_PATH] [--password-file PATH] [--event lock|switch|sleep] [--evidence ABSOLUTE_PATH] [--destroy-after]" >&2
+    echo "usage: $0 [--factorseal PATH] [--root ABSOLUTE_PATH] [--password-file PATH] [--event all|lock|switch|sleep] [--evidence ABSOLUTE_PATH] [--destroy-after]" >&2
     exit "${1:-2}"
 }
 
@@ -12,7 +12,7 @@ factorseal=
 root=
 password_file=
 evidence=
-lifecycle_event=lock
+lifecycle_event=all
 destroy_after=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -47,7 +47,7 @@ socket="${TMPDIR:-/tmp}/fs-$run_id.sock"
 [ "${root#/}" != "$root" ] || usage
 [ ! -e "$root" ] || { echo "acceptance root already exists: $root" >&2; exit 2; }
 [ -z "$password_file" ] || [ -f "$password_file" ] || usage
-case $lifecycle_event in lock|switch|sleep) ;; *) usage ;; esac
+case $lifecycle_event in all|lock|switch|sleep) ;; *) usage ;; esac
 
 case $factorseal in
     */Contents/MacOS/*) app_bundle=${factorseal%/Contents/MacOS/*} ;;
@@ -179,7 +179,11 @@ record os_summary "macOS $(sw_vers -productVersion); $(uname -m)"
 record expected_backend secure-enclave
 record physical_host_check pass
 record hardware_summary "$hardware_summary"
-record lifecycle_event "$lifecycle_event"
+case $lifecycle_event in
+    all) lifecycle_events="lock sleep" ;;
+    *) lifecycle_events=$lifecycle_event ;;
+esac
+record lifecycle_event "$(printf '%s' "$lifecycle_events" | tr ' ' ',')"
 
 run_factorseal() { "$factorseal" --root "$root" --socket "$socket" "$@"; }
 status() { run_factorseal status; }
@@ -238,24 +242,49 @@ printf '%s' 'hardware-lifecycle-acceptance' | run_factorseal set --project accep
 [ "$(run_factorseal get --project acceptance acceptance --field value)" = "hardware-lifecycle-acceptance" ]
 record test.ipc_round_trip pass
 
-echo "Trigger the requested macOS lifecycle event now: $lifecycle_event."
-echo "After returning to this session, press Enter."
-printf 'Press Enter after the lifecycle event: '
-read -r _
-wait_for_vault_exit
-wait_for sealed
-record test.lifecycle_seal pass
-if run_factorseal get --project acceptance acceptance --field value >/dev/null 2>&1; then
-    echo "sealed vault returned a secret" >&2
-    exit 1
-fi
-record test.sealed_read_denied pass
+screen_lock_result=not-run
+suspend_result=not-run
+session_switch_result=not-run
+for event in $lifecycle_events; do
+    case $event in
+        lock)
+            echo "Lock this Mac now, then unlock it and return here."
+            prompt="Press Enter after screen lock/unlock: "
+            ;;
+        sleep)
+            echo "Put this Mac to sleep now, then wake it and return here."
+            prompt="Press Enter after sleep/wake: "
+            ;;
+        switch)
+            echo "Switch away from this macOS login session now, then return here."
+            prompt="Press Enter after switching away and back: "
+            ;;
+    esac
+    printf '%s' "$prompt"
+    read -r _
+    wait_for_vault_exit
+    wait_for sealed
+    if run_factorseal get --project acceptance acceptance --field value >/dev/null 2>&1; then
+        echo "$event left the vault able to return a secret" >&2
+        exit 1
+    fi
+    case $event in
+        lock) screen_lock_result=pass ;;
+        sleep) suspend_result=pass ;;
+        switch) session_switch_result=pass ;;
+    esac
 
-run_factorseal --password-file "$password_file" \
-    agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-reunseal.log" 2>&1 &
-vault_pid=$!
-wait_for unsealed
-[ "$(run_factorseal get --project acceptance acceptance --field value)" = "hardware-lifecycle-acceptance" ]
+    run_factorseal --password-file "$password_file" \
+        agent --idle-seconds 3600 --maximum-seconds 3600 >"$root/acceptance-after-$event.log" 2>&1 &
+    vault_pid=$!
+    wait_for unsealed
+    [ "$(run_factorseal get --project acceptance acceptance --field value)" = "hardware-lifecycle-acceptance" ]
+done
+record test.screen_lock_seal "$screen_lock_result"
+record test.suspend_seal "$suspend_result"
+record test.session_switch_seal "$session_switch_result"
+record test.lifecycle_seal pass
+record test.sealed_read_denied pass
 record test.reunseal_recovery pass
 run_factorseal delete --project acceptance acceptance --field value
 record test.delete pass

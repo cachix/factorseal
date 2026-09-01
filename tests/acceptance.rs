@@ -34,6 +34,8 @@ fn every_physical_runner_emits_the_same_core_evidence_contract() {
             "test.hardware_self_test",
             "test.initial_unseal",
             "test.ipc_round_trip",
+            "test.screen_lock_seal",
+            "test.suspend_seal",
             "test.lifecycle_seal",
             "test.sealed_read_denied",
             "test.reunseal_recovery",
@@ -44,6 +46,24 @@ fn every_physical_runner_emits_the_same_core_evidence_contract() {
             assert!(source.contains(marker), "{name} does not emit `{marker}`");
         }
     }
+}
+
+#[test]
+fn guided_lifecycle_runs_cover_screen_lock_and_suspend_independently() {
+    let linux = runner("linux.sh");
+    assert!(linux.contains("loginctl lock-session"));
+    assert!(linux.contains("systemctl suspend"));
+    assert!(linux.contains("acceptance-after-lock.log"));
+
+    let macos = runner("macos.sh");
+    assert!(macos.contains("lifecycle_event=all"));
+    assert!(macos.contains("lifecycle_events=\"lock sleep\""));
+    assert!(macos.contains("acceptance-after-$event.log"));
+
+    let windows = runner("windows.ps1");
+    assert!(windows.contains("Win+L"));
+    assert!(windows.contains("Start > Power > Sleep"));
+    assert!(windows.contains("acceptance-after-lock.log"));
 }
 
 /// The self-test only means something on real hardware, so CI can check that

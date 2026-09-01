@@ -148,6 +148,10 @@ impl VaultService {
         Ok(())
     }
 
+    pub(crate) fn is_seal_complete(&self) -> bool {
+        self.state.is_seal_complete()
+    }
+
     fn handle_inner(
         &self,
         caller: &CallerIdentity,

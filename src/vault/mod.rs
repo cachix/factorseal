@@ -51,7 +51,17 @@ use std::fmt;
     feature = "vault",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
+use std::sync::Arc;
+#[cfg(all(
+    feature = "vault",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 use std::sync::Mutex;
+#[cfg(all(
+    feature = "vault",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -83,9 +93,15 @@ pub use seal::{
 pub(crate) use store::VaultStore;
 
 #[cfg(all(feature = "vault", target_os = "linux"))]
-pub use linux::{LinuxVaultOptions, linux_caller_identity_for_executable, serve_linux_vault};
+pub use linux::{
+    LinuxVaultLifecycle, LinuxVaultOptions, linux_caller_identity_for_executable,
+    serve_linux_vault, serve_linux_vault_with_lifecycle,
+};
 #[cfg(all(feature = "vault", target_os = "macos"))]
-pub use macos::{MacosVaultOptions, macos_caller_identity_for_executable, serve_macos_vault};
+pub use macos::{
+    MacosVaultLifecycle, MacosVaultOptions, macos_caller_identity_for_executable,
+    serve_macos_vault, serve_macos_vault_with_lifecycle,
+};
 
 // Linux and macOS share one Unix socket client; each target names it after
 // the transport it talks to.
@@ -96,7 +112,8 @@ pub use unix_client::UnixVaultClient as MacosVaultClient;
 
 #[cfg(all(feature = "vault", target_os = "windows"))]
 pub use windows::{
-    WindowsVaultOptions, serve_windows_vault, windows_caller_identity_for_executable,
+    WindowsVaultLifecycle, WindowsVaultOptions, serve_windows_vault,
+    serve_windows_vault_with_lifecycle, windows_caller_identity_for_executable,
 };
 #[cfg(all(feature = "vault-client", target_os = "windows"))]
 pub use windows_client::{WindowsVaultClient, default_windows_pipe_name};
@@ -150,6 +167,111 @@ impl CallerIdentityCache {
         }
         entries.insert(key, identity.clone());
         Ok(identity)
+    }
+}
+
+/// Latches native lifecycle events before hardware-unwrapped keys enter
+/// memory, then connects those events to the live service once it exists.
+///
+/// Registration and unsealing deliberately happen in that order. If lock or
+/// suspend arrives during native authorization or database opening, attaching
+/// the service observes the latch and seals it before accepting any client.
+#[cfg(all(
+    feature = "vault",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+struct LifecycleSignal {
+    requested: AtomicBool,
+    armed: AtomicBool,
+    safe: AtomicBool,
+    service: Mutex<Option<Arc<VaultService>>>,
+}
+
+#[cfg(all(
+    feature = "vault",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+impl LifecycleSignal {
+    fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            armed: AtomicBool::new(false),
+            safe: AtomicBool::new(true),
+            service: Mutex::new(None),
+        }
+    }
+
+    fn arm(&self) -> VaultResult<()> {
+        if self.requested.load(Ordering::Acquire) {
+            return Err(VaultError::NativeAuthorization(
+                NativeAuthorizationError::SessionLocked,
+            ));
+        }
+        self.safe.store(false, Ordering::Release);
+        self.armed.store(true, Ordering::Release);
+        // Close the check/arm race: a callback that ran between the first
+        // load and `armed.store` leaves the latch set and must abort unseal.
+        if self.requested.load(Ordering::Acquire) {
+            self.disarm();
+            return Err(VaultError::NativeAuthorization(
+                NativeAuthorizationError::SessionLocked,
+            ));
+        }
+        Ok(())
+    }
+
+    fn attach(&self, service: &Arc<VaultService>) -> VaultResult<()> {
+        let mut attached = self
+            .service
+            .lock()
+            .map_err(|_| VaultError::WorkerUnavailable)?;
+        *attached = Some(Arc::clone(service));
+        if self.requested.load(Ordering::Acquire) {
+            service.seal()?;
+            self.safe
+                .store(service.is_seal_complete(), Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn trigger(&self) {
+        self.requested.store(true, Ordering::Release);
+        let service = self
+            .service
+            .lock()
+            .ok()
+            .and_then(|service| service.as_ref().map(Arc::clone));
+        if let Some(service) = service {
+            let _ = service.seal();
+            self.safe
+                .store(service.is_seal_complete(), Ordering::Release);
+        }
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    fn needs_emergency_exit(&self) -> bool {
+        self.armed.load(Ordering::Acquire) && !self.safe.load(Ordering::Acquire)
+    }
+
+    fn disarm(&self) {
+        let Ok(mut service) = self.service.lock() else {
+            return;
+        };
+        // A lifecycle callback marks the store sealed before it finishes
+        // joining the key-bearing worker. Keep emergency deadlines effective
+        // until that teardown has actually completed.
+        if service
+            .as_ref()
+            .is_some_and(|service| !service.is_seal_complete())
+        {
+            return;
+        }
+        self.armed.store(false, Ordering::Release);
+        self.safe.store(true, Ordering::Release);
+        *service = None;
     }
 }
 
@@ -667,5 +789,36 @@ mod tests {
         assert_ne!(plain.storage_key(), field.storage_key());
         assert!(!field.storage_key().contains("production"));
         assert!(!field.storage_key().contains("password"));
+    }
+
+    #[cfg(all(
+        feature = "vault",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
+    #[test]
+    fn lifecycle_events_latch_before_a_service_is_attached() {
+        let signal = LifecycleSignal::new();
+        signal.arm().unwrap();
+        signal.trigger();
+
+        assert!(signal.requested());
+        assert!(signal.needs_emergency_exit());
+    }
+
+    #[cfg(all(
+        feature = "vault",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
+    #[test]
+    fn an_already_locked_session_refuses_to_arm() {
+        let signal = LifecycleSignal::new();
+        signal.trigger();
+
+        assert!(matches!(
+            signal.arm(),
+            Err(VaultError::NativeAuthorization(
+                NativeAuthorizationError::SessionLocked
+            ))
+        ));
     }
 }

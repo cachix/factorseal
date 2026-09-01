@@ -20,7 +20,9 @@ use zeroize::Zeroizing;
 
 use super::cli::PermissionCommand;
 use super::factor::{FactorSource, read_factor};
-use super::platform::{caller_identity_for_executable, native_client, serve_vault};
+use super::platform::{
+    caller_identity_for_executable, native_client, prepare_lifecycle, serve_vault,
+};
 use super::{CLI_CONTROL_NAMESPACE, CliError, MAX_PROJECT_VALUE_BYTES, PROJECT_PERMISSIONS};
 
 #[derive(Serialize)]
@@ -626,9 +628,15 @@ pub(super) fn run_agent(
 ) -> Result<(), CliError> {
     wait_for_initialization(root, INITIALIZATION_POLL_INTERVAL);
     let device = Vault::inspect(root)?;
-    let unsealed = unseal_selected(root, &device, requested_group, factor)?;
-    let service = Arc::new(VaultService::open(root, unsealed, unix_time()?, policy)?);
-    serve_vault(&device, &service, root, socket)
+    let lifecycle = prepare_lifecycle()?;
+    lifecycle.arm()?;
+    let result = (|| {
+        let unsealed = unseal_selected(root, &device, requested_group, factor)?;
+        let service = Arc::new(VaultService::open(root, unsealed, unix_time()?, policy)?);
+        serve_vault(&device, &service, root, socket, &lifecycle)
+    })();
+    lifecycle.disarm();
+    result
 }
 
 pub(super) fn wait_for_initialization(root: &Path, poll_interval: Duration) {

@@ -8,21 +8,44 @@ use factorseal::Vault;
 use factorseal::{CallerIdentity, NativeVaultClient, VaultMetadata, VaultService};
 #[cfg(target_os = "linux")]
 use factorseal::{
-    LinuxVaultClient, LinuxVaultOptions, linux_caller_identity_for_executable, serve_linux_vault,
+    LinuxVaultClient, LinuxVaultLifecycle, LinuxVaultOptions, linux_caller_identity_for_executable,
+    serve_linux_vault_with_lifecycle,
 };
 #[cfg(target_os = "macos")]
 use factorseal::{
-    MacosVaultClient, MacosVaultOptions, macos_caller_identity_for_executable, serve_macos_vault,
+    MacosVaultClient, MacosVaultLifecycle, MacosVaultOptions, macos_caller_identity_for_executable,
+    serve_macos_vault_with_lifecycle,
 };
 #[cfg(target_os = "windows")]
 use factorseal::{
-    WindowsVaultClient, WindowsVaultOptions, default_windows_pipe_name, serve_windows_vault,
-    windows_caller_identity_for_executable,
+    WindowsVaultClient, WindowsVaultLifecycle, WindowsVaultOptions, default_windows_pipe_name,
+    serve_windows_vault_with_lifecycle, windows_caller_identity_for_executable,
 };
 
 use super::CliError;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::DEFAULT_UNIX_SOCKET;
+
+#[cfg(target_os = "linux")]
+pub(super) type NativeVaultLifecycle = LinuxVaultLifecycle;
+#[cfg(target_os = "macos")]
+pub(super) type NativeVaultLifecycle = MacosVaultLifecycle;
+#[cfg(target_os = "windows")]
+pub(super) type NativeVaultLifecycle = WindowsVaultLifecycle;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(super) fn prepare_lifecycle() -> Result<NativeVaultLifecycle, CliError> {
+    Ok(NativeVaultLifecycle::new()?)
+}
+
+#[cfg(target_os = "macos")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Linux and Windows lifecycle setup is fallible at the shared call site"
+)]
+pub(super) fn prepare_lifecycle() -> Result<NativeVaultLifecycle, CliError> {
+    Ok(NativeVaultLifecycle::new())
+}
 
 #[cfg(target_os = "linux")]
 #[expect(
@@ -70,9 +93,10 @@ pub(super) fn serve_vault(
     service: &Arc<VaultService>,
     root: &Path,
     socket: Option<&Path>,
+    lifecycle: &NativeVaultLifecycle,
 ) -> Result<(), CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    serve_linux_vault(service, &LinuxVaultOptions::new(socket))?;
+    serve_linux_vault_with_lifecycle(service, &LinuxVaultOptions::new(socket), Some(lifecycle))?;
     Ok(())
 }
 
@@ -82,9 +106,10 @@ pub(super) fn serve_vault(
     service: &Arc<VaultService>,
     root: &Path,
     socket: Option<&Path>,
+    lifecycle: &NativeVaultLifecycle,
 ) -> Result<(), CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    serve_macos_vault(service, &MacosVaultOptions::new(socket))?;
+    serve_macos_vault_with_lifecycle(service, &MacosVaultOptions::new(socket), Some(lifecycle))?;
     Ok(())
 }
 
@@ -94,12 +119,17 @@ pub(super) fn serve_vault(
     service: &Arc<VaultService>,
     _root: &Path,
     socket: Option<&Path>,
+    lifecycle: &NativeVaultLifecycle,
 ) -> Result<(), CliError> {
     let pipe_name = socket.map_or_else(
         || default_windows_pipe_name(device.vault_id()),
         |path| path.to_string_lossy().into_owned(),
     );
-    serve_windows_vault(service, &WindowsVaultOptions::new(pipe_name))?;
+    serve_windows_vault_with_lifecycle(
+        service,
+        &WindowsVaultOptions::new(pipe_name),
+        Some(lifecycle),
+    )?;
     Ok(())
 }
 
@@ -109,6 +139,7 @@ pub(super) fn serve_vault(
     _service: &Arc<VaultService>,
     _root: &Path,
     _socket: Option<&Path>,
+    _lifecycle: &(),
 ) -> Result<(), CliError> {
     Err(CliError::UnsupportedPlatform)
 }

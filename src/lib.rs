@@ -61,7 +61,10 @@ pub use vault::LinuxVaultClient;
 pub type NativeVaultClient = LinuxVaultClient;
 
 #[cfg(all(feature = "vault", target_os = "linux"))]
-pub use vault::{LinuxVaultOptions, linux_caller_identity_for_executable, serve_linux_vault};
+pub use vault::{
+    LinuxVaultLifecycle, LinuxVaultOptions, linux_caller_identity_for_executable,
+    serve_linux_vault, serve_linux_vault_with_lifecycle,
+};
 
 #[cfg(all(feature = "vault-client", target_os = "macos"))]
 pub use vault::MacosVaultClient;
@@ -69,7 +72,10 @@ pub use vault::MacosVaultClient;
 pub type NativeVaultClient = MacosVaultClient;
 
 #[cfg(all(feature = "vault", target_os = "macos"))]
-pub use vault::{MacosVaultOptions, macos_caller_identity_for_executable, serve_macos_vault};
+pub use vault::{
+    MacosVaultLifecycle, MacosVaultOptions, macos_caller_identity_for_executable,
+    serve_macos_vault, serve_macos_vault_with_lifecycle,
+};
 
 #[cfg(all(feature = "vault-client", target_os = "windows"))]
 pub use vault::{WindowsVaultClient, default_windows_pipe_name};
@@ -77,7 +83,10 @@ pub use vault::{WindowsVaultClient, default_windows_pipe_name};
 pub type NativeVaultClient = WindowsVaultClient;
 
 #[cfg(all(feature = "vault", target_os = "windows"))]
-pub use vault::{WindowsVaultOptions, serve_windows_vault, windows_caller_identity_for_executable};
+pub use vault::{
+    WindowsVaultLifecycle, WindowsVaultOptions, serve_windows_vault,
+    serve_windows_vault_with_lifecycle, windows_caller_identity_for_executable,
+};
 
 #[cfg(feature = "hardware")]
 mod hardware;

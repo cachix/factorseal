@@ -42,6 +42,7 @@ pub(super) struct WorkerControl {
     pub(super) sender: mpsc::SyncSender<Command>,
     join: Mutex<Option<JoinHandle<()>>>,
     sealed: AtomicBool,
+    shutdown_complete: AtomicBool,
 }
 
 impl WorkerControl {
@@ -58,6 +59,7 @@ impl WorkerControl {
                 sender,
                 join: Mutex::new(Some(join)),
                 sealed: AtomicBool::new(false),
+                shutdown_complete: AtomicBool::new(false),
             }),
             Ok(Err(error)) => {
                 let _ = join.join();
@@ -71,19 +73,28 @@ impl WorkerControl {
     }
 
     pub(super) fn shutdown(&self) {
-        if self.sealed.swap(true, Ordering::AcqRel) {
-            return;
+        if !self.sealed.swap(true, Ordering::AcqRel) {
+            let _ = self.sender.send(Command::Shutdown);
         }
-        let _ = self.sender.send(Command::Shutdown);
-        if let Ok(mut join) = self.join.lock()
-            && let Some(handle) = join.take()
-        {
+        let Ok(mut join) = self.join.lock() else {
+            return;
+        };
+        if let Some(handle) = join.take() {
             let _ = handle.join();
         }
+        // Concurrent callers must not observe sealing as complete until the
+        // caller that took the join handle has finished waiting for it. The
+        // join mutex provides that hand-off even when this caller did not
+        // initiate shutdown.
+        self.shutdown_complete.store(true, Ordering::Release);
     }
 
     pub(super) fn is_sealed(&self) -> bool {
         self.sealed.load(Ordering::Acquire)
+    }
+
+    pub(super) fn is_shutdown_complete(&self) -> bool {
+        self.shutdown_complete.load(Ordering::Acquire)
     }
 }
 

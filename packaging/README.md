@@ -228,9 +228,11 @@ because CI cannot demonstrate the native prompt or hardware boundary.
 
 ## Native lifecycle scope
 
-The vault registers native lifecycle monitors on every target: logind with a
-delay inhibitor on Linux, AppKit workspace notifications on macOS, and Windows
-power/session notifications through a hidden top-level window. The supplied
-service definitions also cover logout and orderly stop. Until real installed
-artifacts prove these paths during suspend, shutdown, logout, and session lock,
-the packages remain development artifacts.
+The vault registers native lifecycle monitors on every target: logind lock
+state with a delay inhibitor on Linux, Core Graphics lock state plus AppKit
+workspace notifications on macOS, and Windows power/session notifications
+through a hidden top-level window. The guided physical acceptance runners prove
+screen lock and suspend independently, with a recovery unseal between them.
+The supplied service definitions also cover logout and orderly stop. Until real
+installed artifacts prove the remaining shutdown and logout paths, the packages
+remain development artifacts.

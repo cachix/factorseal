@@ -7,6 +7,7 @@
 
 #![allow(unsafe_code)]
 
+use std::ffi::{c_char, c_void};
 use std::fs::{self, File};
 use std::os::unix::fs::MetadataExt;
 #[cfg(test)]
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use block2::RcBlock;
@@ -27,7 +29,7 @@ use nix::unistd::getuid;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
-    NSWorkspace, NSWorkspaceSessionDidResignActiveNotification,
+    NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidResignActiveNotification,
     NSWorkspaceWillPowerOffNotification, NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{NSDate, NSNotification, NSNotificationCenter, NSRunLoop};
@@ -40,7 +42,8 @@ use super::transport::unix_socket::{
 use super::transport::unix_time;
 use super::transport::{hash_file, hash_open_file, path_io_error};
 use super::{
-    CallerIdentity, CallerIdentityCache, CallerPlatform, VaultError, VaultResult, VaultService,
+    CallerIdentity, CallerIdentityCache, CallerPlatform, LifecycleSignal, VaultError, VaultResult,
+    VaultService,
 };
 #[cfg(test)]
 use super::{MacosVaultClient, VaultClient, VaultRequest};
@@ -55,8 +58,9 @@ pub struct MacosVaultOptions {
     /// Install SIGINT/SIGTERM handlers. Disable only when the embedding
     /// process supplies equivalent lifecycle handling.
     pub install_signal_handler: bool,
-    /// Require AppKit sleep, power-off, and session-switch notifications.
-    /// Disable only when the embedding process supplies equivalent hooks.
+    /// Require Core Graphics lock-state monitoring plus AppKit sleep, wake,
+    /// power-off, and session-switch notifications. Disable only when the
+    /// embedding process supplies equivalent hooks.
     pub install_lifecycle_monitor: bool,
 }
 
@@ -78,13 +82,40 @@ pub fn serve_macos_vault(
     service: &Arc<VaultService>,
     options: &MacosVaultOptions,
 ) -> VaultResult<()> {
+    let lifecycle = options
+        .install_lifecycle_monitor
+        .then(MacosVaultLifecycle::new);
+    if let Some(lifecycle) = lifecycle.as_ref() {
+        lifecycle.arm()?;
+    }
+    let result = serve_macos_vault_with_lifecycle(service, options, lifecycle.as_ref());
+    if let Some(lifecycle) = lifecycle.as_ref() {
+        lifecycle.disarm();
+    }
+    result
+}
+
+/// Serve with lifecycle observers established before vault unsealing.
+#[doc(hidden)]
+pub fn serve_macos_vault_with_lifecycle(
+    service: &Arc<VaultService>,
+    options: &MacosVaultOptions,
+    lifecycle_monitor: Option<&MacosVaultLifecycle>,
+) -> VaultResult<()> {
     validate_socket_options("macOS", &options.socket_path, options.poll_interval)?;
     let (listener, _socket_guard) = bind_listener(&options.socket_path)?;
 
     let stopping = Arc::new(AtomicBool::new(false));
-    let lifecycle_monitor = options
-        .install_lifecycle_monitor
-        .then(|| MacosLifecycleMonitor::new(service, &stopping));
+    if let Some(monitor) = lifecycle_monitor {
+        // Deliver notifications queued during hardware authorization before
+        // exposing the newly opened service.
+        monitor.process();
+        monitor.attach(service)?;
+    } else if options.install_lifecycle_monitor {
+        return Err(VaultError::Protocol(
+            "macOS lifecycle monitor was not prepared".to_owned(),
+        ));
+    }
     if options.install_signal_handler {
         install_shutdown_signal_handler(&stopping)?;
     }
@@ -103,7 +134,7 @@ pub fn serve_macos_vault(
             if let Some(monitor) = lifecycle_monitor.as_ref() {
                 monitor.process();
             }
-            Ok(false)
+            Ok(lifecycle_monitor.is_some_and(MacosVaultLifecycle::requested))
         },
         |stream| caller_identity(stream, &caller_cache),
     );
@@ -111,17 +142,23 @@ pub fn serve_macos_vault(
     served.and(sealed)
 }
 
-struct MacosLifecycleMonitor {
+#[doc(hidden)]
+pub struct MacosVaultLifecycle {
     notification_center: Retained<NSNotificationCenter>,
     observers: Vec<Retained<AnyObject>>,
     run_loop: Retained<NSRunLoop>,
+    signal: Arc<LifecycleSignal>,
+    poll_stopping: Arc<AtomicBool>,
+    poll_thread: Option<JoinHandle<()>>,
 }
 
-impl MacosLifecycleMonitor {
-    fn new(service: &Arc<VaultService>, stopping: &Arc<AtomicBool>) -> Self {
+impl MacosVaultLifecycle {
+    #[must_use]
+    pub fn new() -> Self {
         let workspace = NSWorkspace::sharedWorkspace();
         let notification_center = workspace.notificationCenter();
-        let mut observers = Vec::with_capacity(3);
+        let signal = Arc::new(LifecycleSignal::new());
+        let mut observers = Vec::with_capacity(4);
 
         // SAFETY: These are AppKit-owned static notification names, and the
         // block's NonNull<NSNotification> argument exactly matches the
@@ -131,16 +168,20 @@ impl MacosLifecycleMonitor {
                 NSWorkspaceWillSleepNotification,
                 NSWorkspaceWillPowerOffNotification,
                 NSWorkspaceSessionDidResignActiveNotification,
+                // Resume is a fail-closed fallback if the pre-sleep edge was
+                // lost while AppKit's run loop was unavailable.
+                NSWorkspaceDidWakeNotification,
             ]
         } {
-            let lifecycle_service = Arc::clone(service);
-            let lifecycle_stopping = Arc::clone(stopping);
+            let lifecycle_signal = Arc::clone(&signal);
             let block = RcBlock::new(move |_notification: NonNull<NSNotification>| {
-                // Lock synchronously before returning from the pre-sleep or
-                // session callback; the event-loop poll is not the security
-                // boundary for zeroizing hardware-unwrapped keys.
-                let _ = lifecycle_service.seal();
-                lifecycle_stopping.store(true, Ordering::Release);
+                lifecycle_signal.trigger();
+                if lifecycle_signal.needs_emergency_exit() {
+                    // AppKit provides no suspend-delay token. Termination is
+                    // the only fail-closed path if sealing cannot complete in
+                    // the notification callback.
+                    std::process::abort();
+                }
             });
             let observer = unsafe {
                 notification_center.addObserverForName_object_queue_usingBlock(
@@ -153,26 +194,128 @@ impl MacosLifecycleMonitor {
             observers.push(observer.into());
         }
 
-        Self {
+        let mut lifecycle = Self {
             notification_center,
             observers,
             run_loop: NSRunLoop::currentRunLoop(),
+            signal: Arc::clone(&signal),
+            poll_stopping: Arc::new(AtomicBool::new(false)),
+            poll_thread: None,
+        };
+        if macos_screen_is_locked().unwrap_or(true) {
+            lifecycle.signal.trigger();
         }
+        let poll_stopping = Arc::clone(&lifecycle.poll_stopping);
+        let poll_signal = signal;
+        let poll_thread = std::thread::Builder::new()
+            .name("factorseal-macos-lock-state".to_owned())
+            .spawn(move || {
+                while !poll_stopping.load(Ordering::Acquire) {
+                    if macos_screen_is_locked().unwrap_or(true) {
+                        poll_signal.trigger();
+                        if poll_signal.needs_emergency_exit() {
+                            std::process::abort();
+                        }
+                        break;
+                    }
+                    std::thread::sleep(DEFAULT_POLL_INTERVAL);
+                }
+            })
+            .unwrap_or_else(|_| std::process::abort());
+        lifecycle.poll_thread = Some(poll_thread);
+        lifecycle
     }
 
     fn process(&self) {
         self.run_loop
             .runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.0));
+        if macos_screen_is_locked().unwrap_or(true) {
+            self.signal.trigger();
+        }
+    }
+
+    pub fn arm(&self) -> VaultResult<()> {
+        self.signal.arm()
+    }
+
+    pub fn disarm(&self) {
+        self.signal.disarm();
+    }
+
+    #[must_use]
+    pub fn requested(&self) -> bool {
+        self.signal.requested()
+    }
+
+    fn attach(&self, service: &Arc<VaultService>) -> VaultResult<()> {
+        self.signal.attach(service)
     }
 }
 
-impl Drop for MacosLifecycleMonitor {
+impl Default for MacosVaultLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for MacosVaultLifecycle {
     fn drop(&mut self) {
+        self.poll_stopping.store(true, Ordering::Release);
+        if let Some(thread) = self.poll_thread.take() {
+            let _ = thread.join();
+        }
         for observer in &self.observers {
             // SAFETY: Each retained token was returned by this exact
             // notification center's block-observer registration method.
             unsafe { self.notification_center.removeObserver(observer) };
         }
+    }
+}
+
+// Core Graphics exposes the current login-session dictionary but does not
+// provide a typed Rust binding for its screen-lock entry. Keep the small,
+// read-only Core Foundation bridge here beside the lifecycle integration.
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> *const c_void;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFStringCreateWithCString(
+        allocator: *const c_void,
+        bytes: *const c_char,
+        encoding: u32,
+    ) -> *const c_void;
+    fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
+    fn CFGetTypeID(value: *const c_void) -> usize;
+    fn CFBooleanGetTypeID() -> usize;
+    fn CFBooleanGetValue(value: *const c_void) -> u8;
+    fn CFRelease(value: *const c_void);
+}
+
+fn macos_screen_is_locked() -> Option<bool> {
+    const UTF8: u32 = 0x0800_0100;
+    const KEY: &[u8] = b"CGSSessionScreenIsLocked\0";
+    // SAFETY: Both Copy/Create functions return owned CF objects. The key is
+    // NUL-terminated UTF-8, dictionary lookup does not retain, and the value's
+    // type is checked before calling CFBooleanGetValue.
+    unsafe {
+        let dictionary = CGSessionCopyCurrentDictionary();
+        if dictionary.is_null() {
+            return None;
+        }
+        let key = CFStringCreateWithCString(std::ptr::null(), KEY.as_ptr().cast::<c_char>(), UTF8);
+        if key.is_null() {
+            CFRelease(dictionary);
+            return None;
+        }
+        let value = CFDictionaryGetValue(dictionary, key);
+        let locked = (!value.is_null() && CFGetTypeID(value) == CFBooleanGetTypeID())
+            .then(|| CFBooleanGetValue(value) != 0);
+        CFRelease(key);
+        CFRelease(dictionary);
+        locked.or(Some(false))
     }
 }
 
@@ -352,8 +495,9 @@ mod tests {
         let now = unix_time().unwrap();
         let service =
             Arc::new(VaultService::new(store, now, UnsealLeasePolicy::default()).unwrap());
-        let stopping = Arc::new(AtomicBool::new(false));
-        let monitor = MacosLifecycleMonitor::new(&service, &stopping);
+        let monitor = MacosVaultLifecycle::new();
+        monitor.arm().unwrap();
+        monitor.attach(&service).unwrap();
         // SAFETY: This posts the same AppKit-owned notification name used by
         // registration and carries no dynamically typed object payload.
         unsafe {
@@ -361,7 +505,7 @@ mod tests {
                 .notification_center
                 .postNotificationName_object(NSWorkspaceWillSleepNotification, None);
         }
-        assert!(stopping.load(Ordering::Acquire));
+        assert!(monitor.requested());
         assert!(service.expire_if_needed(now).unwrap());
     }
 

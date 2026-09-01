@@ -31,10 +31,12 @@ preflight.
 ./run-acceptance.sh
 ```
 
-Approve the Touch ID/macOS verification dialogs. The default run tests screen
-lock. Separate sleep and session-switch results are just as simple:
+Approve the Touch ID/macOS verification dialogs. The default run tests both
+screen lock and sleep, with a successful re-unseal between them. A focused
+single-event diagnostic or an additional session-switch result can use:
 
 ```console
+./run-acceptance.sh --event lock
 ./run-acceptance.sh --event sleep
 ./run-acceptance.sh --event switch
 ```
@@ -72,8 +74,8 @@ With no options, the runner finds the bundled Factorseal binary, chooses unique
 test and evidence paths, generates a random test-only factor, and destroys the
 test vault and native test key after a successful run. It never touches an
 existing Factorseal vault. The only manual actions are approving native prompts,
-locking and unlocking the session when instructed, and confirming that the
-prompts appeared.
+locking and unlocking the session, suspending and resuming the machine when
+instructed, and confirming that the prompts appeared.
 
 At the end it prints one line beginning with `PASS` and the path to a single
 `.acceptance.txt` file. Attach only that file to
@@ -106,9 +108,12 @@ creation and unseal; Linux validates the TPM plus nested password. They verify:
    times;
 4. the native transport permits an authorized local CLI to put, get, and delete
    an exact-byte value;
-5. a real OS lock, sleep, shutdown-preparation, or session event causes the
-   live vault process to exit and the socket/pipe to become sealed;
-6. the same vault can be unsealed again and recover the stored value.
+5. a real screen lock causes the live vault process to exit, leaves the
+   socket/pipe sealed, and denies reads;
+6. after a successful recovery unseal, a real suspend/resume independently
+   causes the live vault process to exit, leaves the socket/pipe sealed, and
+   denies reads;
+7. the same vault can be unsealed again and recover the stored value.
 
 Run the script from the account that will own the release installation. The
 zero-option guided mode is preferred for volunteer testing. Release engineers
@@ -131,7 +136,8 @@ password, test secret, or username. Never overwrite an existing record.
 
 Use the package-installed binary and ensure the user is in an active logind
 session with access to the real TPM. The runner asks you to lock the current
-session. It must be invoked from a terminal which survives the lock event.
+session and then suspend the machine. It must be invoked from a terminal which
+survives both lifecycle events.
 
 ```console
 ./run-acceptance.sh \
@@ -154,9 +160,10 @@ coverage only; it does not replace this protocol.
 ## Advanced macOS invocation
 
 Run against `/Applications/Factorseal.app/Contents/MacOS/factorseal` on a
-physical Secure Enclave-capable Mac. The runner asks you to lock/switch away or
-sleep the Mac, then waits for the vault to seal. Separately validate the signed
-and notarized app by logging in with its LaunchAgent enabled and confirming the
+physical Secure Enclave-capable Mac. By default the runner asks you to lock and
+then sleep the Mac, checking a fresh unseal between events. Separately validate
+the signed and notarized app by logging in with its LaunchAgent enabled and
+confirming the
 askpass dialog works without a terminal.
 
 ```console
@@ -164,7 +171,7 @@ askpass dialog works without a terminal.
   --factorseal /Applications/Factorseal.app/Contents/MacOS/factorseal \
   --root "$HOME/Library/Application Support/Factorseal-acceptance" \
   --password-file "$HOME/.factorseal-acceptance-password" \
-  --event lock \
+  --event all \
   --evidence "$HOME/factorseal-macos.acceptance.txt"
 ```
 
@@ -174,9 +181,10 @@ The archive runner prefers its sibling app bundle, then the app installed in
 ## Advanced Windows invocation
 
 Run from an interactive, standard-user PowerShell session on a TPM 2.0 machine.
-The runner asks you to lock the current session, then waits for the vault
-process to exit. It must visibly exercise Windows Hello user verification and
-confirm the platform credential reports PRF support. Verify the candidate's
+The runner asks you to lock the current session and later suspend the machine,
+waiting for the vault process to exit after each event. It must visibly
+exercise Windows Hello user verification and confirm the platform credential
+reports PRF support. Verify the candidate's
 Authenticode status before creating any test state:
 
 ```powershell
@@ -231,7 +239,7 @@ Unregister-ScheduledTask -TaskName Factorseal -Confirm:$false
 Repeat the installed-service observation for sleep, logout/disconnect, and
 shutdown preparation. Shutdown and cross-device copied-vault tests necessarily
 resume after a reboot or on a second physical machine; record them in the
-template rather than treating the guided lock runner as the entire release
+template rather than treating the guided runner as the entire release
 matrix. Also verify that cancelling and allowing the Windows Hello ceremony to
 time out leave the vault sealed.
 
@@ -240,10 +248,11 @@ time out leave the vault sealed.
 For every supported OS/hardware combination, attach the generated evidence
 record, redacted script output, and a completed copy of
 [the release acceptance record](results-template.md) to the release approval.
-The generated file covers the repeatable core test; the template records
-signature verification, installed-service behavior, and the additional
-lifecycle events that require separate runs. A pass requires all lifecycle
-events named above, a verified real backend, an observed native user-verification
-prompt where policy requires one, and a successful re-unseal. Treat a missing
+The generated file covers the repeatable lock-and-suspend core test; the
+template records signature verification, installed-service behavior, and the
+additional logout and shutdown events that require separate runs. A pass
+requires all lifecycle events named above, a verified real backend, an observed
+native user-verification prompt where policy requires one, and a successful
+re-unseal. Treat a missing
 prompt, software fallback, inability to seal, or a failure to re-unseal as a
 release blocker.
