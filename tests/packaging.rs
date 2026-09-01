@@ -155,6 +155,42 @@ fn the_linux_unit_uses_askpass_without_a_password_file() {
 }
 
 #[test]
+fn the_linux_package_registers_an_opt_in_secret_portal_backend() {
+    let descriptor = packaging("linux/factorseal.portal");
+    let activation = packaging("linux/org.freedesktop.impl.portal.desktop.factorseal.service.in");
+    let unit = packaging("linux/factorseal-portal.service.in");
+    let builder = packaging("build-unix.sh");
+    let nix_package = repository_file("nix/package.nix");
+
+    for contents in [&descriptor, &activation, &unit] {
+        assert!(contents.contains("org.freedesktop.impl.portal.desktop.factorseal"));
+    }
+    assert!(descriptor.contains("Interfaces=org.freedesktop.impl.portal.Secret;"));
+    assert!(
+        descriptor.contains("UseIn=factorseal"),
+        "legacy portal selection must not replace the desktop keyring automatically"
+    );
+    assert!(activation.contains("Exec=@INSTALL_DIR@/factorseal portal"));
+    assert!(activation.contains("SystemdService=factorseal-portal.service"));
+    assert!(unit.contains("Type=dbus") && unit.contains("factorseal portal"));
+
+    for destination in [
+        "share/dbus-1/services",
+        "share/systemd/user/factorseal-portal.service",
+        "share/xdg-desktop-portal/portals",
+    ] {
+        assert!(
+            builder.contains(destination),
+            "Linux archive omits {destination}"
+        );
+        assert!(
+            nix_package.contains(destination),
+            "Nix package omits {destination}"
+        );
+    }
+}
+
+#[test]
 fn the_linux_starter_hands_an_overridden_socket_to_the_unit() {
     let starter = packaging("linux/factorseal-start");
 

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.factorseal
+Exec=@INSTALL_DIR@/factorseal portal
+SystemdService=factorseal-portal.service

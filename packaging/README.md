@@ -180,6 +180,28 @@ systemd's agent protocol and the askpass pipe; it is never written to the
 runtime directory. Logout, service stop, termination, or the lease deadline
 seals the vault.
 
+### XDG Secret portal
+
+The Linux package installs a D-Bus-activated
+`org.freedesktop.impl.portal.Secret` backend and its `factorseal.portal`
+descriptor. It is deliberately not selected automatically: changing Secret
+portal backends changes the per-application master key and can make an
+existing sandbox-local keyring unreadable.
+
+After starting with applications that have no data under another Secret
+portal backend, opt in with the desktop-specific `portals.conf` file under
+`$XDG_CONFIG_HOME/xdg-desktop-portal/`:
+
+```ini
+[preferred]
+org.freedesktop.impl.portal.Secret=factorseal;
+```
+
+Restart `xdg-desktop-portal` after changing its configuration. The backend
+returns one durable random master secret per portal-authenticated application
+ID. When the Factorseal agent is sealed or unavailable, retrieval fails rather
+than creating an unprotected fallback key.
+
 ## NixOS module
 
 The repository flake exports `nixosModules.factorseal`. A minimal system import

@@ -1,0 +1,5 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.factorseal
+Interfaces=org.freedesktop.impl.portal.Secret;
+# Avoid legacy desktop-name auto-selection. Users opt in through portals.conf.
+UseIn=factorseal

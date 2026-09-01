@@ -11,6 +11,9 @@ mod commands;
 mod factor;
 #[path = "factorseal/platform.rs"]
 mod platform;
+#[cfg(target_os = "linux")]
+#[path = "factorseal/portal.rs"]
+mod portal;
 #[cfg(feature = "secretspec-provider")]
 #[path = "factorseal/provider.rs"]
 mod provider;
@@ -22,6 +25,8 @@ use commands::{
     seal_vault, set_project_value, show_status,
 };
 use factor::FactorSource;
+#[cfg(target_os = "linux")]
+use platform::native_client;
 
 const MAX_FACTOR_BYTES: u64 = 64 * 1024;
 const MAX_PROJECT_VALUE_BYTES: u64 = 64 * 1024;
@@ -110,6 +115,10 @@ enum CliError {
     #[error("SecretSpec provider protocol failed: {0}")]
     ProviderProtocol(String),
 
+    #[cfg(target_os = "linux")]
+    #[error("{0}")]
+    SecretPortal(String),
+
     #[cfg(feature = "secretspec-provider")]
     #[error("could not publish SecretSpec provider discovery: {0}")]
     SecretSpecDiscovery(String),
@@ -185,6 +194,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Permissions { action } => manage_permissions(&root, socket, factor, &action),
         #[cfg(feature = "secretspec-provider")]
         Command::Provider => provider::serve(&root, socket),
+        #[cfg(target_os = "linux")]
+        Command::Portal => {
+            portal::serve(native_client(&root, socket)?).map_err(CliError::SecretPortal)
+        }
     }
 }
 

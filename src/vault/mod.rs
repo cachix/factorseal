@@ -454,6 +454,7 @@ impl fmt::Display for DeviceKeyId {
 #[non_exhaustive]
 pub enum DocumentKind {
     Authorization,
+    LinuxSecretPortal,
     LinuxSecretService,
     LocalKeyring,
     SecretSpecProject,
@@ -465,6 +466,7 @@ impl DocumentKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Authorization => "authorization",
+            Self::LinuxSecretPortal => "linux-secret-portal",
             Self::LinuxSecretService => "linux-secret-service",
             Self::LocalKeyring => "local-keyring",
             Self::SecretSpecProject => "secretspec-project",
@@ -476,6 +478,7 @@ impl DocumentKind {
     pub(crate) fn parse(value: &str) -> VaultResult<Self> {
         match value {
             "authorization" => Ok(Self::Authorization),
+            "linux-secret-portal" => Ok(Self::LinuxSecretPortal),
             "linux-secret-service" => Ok(Self::LinuxSecretService),
             "local-keyring" => Ok(Self::LocalKeyring),
             "secretspec-project" => Ok(Self::SecretSpecProject),
@@ -486,6 +489,13 @@ impl DocumentKind {
         }
     }
 }
+
+/// Reserved native-protocol namespace used by the XDG Secret portal backend.
+///
+/// The portal executable is the authenticated native client. Sandboxed
+/// application IDs arrive separately from the trusted portal frontend and
+/// become addresses within this isolated document kind.
+pub const LINUX_SECRET_PORTAL_NAMESPACE: &[u8] = b"factorseal/secret-portal/v1";
 
 /// Opaque identifier for one encrypted Automerge document.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]

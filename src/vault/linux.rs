@@ -22,12 +22,11 @@ use nix::unistd::getuid;
 use super::transport::unix_socket::{
     accept_until_sealed, bind_listener, install_shutdown_signal_handler, validate_socket_options,
 };
-#[cfg(test)]
 use super::transport::unix_time;
 use super::transport::{hash_file, hash_open_file, path_io_error};
 use super::{
-    CallerIdentity, CallerIdentityCache, CallerPlatform, LifecycleSignal, VaultError, VaultResult,
-    VaultService,
+    CallerIdentity, CallerIdentityCache, CallerPlatform, GrantPermission,
+    LINUX_SECRET_PORTAL_NAMESPACE, LifecycleSignal, VaultError, VaultResult, VaultService,
 };
 #[cfg(all(test, feature = "hardware"))]
 use super::{LinuxVaultClient, VaultClient, VaultRequest};
@@ -39,6 +38,10 @@ const SESSION_ID_ENVIRONMENT: [&str; 2] = ["FACTORSEAL_SESSION_ID", "XDG_SESSION
 
 /// Linux per-user socket configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "embedders independently select signal, lifecycle, and desktop adapters"
+)]
 pub struct LinuxVaultOptions {
     pub socket_path: PathBuf,
     pub poll_interval: Duration,
@@ -52,6 +55,9 @@ pub struct LinuxVaultOptions {
     /// Publish `org.freedesktop.secrets` on the session bus. Disable only for
     /// embedded and socket-only test servers.
     pub install_secret_service: bool,
+    /// Authorize the separately activated XDG Secret portal broker. Disable
+    /// only for embedded and socket-only test servers.
+    pub install_secret_portal: bool,
 }
 
 impl LinuxVaultOptions {
@@ -63,6 +69,7 @@ impl LinuxVaultOptions {
             install_signal_handler: true,
             install_lifecycle_monitor: true,
             install_secret_service: true,
+            install_secret_portal: true,
         }
     }
 }
@@ -110,6 +117,22 @@ pub fn serve_linux_vault_with_lifecycle(
     }
     if options.install_signal_handler {
         install_shutdown_signal_handler(&stopping)?;
+    }
+
+    if options.install_secret_portal {
+        let executable = std::env::current_exe().map_err(|error| {
+            VaultError::Protocol(format!(
+                "could not resolve Factorseal portal executable: {error}"
+            ))
+        })?;
+        let caller = linux_caller_identity_for_executable(executable)?;
+        service.authorize_secret_portal_namespace(
+            &caller,
+            LINUX_SECRET_PORTAL_NAMESPACE,
+            [GrantPermission::Get, GrantPermission::Put],
+            None,
+            unix_time()?,
+        )?;
     }
 
     // Every exit from the loop discards the hardware-unwrapped keys, including
@@ -634,6 +657,7 @@ mod tests {
             install_signal_handler: false,
             install_lifecycle_monitor: false,
             install_secret_service: false,
+            install_secret_portal: false,
         };
         assert!(serve_linux_vault(&service, &options).is_err());
         assert!(
@@ -649,6 +673,7 @@ mod tests {
         assert!(options.install_signal_handler);
         assert!(options.install_lifecycle_monitor);
         assert!(options.install_secret_service);
+        assert!(options.install_secret_portal);
     }
 
     #[test]
@@ -702,6 +727,7 @@ mod tests {
             install_signal_handler: false,
             install_lifecycle_monitor: false,
             install_secret_service: false,
+            install_secret_portal: false,
         };
         let server_service = Arc::clone(&service);
         let server = std::thread::spawn(move || serve_linux_vault(&server_service, &options));

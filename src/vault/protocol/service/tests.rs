@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::*;
+use crate::vault::LINUX_SECRET_PORTAL_NAMESPACE;
 use crate::{DocumentKind, MAX_LIST_PAGE_SIZE, SecretSpecAddress, SecretSpecCoordinates, Vault};
 
 fn service(now: u64, policy: UnsealLeasePolicy) -> (tempfile::TempDir, VaultService) {
@@ -75,6 +76,61 @@ fn typed_actions_select_semantic_document_kinds() {
         scope_action(VaultAction::Status).scope,
         DocumentKind::LocalKeyring
     );
+    assert_eq!(
+        scope_action(VaultAction::Get {
+            namespace: LINUX_SECRET_PORTAL_NAMESPACE.to_vec(),
+            address: WireSecretAddress::new("application/dev.factorseal.Test", None),
+        })
+        .scope,
+        DocumentKind::LinuxSecretPortal
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn secret_portal_grant_authorizes_only_its_reserved_document_kind() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let caller = caller();
+    service
+        .authorize_secret_portal_namespace(
+            &caller,
+            LINUX_SECRET_PORTAL_NAMESPACE,
+            [GrantPermission::Get, GrantPermission::Put],
+            None,
+            100,
+        )
+        .unwrap();
+    let address = WireSecretAddress::new("application/dev.factorseal.Test", None);
+
+    let put = service.handle(
+        &caller,
+        VaultRequest::new(VaultAction::Put {
+            namespace: LINUX_SECRET_PORTAL_NAMESPACE.to_vec(),
+            address: address.clone(),
+            value: WireSecret::new(b"portal-key".to_vec()),
+            evict_at: None,
+        })
+        .unwrap(),
+        100,
+    );
+    assert!(matches!(put.result, Ok(VaultResponseBody::Stored)));
+
+    let local = service.handle(
+        &caller,
+        VaultRequest::new(VaultAction::Get {
+            namespace: b"factorseal/other-keyring/v1".to_vec(),
+            address,
+        })
+        .unwrap(),
+        100,
+    );
+    assert!(matches!(
+        local.result,
+        Err(VaultResponseError {
+            code: VaultResponseErrorCode::AuthorizationRequired,
+            ..
+        })
+    ));
 }
 
 #[test]

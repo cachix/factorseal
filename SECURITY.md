@@ -131,5 +131,8 @@ resolution, so a reused process ID cannot inherit another process's grant.
   platform signing primitive.
 - Hardware binding cannot prevent an already authorized or compromised client
   from exfiltrating a secret returned to it.
+- The XDG Secret portal returns a per-application master key. A sandboxed
+  application may retain that key after Factorseal seals and can continue
+  opening its own encrypted local keyring until the process discards the key.
 - Losing the platform keys loses the protected data. Recovery is not
   implemented.

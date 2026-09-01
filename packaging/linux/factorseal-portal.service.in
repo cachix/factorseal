@@ -1,0 +1,19 @@
+[Unit]
+Description=Factorseal XDG Secret portal backend
+Documentation=https://github.com/domenkozar/factorseal
+Wants=dbus.socket
+After=dbus.socket
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.factorseal
+ExecStart=@INSTALL_DIR@/factorseal portal
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

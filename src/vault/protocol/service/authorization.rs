@@ -152,6 +152,28 @@ impl VaultService {
         )
     }
 
+    /// Persist approval for the built-in XDG Secret portal broker.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn authorize_secret_portal_namespace(
+        &self,
+        caller: &CallerIdentity,
+        namespace: &[u8],
+        permissions: impl IntoIterator<Item = GrantPermission>,
+        expires_at: Option<u64>,
+        now: u64,
+    ) -> VaultResult<()> {
+        self.authorize(
+            caller,
+            AuthorizationTarget::Namespace {
+                scope: DocumentKind::LinuxSecretPortal,
+                namespace,
+            },
+            permissions,
+            expires_at,
+            now,
+        )
+    }
+
     /// Persist approval for a disposable application-cache namespace.
     pub fn authorize_cache_namespace(
         &self,

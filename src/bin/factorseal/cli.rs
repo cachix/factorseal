@@ -175,6 +175,11 @@ pub(super) enum Command {
     /// Serve the SecretSpec external-provider protocol over standard I/O.
     #[cfg(feature = "secretspec-provider")]
     Provider,
+
+    /// Serve the XDG Secret portal backend on the Linux session bus.
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    Portal,
 }
 
 #[derive(Debug, Subcommand)]

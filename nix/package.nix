@@ -50,6 +50,17 @@ rustPlatform.buildRustPackage {
       factorseal.service --replace-fail "@INSTALL_DIR@" "$out/bin"
     install -Dm0644 factorseal.service \
       "$out/share/systemd/user/factorseal.service"
+    substitute ${../packaging/linux/factorseal-portal.service.in} \
+      factorseal-portal.service --replace-fail "@INSTALL_DIR@" "$out/bin"
+    install -Dm0644 factorseal-portal.service \
+      "$out/share/systemd/user/factorseal-portal.service"
+    substitute ${../packaging/linux/org.freedesktop.impl.portal.desktop.factorseal.service.in} \
+      org.freedesktop.impl.portal.desktop.factorseal.service \
+      --replace-fail "@INSTALL_DIR@" "$out/bin"
+    install -Dm0644 org.freedesktop.impl.portal.desktop.factorseal.service \
+      "$out/share/dbus-1/services/org.freedesktop.impl.portal.desktop.factorseal.service"
+    install -Dm0644 ${../packaging/linux/factorseal.portal} \
+      "$out/share/xdg-desktop-portal/portals/factorseal.portal"
     patchShebangs "$out/bin/factorseal-start"
 
     runHook postInstall
