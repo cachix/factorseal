@@ -189,6 +189,47 @@ fn agent_policy_and_root_are_explicitly_configurable() {
 }
 
 #[test]
+fn desktop_launch_options_are_explicitly_configurable() {
+    let cli = Cli::try_parse_from([
+        "factorseal",
+        "--root",
+        "/tmp/factorseal-desktop-test",
+        "--socket",
+        "/tmp/factorseal-desktop.sock",
+        "desktop",
+        "--background",
+        "--idle-seconds",
+        "30",
+        "--maximum-seconds",
+        "600",
+    ])
+    .unwrap();
+    assert_eq!(
+        cli.root.unwrap(),
+        PathBuf::from("/tmp/factorseal-desktop-test")
+    );
+    assert_eq!(
+        cli.socket.unwrap(),
+        PathBuf::from("/tmp/factorseal-desktop.sock")
+    );
+    assert!(matches!(
+        cli.command,
+        Command::Desktop {
+            background: true,
+            idle_seconds: 30,
+            maximum_seconds: 600,
+        }
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn secret_portal_backend_is_an_internal_cli_command() {
+    let cli = Cli::try_parse_from(["factorseal", "portal"]).unwrap();
+    assert!(matches!(cli.command, Command::Portal));
+}
+
+#[test]
 fn agent_waits_for_initialization_metadata() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("missing-vault");

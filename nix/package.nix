@@ -16,6 +16,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.lock
       ../Cargo.toml
       ../crates
+      ../factorseal-desktop
       ../src
     ];
   };

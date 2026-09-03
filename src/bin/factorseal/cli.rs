@@ -77,6 +77,21 @@ pub(super) enum Command {
         maximum_seconds: u64,
     },
 
+    /// Open Factorseal Desktop, the graphical vault host and permission manager.
+    Desktop {
+        /// Start in the tray without opening the main window.
+        #[arg(long)]
+        background: bool,
+
+        /// Idle seconds before hardware-unwrapped keys are discarded.
+        #[arg(long, default_value_t = 300)]
+        idle_seconds: u64,
+
+        /// Absolute maximum seconds for one unseal lease.
+        #[arg(long, default_value_t = 28_800)]
+        maximum_seconds: u64,
+    },
+
     /// Print validated non-secret vault metadata without unsealing.
     Status,
 

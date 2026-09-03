@@ -81,6 +81,9 @@ enum CliError {
     #[error("could not identify the Factorseal executable: {0}")]
     CurrentExecutable(String),
 
+    #[error("could not launch Factorseal Desktop: {0}")]
+    DesktopLaunch(String),
+
     #[error("interactive permission prompting requires terminal input and error output")]
     ApprovalPromptRequiresTerminal,
 
@@ -159,6 +162,11 @@ fn run(cli: Cli) -> Result<(), CliError> {
             },
             unlock.as_ref(),
         ),
+        Command::Desktop {
+            background,
+            idle_seconds,
+            maximum_seconds,
+        } => commands::launch_desktop(&root, socket, background, idle_seconds, maximum_seconds),
         Command::Status => show_status(&root, socket),
         Command::Seal => seal_vault(&root, socket),
         Command::Set {

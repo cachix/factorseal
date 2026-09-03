@@ -25,6 +25,7 @@ let
 
       services.factorseal = {
         enable = true;
+        mode = "agent";
         inherit package;
         users = [ "alice" ];
         inherit idleSeconds;

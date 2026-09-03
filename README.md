@@ -101,6 +101,23 @@ Start an unsealed service in one terminal:
 $ factorseal agent
 ```
 
+Or use the separately packaged graphical host:
+
+```console
+$ factorseal desktop
+```
+
+Desktop initializes and unseals the same vault in-process, then hosts the same
+authenticated endpoint and Linux `org.freedesktop.secrets` adapter. It is an
+alternative to `factorseal agent`, not a client of it, so do not configure both
+to autostart. Repeated Desktop launches activate the existing per-vault
+instance. On Linux, the Desktop package registers D-Bus activation for
+`org.freedesktop.secrets`: a keyring call made while sealed launches or
+activates Desktop, and the bus holds that call until Desktop unseals and claims
+the service name (subject to the calling application's D-Bus timeout). Native
+socket and SecretSpec clients still require Desktop to be unsealed first.
+Sealing removes the native service endpoint and all unwrapped vault keys.
+
 If the vault does not exist yet, `factorseal agent` stays alive, logs the
 initialization instruction, and continues automatically after `factorseal init`
 creates it. Packaged background launchers use this same behavior on every
@@ -425,11 +442,13 @@ macOS, and Windows.
 
 ### Linux Secret Service
 
-While unsealed on Linux, Factorseal can own `org.freedesktop.secrets` on the
-session bus and back its default collection with the same encrypted vault. Do
-not run another provider that owns that bus name, such as GNOME Keyring or oo7,
-at the same time. macOS Keychain and Windows Credential Manager remain separate
-platform interfaces.
+On Linux, Factorseal Desktop registers `org.freedesktop.secrets` for D-Bus
+activation. A keyring request can therefore launch or activate the sealed
+Desktop; after interactive unsealing, the existing Secret Service adapter owns
+the name and handles the queued request. The caller's D-Bus timeout still
+bounds how long authentication may take. Do not run another provider that owns
+that bus name, such as GNOME Keyring or oo7, at the same time. macOS Keychain
+and Windows Credential Manager remain separate platform interfaces.
 
 ## Vault lifecycle
 

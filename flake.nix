@@ -21,6 +21,7 @@
         {
           default = pkgs.callPackage ./nix/package.nix { };
           factorseal = self.packages.${system}.default;
+          factorseal-desktop = pkgs.callPackage ./nix/desktop-package.nix { };
         }
       );
 
@@ -69,6 +70,10 @@
         {
           inherit package;
           nixos-module = import ./nix/tests/factorseal.nix {
+            inherit pkgs;
+            module = self.nixosModules.default;
+          };
+          nixos-module-desktop = import ./nix/tests/factorseal-desktop-eval.nix {
             inherit pkgs;
             module = self.nixosModules.default;
           };

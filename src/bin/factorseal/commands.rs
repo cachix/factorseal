@@ -6,6 +6,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::{BufRead, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -48,6 +49,7 @@ const VAULT_METADATA_FILE: &str = "factorseal.json";
 #[cfg(feature = "secretspec-provider")]
 const SECRETSPEC_CLAIM_FILE: &str = "factorseal.secretspec.json";
 const INITIALIZATION_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const DESKTOP_EXECUTABLE_ENV: &str = "FACTORSEAL_DESKTOP_EXECUTABLE";
 
 #[cfg(feature = "secretspec-provider")]
 #[derive(Serialize)]
@@ -745,6 +747,76 @@ pub(super) fn run_agent(
     })();
     lifecycle.disarm();
     result
+}
+
+/// Launch the separately packaged graphical application without linking its
+/// UI stack into the headless Factorseal executable.
+pub(super) fn launch_desktop(
+    root: &Path,
+    socket: Option<&Path>,
+    background: bool,
+    idle_seconds: u64,
+    maximum_seconds: u64,
+) -> Result<(), CliError> {
+    if idle_seconds == 0 || maximum_seconds == 0 || idle_seconds > maximum_seconds {
+        return Err(CliError::DesktopLaunch(
+            "idle and maximum lease durations must be positive, and idle must not exceed maximum"
+                .to_owned(),
+        ));
+    }
+
+    let executable = desktop_executable()?;
+    let mut command = ProcessCommand::new(&executable);
+    command
+        .arg("--root")
+        .arg(root)
+        .arg("--idle-seconds")
+        .arg(idle_seconds.to_string())
+        .arg("--maximum-seconds")
+        .arg(maximum_seconds.to_string());
+    if let Some(socket) = socket {
+        command.arg("--socket").arg(socket);
+    }
+    if background {
+        command.arg("--background");
+    }
+    command
+        .spawn()
+        .map_err(|error| CliError::DesktopLaunch(format!("{}: {error}", executable.display())))?;
+    Ok(())
+}
+
+fn desktop_executable() -> Result<PathBuf, CliError> {
+    if let Some(path) = std::env::var_os(DESKTOP_EXECUTABLE_ENV) {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+        return Err(CliError::DesktopLaunch(format!(
+            "{DESKTOP_EXECUTABLE_ENV} must be an absolute path"
+        )));
+    }
+
+    let current =
+        std::env::current_exe().map_err(|error| CliError::DesktopLaunch(error.to_string()))?;
+    let name = if cfg!(windows) {
+        "factorseal-desktop.exe"
+    } else {
+        "factorseal-desktop"
+    };
+    let sibling = current
+        .parent()
+        .ok_or_else(|| {
+            CliError::DesktopLaunch("the Factorseal executable has no parent directory".to_owned())
+        })?
+        .join(name);
+    if sibling.is_file() {
+        return Ok(sibling);
+    }
+    Err(CliError::DesktopLaunch(format!(
+        "{name} is not installed beside {}; install Factorseal Desktop or set {DESKTOP_EXECUTABLE_ENV}",
+        current.display()
+    )))
 }
 
 #[cfg(feature = "secretspec-provider")]

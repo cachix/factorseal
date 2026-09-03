@@ -27,6 +27,13 @@ The archives include the endpoint code. `factorseal init` publishes the
 minimal `factorseal.secretspec.json` claim automatically, and the agent
 refreshes its canonical executable path after packaged upgrades.
 
+The Linux Desktop package additionally installs
+`org.freedesktop.secrets.service` in the session-bus activation directory.
+Its foreground activation command opens a new Desktop or signals the existing
+per-vault instance. The activation helper remains alive until the unsealed
+Secret Service owns the name, preventing the bus from treating a successful
+handoff to an already-running Desktop as an exited activation process.
+
 Official macOS releases still require installer signing and notarization.
 Directly distributed Windows ZIP releases require platform signing credentials;
 the Microsoft Store signs an accepted MSIX. Linux release jobs must
@@ -219,6 +226,33 @@ cannot read that link on the tested NixOS baseline. The unit still applies
 no-new-privileges, W^X memory, native-architecture, Unix-socket-only, SUID/SGID,
 realtime, and restrictive-umask controls. Restoring mount isolation requires a
 different verifiable IPC application identity or a broker architecture.
+
+The module has two mutually exclusive host modes. The default
+`services.factorseal.mode = "agent"` installs the headless systemd user unit.
+For a graphical session, use:
+
+```nix
+services.factorseal = {
+  enable = true;
+  mode = "desktop";
+  users = [ "alice" ];
+  desktop.autostart = true;
+};
+```
+
+Desktop mode supplies `org.freedesktop.secrets`. On desktops that enable GNOME
+Keyring, explicitly turn off that competing provider so the bus name has one
+owner:
+
+```nix
+services.gnome.gnome-keyring.enable = lib.mkForce false;
+```
+
+Desktop mode installs both packages, exports the exact Desktop executable path
+used by `factorseal desktop`, and creates an XDG autostart entry. It does not
+install the competing headless user unit or use systemd askpass; the Desktop
+process owns password/biometric prompting and, once unsealed, publishes the
+same native Factorseal endpoint and Linux Secret Service adapter.
 
 The desktop adapter uses `hardwareseal` directly and rejects software fallback.
 Linux biometric policies fail closed; Windows biometric policies require a

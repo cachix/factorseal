@@ -8,7 +8,11 @@ license = "Apache-2.0"
 repository = "https://github.com/domenkozar/factorseal"
 
 [workspace]
-members = ["crates/hardwareseal", "crates/secret-service-protocol"]
+members = [
+    "crates/hardwareseal",
+    "crates/secret-service-protocol",
+    "factorseal-desktop",
+]
 resolver = "2"
 
 [features]
@@ -156,3 +160,12 @@ missing_errors_doc = "allow"
 
 [profile.test]
 debug = 0
+
+# Password stretching intentionally uses production-strength Argon2 settings
+# in the desktop app. Optimize only its implementation in development builds
+# so local UI testing does not turn that security cost into a multi-second wait.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

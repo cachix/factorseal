@@ -23,6 +23,15 @@ fn packaging_path(relative: &str) -> PathBuf {
         .join(relative)
 }
 
+#[test]
+fn desktop_secret_service_activation_targets_the_graphical_host() {
+    let activation = packaging("linux/org.freedesktop.secrets.service.in");
+    assert!(activation.contains("[D-BUS Service]"));
+    assert!(activation.contains("Name=org.freedesktop.secrets"));
+    assert!(activation.contains("Exec=@DESKTOP_EXECUTABLE@ --keyring-activation"));
+    assert!(!activation.contains("--background"));
+}
+
 fn repository_file(relative: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
     std::fs::read_to_string(&path)
