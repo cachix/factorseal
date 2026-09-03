@@ -11,11 +11,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
-    DocumentKind, GrantPermission, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
-    PermissionChange, PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind,
-    UnlockGroup, UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient,
-    VaultCryptoProfile, VaultError, VaultMetadata, VaultRequest, VaultResponseBody,
-    VaultResponseErrorCode, VaultService,
+    DocumentKind, GrantPermission, HistoryEntry, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
+    MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionState, SecretSpecAddress,
+    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealLeasePolicy,
+    UnsealedVault, Vault, VaultAction, VaultClient, VaultCryptoProfile, VaultError, VaultMetadata,
+    VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -30,7 +30,8 @@ use super::{CLI_CONTROL_NAMESPACE, CliError, MAX_PROJECT_VALUE_BYTES, PROJECT_PE
 #[derive(Serialize)]
 struct Status<'a> {
     path: String,
-    vault_id: String,
+    installation_id: String,
+    device_vault_id: String,
     device_key_id: String,
     public_signing_key: String,
     actor_id: String,
@@ -39,7 +40,6 @@ struct Status<'a> {
     cryptographic_profile: &'a str,
     unlock_policy: Vec<String>,
     preferred_unlock_group: String,
-    key_epoch: u64,
     created_at: u64,
     state: &'static str,
 }
@@ -96,8 +96,9 @@ pub(super) fn initialize(
         };
     }
     println!(
-        "Initialized Factorseal vault {} at {} using {}",
-        device.vault_id(),
+        "Initialized Factorseal installation {} with device vault {} at {} using {}",
+        device.installation_id(),
+        device.device_vault_id(),
         root.display(),
         device.hardware_backend()
     );
@@ -169,7 +170,8 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
     let state = live_state(root, socket, &device);
     let status = Status {
         path: root.display().to_string(),
-        vault_id: device.vault_id().to_string(),
+        installation_id: device.installation_id().to_string(),
+        device_vault_id: device.device_vault_id().to_string(),
         device_key_id: device.device_key_id().to_string(),
         public_signing_key: hex::encode(device.public_signing_key()),
         actor_id: hex::encode(device.actor_id()),
@@ -183,7 +185,6 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
             .map(ToString::to_string)
             .collect(),
         preferred_unlock_group: device.preferred_unlock_group().to_string(),
-        key_epoch: device.key_epoch(),
         created_at: device.created_at(),
         state,
     };
@@ -251,10 +252,12 @@ fn live_state(root: &Path, socket: Option<&Path>, device: &VaultMetadata) -> &'s
     match client.request(&request) {
         Ok(response) => match response.result {
             Ok(VaultResponseBody::Status {
-                vault_id,
+                installation_id,
+                device_vault_id,
                 device_key_id,
                 ..
-            }) if vault_id == device.vault_id().to_string()
+            }) if installation_id == device.installation_id().to_string()
+                && device_vault_id == device.device_vault_id().to_string()
                 && device_key_id == device.device_key_id().to_string() =>
             {
                 "unsealed"
@@ -377,6 +380,80 @@ pub(super) fn list_project_addresses(
     let client = native_client(root, socket)?;
     let addresses = fetch_project_addresses(&client, project)?;
     write_metadata(&mut std::io::stdout().lock(), &addresses, json)
+}
+
+pub(super) fn list_project_history(
+    root: &Path,
+    socket: Option<&Path>,
+    project: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let client = native_client(root, socket)?;
+    let entries = fetch_project_history(&client, project)?;
+    write_metadata(&mut std::io::stdout().lock(), &entries, json)
+}
+
+/// Follow every history page for one project. Entries arrive newest first
+/// with strictly decreasing sequence numbers, and a cursor that fails to move
+/// below the last entry is a protocol error rather than an endless loop.
+pub(super) fn fetch_project_history(
+    client: &dyn VaultClient,
+    project: &str,
+) -> Result<Vec<HistoryEntry>, CliError> {
+    let mut entries: Vec<HistoryEntry> = Vec::new();
+    let mut cursor: Option<u64> = None;
+    loop {
+        let request = VaultRequest::new(VaultAction::ListProjectHistory {
+            project: project.to_owned(),
+            address: None,
+            cursor,
+            limit: MAX_HISTORY_PAGE_SIZE,
+        })?;
+        let response = client.request(&request)?;
+        let (page, next_cursor) = match response.result {
+            Ok(VaultResponseBody::History {
+                entries,
+                next_cursor,
+            }) => (entries, next_cursor),
+            Ok(_) => {
+                return Err(VaultError::Protocol(
+                    "vault returned an unexpected history response".to_owned(),
+                )
+                .into());
+            }
+            Err(error) => return Err(vault_request_error(error)),
+        };
+        if page.len() > usize::from(MAX_HISTORY_PAGE_SIZE) {
+            return Err(VaultError::Protocol("history page is too large".to_owned()).into());
+        }
+        let page_is_empty = page.is_empty();
+        for entry in page {
+            if !entry.is_supported()
+                || entries
+                    .last()
+                    .is_some_and(|previous| previous.seq <= entry.seq)
+                || cursor.is_some_and(|cursor| entry.seq >= cursor)
+            {
+                return Err(VaultError::Protocol(
+                    "history response is not strictly ordered".to_owned(),
+                )
+                .into());
+            }
+            entries.push(entry);
+        }
+        let Some(next) = next_cursor else {
+            return Ok(entries);
+        };
+        if page_is_empty
+            || entries.last().is_none_or(|last| next != last.seq)
+            || cursor.is_some_and(|cursor| next >= cursor)
+        {
+            return Err(
+                VaultError::Protocol("vault returned a stalled history cursor".to_owned()).into(),
+            );
+        }
+        cursor = Some(next);
+    }
 }
 
 pub(super) fn fetch_projects(client: &dyn VaultClient) -> Result<Vec<String>, CliError> {

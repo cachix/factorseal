@@ -19,6 +19,7 @@ use crate::{EncryptionAlgorithm, Error, Result};
 pub(crate) const KEY_BYTES: usize = 32;
 pub(crate) const NONCE_BYTES: usize = crate::algorithm::AES_GCM_NONCE_BYTES;
 
+#[cfg(feature = "vault-store")]
 pub(crate) const CURRENT_ENCRYPTION_ALGORITHM: EncryptionAlgorithm = EncryptionAlgorithm::Aes256Gcm;
 
 pub(crate) struct EncryptedPayload {

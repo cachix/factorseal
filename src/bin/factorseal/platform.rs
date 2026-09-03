@@ -84,7 +84,9 @@ pub(super) fn native_client(
         ));
     }
     let device = Vault::inspect(root)?;
-    Ok(WindowsVaultClient::for_vault(device.vault_id()))
+    Ok(WindowsVaultClient::for_installation(
+        device.installation_id(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -122,7 +124,7 @@ pub(super) fn serve_vault(
     lifecycle: &NativeVaultLifecycle,
 ) -> Result<(), CliError> {
     let pipe_name = socket.map_or_else(
-        || default_windows_pipe_name(device.vault_id()),
+        || default_windows_pipe_name(device.installation_id()),
         |path| path.to_string_lossy().into_owned(),
     );
     serve_windows_vault_with_lifecycle(

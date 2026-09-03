@@ -4,12 +4,15 @@ use std::io;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "vault-store")]
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::vault::{SecretAddress, SecretSpecAddress, VaultError, VaultResult};
+use crate::vault::encoding::base64_bytes;
+use crate::vault::{HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult};
 
-pub(super) const PROTOCOL_VERSION: u8 = 7;
+// Version 9 adds history listing and carries secret bytes as base64.
+pub(super) const PROTOCOL_VERSION: u8 = 9;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -19,6 +22,13 @@ pub const MAX_PERMISSION_WAIT_MS: u64 = 5_000;
 /// Eight complete native SecretSpec addresses still fit below the one-MiB
 /// response bound even when every address component requires JSON escaping.
 pub const MAX_LIST_PAGE_SIZE: u16 = 8;
+/// Maximum number of history entries returned by one history request.
+///
+/// An entry carries a full native address, a caller principal with three
+/// identity components, and bounded declared context. Four such entries still
+/// fit below the one-MiB response bound when every string requires JSON
+/// escaping.
+pub const MAX_HISTORY_PAGE_SIZE: u16 = 4;
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_APPLICATION_COMPONENT_BYTES: usize = 4 * 1024;
 const MAX_APPLICATION_BASE_DIR_BYTES: usize = 32 * 1024;
@@ -184,10 +194,10 @@ impl WireSecretAddress {
     }
 }
 
-/// Secret bytes that wipe their allocation on drop.
+/// Secret bytes that wipe their allocation on drop. They travel as base64.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct WireSecret(Vec<u8>);
+pub struct WireSecret(#[serde(with = "base64_bytes")] Vec<u8>);
 
 impl fmt::Debug for WireSecret {
     /// Requests and responses carry this type and derive `Debug`, so a
@@ -496,6 +506,37 @@ pub enum VaultAction {
         cursor: Option<String>,
         limit: u16,
     },
+    /// List recorded changes in one durable local-keyring namespace, newest
+    /// first, without returning values.
+    ListHistory {
+        namespace: Vec<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<WireSecretAddress>,
+        /// Continue below this sequence number.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<u64>,
+        limit: u16,
+    },
+    /// List recorded changes in one durable project, newest first, without
+    /// returning values.
+    ListProjectHistory {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<SecretSpecAddress>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<u64>,
+        limit: u16,
+    },
+    /// List recorded changes in one disposable cache project, newest first,
+    /// without returning values.
+    ListCacheHistory {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<SecretSpecAddress>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<u64>,
+        limit: u16,
+    },
     /// Read from the SecretSpec provider cache.
     GetCache {
         project: String,
@@ -552,6 +593,9 @@ pub enum VaultAction {
 }
 
 impl VaultAction {
+    // Every action is validated in one exhaustive match so a new variant
+    // cannot be forgotten.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
             Self::Status | Self::ListPermissions => Ok(()),
@@ -623,6 +667,34 @@ impl VaultAction {
                     validate_address_cursor(cursor)?;
                 }
                 Ok(())
+            }
+            Self::ListHistory {
+                namespace,
+                address,
+                limit,
+                ..
+            } => {
+                validate_namespace(namespace)?;
+                validate_history_limit(*limit)?;
+                address.as_ref().map_or(Ok(()), WireSecretAddress::validate)
+            }
+            Self::ListProjectHistory {
+                project,
+                address,
+                limit,
+                ..
+            }
+            | Self::ListCacheHistory {
+                project,
+                address,
+                limit,
+                ..
+            } => {
+                validate_history_limit(*limit)?;
+                match address {
+                    Some(address) => validate_project_address(project, address),
+                    None => validate_project(project),
+                }
             }
             Self::Mutate {
                 namespace,
@@ -741,7 +813,8 @@ pub enum VaultResponseBody {
     /// live-state lock, which fails closed once the lease expires or the vault
     /// seals.
     Status {
-        vault_id: String,
+        installation_id: String,
+        device_vault_id: String,
         device_key_id: String,
         hardware_backend: String,
         idle_deadline: u64,
@@ -767,6 +840,13 @@ pub enum VaultResponseBody {
         addresses: Vec<SecretSpecAddress>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
+    },
+    /// Recorded changes, newest first. Entries never carry a value.
+    History {
+        entries: Vec<HistoryEntry>,
+        /// Sequence number to continue below, absent on the last page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<u64>,
     },
     Sealed,
     Permissions {
@@ -914,6 +994,15 @@ fn validate_list_limit(limit: u16) -> VaultResult<()> {
     if !(1..=MAX_LIST_PAGE_SIZE).contains(&limit) {
         return Err(VaultError::Protocol(format!(
             "list limit must be between one and {MAX_LIST_PAGE_SIZE}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_history_limit(limit: u16) -> VaultResult<()> {
+    if !(1..=MAX_HISTORY_PAGE_SIZE).contains(&limit) {
+        return Err(VaultError::Protocol(format!(
+            "history limit must be between one and {MAX_HISTORY_PAGE_SIZE}"
         )));
     }
     Ok(())

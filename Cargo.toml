@@ -27,8 +27,8 @@ vault-store = [
     "dep:tokio",
     "dep:turso",
 ]
-# The legacy full desktop vault feature remains the default and retains its
-# public API. Mobile embedders use `vault-store` + `key-protection` instead.
+# The full desktop vault feature remains the default. Mobile embedders use
+# `vault-store` + `key-protection` instead.
 vault = [
     "vault-client",
     "vault-store",
@@ -61,6 +61,7 @@ key-protection = [
     "dep:aes-gcm",
     "dep:argon2",
     "dep:ghash",
+    "dep:hmac",
     "dep:ml-dsa",
     "dep:nt-token",
     "dep:pbkdf2",

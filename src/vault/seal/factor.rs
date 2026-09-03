@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 #[cfg(feature = "key-protection")]
-use super::super::VaultId;
-#[cfg(feature = "key-protection")]
-use super::super::signature::SIGNING_SEED_BYTES;
+use super::super::InstallationId;
 use super::super::{VaultError, VaultResult};
 
 #[cfg(feature = "key-protection")]
@@ -35,12 +33,7 @@ const PBKDF2_ITERATIONS: u32 = 1_000;
 const MIN_PBKDF2_ITERATIONS: u32 = 1_000;
 const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
 #[cfg(feature = "key-protection")]
-pub(super) type ProtectedKeyPayloads = (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>, NestedProtection);
-#[cfg(feature = "key-protection")]
-pub(super) type UnsealedVaultKeys = (
-    Zeroizing<[u8; KEY_BYTES]>,
-    Zeroizing<[u8; SIGNING_SEED_BYTES]>,
-);
+pub(super) type ProtectedKeyPayload = (Zeroizing<Vec<u8>>, NestedProtection);
 
 /// Parameters of the secret-bearing factor nested inside the platform
 /// hardware wrapping.
@@ -75,15 +68,14 @@ impl FactorParameters {
     }
 }
 
-/// The nested factor recorded for a vault, with the nonces that
-/// bind its derived key to the wrapped data key and signing seed.
+/// The nested factor recorded for an installation, with the nonce that binds
+/// its derived key to the wrapped root key.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NestedProtection {
     factor: FactorParameters,
     encryption_algorithm: crate::EncryptionAlgorithm,
-    data_key_nonce: [u8; crate::algorithm::AES_GCM_NONCE_BYTES],
-    signing_seed_nonce: [u8; crate::algorithm::AES_GCM_NONCE_BYTES],
+    vault_root_key_nonce: [u8; crate::algorithm::AES_GCM_NONCE_BYTES],
 }
 
 impl NestedProtection {
@@ -176,35 +168,25 @@ impl std::fmt::Debug for UnsealFactor<'_> {
 
 #[cfg(feature = "key-protection")]
 pub(super) fn protect_with_factor(
-    vault_id: VaultId,
-    data_key: &[u8; KEY_BYTES],
-    signing_seed: &[u8; SIGNING_SEED_BYTES],
+    installation_id: InstallationId,
+    vault_root_key: &[u8; KEY_BYTES],
     factor: UnsealFactor<'_>,
     profile: super::VaultCryptoProfile,
-) -> VaultResult<ProtectedKeyPayloads> {
+) -> VaultResult<ProtectedKeyPayload> {
     let parameters = new_factor_parameters(factor, profile)?;
     let factor_key = derive_factor_key(factor, &parameters)?;
-    let data = crate::crypto::encrypt(
+    let root = crate::crypto::encrypt(
         &factor_key,
-        &factor_aad(vault_id, b"data-encryption-key"),
-        data_key,
+        &factor_aad(installation_id, b"vault-root-key"),
+        vault_root_key,
     )
     .map_err(|_| VaultError::Crypto)?;
-    let signing = crate::crypto::encrypt(
-        &factor_key,
-        &factor_aad(vault_id, b"device-signing-seed"),
-        signing_seed,
-    )
-    .map_err(|_| VaultError::Crypto)?;
-    debug_assert_eq!(data.algorithm, signing.algorithm);
     Ok((
-        Zeroizing::new(data.ciphertext),
-        Zeroizing::new(signing.ciphertext),
+        Zeroizing::new(root.ciphertext),
         NestedProtection {
             factor: parameters,
-            encryption_algorithm: data.algorithm,
-            data_key_nonce: data.nonce,
-            signing_seed_nonce: signing.nonce,
+            encryption_algorithm: root.algorithm,
+            vault_root_key_nonce: root.nonce,
         },
     ))
 }
@@ -243,33 +225,21 @@ fn new_factor_parameters(
 
 #[cfg(feature = "key-protection")]
 pub(super) fn unprotect_with_factor(
-    vault_id: VaultId,
+    installation_id: InstallationId,
     protection: &NestedProtection,
-    data_key_payload: &Zeroizing<Vec<u8>>,
-    signing_seed_payload: &Zeroizing<Vec<u8>>,
+    vault_root_key_payload: &Zeroizing<Vec<u8>>,
     factor: UnsealFactor<'_>,
-) -> VaultResult<UnsealedVaultKeys> {
+) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
     let factor_key = derive_factor_key(factor, &protection.factor)?;
-    let data_key = crate::crypto::decrypt(
+    let vault_root_key = crate::crypto::decrypt(
         protection.encryption_algorithm,
         &factor_key,
-        &protection.data_key_nonce,
-        &factor_aad(vault_id, b"data-encryption-key"),
-        data_key_payload,
+        &protection.vault_root_key_nonce,
+        &factor_aad(installation_id, b"vault-root-key"),
+        vault_root_key_payload,
     )
     .map_err(|_| factor_incorrect_error(protection.factor.kind()))?;
-    let signing_seed = crate::crypto::decrypt(
-        protection.encryption_algorithm,
-        &factor_key,
-        &protection.signing_seed_nonce,
-        &factor_aad(vault_id, b"device-signing-seed"),
-        signing_seed_payload,
-    )
-    .map_err(|_| factor_incorrect_error(protection.factor.kind()))?;
-    Ok((
-        decode_key::<KEY_BYTES>(&data_key, "data-encryption key")?,
-        decode_key::<SIGNING_SEED_BYTES>(&signing_seed, "device-signing seed")?,
-    ))
+    decode_key::<KEY_BYTES>(&vault_root_key, "vault root key")
 }
 
 /// Derive the nested factor's key. The supplied factor must match the one the
@@ -351,10 +321,10 @@ fn validate_factor_parameters(parameters: &FactorParameters) -> VaultResult<()> 
 }
 
 #[cfg(feature = "key-protection")]
-fn factor_aad(vault_id: VaultId, purpose: &[u8]) -> Vec<u8> {
+fn factor_aad(installation_id: InstallationId, purpose: &[u8]) -> Vec<u8> {
     let mut aad = Vec::with_capacity(64 + purpose.len());
     aad.extend_from_slice(b"factorseal/vault-factor/v2\0");
-    aad.extend_from_slice(vault_id.as_bytes());
+    aad.extend_from_slice(installation_id.as_bytes());
     aad.extend_from_slice(&(purpose.len() as u64).to_be_bytes());
     aad.extend_from_slice(purpose);
     aad
@@ -377,20 +347,22 @@ pub(super) fn decode_key<const LENGTH: usize>(
     name: &'static str,
 ) -> VaultResult<Zeroizing<[u8; LENGTH]>> {
     let length = plaintext.len();
-    let bytes: [u8; LENGTH] = plaintext
-        .as_slice()
-        .try_into()
-        .map_err(|_| VaultError::Protection(format!("unwrapped {name} has {length} bytes")))?;
-    Ok(Zeroizing::new(bytes))
+    if length != LENGTH {
+        return Err(VaultError::Protection(format!(
+            "unwrapped {name} has {length} bytes"
+        )));
+    }
+    let mut bytes = Zeroizing::new([0_u8; LENGTH]);
+    bytes.copy_from_slice(plaintext);
+    Ok(bytes)
 }
 
 #[cfg(all(test, feature = "key-protection"))]
 mod tests {
     use super::*;
 
-    const VAULT_ID: VaultId = VaultId::from_bytes([7; 16]);
-    const DATA_KEY: [u8; KEY_BYTES] = [3; KEY_BYTES];
-    const SIGNING_SEED: [u8; SIGNING_SEED_BYTES] = [9; SIGNING_SEED_BYTES];
+    const INSTALLATION_ID: InstallationId = InstallationId::from_bytes([7; 16]);
+    const VAULT_ROOT_KEY: [u8; KEY_BYTES] = [3; KEY_BYTES];
 
     #[test]
     fn profiles_select_their_recorded_password_kdf() {
@@ -404,10 +376,9 @@ mod tests {
                 NestedFactorKind::Pbkdf2HmacSha256Password,
             ),
         ] {
-            let (data_payload, signing_payload, protection) = protect_with_factor(
-                VAULT_ID,
-                &DATA_KEY,
-                &SIGNING_SEED,
+            let (payload, protection) = protect_with_factor(
+                INSTALLATION_ID,
+                &VAULT_ROOT_KEY,
                 UnsealFactor::Password(b"correct horse"),
                 profile,
             )
@@ -415,57 +386,50 @@ mod tests {
             assert_eq!(protection.kind(), expected_kind);
             assert!(protection.matches_profile(profile));
 
-            let (data_key, signing_seed) = unprotect_with_factor(
-                VAULT_ID,
+            let root_key = unprotect_with_factor(
+                INSTALLATION_ID,
                 &protection,
-                &data_payload,
-                &signing_payload,
+                &payload,
                 UnsealFactor::Password(b"correct horse"),
             )
             .unwrap();
-            assert_eq!(*data_key, DATA_KEY);
-            assert_eq!(*signing_seed, SIGNING_SEED);
+            assert_eq!(*root_key, VAULT_ROOT_KEY);
         }
     }
 
     #[test]
-    fn protected_keys_require_the_original_factor_and_vault() {
-        let (data_payload, signing_payload, protection) = protect_with_factor(
-            VAULT_ID,
-            &DATA_KEY,
-            &SIGNING_SEED,
+    fn protected_keys_require_the_original_factor_and_installation() {
+        let (payload, protection) = protect_with_factor(
+            INSTALLATION_ID,
+            &VAULT_ROOT_KEY,
             UnsealFactor::Password(b"correct horse"),
             super::super::VaultCryptoProfile::Default,
         )
         .unwrap();
 
-        let (data_key, signing_seed) = unprotect_with_factor(
-            VAULT_ID,
+        let root_key = unprotect_with_factor(
+            INSTALLATION_ID,
             &protection,
-            &data_payload,
-            &signing_payload,
+            &payload,
             UnsealFactor::Password(b"correct horse"),
         )
         .unwrap();
-        assert_eq!(*data_key, DATA_KEY);
-        assert_eq!(*signing_seed, SIGNING_SEED);
+        assert_eq!(*root_key, VAULT_ROOT_KEY);
 
         assert!(matches!(
             unprotect_with_factor(
-                VAULT_ID,
+                INSTALLATION_ID,
                 &protection,
-                &data_payload,
-                &signing_payload,
+                &payload,
                 UnsealFactor::Password(b"wrong factor"),
             ),
             Err(VaultError::Protection(_))
         ));
         assert!(matches!(
             unprotect_with_factor(
-                VaultId::from_bytes([8; 16]),
+                InstallationId::from_bytes([8; 16]),
                 &protection,
-                &data_payload,
-                &signing_payload,
+                &payload,
                 UnsealFactor::Password(b"correct horse"),
             ),
             Err(VaultError::Protection(_))
@@ -476,9 +440,8 @@ mod tests {
     fn empty_factors_and_unsafe_parameters_are_rejected() {
         assert!(matches!(
             protect_with_factor(
-                VAULT_ID,
-                &DATA_KEY,
-                &SIGNING_SEED,
+                INSTALLATION_ID,
+                &VAULT_ROOT_KEY,
                 UnsealFactor::Password(b""),
                 super::super::VaultCryptoProfile::Default,
             ),
@@ -491,8 +454,7 @@ mod tests {
                 salt: [0; SALT_BYTES],
             },
             encryption_algorithm: crate::EncryptionAlgorithm::Aes256Gcm,
-            data_key_nonce: [0; crate::algorithm::AES_GCM_NONCE_BYTES],
-            signing_seed_nonce: [0; crate::algorithm::AES_GCM_NONCE_BYTES],
+            vault_root_key_nonce: [0; crate::algorithm::AES_GCM_NONCE_BYTES],
         };
         assert!(matches!(
             protection.validate(),
@@ -508,8 +470,7 @@ mod tests {
                 salt: [0; SALT_BYTES],
             },
             encryption_algorithm: crate::EncryptionAlgorithm::Aes256Gcm,
-            data_key_nonce: [0; crate::algorithm::AES_GCM_NONCE_BYTES],
-            signing_seed_nonce: [0; crate::algorithm::AES_GCM_NONCE_BYTES],
+            vault_root_key_nonce: [0; crate::algorithm::AES_GCM_NONCE_BYTES],
         };
         assert!(matches!(
             protection.validate(),

@@ -1,5 +1,28 @@
 use super::*;
-use crate::vault::Vault;
+use crate::vault::store::database::to_i64;
+use crate::vault::{
+    CallerIdentity, CallerPlatform, HistoryOperation, PermissionPrincipal, Vault,
+    VaultApplicationContext,
+};
+
+const TEST_NOW: u64 = 10;
+/// A deadline the eviction sweep that runs on every open cannot have reached.
+const FAR_FUTURE: u64 = 4_102_444_800;
+
+fn caller() -> CallerIdentity {
+    CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "/usr/bin/test-client",
+        [3; 32],
+        None,
+    )
+    .unwrap()
+}
+
+fn provenance() -> Provenance {
+    Provenance::caller(&caller(), None)
+}
 
 fn store() -> (tempfile::TempDir, PathBuf, VaultStore) {
     let directory = tempfile::tempdir().unwrap();
@@ -39,6 +62,48 @@ fn database_count(root: &Path, sql: &str) -> u64 {
     })
 }
 
+fn database_blobs(root: &Path, sql: &str) -> Vec<Vec<u8>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let database = turso::Builder::new_local(root.join(DATABASE_FILE).to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        let mut rows = connection.query(sql, ()).await.unwrap();
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            values.push(row_blob(&row, 0).unwrap());
+        }
+        values
+    })
+}
+
+fn insert_conflicting_snapshot(root: &Path, document_id: &[u8], generation: u64) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let database = turso::Builder::new_local(root.join(DATABASE_FILE).to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                "INSERT INTO document_snapshots(document_id, generation, envelope)
+                 VALUES (?1, ?2, X'00')",
+                params![document_id.to_vec(), to_i64(generation).unwrap()],
+            )
+            .await
+            .unwrap();
+    });
+}
+
 fn put_two_generations(store: &VaultStore) -> SecretAddress {
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
@@ -48,6 +113,8 @@ fn put_two_generations(store: &VaultStore) -> SecretAddress {
             &address,
             b"first",
             None,
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     store
@@ -57,6 +124,8 @@ fn put_two_generations(store: &VaultStore) -> SecretAddress {
             &address,
             b"second",
             None,
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     address
@@ -93,6 +162,8 @@ fn turso_round_trip_restart_and_idempotent_delete() {
             &address,
             b"classified",
             None,
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     assert_eq!(
@@ -132,7 +203,9 @@ fn turso_round_trip_restart_and_idempotent_delete() {
             .delete(
                 DocumentKind::SecretSpecProviderCache,
                 b"secretspec",
-                &address
+                &address,
+                &provenance(),
+                TEST_NOW
             )
             .unwrap()
     );
@@ -141,10 +214,477 @@ fn turso_round_trip_restart_and_idempotent_delete() {
             .delete(
                 DocumentKind::SecretSpecProviderCache,
                 b"secretspec",
-                &address
+                &address,
+                &provenance(),
+                TEST_NOW
             )
             .unwrap()
     );
+}
+
+/// Authorization checks read several grant addresses at once. That read must
+/// not commit a generation, even when one of the records has expired.
+#[test]
+fn get_many_reads_one_document_without_writing() {
+    let (_directory, root, store) = store();
+    let durable = SecretAddress::new("grant/durable", None).unwrap();
+    let expiring = SecretAddress::new("grant/expiring", None).unwrap();
+    let missing = SecretAddress::new("grant/missing", None).unwrap();
+    store
+        .put_at(
+            DocumentKind::Authorization,
+            b"grants",
+            &durable,
+            b"durable",
+            None,
+            &provenance(),
+            TEST_NOW,
+        )
+        .unwrap();
+    store
+        .put_at(
+            DocumentKind::Authorization,
+            b"grants",
+            &expiring,
+            b"expiring",
+            Some(50),
+            &provenance(),
+            TEST_NOW,
+        )
+        .unwrap();
+    let commits_before = database_count(&root, "SELECT COUNT(*) FROM protected_commits");
+
+    let values = store
+        .get_many(
+            DocumentKind::Authorization,
+            b"grants",
+            &[durable.clone(), expiring.clone(), missing.clone()],
+            50,
+        )
+        .unwrap();
+    assert_eq!(values.len(), 3);
+    assert_eq!(
+        values[0].as_deref().map(Vec::as_slice),
+        Some(b"durable".as_slice())
+    );
+    assert!(values[1].is_none());
+    assert!(values[2].is_none());
+    assert_eq!(
+        database_count(&root, "SELECT COUNT(*) FROM protected_commits"),
+        commits_before
+    );
+    assert!(
+        store
+            .get_many(DocumentKind::Authorization, b"absent", &[missing], 50)
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
+
+    // A plain read of the same expired record still evicts it.
+    assert!(
+        store
+            .get_at(DocumentKind::Authorization, b"grants", &expiring, 50)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        database_count(&root, "SELECT COUNT(*) FROM protected_commits"),
+        commits_before + 1
+    );
+}
+
+#[test]
+fn history_survives_reopen_with_provenance_and_pages_newest_first() {
+    let (_directory, root, store) = store();
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    let other = SecretAddress::new("demo/default/OTHER", None).unwrap();
+    // An absolute path on every platform, since the context validates it.
+    let base_dir = std::env::temp_dir().display().to_string();
+    let declared = VaultApplicationContext::new(
+        Some("demo".to_owned()),
+        Some("default".to_owned()),
+        Some(base_dir.clone()),
+        Some("build".to_owned()),
+    )
+    .unwrap();
+    let declared_provenance = Provenance::caller(&caller(), Some(&declared));
+    store
+        .put_at(
+            DocumentKind::LocalKeyring,
+            b"keyring",
+            &address,
+            b"first",
+            None,
+            &declared_provenance,
+            100,
+        )
+        .unwrap();
+    store
+        .put_at(
+            DocumentKind::LocalKeyring,
+            b"keyring",
+            &other,
+            b"other",
+            Some(FAR_FUTURE),
+            &provenance(),
+            101,
+        )
+        .unwrap();
+    assert!(
+        store
+            .delete(
+                DocumentKind::LocalKeyring,
+                b"keyring",
+                &address,
+                &provenance(),
+                102
+            )
+            .unwrap()
+    );
+    drop(store);
+
+    let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
+    let first_page = store
+        .list_history(DocumentKind::LocalKeyring, b"keyring", None, None, 2)
+        .unwrap();
+    assert_eq!(first_page.items.len(), 2);
+    assert_eq!(first_page.next_before_seq, Some(1));
+    assert_eq!(first_page.items[0].seq, 2);
+    assert_eq!(first_page.items[0].at, 102);
+    assert_eq!(first_page.items[0].operation, HistoryOperation::Delete);
+    assert_eq!(first_page.items[0].address, address);
+    assert_eq!(first_page.items[1].seq, 1);
+    assert_eq!(first_page.items[1].address, other);
+    assert_eq!(first_page.items[1].evict_at, Some(FAR_FUTURE));
+
+    let second_page = store
+        .list_history(DocumentKind::LocalKeyring, b"keyring", None, Some(1), 2)
+        .unwrap();
+    assert_eq!(second_page.items.len(), 1);
+    assert!(second_page.next_before_seq.is_none());
+    let created = &second_page.items[0];
+    assert_eq!(created.seq, 0);
+    assert_eq!(created.at, 100);
+    assert_eq!(created.operation, HistoryOperation::Put { changed: true });
+    assert_eq!(created.device_key_id, store.device().device_key_id());
+    assert_eq!(
+        created.provenance,
+        Provenance::Caller {
+            principal: PermissionPrincipal::from(&caller()),
+            application: Some(crate::vault::DeclaredApplication {
+                project: Some("demo".to_owned()),
+                profile: Some("default".to_owned()),
+                base_dir: Some(base_dir),
+                reason: Some("build".to_owned()),
+            }),
+        }
+    );
+    assert_eq!(first_page.items[0].previous_version_id, created.version_id);
+
+    let filtered = store
+        .list_history(
+            DocumentKind::LocalKeyring,
+            b"keyring",
+            Some(&other),
+            None,
+            8,
+        )
+        .unwrap();
+    assert_eq!(filtered.items.len(), 1);
+    assert_eq!(filtered.items[0].seq, 1);
+
+    let absent = store
+        .list_history(DocumentKind::LocalKeyring, b"missing", None, None, 8)
+        .unwrap();
+    assert!(absent.items.is_empty());
+}
+
+#[test]
+fn documents_belong_to_one_device_vault_and_have_distinct_wrapped_keys() {
+    let (_directory, root, store) = store();
+    let device_vault_id = store.device().device_vault_id();
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    for (kind, partition, value) in [
+        (
+            DocumentKind::SecretSpecProviderCache,
+            b"cache".as_slice(),
+            b"cache-value".as_slice(),
+        ),
+        (
+            DocumentKind::LocalKeyring,
+            b"keyring".as_slice(),
+            b"keyring-value".as_slice(),
+        ),
+    ] {
+        store
+            .put_at(
+                kind,
+                partition,
+                &address,
+                value,
+                None,
+                &provenance(),
+                TEST_NOW,
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    assert_eq!(database_count(&root, "SELECT COUNT(*) FROM vaults"), 1);
+    assert_eq!(
+        database_blobs(&root, "SELECT vault_id FROM vaults"),
+        [device_vault_id.as_bytes().to_vec()]
+    );
+    assert_eq!(
+        database_count(
+            &root,
+            "SELECT COUNT(*) FROM documents
+             WHERE vault_id = (SELECT vault_id FROM vaults WHERE vault_kind = 'device')",
+        ),
+        2
+    );
+    let wrapped = database_blobs(
+        &root,
+        "SELECT wrapped_dek FROM documents ORDER BY document_id",
+    );
+    assert_eq!(wrapped.len(), 2);
+    assert_ne!(wrapped[0], wrapped[1]);
+}
+
+/// A superseded snapshot may linger in the database until compaction. Its key
+/// must not: every generation wraps a fresh DEK and the row keeps only the
+/// current one.
+#[test]
+fn every_generation_rotates_the_document_key() {
+    let (_directory, root, store) = store();
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    let mut wrapped_keys = Vec::new();
+    for value in [b"first".as_slice(), b"second"] {
+        store
+            .put_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address,
+                value,
+                None,
+                &provenance(),
+                TEST_NOW,
+            )
+            .unwrap();
+        wrapped_keys.extend(database_blobs(&root, "SELECT wrapped_dek FROM documents"));
+    }
+    assert!(
+        store
+            .delete(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address,
+                &provenance(),
+                TEST_NOW
+            )
+            .unwrap()
+    );
+    wrapped_keys.extend(database_blobs(&root, "SELECT wrapped_dek FROM documents"));
+    drop(store);
+
+    assert_eq!(wrapped_keys.len(), 3);
+    assert_ne!(wrapped_keys[0], wrapped_keys[1]);
+    assert_ne!(wrapped_keys[1], wrapped_keys[2]);
+    assert_ne!(wrapped_keys[0], wrapped_keys[2]);
+    assert_eq!(database_count(&root, "SELECT key_epoch FROM documents"), 3);
+    assert_eq!(database_count(&root, "SELECT generation FROM documents"), 3);
+
+    let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
+    assert!(
+        store
+            .get_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address,
+                10,
+            )
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn protected_chain_authenticates_the_wrapped_document_key() {
+    let (_directory, root, store) = store();
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    store
+        .put_at(
+            DocumentKind::SecretSpecProviderCache,
+            b"cache",
+            &address,
+            b"value",
+            None,
+            &provenance(),
+            TEST_NOW,
+        )
+        .unwrap();
+    drop(store);
+
+    execute_database_mutation(&root, "UPDATE documents SET wrapped_dek = X'00'");
+    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+}
+
+#[test]
+fn wrapped_document_keys_cannot_be_swapped_between_documents() {
+    let (_directory, root, store) = store();
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    for partition in [b"first".as_slice(), b"second".as_slice()] {
+        store
+            .put_at(
+                DocumentKind::SecretSpecProviderCache,
+                partition,
+                &address,
+                partition,
+                None,
+                &provenance(),
+                TEST_NOW,
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    execute_database_mutation(
+        &root,
+        "UPDATE documents
+         SET wrapped_dek = (
+             SELECT wrapped_dek FROM documents AS source
+             WHERE source.document_id != documents.document_id LIMIT 1
+         )
+         WHERE document_id = (SELECT document_id FROM documents ORDER BY document_id LIMIT 1)",
+    );
+
+    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+}
+
+#[test]
+fn encrypted_snapshots_cannot_be_swapped_between_documents() {
+    let (_directory, root, store) = store();
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    for partition in [b"first".as_slice(), b"second".as_slice()] {
+        store
+            .put_at(
+                DocumentKind::SecretSpecProviderCache,
+                partition,
+                &address,
+                partition,
+                None,
+                &provenance(),
+                TEST_NOW,
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    execute_database_mutation(
+        &root,
+        "UPDATE document_snapshots
+         SET envelope = (
+             SELECT envelope FROM document_snapshots AS source
+             WHERE source.document_id != document_snapshots.document_id LIMIT 1
+         )
+         WHERE document_id = (
+             SELECT document_id FROM document_snapshots ORDER BY document_id LIMIT 1
+         )",
+    );
+
+    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+    assert!(matches!(reopened, Err(VaultError::Signature)));
+}
+
+#[test]
+fn failed_persistence_rolls_back_the_entire_document_generation() {
+    let (_directory, root, store) = store();
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    store
+        .put_at(
+            DocumentKind::SecretSpecProviderCache,
+            b"secretspec",
+            &address,
+            b"committed",
+            None,
+            &provenance(),
+            TEST_NOW,
+        )
+        .unwrap();
+    let document_id = database_blobs(&root, "SELECT document_id FROM documents")
+        .pop()
+        .unwrap();
+
+    // Force the snapshot insert to fail after the transaction has updated
+    // the document head. The update and every later insert must roll back.
+    insert_conflicting_snapshot(&root, &document_id, 2);
+    assert!(matches!(
+        store.put_at(
+            DocumentKind::SecretSpecProviderCache,
+            b"secretspec",
+            &address,
+            b"must-not-commit",
+            None,
+            &provenance(),
+            TEST_NOW,
+        ),
+        Err(VaultError::Database(_))
+    ));
+    assert_eq!(
+        store
+            .get_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address,
+                10,
+            )
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        b"committed"
+    );
+    drop(store);
+    execute_database_mutation(&root, "DELETE FROM document_snapshots WHERE generation = 2");
+
+    assert_eq!(
+        database_count(&root, "SELECT COUNT(*) FROM protected_commits"),
+        1
+    );
+    assert_eq!(
+        database_count(&root, "SELECT COUNT(*) FROM document_snapshots"),
+        1
+    );
+    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
+    assert_eq!(
+        reopened
+            .get_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address,
+                10,
+            )
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        b"committed"
+    );
+}
+
+#[test]
+fn installation_rejects_an_unexpected_extra_vault() {
+    let (_directory, root, store) = store();
+    drop(store);
+    execute_database_mutation(
+        &root,
+        "INSERT INTO vaults(vault_id, vault_kind, created_at)
+         VALUES (X'01010101010101010101010101010101', 'personal', 1)",
+    );
+
+    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
 }
 
 #[test]
@@ -168,6 +708,8 @@ fn batch_mutation_commits_related_records_in_one_generation() {
                     evict_at: None,
                 },
             ],
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     drop(store);
@@ -209,6 +751,8 @@ fn expiration_is_purged_without_read_and_stays_gone() {
             &address,
             b"short-lived",
             Some(50),
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     assert_eq!(store.purge_expired_at(49).unwrap(), 0);
@@ -229,6 +773,96 @@ fn expiration_is_purged_without_read_and_stays_gone() {
     );
 }
 
+/// Expired records in every document kind are removed by the sweep alone, so a
+/// grant that is never read again does not stay in the authorization
+/// document, and a sweep touches only documents with a deadline that is due.
+#[test]
+fn expired_records_are_swept_from_every_document_kind() {
+    let (_directory, root, store) = store();
+    let durable = SecretAddress::new("grant/durable", None).unwrap();
+    let expiring = SecretAddress::new("grant/expiring", None).unwrap();
+    let session = SecretAddress::new("session/token", None).unwrap();
+    for (kind, namespace, address, value, evict_at) in [
+        (
+            DocumentKind::Authorization,
+            b"grants".as_slice(),
+            &durable,
+            b"durable".as_slice(),
+            None,
+        ),
+        (
+            DocumentKind::Authorization,
+            b"grants",
+            &expiring,
+            b"expiring",
+            Some(50),
+        ),
+        (
+            DocumentKind::LocalKeyring,
+            b"keyring",
+            &session,
+            b"token",
+            Some(60),
+        ),
+    ] {
+        store
+            .put_at(
+                kind,
+                namespace,
+                address,
+                value,
+                evict_at,
+                &provenance(),
+                TEST_NOW,
+            )
+            .unwrap();
+    }
+
+    assert_eq!(store.purge_expired_at(49).unwrap(), 0);
+    assert_eq!(store.purge_expired_at(50).unwrap(), 1);
+    assert_eq!(store.purge_expired_at(59).unwrap(), 0);
+    assert_eq!(store.purge_expired_at(60).unwrap(), 1);
+    assert_eq!(store.purge_expired_at(61).unwrap(), 0);
+
+    // The swept records are gone without a read evicting them, and the
+    // durable one stays.
+    let commits = database_count(&root, "SELECT COUNT(*) FROM protected_commits");
+    let values = store
+        .get_many(
+            DocumentKind::Authorization,
+            b"grants",
+            &[durable.clone(), expiring.clone()],
+            70,
+        )
+        .unwrap();
+    assert_eq!(
+        values[0].as_deref().map(Vec::as_slice),
+        Some(b"durable".as_slice())
+    );
+    assert!(values[1].is_none());
+    assert!(
+        store
+            .get_at(DocumentKind::LocalKeyring, b"keyring", &session, 70)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        database_count(&root, "SELECT COUNT(*) FROM protected_commits"),
+        commits
+    );
+    let swept = store
+        .list_history(
+            DocumentKind::Authorization,
+            b"grants",
+            Some(&expiring),
+            None,
+            8,
+        )
+        .unwrap();
+    assert_eq!(swept.items[0].operation, HistoryOperation::Expire);
+    assert_eq!(swept.items[0].at, 50);
+}
+
 #[test]
 fn project_listing_purges_expired_entries_and_hides_empty_projects() {
     let (_directory, _root, store) = store();
@@ -243,6 +877,8 @@ fn project_listing_purges_expired_entries_and_hides_empty_projects() {
             &address,
             b"short-lived",
             Some(50),
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
 
@@ -268,6 +904,8 @@ fn installation_files_contain_no_secret_or_predictable_name() {
             &address,
             b"needle-secret-value",
             None,
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     drop(store);
@@ -318,6 +956,50 @@ fn one_worker_owns_the_database() {
 }
 
 #[test]
+fn sealing_one_store_handle_invalidates_every_clone() {
+    let (_directory, _root, store) = store();
+    let clone = store.clone();
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    store
+        .put_at(
+            DocumentKind::SecretSpecProviderCache,
+            b"secretspec",
+            &address,
+            b"value",
+            None,
+            &provenance(),
+            TEST_NOW,
+        )
+        .unwrap();
+
+    clone.seal();
+
+    assert!(store.is_sealed());
+    assert!(store.is_shutdown_complete());
+    assert!(matches!(
+        store.get_at(
+            DocumentKind::SecretSpecProviderCache,
+            b"secretspec",
+            &address,
+            10,
+        ),
+        Err(VaultError::WorkerUnavailable)
+    ));
+    assert!(matches!(
+        clone.put_at(
+            DocumentKind::SecretSpecProviderCache,
+            b"secretspec",
+            &address,
+            b"replacement",
+            None,
+            &provenance(),
+            TEST_NOW,
+        ),
+        Err(VaultError::WorkerUnavailable)
+    ));
+}
+
+#[test]
 fn protected_chain_detects_snapshot_tamper() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
@@ -328,6 +1010,8 @@ fn protected_chain_detects_snapshot_tamper() {
             &address,
             b"value",
             None,
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     drop(store);
@@ -366,6 +1050,8 @@ fn protected_chain_detects_a_missing_document_row() {
             &address,
             b"value",
             None,
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     drop(store);
@@ -407,20 +1093,51 @@ fn protected_chain_detects_rolled_back_head() {
 #[test]
 fn protected_chain_detects_a_rolled_back_document() {
     let (_directory, root, store) = store();
-    put_two_generations(&store);
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    store
+        .put_at(
+            DocumentKind::SecretSpecProviderCache,
+            b"secretspec",
+            &address,
+            b"first",
+            None,
+            &provenance(),
+            TEST_NOW,
+        )
+        .unwrap();
+    let first_wrapped_dek = database_blobs(&root, "SELECT wrapped_dek FROM documents")
+        .pop()
+        .unwrap();
+    store
+        .put_at(
+            DocumentKind::SecretSpecProviderCache,
+            b"secretspec",
+            &address,
+            b"second",
+            None,
+            &provenance(),
+            TEST_NOW,
+        )
+        .unwrap();
     drop(store);
     // Every global check still passes after this: the chain, the row-set
-    // counts, and the document's agreement with the commit it points at.
-    // Only the document itself has been rewound a generation.
+    // counts, and the document's agreement with the commit it points at,
+    // including that generation's key epoch and wrapped key. Only the
+    // document itself has been rewound a generation.
     execute_database_mutation(
         &root,
-        "UPDATE documents
-            SET generation = 1,
-                current_commit_id = (
-                    SELECT commit_id FROM protected_commits
-                    WHERE document_id = documents.document_id AND generation = 1
-                )
-          WHERE generation = 2",
+        &format!(
+            "UPDATE documents
+                SET generation = 1,
+                    key_epoch = 1,
+                    wrapped_dek = X'{}',
+                    current_commit_id = (
+                        SELECT commit_id FROM protected_commits
+                        WHERE document_id = documents.document_id AND generation = 1
+                    )
+              WHERE generation = 2",
+            hex::encode(&first_wrapped_dek)
+        ),
     );
 
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
@@ -449,6 +1166,8 @@ fn compaction_bounds_the_chain_and_keeps_every_document_readable() {
                 &address,
                 value.as_bytes(),
                 None,
+                &provenance(),
+                TEST_NOW,
             )
             .unwrap();
         latest[index] = value;
@@ -496,6 +1215,8 @@ fn a_compacted_chain_still_detects_snapshot_tamper() {
                 &address,
                 generation.to_string().as_bytes(),
                 None,
+                &provenance(),
+                TEST_NOW,
             )
             .unwrap();
     }
@@ -510,26 +1231,6 @@ fn a_compacted_chain_still_detects_snapshot_tamper() {
 }
 
 #[test]
-fn protected_chain_detects_missing_change() {
-    let (_directory, root, store) = store();
-    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
-    store
-        .put_at(
-            DocumentKind::SecretSpecProviderCache,
-            b"secretspec",
-            &address,
-            b"value",
-            None,
-        )
-        .unwrap();
-    drop(store);
-    execute_database_mutation(&root, "DELETE FROM document_changes");
-
-    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
-    assert!(matches!(reopened, Err(VaultError::Signature)));
-}
-
-#[test]
 fn protected_chain_detects_document_kind_tamper() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
@@ -540,10 +1241,37 @@ fn protected_chain_detects_document_kind_tamper() {
             &address,
             b"value",
             None,
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     drop(store);
     execute_database_mutation(&root, "UPDATE documents SET document_kind = 'invalid-kind'");
+
+    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
+    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+}
+
+#[test]
+fn protected_chain_detects_document_vault_tamper() {
+    let (_directory, root, store) = store();
+    let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
+    store
+        .put_at(
+            DocumentKind::SecretSpecProviderCache,
+            b"secretspec",
+            &address,
+            b"value",
+            None,
+            &provenance(),
+            TEST_NOW,
+        )
+        .unwrap();
+    drop(store);
+    execute_database_mutation(
+        &root,
+        "UPDATE documents SET vault_id = X'01010101010101010101010101010101'",
+    );
 
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
     assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
@@ -560,6 +1288,8 @@ fn protected_chain_detects_commit_record_tamper() {
             &address,
             b"value",
             None,
+            &provenance(),
+            TEST_NOW,
         )
         .unwrap();
     drop(store);

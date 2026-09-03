@@ -14,11 +14,15 @@ use super::{
     UnsealedVault, VaultCryptoProfile, VaultPlatform,
 };
 use crate::vault::signature::{SIGNING_SEED_BYTES, public_key_for_seed};
-use crate::vault::{DeviceKeyId, KeyProtector, VaultError, VaultId, VaultResult};
+use crate::vault::{
+    DeviceKeyId, InstallationId, InstallationSecrets, KeyProtector, VaultError, VaultId,
+    VaultResult,
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct VaultCreation {
-    pub(super) vault_id: VaultId,
+    pub(super) installation_id: InstallationId,
+    pub(super) device_vault_id: VaultId,
     pub(super) created_at: u64,
     pub(super) platform: VaultPlatform,
     pub(super) cryptographic_profile: VaultCryptoProfile,
@@ -29,17 +33,20 @@ pub(super) struct LabeledProtector<'a> {
     pub(super) key: &'a dyn KeyProtector,
 }
 
-pub(super) struct SlotProtectors<'a> {
+/// The one hardware protector an unlock group wraps the installation root
+/// with. Every other key is root-wrapped or root-derived, so one hardware
+/// operation and, where the policy demands it, one user verification opens
+/// the installation.
+pub(super) struct SlotProtector<'a> {
     pub(super) group: &'a UnlockGroup,
     pub(super) wrapping: LabeledProtector<'a>,
-    pub(super) signing: LabeledProtector<'a>,
 }
 
 pub(super) fn create_with_protectors(
     root: &Path,
     creation: VaultCreation,
     policy: UnlockPolicy,
-    protectors: &[SlotProtectors<'_>],
+    protectors: &[SlotProtector<'_>],
     credentials: UnlockCredentials<'_>,
     pending: bool,
 ) -> VaultResult<UnsealedVault> {
@@ -50,16 +57,17 @@ pub(super) fn create_with_protectors(
         ));
     }
     let VaultCreation {
-        vault_id,
+        installation_id,
+        device_vault_id,
         created_at,
         platform,
         cryptographic_profile,
     } = creation;
-    let mut data_key = Zeroizing::new([0_u8; KEY_BYTES]);
+    let mut vault_root_key = Zeroizing::new([0_u8; KEY_BYTES]);
     let mut signing_seed = Zeroizing::new([0_u8; SIGNING_SEED_BYTES]);
-    getrandom::fill(&mut *data_key)?;
+    getrandom::fill(&mut *vault_root_key)?;
     getrandom::fill(&mut *signing_seed)?;
-    let public_signing_key = public_key_for_seed(&signing_seed)?;
+    let public_signing_key = public_key_for_seed(&signing_seed);
     let device_key_id = DeviceKeyId::for_public_key(&public_signing_key);
     let actor_id = actor_id_for_public_key(&public_signing_key).to_vec();
     let mut hardware_backend = None;
@@ -71,45 +79,40 @@ pub(super) fn create_with_protectors(
                 "unlock policy and hardware protector order do not match".to_owned(),
             ));
         }
-        validate_pair(platform, slot, &mut hardware_backend)?;
+        validate_protector(platform, slot, &mut hardware_backend)?;
         let password = credentials.password_for(slot.group)?;
-        let (data_payload, signing_payload, password_protection) = if let Some(password) = password
-        {
-            let (data, signing, protection) = protect_with_factor(
-                vault_id,
-                &data_key,
-                &signing_seed,
+        let (root_payload, password_protection) = if let Some(password) = password {
+            let (root, protection) = protect_with_factor(
+                installation_id,
+                &vault_root_key,
                 UnsealFactor::Password(password),
                 cryptographic_profile,
             )?;
-            (data, signing, Some(protection))
+            (root, Some(protection))
         } else {
-            (
-                Zeroizing::new(data_key.to_vec()),
-                Zeroizing::new(signing_seed.to_vec()),
-                None,
-            )
+            (Zeroizing::new(vault_root_key.to_vec()), None)
         };
         slots.push(UnlockSlot {
             group: slot.group.clone(),
             wrapping_key_label: slot.wrapping.label.to_owned(),
-            signing_key_label: slot.signing.label.to_owned(),
-            wrapped_data_key: slot
+            wrapped_vault_root_key: slot
                 .wrapping
                 .key
-                .wrap(&data_payload)
-                .map_err(|error| VaultError::Protection(error.to_string()))?,
-            wrapped_signing_seed: slot
-                .signing
-                .key
-                .wrap(&signing_payload)
+                .wrap(&root_payload)
                 .map_err(|error| VaultError::Protection(error.to_string()))?,
             password_protection,
         });
     }
 
+    let (secrets, wrapped_installation_secrets) = InstallationSecrets::generate(
+        installation_id,
+        device_vault_id,
+        vault_root_key,
+        &signing_seed,
+    )?;
     let stored = VaultFile::new(NewVaultFile {
-        vault_id,
+        installation_id,
+        device_vault_id,
         device_key_id,
         public_signing_key,
         actor_id,
@@ -120,30 +123,25 @@ pub(super) fn create_with_protectors(
         cryptographic_profile,
         unlock_policy: policy,
         unlock_slots: slots,
+        wrapped_installation_secrets,
         created_at,
     });
     write_vault(root, &stored, pending)?;
     Ok(UnsealedVault {
         public: stored.public(),
-        data_key,
-        signing_seed,
+        secrets,
         initialize_store: true,
     })
 }
 
-fn validate_pair(
+fn validate_protector(
     platform: VaultPlatform,
-    slot: &SlotProtectors<'_>,
+    slot: &SlotProtector<'_>,
     common_backend: &mut Option<String>,
 ) -> VaultResult<()> {
-    if slot.wrapping.label == slot.signing.label {
+    if slot.wrapping.label.is_empty() {
         return Err(VaultError::Protection(
-            "wrapping and signing key labels must be distinct".to_owned(),
-        ));
-    }
-    if slot.wrapping.key.backend() != slot.signing.key.backend() {
-        return Err(VaultError::Protection(
-            "wrapping and signing keys use different hardware backends".to_owned(),
+            "wrapping key label must not be empty".to_owned(),
         ));
     }
     let backend = slot.wrapping.key.backend().as_str();
@@ -169,32 +167,25 @@ pub(super) fn unseal_with_protectors(
     stored: &VaultFile,
     slot: &UnlockSlot,
     wrapping: &dyn KeyProtector,
-    signing: &dyn KeyProtector,
     credentials: UnlockCredentials<'_>,
 ) -> VaultResult<UnsealedVault> {
     stored.validate()?;
-    if wrapping.backend().as_str() != stored.hardware_backend
-        || signing.backend().as_str() != stored.hardware_backend
-    {
+    if wrapping.backend().as_str() != stored.hardware_backend {
         return Err(VaultError::Protection(
             "vault hardware backend does not match its metadata".to_owned(),
         ));
     }
-    let data_payload = wrapping
-        .unwrap(&slot.wrapped_data_key)
+    let root_payload = wrapping
+        .unwrap(&slot.wrapped_vault_root_key)
         .map_err(|error| VaultError::Protection(error.to_string()))?;
-    let signing_payload = signing
-        .unwrap(&slot.wrapped_signing_seed)
-        .map_err(|error| VaultError::Protection(error.to_string()))?;
-    let (data_key, signing_seed) = if let Some(protection) = &slot.password_protection {
+    let vault_root_key = if let Some(protection) = &slot.password_protection {
         let password = credentials.password_for(&slot.group)?.ok_or_else(|| {
             VaultError::Protection("password-protected slot has no password factor".to_owned())
         })?;
         unprotect_with_factor(
-            stored.vault_id,
+            stored.installation_id,
             protection,
-            &data_payload,
-            &signing_payload,
+            &root_payload,
             UnsealFactor::Password(password),
         )?
     } else {
@@ -203,24 +194,30 @@ pub(super) fn unseal_with_protectors(
                 "password unlock group has no password protection".to_owned(),
             ));
         }
-        (
-            decode_key::<KEY_BYTES>(&data_payload, "data-encryption key")?,
-            decode_key::<SIGNING_SEED_BYTES>(&signing_payload, "device-signing seed")?,
-        )
+        decode_key::<KEY_BYTES>(&root_payload, "vault root key")?
     };
-    let public_signing_key = public_key_for_seed(&signing_seed)?;
+    let secrets = InstallationSecrets::open(
+        stored.installation_id,
+        stored.device_vault_id,
+        vault_root_key,
+        &stored.wrapped_installation_secrets,
+    )?;
+    // The root-wrapped seed is the only copy of the signing identity, so
+    // derive the public key from it and refuse a metadata file whose public
+    // identity does not match before anything is opened with it.
+    let signing_seed = secrets.signing_seed(stored.installation_id, stored.device_vault_id)?;
+    let public_signing_key = public_key_for_seed(&signing_seed);
     if public_signing_key != stored.public_signing_key
         || DeviceKeyId::for_public_key(&public_signing_key) != stored.device_key_id
         || actor_id_for_public_key(&public_signing_key).as_slice() != stored.actor_id
     {
         return Err(VaultError::Protection(
-            "device-signing key does not match vault identity".to_owned(),
+            "device-signing key does not match installation identity".to_owned(),
         ));
     }
     Ok(UnsealedVault {
         public: stored.public(),
-        data_key,
-        signing_seed,
+        secrets,
         initialize_store: false,
     })
 }

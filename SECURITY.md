@@ -12,10 +12,11 @@ open a public issue before a coordinated fix is available.
 The per-user vault is the intended product architecture. Its keyring interface
 is one authorized way to retrieve and update credentials:
 
-- one per-user process is the sole owner of the embedded Turso database and
-  plaintext vault keys;
-- every Automerge snapshot and change is encrypted with AES-256-GCM and
-  every durable change and commit is signed by the vault device key;
+- one per-user process is the sole owner of the embedded Turso database, the
+  lease-scoped installation root/index capability, and active operation keys;
+- every Automerge document has an independent random DEK; snapshots and
+  changes are encrypted with AES-256-GCM, and every durable change and commit
+  is signed by the installation's device key;
 - secret names and values exist inside encrypted documents, not plaintext SQL
   columns or filenames;
 - the vault root directory is created mode 0700 on Unix and with a protected,
@@ -25,7 +26,7 @@ is one authorized way to retrieve and update credentials:
   grant, is available only while unsealed, and never returns secret values;
 - a bounded local protocol authorizes transport-derived user, executable, and
   application identities against durable scoped grants;
-- replayed and oversized requests fail closed, and secret buffers use
+- duplicated and oversized requests fail closed, and secret buffers use
   zeroizing storage where the API permits;
 - idle and absolute unseal leases, explicit sealing, termination signals, startup
   cleanup, native suspend/shutdown/session notifications, and live expiration
@@ -34,8 +35,10 @@ is one authorized way to retrieve and update credentials:
 Every unlock group is hardware-bound. Factors inside a group are AND
 requirements and independently wrapped groups are OR alternatives. Password
 groups use memory-hard Argon2id by default. The opt-in FIPS profile instead
-uses PBKDF2-HMAC-SHA-256 with 600,000 iterations. Both separately encrypt the
-DEK and device-signing seed with AES-256-GCM before hardware wrapping.
+uses PBKDF2-HMAC-SHA-256 with 600,000 iterations. Both encrypt the installation
+root with AES-256-GCM before one hardware key per group wraps it. The root
+derives the document-index key and authenticates the wrapped signing seed and
+each generation's independently wrapped DEK.
 Biometric groups gate their hardware keys with the platform biometric policy;
 biometric-only groups do not contain a password layer. Password files are
 accepted only as private
@@ -43,11 +46,13 @@ bounded regular files and are intended for short-lived session launch handoff.
 Software keyring and DPAPI-only fallbacks are rejected.
 
 Each biometric HardwareSeal unseal performs a native authorization ceremony.
-Factorseal then holds the unsealed vault keys only for its independently
-bounded idle and absolute lease. Native cancellation, denial, unavailable UI,
-locked session, and invalidated credentials remain distinct vault errors;
-unavailable hardware and unsupported policy are distinct as well. None is
-treated as a prompt success or silently downgraded.
+Factorseal then holds only the installation root and document-index key for its
+independently bounded idle and absolute lease. A document DEK and exportable
+signing seed are root-unwrapped into zeroizing memory only for the operation
+that needs them. Native cancellation, denial, unavailable UI, locked session,
+and invalidated credentials remain distinct vault errors; unavailable hardware
+and unsupported policy are distinct as well. None is treated as a prompt
+success or silently downgraded.
 
 ## Cryptographic profile and FIPS status
 
@@ -95,12 +100,17 @@ resolution, so a reused process ID cannot inherit another process's grant.
 - Native lifecycle monitors are implemented on all targets, but packaged
   artifacts remain development-only until suspend, shutdown, logout, and
   session-lock behavior passes on native machines.
-- A signed local commit chain detects modified content, missing history,
+- A signed local commit chain detects modified content, missing generations,
   divergent writers, and partial rollback when a newer protected head or
   commit remains, including a single document rewound while the global head is
   untouched. The chain is a tamper check, not an audit log: once it grows past
   a bound it is re-signed and compacted down to the current state of every
-  document, and superseded generations are discarded. It cannot detect rollback
+  document, and superseded generations are discarded. Every generation is
+  encrypted under a fresh document key and each persisted snapshot contains
+  only current records, so a superseded generation that has not been compacted
+  yet holds no recoverable deleted value. The value-free change history beside
+  each document is as trustworthy as the installation root holder during a
+  lease; it is a record for the user, not an audit log. It cannot detect rollback
   of the complete vault directory. Detecting that needs a checkpoint held
   outside the directory; the offline MVP does not claim whole-directory
   rollback detection.
@@ -135,10 +145,20 @@ resolution, so a reused process ID cannot inherit another process's grant.
   support, TPM binding, timeout/cancellation behavior, the application-owned
   prompt window, and the supported Windows Hello prompt before the release
   gate can pass.
-- The current ML-DSA-65 signing seed is hardware-wrapped and exists in zeroizing
-  vault memory during an unseal lease. Signing is not yet performed by a non-exportable
-  platform signing primitive.
+- The current ML-DSA-65 signing seed is root-wrapped and exists in
+  zeroizing vault memory only while signing. Signing is not yet performed by a
+  non-exportable platform primitive. The retained installation root still has
+  authority to unwrap every local document during an active lease, so code
+  execution in the unsealed process remains outside this protection.
 - Hardware binding cannot prevent an already authorized or compromised client
   from exfiltrating a secret returned to it.
 - Losing the platform keys loses the protected data. Recovery is not
   implemented.
+- The bounded request-ID window is an idempotency guard against a client
+  resubmitting a request, not a replay defense: the local transport is a
+  peer-credentialed, owner-only socket or pipe with no intermediary to replay
+  through.
+- The embedded database is a pre-release Turso build and the sole durable
+  store. Its crash consistency is trusted for the one-transaction commit
+  path; the signed commit chain detects a torn or tampered result but cannot
+  repair it.

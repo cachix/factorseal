@@ -707,7 +707,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "hardware")]
     use crate::{
-        GrantPermission, UnsealLeasePolicy, Vault, VaultAction, VaultId, VaultResponseBody,
+        GrantPermission, InstallationId, UnsealLeasePolicy, Vault, VaultAction, VaultResponseBody,
         WireSecret, WireSecretAddress, vault::VaultStore,
     };
 
@@ -767,7 +767,10 @@ mod tests {
         assert!(poisoned.is_err());
 
         let options = WindowsVaultOptions {
-            pipe_name: format!(r"\\.\pipe\factorseal-test-{}", VaultId::random().unwrap()),
+            pipe_name: format!(
+                r"\\.\pipe\factorseal-test-{}",
+                InstallationId::random().unwrap()
+            ),
             poll_interval: Duration::from_millis(5),
             install_signal_handler: false,
             install_lifecycle_monitor: false,
@@ -813,7 +816,10 @@ mod tests {
             )
             .unwrap();
 
-        let pipe_name = format!(r"\\.\pipe\factorseal-test-{}", VaultId::random().unwrap());
+        let pipe_name = format!(
+            r"\\.\pipe\factorseal-test-{}",
+            InstallationId::random().unwrap()
+        );
         let options = WindowsVaultOptions {
             pipe_name: pipe_name.clone(),
             poll_interval: Duration::from_millis(5),

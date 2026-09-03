@@ -3,18 +3,19 @@ use std::path::Path;
 use interprocess::os::windows::named_pipe::{DuplexPipeStream, pipe_mode};
 
 use super::transport::{exchange_request, pipe_io_error as io_error};
-use super::{VaultClient, VaultError, VaultId, VaultRequest, VaultResponse, VaultResult};
+use super::{InstallationId, VaultClient, VaultError, VaultRequest, VaultResponse, VaultResult};
 
 const PIPE_PREFIX: &str = r"\\.\pipe\factorseal-";
 type BytePipe = DuplexPipeStream<pipe_mode::Bytes>;
 
-/// Derive the native endpoint for one Windows vault.
+/// Derive the native endpoint for one Windows installation.
 ///
-/// Named pipes live outside the filesystem, so the vault ID provides the same
-/// per-vault routing that `<root>/factorseal.sock` provides on Unix.
+/// Named pipes live outside the filesystem, so the installation ID provides
+/// the same per-installation routing that `<root>/factorseal.sock` provides on
+/// Unix.
 #[must_use]
-pub fn default_windows_pipe_name(vault_id: VaultId) -> String {
-    format!("{PIPE_PREFIX}{vault_id}")
+pub fn default_windows_pipe_name(installation_id: InstallationId) -> String {
+    format!("{PIPE_PREFIX}{installation_id}")
 }
 
 /// Lightweight native client for the Factorseal Windows vault.
@@ -31,10 +32,10 @@ impl WindowsVaultClient {
         }
     }
 
-    /// Connect to the default named pipe derived for `vault_id`.
+    /// Connect to the default named pipe derived for `installation_id`.
     #[must_use]
-    pub fn for_vault(vault_id: VaultId) -> Self {
-        Self::new(default_windows_pipe_name(vault_id))
+    pub fn for_installation(installation_id: InstallationId) -> Self {
+        Self::new(default_windows_pipe_name(installation_id))
     }
 
     fn request_inner(&self, request: &VaultRequest) -> VaultResult<VaultResponse> {
@@ -81,9 +82,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_pipe_name_is_stable_and_vault_scoped() {
-        let first = VaultId::from_bytes([0x11; 16]);
-        let second = VaultId::from_bytes([0x22; 16]);
+    fn default_pipe_name_is_stable_and_installation_scoped() {
+        let first = InstallationId::from_bytes([0x11; 16]);
+        let second = InstallationId::from_bytes([0x22; 16]);
 
         assert_eq!(
             default_windows_pipe_name(first),

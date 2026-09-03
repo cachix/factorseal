@@ -13,16 +13,18 @@ use super::filesystem::path_error;
 use super::filesystem::write_new_private_file;
 use super::policy::{UnlockFactorKind, UnlockGroup, UnlockPolicy};
 use super::{KEY_BYTES, VaultCryptoProfile, VaultMetadata, VaultPlatform};
-use crate::vault::{DeviceKeyId, VaultError, VaultId, VaultResult};
+use crate::vault::{
+    DeviceKeyId, InstallationId, VaultError, VaultId, VaultResult, WrappedInstallationSecrets,
+};
 
 pub(super) const VAULT_FILE: &str = "factorseal.json";
+#[cfg(feature = "key-protection")]
 pub(super) const PENDING_VAULT_FILE: &str = ".factorseal.json.pending";
 const VAULT_FORMAT: &str = "factorseal-vault";
-// Version 5 records whether password slots use the default Argon2id profile or
-// the FIPS-oriented PBKDF2-HMAC-SHA-256 profile. Version 4 had no profile field
-// and is interpreted as FIPS because it always used PBKDF2.
-const VAULT_VERSION: u32 = 5;
-const LEGACY_FIPS_VAULT_VERSION: u32 = 4;
+// Version 7 hardware-wraps only the installation root per unlock group. The
+// signing seed is root-wrapped once and the index key is derived from the
+// root. Earlier formats are deliberately rejected.
+const VAULT_VERSION: u32 = 7;
 const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,19 +32,19 @@ const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 pub(super) struct VaultFile {
     pub(super) format: String,
     pub(super) version: u32,
-    pub(super) vault_id: VaultId,
+    pub(super) installation_id: InstallationId,
+    pub(super) device_vault_id: VaultId,
     pub(super) device_key_id: DeviceKeyId,
     pub(super) public_signing_key: Vec<u8>,
     pub(super) actor_id: Vec<u8>,
     pub(super) platform: VaultPlatform,
     pub(super) hardware_backend: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) cryptographic_profile: Option<VaultCryptoProfile>,
+    pub(super) cryptographic_profile: VaultCryptoProfile,
     pub(super) unlock_policy: UnlockPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) preferred_unlock_group: Option<UnlockGroup>,
     pub(super) unlock_slots: Vec<UnlockSlot>,
-    pub(super) key_epoch: u64,
+    pub(super) wrapped_installation_secrets: WrappedInstallationSecrets,
     pub(super) created_at: u64,
 }
 
@@ -51,15 +53,14 @@ pub(super) struct VaultFile {
 pub(super) struct UnlockSlot {
     pub(super) group: UnlockGroup,
     pub(super) wrapping_key_label: String,
-    pub(super) signing_key_label: String,
-    pub(super) wrapped_data_key: Vec<u8>,
-    pub(super) wrapped_signing_seed: Vec<u8>,
+    pub(super) wrapped_vault_root_key: Vec<u8>,
     pub(super) password_protection: Option<NestedProtection>,
 }
 
 #[cfg(feature = "key-protection")]
 pub(super) struct NewVaultFile {
-    pub(super) vault_id: VaultId,
+    pub(super) installation_id: InstallationId,
+    pub(super) device_vault_id: VaultId,
     pub(super) device_key_id: DeviceKeyId,
     pub(super) public_signing_key: Vec<u8>,
     pub(super) actor_id: Vec<u8>,
@@ -68,6 +69,7 @@ pub(super) struct NewVaultFile {
     pub(super) cryptographic_profile: VaultCryptoProfile,
     pub(super) unlock_policy: UnlockPolicy,
     pub(super) unlock_slots: Vec<UnlockSlot>,
+    pub(super) wrapped_installation_secrets: WrappedInstallationSecrets,
     pub(super) created_at: u64,
 }
 
@@ -75,7 +77,8 @@ impl VaultFile {
     #[cfg(feature = "key-protection")]
     pub(super) fn new(contents: NewVaultFile) -> Self {
         let NewVaultFile {
-            vault_id,
+            installation_id,
+            device_vault_id,
             device_key_id,
             public_signing_key,
             actor_id,
@@ -84,22 +87,24 @@ impl VaultFile {
             cryptographic_profile,
             unlock_policy,
             unlock_slots,
+            wrapped_installation_secrets,
             created_at,
         } = contents;
         Self {
             format: VAULT_FORMAT.to_owned(),
             version: VAULT_VERSION,
-            vault_id,
+            installation_id,
+            device_vault_id,
             device_key_id,
             public_signing_key,
             actor_id,
             platform,
             hardware_backend,
-            cryptographic_profile: Some(cryptographic_profile),
+            cryptographic_profile,
             preferred_unlock_group: unlock_policy.groups().first().cloned(),
             unlock_policy,
             unlock_slots,
-            key_epoch: 0,
+            wrapped_installation_secrets,
             created_at,
         }
     }
@@ -111,31 +116,29 @@ impl VaultFile {
             .or_else(|| self.unlock_policy.groups().first().cloned())
             .expect("validated unlock policies contain a group");
         VaultMetadata {
-            vault_id: self.vault_id,
+            installation_id: self.installation_id,
+            device_vault_id: self.device_vault_id,
             device_key_id: self.device_key_id,
             public_signing_key: self.public_signing_key.clone(),
             actor_id: self.actor_id.clone(),
             platform: self.platform,
             hardware_backend: self.hardware_backend.clone(),
-            cryptographic_profile: self.cryptographic_profile(),
+            cryptographic_profile: self.cryptographic_profile,
             unlock_policy: self.unlock_policy.clone(),
             preferred_unlock_group,
-            key_epoch: self.key_epoch,
             created_at: self.created_at,
         }
     }
 
     pub(super) fn validate(&self) -> VaultResult<()> {
-        if self.format != VAULT_FORMAT
-            || !matches!(self.version, LEGACY_FIPS_VAULT_VERSION | VAULT_VERSION)
-            || (self.version == LEGACY_FIPS_VAULT_VERSION && self.cryptographic_profile.is_some())
-            || (self.version == VAULT_VERSION && self.cryptographic_profile.is_none())
-        {
+        if self.format != VAULT_FORMAT || self.version != VAULT_VERSION {
             return Err(VaultError::Protection(
                 "unsupported vault metadata format or version".to_owned(),
             ));
         }
-        if !platform_accepts_backend(self.platform, &self.hardware_backend)
+        self.wrapped_installation_secrets.validate()?;
+        if self.installation_id.as_bytes() == self.device_vault_id.as_bytes()
+            || !platform_accepts_backend(self.platform, &self.hardware_backend)
             || self.actor_id.is_empty()
             || DeviceKeyId::for_public_key(&self.public_signing_key) != self.device_key_id
             || actor_id_for_public_key(&self.public_signing_key).as_slice() != self.actor_id
@@ -157,17 +160,15 @@ impl VaultFile {
                 "unlock policy and wrapping slots do not match".to_owned(),
             ));
         }
-        let mut labels = Vec::with_capacity(self.unlock_slots.len() * 2);
-        let cryptographic_profile = self.cryptographic_profile();
+        let mut labels = Vec::with_capacity(self.unlock_slots.len());
         for (slot, group) in self.unlock_slots.iter().zip(self.unlock_policy.groups()) {
-            slot.validate(cryptographic_profile)?;
+            slot.validate(self.cryptographic_profile)?;
             if &slot.group != group {
                 return Err(VaultError::Protection(
                     "unlock policy and wrapping slot order do not match".to_owned(),
                 ));
             }
             labels.push(slot.wrapping_key_label.as_str());
-            labels.push(slot.signing_key_label.as_str());
         }
         labels.sort_unstable();
         if labels.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -177,27 +178,13 @@ impl VaultFile {
         }
         Ok(())
     }
-
-    pub(super) const fn cryptographic_profile(&self) -> VaultCryptoProfile {
-        if self.version == LEGACY_FIPS_VAULT_VERSION {
-            VaultCryptoProfile::Fips
-        } else {
-            match self.cryptographic_profile {
-                Some(profile) => profile,
-                None => VaultCryptoProfile::Default,
-            }
-        }
-    }
 }
 
 impl UnlockSlot {
     fn validate(&self, cryptographic_profile: VaultCryptoProfile) -> VaultResult<()> {
         self.group.validate()?;
         if self.wrapping_key_label.is_empty()
-            || self.signing_key_label.is_empty()
-            || self.wrapping_key_label == self.signing_key_label
-            || self.wrapped_data_key.is_empty()
-            || self.wrapped_signing_seed.is_empty()
+            || self.wrapped_vault_root_key.is_empty()
             || self.password_protection.is_some() != self.group.requires(UnlockFactorKind::Password)
         {
             return Err(VaultError::Protection(
@@ -220,11 +207,50 @@ pub(super) fn read_vault(root: &Path) -> VaultResult<VaultFile> {
     read_vault_file(&root.join(VAULT_FILE))
 }
 
+#[cfg(feature = "key-protection")]
 pub(super) fn read_pending_vault(root: &Path) -> VaultResult<VaultFile> {
     read_vault_file(&root.join(PENDING_VAULT_FILE))
 }
 
 fn read_vault_file(path: &Path) -> VaultResult<VaultFile> {
+    let bytes = read_bounded_vault_file(path)?;
+    let parsed: Result<VaultFile, _> = serde_json::from_slice(&bytes);
+    let stored = match parsed {
+        Ok(stored) => stored,
+        Err(error) => return Err(unsupported_version_error(&bytes, error.to_string())),
+    };
+    if let Err(error) = stored.validate() {
+        return Err(unsupported_version_error(&bytes, error.to_string()));
+    }
+    Ok(stored)
+}
+
+/// Name the version a rejected file was written with instead of returning a
+/// field-level parse error.
+fn unsupported_version_error(bytes: &[u8], original: String) -> VaultError {
+    #[derive(Deserialize)]
+    struct Stamp {
+        format: String,
+        version: u32,
+    }
+    match serde_json::from_slice::<Stamp>(bytes) {
+        Ok(stamp) if stamp.format == VAULT_FORMAT && stamp.version < VAULT_VERSION => {
+            VaultError::Protection(format!(
+                "vault metadata version {} predates this Factorseal build and is not supported",
+                stamp.version
+            ))
+        }
+        Ok(stamp) if stamp.format == VAULT_FORMAT && stamp.version > VAULT_VERSION => {
+            VaultError::Protection(format!(
+                "vault metadata version {} was written by a newer Factorseal build",
+                stamp.version
+            ))
+        }
+        _ => VaultError::Protection(original),
+    }
+}
+
+fn read_bounded_vault_file(path: &Path) -> VaultResult<Vec<u8>> {
     let file = fs::File::open(path).map_err(|error| path_error(path, error))?;
     let metadata = file.metadata().map_err(|error| path_error(path, error))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_VAULT_FILE_BYTES {
@@ -243,10 +269,7 @@ fn read_vault_file(path: &Path) -> VaultResult<VaultFile> {
             "vault metadata is not a bounded regular file".to_owned(),
         ));
     }
-    let stored: VaultFile = serde_json::from_slice(&bytes)
-        .map_err(|error| VaultError::Protection(error.to_string()))?;
-    stored.validate()?;
-    Ok(stored)
+    Ok(bytes)
 }
 
 #[cfg(feature = "key-protection")]

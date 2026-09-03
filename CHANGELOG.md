@@ -4,18 +4,39 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
-- Create the Windows vault root with a protected DACL that grants access to the
-  current user only, and reject a root at open time whose DACL inherits from
-  its parent or grants access to any other trustee. Vault roots created by
-  earlier builds must be recreated or repaired with `icacls` as the error
-  message describes.
-- Reject a Linux vault peer that is being traced or that was started with
-  `LD_PRELOAD` or `LD_AUDIT` in its environment before its executable identity
-  is resolved, closing the direct debugger and preload paths to a granted
-  executable's identity.
-- Enable the `zeroize` feature on `aes-gcm`, `aes`, `ghash`, and `polyval` in
-  both the vault and `hardwareseal` so an expanded AES-256-GCM key schedule and
-  the GHASH authentication key are wiped when a cipher instance is dropped.
+- Split the installation root from per-document keys: a permanent
+  `InstallationId`, a distinct non-replicating Device `VaultId`, a
+  hardware-wrapped installation root, and an independently wrapped DEK per
+  document.
+- Persist every document generation as a fresh-genesis projection under a
+  fresh DEK. Deleted and overwritten values no longer survive in the snapshot
+  at rest, and a superseded generation's key is replaced in the same
+  transaction. Per-change envelopes are no longer written, and one ML-DSA-65
+  signature per generation lives in the protected commit, which now records
+  its signature algorithm. A rejected mutation is discarded from memory rather
+  than left to ride along with the next write, and the vault-owned buffers
+  that carry a serialized value are wiped on drop. Schema version 4, envelope
+  version 6, commit version 5.
+- Record a bounded, value-free change history beside every document: the
+  address, operation, time, value version created and replaced, and the
+  transport-authenticated caller or service reason. The history is its own
+  ciphertext in the document's envelope, under the same key and signed
+  commit, so reads never decrypt it and writes append to it instead of
+  rebuilding it inside Automerge. Retention is bounded per document kind.
+  Expose it as `ListHistory`, `ListProjectHistory`, and `ListCacheHistory`
+  under the `List` permission and as `factorseal history --project`; an entry
+  made by another application shows a redacted provenance unless the reader
+  holds `manage-permissions`. Secret bytes now travel and persist as base64.
+  Protocol version 9.
+- Hardware-wrap only the installation root for each unlock group and derive
+  the document-index key from the root, so unsealing needs one hardware
+  operation and at most one user verification. Metadata version 7. Earlier
+  versions are refused with a message naming the version, and
+  `factorseal destroy --yes-really-destroy` removes such a root together with
+  the hardware keys its metadata names so `init` can start over.
+- Evaluate every candidate grant from one load of the authorization document
+  without writing, accept only a kind-wide grant for kind-wide operations,
+  prune expired permission registry entries on write, and let revocation
 - Replace XChaCha20-Poly1305 vault envelopes with version-3 AES-256-GCM
   envelopes and add persisted `default` and `fips` vault profiles. The default
   password KDF is memory-hard Argon2id; `factorseal init --fips` selects

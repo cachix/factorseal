@@ -3,7 +3,7 @@
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use crate::vault::{VaultError, VaultResult, VaultStore};
+use crate::vault::{Provenance, VaultError, VaultResult, VaultStore};
 
 use super::super::grant::{list_granted_permissions, revoke_permission};
 use super::super::lease::{ReplayWindow, UnsealLease};
@@ -26,8 +26,9 @@ struct LiveState {
     approvals: PendingApprovals,
     granted_permissions: Vec<Permission>,
     /// Whole second the storage eviction sweep last ran in. The sweep
-    /// decrypts, verifies, and re-parses every cached document, while platform
-    /// event loops poll expiration about ten times a second.
+    /// decrypts, verifies, and re-parses every document with a record due for
+    /// eviction, while platform event loops poll expiration about ten times a
+    /// second.
     last_purge_at: u64,
     #[cfg(all(test, feature = "hardware"))]
     purges: usize,
@@ -170,8 +171,13 @@ impl LiveStateGuard<'_> {
         Ok(())
     }
 
-    pub(super) fn revoke_permission(&mut self, id: &str, now: u64) -> VaultResult<()> {
-        revoke_permission(&self.live.store, id, now)?;
+    pub(super) fn revoke_permission(
+        &mut self,
+        id: &str,
+        now: u64,
+        provenance: &Provenance,
+    ) -> VaultResult<()> {
+        revoke_permission(&self.live.store, id, now, provenance)?;
         self.live.approvals.changed();
         self.approval_changed.notify_all();
         Ok(())
@@ -183,11 +189,19 @@ impl LiveStateGuard<'_> {
         signature: &[u8],
         grant_duration_seconds: Option<u64>,
         now: u64,
+        provenance: &Provenance,
     ) -> VaultResult<()> {
         let LiveState {
             store, approvals, ..
         } = &mut *self.live;
-        approvals.approve(store, id, signature, grant_duration_seconds, now)?;
+        approvals.approve(
+            store,
+            id,
+            signature,
+            grant_duration_seconds,
+            now,
+            provenance,
+        )?;
         self.approval_changed.notify_all();
         Ok(())
     }

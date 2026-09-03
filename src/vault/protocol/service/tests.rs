@@ -1,6 +1,13 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use super::super::grant::{
+    GrantTarget, list_granted_permissions, promote_permission, revoke_permission, store_grant,
+};
 use super::*;
+use crate::vault::{
+    DeviceKeyId, HistoryEntry, HistoryOperation, MAX_HISTORY_PAGE_SIZE, Permission,
+    PermissionOperation, PermissionPrincipal, Provenance, SecretAddress, ServiceReason, VersionId,
+};
 use crate::{DocumentKind, MAX_LIST_PAGE_SIZE, SecretSpecAddress, SecretSpecCoordinates, Vault};
 
 fn service(now: u64, policy: UnsealLeasePolicy) -> (tempfile::TempDir, VaultService) {
@@ -75,6 +82,88 @@ fn typed_actions_select_semantic_document_kinds() {
         scope_action(VaultAction::Status).scope,
         DocumentKind::LocalKeyring
     );
+}
+
+/// The vault's own helper processes are identified by their executable
+/// digest. Restarting the same build must not write a generation, and an
+/// upgraded build must take the namespace over from the build it replaces.
+#[cfg(target_os = "linux")]
+#[test]
+fn helper_process_grants_are_exclusive_and_free_when_unchanged() {
+    use super::super::grant::GRANT_DOCUMENT_NAMESPACE;
+
+    const SECRET_SERVICE_NAMESPACE: &[u8] = b"factorseal/secret-service/v1";
+
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let build = |digest: [u8; 32]| {
+        CallerIdentity::new(
+            CallerPlatform::Linux,
+            "uid:1000",
+            "/usr/bin/factorseal",
+            digest,
+            None,
+        )
+        .unwrap()
+    };
+    let old_build = build([1; 32]);
+    let new_build = build([2; 32]);
+    let permissions = [GrantPermission::Get, GrantPermission::Put];
+    let authorization_history = || {
+        let state = service.state.lock_live(Instant::now()).unwrap();
+        state
+            .store()
+            .list_history(
+                DocumentKind::Authorization,
+                GRANT_DOCUMENT_NAMESPACE,
+                None,
+                None,
+                MAX_HISTORY_PAGE_SIZE,
+            )
+            .unwrap()
+            .items
+            .len()
+    };
+    let get = |caller: &CallerIdentity, now: u64| {
+        service.handle(
+            caller,
+            VaultRequest::new(VaultAction::Get {
+                namespace: SECRET_SERVICE_NAMESPACE.to_vec(),
+                address: WireSecretAddress::new("application/dev.factorseal.Test", None),
+            })
+            .unwrap(),
+            now,
+        )
+    };
+
+    service
+        .authorize_secret_service_namespace(&old_build, SECRET_SERVICE_NAMESPACE, permissions, 100)
+        .unwrap();
+    let after_first_start = authorization_history();
+    assert!(after_first_start > 0);
+    assert!(matches!(
+        get(&old_build, 100).result,
+        Ok(VaultResponseBody::Secret { value: None })
+    ));
+
+    service
+        .authorize_secret_service_namespace(&old_build, SECRET_SERVICE_NAMESPACE, permissions, 101)
+        .unwrap();
+    assert_eq!(authorization_history(), after_first_start);
+
+    service
+        .authorize_secret_service_namespace(&new_build, SECRET_SERVICE_NAMESPACE, permissions, 102)
+        .unwrap();
+    assert!(matches!(
+        get(&new_build, 102).result,
+        Ok(VaultResponseBody::Secret { value: None })
+    ));
+    assert!(matches!(
+        get(&old_build, 102).result,
+        Err(VaultResponseError {
+            code: VaultResponseErrorCode::AuthorizationRequired,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -346,12 +435,347 @@ fn list_requests_are_bounded_and_maximum_pages_fit_the_wire_limit() {
     let response = VaultResponse::success(
         RequestId::from_bytes([31; REQUEST_ID_BYTES]),
         VaultResponseBody::ProjectAddresses {
-            addresses: vec![address; usize::from(MAX_LIST_PAGE_SIZE)],
+            addresses: vec![address.clone(); usize::from(MAX_LIST_PAGE_SIZE)],
             next_cursor: Some("A".repeat(43)),
         },
     );
     let encoded = response.encode().unwrap();
     assert!(encoded.len() <= MAX_MESSAGE_BYTES);
+
+    for limit in [0, MAX_HISTORY_PAGE_SIZE + 1] {
+        assert!(
+            VaultRequest::new(VaultAction::ListProjectHistory {
+                project: "demo".to_owned(),
+                address: None,
+                cursor: None,
+                limit,
+            })
+            .unwrap()
+            .encode()
+            .is_err()
+        );
+    }
+    let identity = "\u{1}".repeat(4 * 1024);
+    let declared = "\u{1}".repeat(512);
+    let principal = CallerIdentity::new(
+        CallerPlatform::Linux,
+        identity.clone(),
+        identity.clone(),
+        [255; 32],
+        Some(identity),
+    )
+    .unwrap();
+    // The base directory must be absolute on every platform; only its bounded
+    // length matters here.
+    let base_dir = std::env::temp_dir().join(&declared).display().to_string();
+    let context = VaultApplicationContext::new(
+        Some(declared.clone()),
+        Some(declared.clone()),
+        Some(base_dir),
+        Some(declared),
+    )
+    .unwrap();
+    let worst = HistoryEntry {
+        version: HistoryEntry::CURRENT_VERSION,
+        seq: u64::MAX,
+        at: u64::MAX,
+        operation: HistoryOperation::Put { changed: true },
+        address: SecretAddress::secret_spec(address).unwrap(),
+        version_id: Some(VersionId::from_bytes([255; 16])),
+        previous_version_id: Some(VersionId::from_bytes([255; 16])),
+        evict_at: Some(u64::MAX),
+        provenance: Provenance::caller(&principal, Some(&context)),
+        device_key_id: DeviceKeyId::from_bytes([255; 32]),
+    };
+    let response = VaultResponse::success(
+        RequestId::from_bytes([32; REQUEST_ID_BYTES]),
+        VaultResponseBody::History {
+            entries: vec![worst; usize::from(MAX_HISTORY_PAGE_SIZE)],
+            next_cursor: Some(u64::MAX),
+        },
+    );
+    let encoded = response.encode().unwrap();
+    assert!(encoded.len() <= MAX_MESSAGE_BYTES);
+}
+
+/// The kind-wide check used to build a namespace target from a fixed
+/// sentinel string, so a namespace grant on that literal would have satisfied
+/// it. Only a grant on the whole kind may.
+#[test]
+fn kind_wide_listing_accepts_only_a_kind_wide_grant() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let browser = caller();
+    {
+        let state = service.state.lock_live(Instant::now()).unwrap();
+        store_grant(
+            state.store(),
+            &browser,
+            GrantTarget::Namespace {
+                scope: DocumentKind::SecretSpecProject,
+                namespace: b"factorseal/document-kind/v1",
+            },
+            [GrantPermission::List],
+            None,
+            100,
+        )
+        .unwrap();
+    }
+    let list = || {
+        service.handle(
+            &browser,
+            VaultRequest::new(VaultAction::ListProjects {
+                cursor: None,
+                limit: 1,
+            })
+            .unwrap(),
+            101,
+        )
+    };
+    assert!(matches!(
+        list().result,
+        Err(VaultResponseError {
+            code: VaultResponseErrorCode::AuthorizationRequired,
+            ..
+        })
+    ));
+
+    service
+        .authorize_document_kind(
+            &browser,
+            DocumentKind::SecretSpecProject,
+            [GrantPermission::List],
+            None,
+            101,
+        )
+        .unwrap();
+    assert!(matches!(
+        list().result,
+        Ok(VaultResponseBody::Projects { .. })
+    ));
+}
+
+/// An expired grant record may already have been swept when the user revokes
+/// the permission. Revocation still removes the registry entry, and expired
+/// entries are pruned whenever the registry is written.
+#[test]
+fn revoking_an_expired_permission_cleans_the_registry() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let principal = caller();
+    let provenance = Provenance::service(ServiceReason::GrantStorage);
+    let permission = |id: &str, expires_at: Option<u64>| Permission {
+        id: id.to_owned(),
+        operation: PermissionOperation::Get,
+        principal: PermissionPrincipal::from(&principal),
+        application: VaultApplicationContext::new(Some("demo".to_owned()), None, None, None)
+            .unwrap(),
+        state: PermissionState::Granted {
+            granted_at: 100,
+            expires_at,
+        },
+    };
+    let state = service.state.lock_live(Instant::now()).unwrap();
+    let store = state.store();
+    for (id, expires_at) in [("prm_short", Some(150)), ("prm_long", None)] {
+        promote_permission(
+            store,
+            &principal,
+            GrantTarget::Project {
+                scope: DocumentKind::SecretSpecProviderCache,
+                namespace: b"demo",
+                project: "demo",
+            },
+            GrantPermission::Get,
+            permission(id, expires_at),
+            100,
+            &provenance,
+        )
+        .unwrap();
+    }
+    assert_eq!(list_granted_permissions(store, 100).unwrap().len(), 2);
+    assert_eq!(list_granted_permissions(store, 150).unwrap().len(), 1);
+
+    revoke_permission(store, "prm_short", 160, &provenance).unwrap();
+    assert!(revoke_permission(store, "prm_short", 161, &provenance).is_err());
+    revoke_permission(store, "prm_long", 162, &provenance).unwrap();
+    assert!(list_granted_permissions(store, 162).unwrap().is_empty());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn project_history_is_paginated_value_free_and_separately_authorized() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let writer = caller();
+    service
+        .authorize_document_kind(
+            &writer,
+            DocumentKind::SecretSpecProject,
+            [GrantPermission::Put, GrantPermission::Delete],
+            None,
+            100,
+        )
+        .unwrap();
+    let token = project_key("alpha", "TOKEN");
+    let other = project_key("alpha", "OTHER");
+    for (now, action) in [
+        (
+            101,
+            VaultAction::PutProject {
+                project: "alpha".to_owned(),
+                address: token.clone(),
+                value: WireSecret::new(b"first-secret-value".to_vec()),
+            },
+        ),
+        (
+            102,
+            VaultAction::PutProject {
+                project: "alpha".to_owned(),
+                address: token.clone(),
+                value: WireSecret::new(b"second-secret-value".to_vec()),
+            },
+        ),
+        (
+            103,
+            VaultAction::DeleteProject {
+                project: "alpha".to_owned(),
+                address: token.clone(),
+            },
+        ),
+    ] {
+        let response = service.handle(&writer, VaultRequest::new(action).unwrap(), now);
+        assert!(response.result.is_ok(), "{:?}", response.result);
+    }
+
+    let history = |caller: &CallerIdentity, address: Option<SecretSpecAddress>, cursor, limit| {
+        service.handle(
+            caller,
+            VaultRequest::new(VaultAction::ListProjectHistory {
+                project: "alpha".to_owned(),
+                address,
+                cursor,
+                limit,
+            })
+            .unwrap(),
+            104,
+        )
+    };
+
+    // A put grant does not authorize listing history, and neither does an
+    // unrelated caller.
+    let browser = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.ui",
+        [11; 32],
+        None,
+    )
+    .unwrap();
+    for caller in [&writer, &browser] {
+        let response = history(caller, None, None, 2);
+        assert!(matches!(
+            response.result,
+            Err(VaultResponseError {
+                code: VaultResponseErrorCode::AuthorizationRequired,
+                ..
+            })
+        ));
+    }
+    service
+        .authorize_document_kind(
+            &browser,
+            DocumentKind::SecretSpecProject,
+            [GrantPermission::List],
+            None,
+            104,
+        )
+        .unwrap();
+
+    let first = history(&browser, None, None, 2);
+    let encoded = first.encode().unwrap();
+    for needle in [
+        b"first-secret-value".as_slice(),
+        b"second-secret-value",
+        b"Zmlyc3Qtc2VjcmV0",
+        b"c2Vjb25kLXNlY3JldA",
+    ] {
+        assert!(
+            !encoded.windows(needle.len()).any(|window| window == needle),
+            "history response carried a value"
+        );
+    }
+    let Ok(VaultResponseBody::History {
+        entries,
+        next_cursor,
+    }) = first.result
+    else {
+        panic!("expected a history page");
+    };
+    assert_eq!(next_cursor, Some(1));
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].seq, 2);
+    assert_eq!(entries[0].at, 103);
+    assert_eq!(entries[0].operation, HistoryOperation::Delete);
+    assert_eq!(entries[1].seq, 1);
+    assert_eq!(
+        entries[1].operation,
+        HistoryOperation::Put { changed: true }
+    );
+    assert_eq!(entries[0].previous_version_id, entries[1].version_id);
+    // Another application's identity is withheld from a reader that only
+    // holds a list grant.
+    assert!(entries.iter().all(|entry| {
+        entry.address == SecretAddress::secret_spec(token.clone()).unwrap()
+            && entry.provenance == Provenance::Redacted
+    }));
+
+    let Ok(VaultResponseBody::History {
+        entries,
+        next_cursor,
+    }) = history(&browser, None, Some(1), 2).result
+    else {
+        panic!("expected the last history page");
+    };
+    assert!(next_cursor.is_none());
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].seq, 0);
+    assert_eq!(entries[0].at, 101);
+    assert!(entries[0].previous_version_id.is_none());
+
+    let Ok(VaultResponseBody::History { entries, .. }) =
+        history(&browser, Some(other), None, 4).result
+    else {
+        panic!("expected an empty filtered page");
+    };
+    assert!(entries.is_empty());
+
+    // The writer sees its own entries in full, and a permission manager sees
+    // every principal, as it does through `ListPermissions`.
+    let full = Provenance::Caller {
+        principal: PermissionPrincipal::from(&writer),
+        application: None,
+    };
+    service
+        .authorize_document_kind(
+            &writer,
+            DocumentKind::SecretSpecProject,
+            [GrantPermission::List],
+            None,
+            104,
+        )
+        .unwrap();
+    let Ok(VaultResponseBody::History { entries, .. }) = history(&writer, None, None, 4).result
+    else {
+        panic!("expected the writer's history page");
+    };
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().all(|entry| entry.provenance == full));
+
+    service.authorize_permission_manager(&browser, 104).unwrap();
+    let Ok(VaultResponseBody::History { entries, .. }) = history(&browser, None, None, 4).result
+    else {
+        panic!("expected the manager's history page");
+    };
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().all(|entry| entry.provenance == full));
 }
 
 #[test]

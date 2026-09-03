@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(
+    feature = "key-protection",
+    feature = "vault-client",
+    feature = "vault-store"
+))]
 pub(crate) const AES_GCM_NONCE_BYTES: usize = 12;
 
 /// Authenticated-encryption algorithm recorded in every protected payload.

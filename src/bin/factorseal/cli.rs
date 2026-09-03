@@ -137,6 +137,17 @@ pub(super) enum Command {
         json: bool,
     },
 
+    /// Show recorded changes in one durable project, newest first, without
+    /// reading values.
+    History {
+        #[arg(long, env = "SECRETSPEC_PROJECT")]
+        project: String,
+
+        /// Emit one JSON array instead of one entry object per line.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Permanently delete this vault and all of its hardware keys.
     Destroy {
         /// Required acknowledgement because this cannot be undone.

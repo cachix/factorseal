@@ -45,24 +45,18 @@ Factorseal is a local security broker around platform hardware. It is not a
 password manager or remote secrets service, and it does not attempt to replace
 every Apple Keychain or Windows Credential Manager API.
 
-## Platform unlock support
+## Desktop unlock support
 
 | Platform | Biometric method | Intended hardware binding | Status |
 | --- | --- | --- | --- |
 | macOS | Touch ID | Keychain/Secure Enclave key-use policy | Implemented; physical-device release acceptance remains |
 | Windows | Windows Hello fingerprint, face, or PIN | TPM sealed-data object nested inside Windows Hello PRF encryption | Implemented; physical-device prompt and policy acceptance remains |
 | Linux | No portable built-in biometric path | TPM 2.0 supports hardware wrapping, but `fprintd` does not provide a hardware-bound secret | Password-backed TPM unlock only |
-| iPhone and iPad | Face ID or Touch ID | Keychain/Secure Enclave-protected share | Mobile core and adapter boundary implemented; native app adapter remains |
-| Android | `BiometricPrompt` | StrongBox or trusted-environment Keystore-protected share | Mobile core and adapter boundary implemented; native app adapter remains |
-| Any desktop using a phone | Phone Face ID or fingerprint | Phone-held share returned over an authenticated post-quantum-hybrid channel | Planned optional feature |
 
 The vault encryption and ML-DSA signatures are designed to resist quantum
 attacks. Native biometric enforcement still inherits the cryptographic and
-certification properties of Secure Enclave, Windows Hello, or Android
-Keystore, so Factorseal does not claim that those complete platform paths are
-post-quantum certified. Phone unlock is intended to give Linux and machines
-without a suitable local sensor the same approval flow without treating a
-software-only biometric result as a cryptographic factor.
+certification properties of Secure Enclave or Windows Hello, so Factorseal does
+not claim that those complete platform paths are post-quantum certified.
 
 ## Quick start
 
@@ -129,8 +123,19 @@ $ factorseal list --project my-app
 {"kind":"native","coordinates":{"item":"github","field":"token"}}
 ```
 
-Both commands follow every bounded vault cursor automatically. Pass `--json`
-to emit one JSON array instead of JSON-quoted projects or one compact address
+Show what changed in a project, newest first, without reading any value:
+
+```console
+$ factorseal history --project my-app
+{"version":1,"seq":1,"at":1756742400,"operation":{"type":"delete"},"address":{"domain":"secret_spec","address":{"kind":"native","coordinates":{"item":"github","field":"token"}}},"previous_version_id":"…","provenance":{"source":"caller","principal":{…}},"device_key_id":[…]}
+```
+
+An entry names the address, the operation, the value version it created or
+replaced, and the transport-authenticated caller or service reason it was
+performed for. It never contains the value itself.
+
+All three commands follow every bounded vault cursor automatically. Pass
+`--json` to emit one JSON array instead of JSON-quoted projects or one compact
 object per line.
 
 `set` prompts without echo when standard input is a terminal. It can also read
@@ -150,8 +155,7 @@ service is reachable.
 
 Replacing or upgrading the binary changes its executable digest. Stop the
 service and run `factorseal grant-cli` to authorize the new CLI executable. The
-project-approval upgrade also requires this once because legacy broad provider
-grants are intentionally ignored.
+project approval must also be renewed for the new executable.
 
 Seal the running service immediately when it is no longer needed:
 
@@ -173,9 +177,12 @@ device-signed data.
                   \                       /
                    +---- wrapping slot ---+
                               |
-                   DEK + device signing seed
+                     installation root
                               |
                               v
+                 derived document-index key
+              per-operation signing seed / DEK
+                              |
    CLI / SecretSpec endpoint / aware application
                               |
                     Keyring or cache adapter
@@ -194,39 +201,45 @@ device-signed data.
                      embedded Turso database
 ```
 
-Every configured OR alternative has an independent pair of hardware-wrapping
-keys. A biometric factor gates those keys through the platform policy; a
-password factor additionally derives a key with Argon2id by default, or
-PBKDF2-HMAC-SHA-256 in the persisted FIPS profile, and encrypts the wrapped
-payload with AES-256-GCM. Enclave operations are not in the database write
-path.
-Once unsealed, the data-encryption key and signing seed exist only in zeroizing
-memory owned by the store worker until the vault seals.
+Every configured OR alternative has one independent hardware-wrapping key. A
+biometric factor gates that key through the platform policy; a password factor
+additionally derives a key with Argon2id by default, or PBKDF2-HMAC-SHA-256 in
+the persisted FIPS profile, and encrypts the wrapped payload with AES-256-GCM.
+Hardware-protector operations are not in the database write path, and
+unsealing costs one hardware operation. Once unsealed, only the installation
+root and the document-index key derived from it remain in zeroizing worker
+memory for the lease. A document DEK and exportable signing seed are unwrapped
+only for the operation that needs them and zeroized immediately afterward.
 
 ### Creation and unsealing
 
-Creation generates a random 256-bit data-encryption key and a separate
-ML-DSA-65 signing seed. The signing identity also determines the permanent
-`DeviceKeyId` and stable Automerge actor ID.
+Creation generates distinct random installation and device-vault IDs, a
+256-bit installation root, and a separate ML-DSA-65 signing seed; the
+document-index key is derived from the root and the installation identity.
+The signing identity also determines the permanent `DeviceKeyId`
+and stable Automerge actor ID. Each document generation is encrypted under its
+own random 256-bit DEK; the document row keeps only the current wrapped key.
 
 Factors inside a group are all required; each repeated group is an independent
 OR alternative. Password groups derive an encryption key with the vault's
 recorded KDF—Argon2id by default or PBKDF2-HMAC-SHA-256 in the FIPS profile—and
-separately encrypt the data key and signing seed with AES-256-GCM before two
-distinct enclave keys wrap them. Biometric-only groups wrap those keys directly
-with a separate pair whose use requires platform biometric approval.
+encrypt the installation root with AES-256-GCM before one hardware-backed key
+wraps it. Biometric-only groups wrap the root directly with a key whose use
+requires platform biometric approval, so unsealing needs one native ceremony.
 
-Unsealing reverses those layers, derives the public signing identity again, and
-rejects any mismatch before opening the database. The store then verifies its
-schema, public vault identity, signed commit chain, and current document heads
-before serving requests.
+Unsealing reverses those layers, derives the public signing identity from the
+root-wrapped seed, and rejects any mismatch before opening the database.
+The store then verifies its schema, installation/device-vault identity, signed
+commit chain, wrapped document-key digests, and current document heads before
+serving requests.
 
 ### Authenticated local requests
 
 The local protocol uses strict, versioned JSON messages with random 128-bit
 request IDs and a 1 MiB limit. Secret-bearing buffers zeroize on drop where the
 Rust API permits. Responses are bound to their request IDs, and the service
-keeps a bounded replay window.
+keeps a bounded window of consumed IDs so a resubmitted request is not applied
+twice.
 
 Caller identity comes from the native transport, never from request JSON:
 
@@ -248,11 +261,12 @@ code and hides the evidence before it connects.
 
 ### Documents and persistence
 
-Factorseal stores multiple encrypted Automerge documents. A document ID is an
-HMAC under the vault data key over its semantic kind and private partition, so
-SQL does not reveal or permit offline guessing of project names. Secret names,
-addresses, project partitions, and values live only inside encrypted Automerge
-snapshots, not in SQL columns or filenames.
+Factorseal stores multiple encrypted Automerge documents in one non-replicating
+Device vault. A document ID is an HMAC under the installation's index key over
+the Device-vault ID, semantic kind, and private partition, so SQL does not
+reveal or permit offline guessing of project names. Secret names, addresses,
+project partitions, and values live only inside encrypted Automerge snapshots,
+not in SQL columns or filenames.
 
 Every Automerge document has this version-1 root shape:
 
@@ -283,20 +297,35 @@ bounded batch mutation; they never receive raw `AutoCommit` access. Reads use
 all visible Automerge values. Different concurrent values return an explicit
 conflict rather than silently selecting Automerge's display winner.
 
-Every mutation produces an encrypted snapshot and encrypted Automerge changes
-using AES-256-GCM with fresh 96-bit nonces. ML-DSA-65 signatures bind their
-document kind, device, actor, generation, key epoch, dependencies, and
-ciphertext.
+Every mutation persists one encrypted snapshot. The snapshot is a fresh-genesis
+projection of the document's current records, so deleted and overwritten
+values do not survive in it, and it is encrypted under a fresh DEK for that
+generation with AES-256-GCM and a 96-bit nonce. The AEAD header binds its
+Device-vault ID, document kind, device, generation, key epoch, and Automerge
+heads, and one ML-DSA-65 signed protected commit per generation binds the
+snapshot digest and wrapped key.
 
-One worker thread owns the Turso connection, exclusive `factorseal.lock`,
-plaintext vault keys, and all decrypted document state. A mutation uses one
-transaction to compare-and-swap the document generation, append its encrypted
-state, append a signed protected commit, and advance the global head. The
-history is periodically compacted to the current state of every document; it is
-a tamper check, not an audit log.
+Each document also keeps a bounded history of its changes: which address
+changed, when, on whose behalf, and which value version replaced which.
+History never contains a secret value, and it is trimmed per document kind so
+a busy cache cannot grow without bound. The history is its own ciphertext in
+the same envelope as the record document, under the same key and covered by
+the same signed commit, so reading records never decrypts it, a write appends
+to it without rebuilding it inside the record document, and listing history
+never decrypts a value. An entry made by another application is shown with
+its principal and declared context redacted unless the reader holds the
+`manage-permissions` grant.
 
-For the full storage and verification invariants, see
-[Architecture](docs/architecture.md).
+One worker thread owns the Turso connection, exclusive `factorseal.lock`, and
+lease-scoped installation root/index capability. It unwraps only the requested
+document DEK and the signing seed while processing an operation. A mutation
+uses one transaction to compare-and-swap the document generation, append its
+encrypted state, append a signed protected commit, and advance the global head.
+The history is periodically compacted to the current state of every document;
+it is a tamper check, not an audit log.
+
+The store re-verifies these storage and protected-chain invariants whenever
+the vault is opened.
 
 ## Interfaces and document kinds
 
@@ -404,38 +433,45 @@ deadline. Status checks do not refresh the lease.
 shutdown all converge on the same worker shutdown path. The platform adapters
 monitor logind on Linux, AppKit notifications on macOS, and power/session window
 messages on Windows. Sealing invalidates every store handle and zeroizes the
-worker's data key and signing seed.
+worker's installation root, index key, and any active operation keys.
 
 The vault directory contains:
 
 - `factorseal.json`: public identity, unlock policy, per-group key labels,
-  factor parameters, and enclave-wrapped bootstrap material;
+  factor parameters, and hardware-wrapped bootstrap material;
 - `factorseal.db`: encrypted, signed vault state;
 - `factorseal.lock`: exclusive store ownership;
 - `factorseal.sock`: the live Linux/macOS endpoint, present only while served.
 
-Windows uses `\\.\pipe\factorseal-<vault-id>` instead of a socket.
+Windows uses `\\.\pipe\factorseal-<installation-id>` instead of a socket.
 `FACTORSEAL_ROOT` overrides the vault directory and `FACTORSEAL_SOCKET`
 overrides the native endpoint.
 
 `factorseal destroy --yes-really-destroy` permanently deletes a sealed vault,
-including every unlock group's enclave keys. It requires one configured unlock
-group and is irreversible.
+including every unlock group's hardware keys. It requires one configured unlock
+group and is irreversible. A root written by an earlier metadata version
+cannot be unsealed by the current build; `destroy` still removes it together
+with the hardware keys its metadata names, with no unlock group to prove,
+after which `factorseal init` creates a new vault.
 
 ## Security properties and limitations
 
 Factorseal is designed so that:
 
-- the plaintext data-encryption key is never persisted;
+- plaintext installation, signing, index, and document keys are never
+  persisted;
 - copying `factorseal.db` and `factorseal.json` to another machine does not
-  recover secrets without the enclave keys;
+  recover secrets without the hardware keys;
 - Turso receives no plaintext document content and is not an authorization
   boundary;
 - an application receives a secret only after its transport-derived identity
   matches a suitable grant;
-- signed envelopes and commits detect content tampering, missing history,
+- signed snapshots and commits detect content tampering, missing generations,
   divergent writers, and inconsistent partial rollback when newer protected
-  state remains.
+  state remains;
+- a deleted or overwritten value is absent from the next persisted snapshot,
+  and the superseded generation's key is replaced, so what lingers until
+  compaction cannot be decrypted.
 
 The design does not detect rollback of the complete vault directory. Doing so
 requires a trusted checkpoint stored elsewhere. The offline MVP deliberately
@@ -455,14 +491,18 @@ memory-hard, but it is not a FIPS-approved KDF. The current RustCrypto
 implementations and Factorseal product boundary have not completed CAVP or
 CMVP validation, so neither profile makes Factorseal FIPS 140-3 validated.
 Platform biometric paths inherit the algorithms and certification properties
-of their TPM, Secure Enclave, Windows Hello, or Keystore components and are not
+of their TPM, Secure Enclave, or Windows Hello components and are not
 claimed to be completely post-quantum certified.
 
-The signing seed is enclave-wrapped but exists in zeroizing process memory
-while unsealed; signing is not yet performed by a non-exportable native signing
-primitive. Enclave binding also cannot stop an authorized or compromised
-client from exfiltrating a secret returned to it. Recovery is not implemented,
-so losing the enclave keys loses the vault.
+The signing seed is root-wrapped, but must briefly exist in
+zeroizing process memory for each signature; signing is not yet performed by a
+non-exportable native signing primitive. The retained installation root can
+unwrap any local document during an active lease, so this hierarchy reduces
+passive key retention rather than defeating code execution in the unsealed
+process. Hardware binding also cannot stop an authorized or compromised client
+from exfiltrating a secret returned to it. Recovery is not implemented, so
+losing the hardware keys loses the vault. Zeroization is best-effort; locked
+memory and complete process-dump protection are not yet implemented.
 
 See [Security](SECURITY.md) for the complete threat model and vulnerability
 reporting instructions.

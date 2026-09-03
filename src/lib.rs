@@ -2,7 +2,7 @@
 //!
 //! A per-user background service owns an
 //! embedded Turso database containing encrypted, signed Automerge documents.
-//! Each vault records AND-factor groups as independently hardware-wrapped OR
+//! Each installation records AND-factor groups as independently hardware-wrapped OR
 //! alternatives. Applications use its keyring
 //! interface over authenticated local IPC and never open the database or
 //! receive its keys.
@@ -37,19 +37,21 @@ pub use keyring::{Keyring, KeyringError, KeyringResult};
     feature = "vault-store"
 ))]
 pub use vault::{
-    DeviceKeyId, DocumentId, DocumentKind, NativeAuthorizationError, NestedFactorKind, RequestId,
-    SecretAddress, SecretSpecAddress, SecretSpecCoordinates, UnlockCredentials, UnlockFactorKind,
-    UnlockGroup, UnlockPolicy, UnsealFactor, UnsealedVault, Vault, VaultCryptoProfile, VaultError,
-    VaultId, VaultMetadata, VaultPlatform, VaultResult,
+    DeclaredApplication, DeviceKeyId, DocumentId, DocumentKind, HistoryEntry, HistoryOperation,
+    HistoryRetention, InstallationId, NativeAuthorizationError, NestedFactorKind, Provenance,
+    RequestId, SecretAddress, SecretSpecAddress, SecretSpecCoordinates, ServiceReason,
+    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealFactor, UnsealedVault,
+    Vault, VaultCryptoProfile, VaultError, VaultId, VaultKind, VaultMetadata, VaultPlatform,
+    VaultResult, VersionId,
 };
 
 #[cfg(feature = "vault-client")]
 pub use vault::{
-    MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionOperation,
-    PermissionPrincipal, PermissionState, PermissionWaitStatus, VaultAction,
-    VaultApplicationContext, VaultClient, VaultInteractionReference, VaultMutation, VaultRequest,
-    VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret,
-    WireSecretAddress,
+    MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
+    PermissionChange, PermissionOperation, PermissionPrincipal, PermissionState,
+    PermissionWaitStatus, VaultAction, VaultApplicationContext, VaultClient,
+    VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse, VaultResponseBody,
+    VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
 };
 
 #[cfg(feature = "vault-store")]

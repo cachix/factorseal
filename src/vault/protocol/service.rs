@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::vault::{DocumentKind, UnsealedVault, VaultError, VaultResult, VaultStore};
+use crate::vault::{DocumentKind, Provenance, UnsealedVault, VaultError, VaultResult, VaultStore};
 
 use super::wire::PROTOCOL_VERSION;
 #[cfg(all(test, feature = "hardware"))]
@@ -164,6 +164,7 @@ impl VaultService {
         let application = request.application().cloned();
         let approval =
             ApprovalCandidate::for_request(caller, application.as_ref(), &request.action);
+        let provenance = Provenance::caller(caller, application.as_ref());
         let mut state = self.state.lock_live(monotonic_now)?;
         state.consume(request.request_id())?;
         let result = match request.action {
@@ -212,7 +213,7 @@ impl VaultService {
                 duration_seconds,
             } => {
                 require_permission_manager(&state, caller, now)?;
-                state.approve(&id, &signature, duration_seconds, now)?;
+                state.approve(&id, &signature, duration_seconds, now, &provenance)?;
                 state.touch(now, monotonic_now)?;
                 return Ok(VaultResponseBody::PermissionChanged {
                     status: super::PermissionChange::Granted,
@@ -220,13 +221,20 @@ impl VaultService {
             }
             VaultAction::RevokePermission { id } => {
                 require_permission_manager(&state, caller, now)?;
-                state.revoke_permission(&id, now)?;
+                state.revoke_permission(&id, now, &provenance)?;
                 state.touch(now, monotonic_now)?;
                 return Ok(VaultResponseBody::PermissionChanged {
                     status: super::PermissionChange::Revoked,
                 });
             }
-            action => execute_action(state.store(), caller, action, now, state.lease_deadlines()),
+            action => execute_action(
+                state.store(),
+                caller,
+                action,
+                now,
+                state.lease_deadlines(),
+                &provenance,
+            ),
         };
         let (result, refresh_lease) = match result {
             Ok(result) => result,
@@ -257,7 +265,7 @@ fn require_permission_manager(
         caller,
         GrantRequirement {
             scope: DocumentKind::Authorization,
-            namespace: PERMISSION_CONTROL_NAMESPACE,
+            namespace: Some(PERMISSION_CONTROL_NAMESPACE),
             address: None,
             project: None,
             permission: GrantPermission::ManagePermissions,

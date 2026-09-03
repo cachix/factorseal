@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 
 use super::VaultResult;
 
-/// Hardware-backed facility that protects a vault key payload.
+/// Hardware-backed facility that protects an installation key payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum HardwareBackend {
@@ -59,7 +59,7 @@ pub trait KeyProtector {
     fn delete(&self) -> VaultResult<()>;
 }
 
-/// Creates and reopens the two native keys owned by one vault.
+/// Creates and reopens the native wrapping keys owned by one installation.
 ///
 /// `root` is provided for adapters that keep authenticated public metadata
 /// next to the vault. Mobile adapters may ignore it and use only `label`.

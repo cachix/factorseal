@@ -6,8 +6,11 @@
 
 #[cfg(feature = "vault-store")]
 mod document;
+mod encoding;
 #[cfg(feature = "vault-store")]
 mod envelope;
+mod history;
+mod keys;
 #[cfg(feature = "key-protection")]
 mod protection;
 mod protocol;
@@ -68,20 +71,26 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "vault-store")]
-pub(crate) use document::{DocumentMutation, DocumentOperation, SecretDocument, SecretRead};
-#[cfg(feature = "vault-store")]
-pub use envelope::{
-    EncryptedSnapshot, SignatureAlgorithm, SignedChangeEnvelope, verify_and_decrypt_change,
-    verify_and_decrypt_snapshot,
+pub(crate) use document::{
+    DocumentMutation, DocumentOperation, MutationContext, SecretDocument, SecretRead,
 };
+#[cfg(feature = "vault-store")]
+pub use envelope::{EncryptedSnapshot, decrypt_snapshot};
+pub use history::{
+    DeclaredApplication, HistoryEntry, HistoryOperation, HistoryRetention, Provenance,
+    ServiceReason, VersionId,
+};
+#[cfg(feature = "vault-store")]
+pub(crate) use keys::WrappedKey;
+pub(crate) use keys::{InstallationSecrets, WrappedInstallationSecrets};
 #[cfg(feature = "key-protection")]
 pub use protection::{HardwareBackend, KeyProtector, KeyProtectorFactory};
 pub use protocol::{
-    CallerIdentity, CallerPlatform, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
-    PermissionChange, PermissionOperation, PermissionPrincipal, PermissionState,
-    PermissionWaitStatus, RequestId, VaultAction, VaultApplicationContext, VaultClient,
-    VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse, VaultResponseBody,
-    VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    CallerIdentity, CallerPlatform, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
+    MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionOperation, PermissionPrincipal,
+    PermissionState, PermissionWaitStatus, RequestId, VaultAction, VaultApplicationContext,
+    VaultClient, VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse,
+    VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
 };
 #[cfg(feature = "vault-store")]
 pub use protocol::{GrantPermission, UnsealLeasePolicy, VaultService};
@@ -89,6 +98,8 @@ pub use seal::{
     NestedFactorKind, UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealFactor,
     UnsealedVault, Vault, VaultCryptoProfile, VaultMetadata, VaultPlatform,
 };
+#[cfg(feature = "vault-store")]
+pub use signature::SignatureAlgorithm;
 #[cfg(feature = "vault-store")]
 pub(crate) use store::VaultStore;
 
@@ -370,7 +381,49 @@ impl From<getrandom::Error> for VaultError {
     }
 }
 
-/// Permanent random identifier for one Factorseal vault.
+/// Permanent random identifier for one hardware-bound Factorseal installation.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InstallationId([u8; VAULT_ID_BYTES]);
+
+impl InstallationId {
+    pub fn random() -> VaultResult<Self> {
+        let mut bytes = [0_u8; VAULT_ID_BYTES];
+        getrandom::fill(&mut bytes)?;
+        Ok(Self(bytes))
+    }
+
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; VAULT_ID_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; VAULT_ID_BYTES] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for InstallationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("InstallationId")
+            .field(&URL_SAFE_NO_PAD.encode(self.0))
+            .finish()
+    }
+}
+
+impl fmt::Display for InstallationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&URL_SAFE_NO_PAD.encode(self.0))
+    }
+}
+
+/// Permanent random identifier for one document container.
+///
+/// The first implementation creates exactly one [`VaultKind::Device`] vault
+/// for each installation. Personal and team vault IDs use the same opaque
+/// representation when their synchronization milestone is implemented.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct VaultId([u8; VAULT_ID_BYTES]);
@@ -408,7 +461,40 @@ impl fmt::Display for VaultId {
     }
 }
 
-/// Digest identifier for the vault's separate signing key.
+/// Security and replication domain of a document container.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum VaultKind {
+    Device,
+    Personal,
+    Team,
+}
+
+impl VaultKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::Personal => "personal",
+            Self::Team => "team",
+        }
+    }
+
+    #[cfg(feature = "vault-store")]
+    pub(crate) fn parse(value: &str) -> VaultResult<Self> {
+        match value {
+            "device" => Ok(Self::Device),
+            "personal" => Ok(Self::Personal),
+            "team" => Ok(Self::Team),
+            _ => Err(VaultError::InvalidData(format!(
+                "unknown vault kind `{value}`"
+            ))),
+        }
+    }
+}
+
+/// Digest identifier for the installation's separate signing key.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DeviceKeyId([u8; DEVICE_KEY_ID_BYTES]);
@@ -497,10 +583,17 @@ impl DocumentId {
     /// database worker so project names cannot be guessed from SQL metadata.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn derive_for_test(vault_id: VaultId, kind: DocumentKind, partition: &[u8]) -> Self {
+    pub(crate) fn derive_for_test(
+        installation_id: InstallationId,
+        vault_id: VaultId,
+        kind: DocumentKind,
+        partition: &[u8],
+    ) -> Self {
         let mut digest = Sha256::new();
-        digest.update(b"factorseal/document-id/v1\0");
+        digest.update(b"factorseal/document-id/v3\0");
+        digest.update(installation_id.as_bytes());
         digest.update(vault_id.as_bytes());
+        digest.update((kind.as_str().len() as u64).to_be_bytes());
         digest.update(kind.as_str().as_bytes());
         digest.update((partition.len() as u64).to_be_bytes());
         digest.update(partition);
@@ -619,6 +712,7 @@ impl SecretSpecAddress {
         }
     }
 
+    #[cfg(any(feature = "vault-store", test))]
     fn update_digest(&self, digest: &mut Sha256) {
         match self {
             Self::Convention {
@@ -725,11 +819,13 @@ impl SecretAddress {
     }
 }
 
+#[cfg(any(feature = "vault-store", test))]
 fn update_digest_string(digest: &mut Sha256, value: &str) {
     digest.update((value.len() as u64).to_be_bytes());
     digest.update(value.as_bytes());
 }
 
+#[cfg(any(feature = "vault-store", test))]
 fn update_digest_option(digest: &mut Sha256, value: Option<&str>) {
     match value {
         Some(value) => {
@@ -758,23 +854,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn document_ids_are_kind_partitioned_and_installation_specific() {
-        let first = VaultId::from_bytes([1; VAULT_ID_BYTES]);
-        let second = VaultId::from_bytes([2; VAULT_ID_BYTES]);
+    fn document_ids_are_kind_vault_and_installation_specific() {
+        let first = InstallationId::from_bytes([1; VAULT_ID_BYTES]);
+        let second = InstallationId::from_bytes([2; VAULT_ID_BYTES]);
+        let first_vault = VaultId::from_bytes([3; VAULT_ID_BYTES]);
+        let second_vault = VaultId::from_bytes([4; VAULT_ID_BYTES]);
         let cache = DocumentId::derive_for_test(
             first,
+            first_vault,
             DocumentKind::SecretSpecProviderCache,
             b"secretspec",
         );
 
         assert_ne!(
             cache,
-            DocumentId::derive_for_test(first, DocumentKind::LocalKeyring, b"secretspec")
+            DocumentId::derive_for_test(
+                first,
+                first_vault,
+                DocumentKind::LocalKeyring,
+                b"secretspec"
+            )
         );
         assert_ne!(
             cache,
             DocumentId::derive_for_test(
                 second,
+                first_vault,
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec"
+            )
+        );
+        assert_ne!(
+            cache,
+            DocumentId::derive_for_test(
+                first,
+                second_vault,
                 DocumentKind::SecretSpecProviderCache,
                 b"secretspec"
             )
