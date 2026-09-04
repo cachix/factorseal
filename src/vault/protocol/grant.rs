@@ -443,12 +443,12 @@ fn write_registry(
 }
 
 #[cfg(feature = "vault-store")]
-pub(super) fn require_grant(
+pub(super) fn require_grant_until(
     store: &VaultStore,
     caller: &CallerIdentity,
     requirement: GrantRequirement<'_>,
     now: u64,
-) -> VaultResult<()> {
+) -> VaultResult<Option<u64>> {
     let GrantRequirement {
         scope,
         namespace,
@@ -507,7 +507,7 @@ pub(super) fn require_grant(
         let grant: AccessGrant = serde_json::from_slice(&bytes)
             .map_err(|error| VaultError::Protocol(error.to_string()))?;
         if grant_satisfies(&grant, caller_fingerprint, target_digest, permission, now) {
-            return Ok(());
+            return Ok(grant.expires_at);
         }
     }
     Err(VaultError::AuthorizationRequired)

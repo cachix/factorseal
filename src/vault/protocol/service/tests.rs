@@ -1,5 +1,134 @@
 use std::time::{Duration, Instant};
 
+#[test]
+fn result_delivery_is_bounded_by_both_grant_and_record_expiry() {
+    for (grant_expiry, record_expiry) in [(200, 150), (150, 200)] {
+        let (_directory, service) = service(100, UnsealLeasePolicy::default());
+        let caller = caller();
+        service
+            .authorize_namespace(
+                &caller,
+                b"deadline",
+                [GrantPermission::Get],
+                Some(grant_expiry),
+                100,
+            )
+            .unwrap();
+        {
+            let state = service.state.lock_live(Instant::now()).unwrap();
+            state
+                .store()
+                .put_at(
+                    DocumentKind::LocalKeyring,
+                    b"deadline",
+                    &SecretAddress::new("TOKEN", None).unwrap(),
+                    b"value",
+                    Some(record_expiry),
+                    &Provenance::caller(&caller, None),
+                    100,
+                )
+                .unwrap();
+        }
+        let start = Instant::now();
+        let request = VaultRequest::new(VaultAction::Get {
+            namespace: b"deadline".to_vec(),
+            address: WireSecretAddress::new("TOKEN", None),
+        })
+        .unwrap();
+        let mut response = service.handle(&caller, request, 100);
+        assert!(matches!(
+            response.result,
+            Ok(VaultResponseBody::Secret { value: Some(_) })
+        ));
+        assert!(response.delivery_deadline.unwrap() <= start + Duration::from_secs(50));
+        response.delivery_deadline = Some(Instant::now());
+        assert!(matches!(response.encode(), Err(VaultError::Sealed)));
+    }
+}
+
+#[test]
+fn sealing_invalidates_a_response_that_has_not_been_sent() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let response = service.handle(
+        &caller(),
+        VaultRequest::new(VaultAction::Status).unwrap(),
+        100,
+    );
+    assert!(response.encode().is_ok());
+    service.seal().unwrap();
+    assert!(matches!(response.encode(), Err(VaultError::Sealed)));
+}
+
+#[test]
+fn queued_request_is_rejected_after_absolute_expiry() {
+    use std::sync::{Arc, mpsc};
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    let store = VaultStore::open(&root, Vault::create_for_test(&root).unwrap()).unwrap();
+    let caller = caller();
+    let address = SecretAddress::new("queued-secret", None).unwrap();
+    store_grant(
+        &store,
+        &caller,
+        GrantTarget::Namespace {
+            scope: DocumentKind::LocalKeyring,
+            namespace: b"audit",
+        },
+        [GrantPermission::Get],
+        None,
+        100,
+    )
+    .unwrap();
+    store
+        .put_at(
+            DocumentKind::LocalKeyring,
+            b"audit",
+            &address,
+            b"value-after-expiry",
+            None,
+            &Provenance::caller(&caller, None),
+            100,
+        )
+        .unwrap();
+    let started = Instant::now();
+    let service = Arc::new(
+        VaultService::new(
+            store,
+            100,
+            UnsealLeasePolicy {
+                idle_timeout: Duration::from_millis(200),
+                maximum_lifetime: Duration::from_millis(200),
+            },
+        )
+        .unwrap(),
+    );
+    let guard = service.state.lock_live(Instant::now()).unwrap();
+    let queued = Arc::clone(&service);
+    let (sender, receiver) = mpsc::channel();
+    let join = std::thread::spawn(move || {
+        let request = VaultRequest::new(VaultAction::Get {
+            namespace: b"audit".to_vec(),
+            address: WireSecretAddress::new("queued-secret", None),
+        })
+        .unwrap();
+        sender.send(()).unwrap();
+        queued.handle(&caller, request, 100)
+    });
+    receiver.recv().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    drop(guard);
+    let response = join.join().unwrap();
+    assert!(started.elapsed() > Duration::from_millis(200));
+    assert!(matches!(
+        response.result,
+        Err(VaultResponseError {
+            code: VaultResponseErrorCode::Sealed,
+            ..
+        })
+    ));
+    assert!(service.is_seal_complete());
+}
+
 use super::super::grant::{
     GrantTarget, list_granted_permissions, promote_permission, revoke_permission, store_grant,
 };
@@ -712,7 +841,9 @@ fn project_history_is_paginated_value_free_and_separately_authorized() {
     assert_eq!(next_cursor, Some(1));
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].seq, 2);
-    assert_eq!(entries[0].at, 103);
+    // Provenance uses execution time, which can advance while awaiting grant
+    // and storage work. It must never predate the caller's entry sample.
+    assert!(entries[0].at >= 103);
     assert_eq!(entries[0].operation, HistoryOperation::Delete);
     assert_eq!(entries[1].seq, 1);
     assert_eq!(
@@ -737,7 +868,7 @@ fn project_history_is_paginated_value_free_and_separately_authorized() {
     assert!(next_cursor.is_none());
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].seq, 0);
-    assert_eq!(entries[0].at, 101);
+    assert!(entries[0].at >= 101);
     assert!(entries[0].previous_version_id.is_none());
 
     let Ok(VaultResponseBody::History { entries, .. }) =

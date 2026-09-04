@@ -123,6 +123,7 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), CliError> {
+    platform::disable_core_dumps()?;
     let root = resolve_root(cli.root.as_deref())?;
     let socket = cli.socket.as_deref();
     let factor = FactorSource {
@@ -130,6 +131,19 @@ fn run(cli: Cli) -> Result<(), CliError> {
         askpass: cli.askpass.as_deref(),
     };
     match cli.command {
+        Command::SignPermission {
+            id,
+            challenge,
+            duration_seconds,
+            unlock,
+        } => commands::sign_permission(
+            &root,
+            factor,
+            &id,
+            &challenge,
+            duration_seconds,
+            unlock.as_ref(),
+        ),
         Command::Init { unlock, fips } => initialize(&root, unlock, factor, fips),
         Command::Agent {
             unlock,

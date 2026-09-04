@@ -10,6 +10,7 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
 ExecStart=@INSTALL_DIR@/factorseal --askpass=systemd-ask-password agent
 Restart=no
 UMask=0077
+LimitCORE=0
 NoNewPrivileges=yes
 # Do not add filesystem mount-namespace options here. Caller authentication
 # reads /proc/<SO_PEERCRED pid>/exe, which becomes inaccessible from a

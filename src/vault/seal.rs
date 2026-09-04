@@ -205,10 +205,11 @@ impl Vault {
         discard_initialization_with_factory(root.as_ref(), &PlatformProtectorFactory, true)
     }
 
-    /// Permanently destroy a single-password vault after proving
+    /// Remove a single-password vault after proving
     /// possession of its password factor.
     ///
-    /// This deletes all native hardware keys and the local vault directory.
+    /// This removes backend-owned key state and the local vault directory.
+    /// Retained TPM envelopes and backups are not revoked by local removal.
     /// Callers must first stop any running vault service; destruction is an
     /// explicit recovery or disposable-test operation, not a substitute for
     /// sealing a live vault.
@@ -222,7 +223,8 @@ impl Vault {
         Self::discard_initialization(root)
     }
 
-    /// Permanently destroy a native vault after satisfying one unlock group.
+    /// Remove a native vault after satisfying one unlock group.
+    /// Retained TPM envelopes and backups are not revoked by local removal.
     #[cfg(feature = "hardware")]
     pub fn destroy_with_unlock_group(
         root: impl AsRef<Path>,

@@ -13,6 +13,7 @@ mod chain;
 mod database;
 mod worker;
 
+pub(crate) use worker::StoredSecret;
 use worker::{Command, SecretValues, WorkerControl, request};
 
 #[derive(Clone)]
@@ -34,6 +35,10 @@ pub(crate) struct HistoryPage {
 }
 
 impl VaultStore {
+    pub(crate) fn seal_signal(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.control.seal_signal()
+    }
+
     /// Open the vault's embedded Turso database and consume its
     /// hardware-unwrapped secrets into the worker.
     pub(crate) fn open(root: impl AsRef<Path>, unsealed: UnsealedVault) -> VaultResult<Self> {
@@ -55,6 +60,22 @@ impl VaultStore {
     /// All clones become sealed.
     pub(crate) fn seal(&self) {
         self.control.shutdown();
+    }
+
+    pub(crate) fn request_seal(&self) {
+        self.control.request_shutdown();
+    }
+
+    pub(crate) fn set_deadline(&self, deadline: std::time::Instant) -> VaultResult<()> {
+        self.control.set_deadline(deadline)
+    }
+
+    pub(crate) fn deadline(&self) -> VaultResult<Option<std::time::Instant>> {
+        self.control.deadline()
+    }
+
+    pub(crate) fn enable_emergency_exit(&self) {
+        self.control.enable_emergency_exit();
     }
 
     #[must_use]
@@ -110,6 +131,17 @@ impl VaultStore {
         address: &SecretAddress,
         now: u64,
     ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
+        self.get_with_deadline(scope, namespace, address, now)
+            .map(|value| value.map(|secret| secret.value))
+    }
+
+    pub(crate) fn get_with_deadline(
+        &self,
+        scope: DocumentKind,
+        namespace: &[u8],
+        address: &SecretAddress,
+        now: u64,
+    ) -> VaultResult<Option<StoredSecret>> {
         request(&self.control.sender, |response| Command::Get {
             scope,
             partition: namespace.to_vec(),

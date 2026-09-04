@@ -36,6 +36,19 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
+    /// Internal, short-lived key owner; never connects to the agent.
+    #[command(hide = true)]
+    SignPermission {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        challenge: String,
+        #[arg(long)]
+        duration_seconds: Option<u64>,
+        #[arg(long)]
+        unlock: Option<UnlockGroup>,
+    },
+
     /// Create and seal a hardware-bound vault.
     Init {
         /// AND-separated factors in one unlock group; repeat for OR alternatives.
@@ -148,7 +161,7 @@ pub(super) enum Command {
         json: bool,
     },
 
-    /// Permanently delete this vault and all of its hardware keys.
+    /// Remove this vault and backend-owned keys; retained TPM backups are not revoked.
     Destroy {
         /// Required acknowledgement because this cannot be undone.
         #[arg(long)]

@@ -102,6 +102,9 @@ pub fn serve_macos_vault_with_lifecycle(
     options: &MacosVaultOptions,
     lifecycle_monitor: Option<&MacosVaultLifecycle>,
 ) -> VaultResult<()> {
+    if options.install_lifecycle_monitor {
+        service.enable_emergency_exit();
+    }
     validate_socket_options("macOS", &options.socket_path, options.poll_interval)?;
     let (listener, _socket_guard) = bind_listener(&options.socket_path)?;
 
@@ -175,12 +178,12 @@ impl MacosVaultLifecycle {
         } {
             let lifecycle_signal = Arc::clone(&signal);
             let block = RcBlock::new(move |_notification: NonNull<NSNotification>| {
-                lifecycle_signal.trigger();
+                lifecycle_signal.trigger_bounded(Duration::from_millis(250));
                 if lifecycle_signal.needs_emergency_exit() {
                     // AppKit provides no suspend-delay token. Termination is
                     // the only fail-closed path if sealing cannot complete in
                     // the notification callback.
-                    std::process::abort();
+                    std::process::exit(1);
                 }
             });
             let observer = unsafe {
@@ -203,7 +206,7 @@ impl MacosVaultLifecycle {
             poll_thread: None,
         };
         if macos_screen_is_locked().unwrap_or(true) {
-            lifecycle.signal.trigger();
+            lifecycle.signal.trigger_bounded(Duration::from_millis(250));
         }
         let poll_stopping = Arc::clone(&lifecycle.poll_stopping);
         let poll_signal = signal;
@@ -212,16 +215,16 @@ impl MacosVaultLifecycle {
             .spawn(move || {
                 while !poll_stopping.load(Ordering::Acquire) {
                     if macos_screen_is_locked().unwrap_or(true) {
-                        poll_signal.trigger();
+                        poll_signal.trigger_bounded(Duration::from_millis(250));
                         if poll_signal.needs_emergency_exit() {
-                            std::process::abort();
+                            std::process::exit(1);
                         }
                         break;
                     }
                     std::thread::sleep(DEFAULT_POLL_INTERVAL);
                 }
             })
-            .unwrap_or_else(|_| std::process::abort());
+            .unwrap_or_else(|_| std::process::exit(1));
         lifecycle.poll_thread = Some(poll_thread);
         lifecycle
     }
@@ -230,7 +233,7 @@ impl MacosVaultLifecycle {
         self.run_loop
             .runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.0));
         if macos_screen_is_locked().unwrap_or(true) {
-            self.signal.trigger();
+            self.signal.trigger_bounded(Duration::from_millis(250));
         }
     }
 

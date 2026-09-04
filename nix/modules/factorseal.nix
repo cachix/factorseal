@@ -98,6 +98,7 @@ in
         ];
         Restart = "no";
         UMask = "0077";
+        LimitCORE = 0;
         NoNewPrivileges = true;
         # Do not add options which create a filesystem mount namespace here.
         # Linux authenticates clients by reading /proc/<SO_PEERCRED pid>/exe;

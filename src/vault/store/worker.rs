@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -21,11 +22,11 @@ use crate::vault::{
 };
 
 use super::bootstrap::open_store;
-#[cfg(all(test, feature = "hardware"))]
 use super::chain::ProtectedCommit;
 #[cfg(all(test, feature = "hardware"))]
 use super::database::query_count;
-use super::database::{database_error, document_id_from_blob, row_blob, row_text, to_i64};
+#[cfg(all(test, feature = "hardware"))]
+use super::database::row_blob;
 use super::{HistoryPage, StorePage};
 
 mod integrity;
@@ -45,29 +46,75 @@ const EXPIRY: Provenance = Provenance::service(ServiceReason::Expiry);
 /// One value per requested address, absent when missing or expired.
 pub(super) type SecretValues = Vec<Option<Zeroizing<Vec<u8>>>>;
 
+pub(crate) struct StoredSecret {
+    pub(crate) value: Zeroizing<Vec<u8>>,
+    pub(crate) expires_at: Option<u64>,
+}
+
 pub(super) struct WorkerControl {
     pub(super) sender: mpsc::SyncSender<Command>,
     join: Mutex<Option<JoinHandle<()>>>,
-    sealed: AtomicBool,
+    status: Arc<WorkerStatus>,
+}
+
+#[derive(Default)]
+struct WorkerStatus {
+    sealed: Arc<AtomicBool>,
     shutdown_complete: AtomicBool,
+    deadline: Mutex<Option<Instant>>,
+    emergency_exit: AtomicBool,
+}
+
+impl WorkerStatus {
+    fn is_sealed(&self) -> bool {
+        let expired = self.deadline.lock().map_or(true, |deadline| {
+            deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        });
+        if expired {
+            self.sealed.store(true, Ordering::Release);
+        }
+        self.sealed.load(Ordering::Acquire)
+    }
+}
+
+struct WorkerExit(Arc<WorkerStatus>);
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        self.0.sealed.store(true, Ordering::Release);
+        self.0.shutdown_complete.store(true, Ordering::Release);
+    }
 }
 
 impl WorkerControl {
+    pub(super) fn seal_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.status.sealed)
+    }
+
     pub(super) fn start(root: PathBuf, unsealed: UnsealedVault) -> VaultResult<Self> {
         let (sender, receiver) = mpsc::sync_channel(COMMAND_QUEUE);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let status = Arc::new(WorkerStatus::default());
+        let worker_status = Arc::clone(&status);
         let join = thread::Builder::new()
             .name("factorseal-store".to_owned())
-            .spawn(move || run_worker(root, unsealed, receiver, ready_sender))
+            .spawn(move || run_worker(root, unsealed, receiver, ready_sender, worker_status))
             .map_err(|error| VaultError::Database(error.to_string()))?;
 
         match ready_receiver.recv() {
-            Ok(Ok(())) => Ok(Self {
-                sender,
-                join: Mutex::new(Some(join)),
-                sealed: AtomicBool::new(false),
-                shutdown_complete: AtomicBool::new(false),
-            }),
+            Ok(Ok(())) => {
+                let watched = Arc::downgrade(&status);
+                let control = Self {
+                    sender,
+                    join: Mutex::new(Some(join)),
+                    status,
+                };
+                // Independent of the state mutex and the database thread.
+                thread::Builder::new()
+                    .name("factorseal-lease-watchdog".to_owned())
+                    .spawn(move || watch_shutdown(&watched))
+                    .map_err(|error| VaultError::Database(error.to_string()))?;
+                Ok(control)
+            }
             Ok(Err(error)) => {
                 let _ = join.join();
                 Err(error)
@@ -80,9 +127,7 @@ impl WorkerControl {
     }
 
     pub(super) fn shutdown(&self) {
-        if !self.sealed.swap(true, Ordering::AcqRel) {
-            let _ = self.sender.send(Command::Shutdown);
-        }
+        self.request_shutdown();
         let Ok(mut join) = self.join.lock() else {
             return;
         };
@@ -93,15 +138,50 @@ impl WorkerControl {
         // caller that took the join handle has finished waiting for it. The
         // join mutex provides that hand-off even when this caller did not
         // initiate shutdown.
-        self.shutdown_complete.store(true, Ordering::Release);
+        self.status.shutdown_complete.store(true, Ordering::Release);
+    }
+
+    pub(super) fn request_shutdown(&self) {
+        self.status.sealed.store(true, Ordering::Release);
+        // A full queue must not prevent announcing shutdown. The worker also
+        // polls the out-of-band flag and drops queued secret-bearing commands.
+        let _ = self.sender.try_send(Command::Shutdown);
+    }
+
+    pub(super) fn set_deadline(&self, deadline: Instant) -> VaultResult<()> {
+        let mut current = self
+            .status
+            .deadline
+            .lock()
+            .map_err(|_| VaultError::WorkerUnavailable)?;
+        if self.status.sealed.load(Ordering::Acquire)
+            || current.is_some_and(|old| Instant::now() >= old)
+        {
+            self.status.sealed.store(true, Ordering::Release);
+            return Err(VaultError::Sealed);
+        }
+        *current = Some(deadline);
+        Ok(())
+    }
+
+    pub(super) fn deadline(&self) -> VaultResult<Option<Instant>> {
+        self.status
+            .deadline
+            .lock()
+            .map(|deadline| *deadline)
+            .map_err(|_| VaultError::WorkerUnavailable)
+    }
+
+    pub(super) fn enable_emergency_exit(&self) {
+        self.status.emergency_exit.store(true, Ordering::Release);
     }
 
     pub(super) fn is_sealed(&self) -> bool {
-        self.sealed.load(Ordering::Acquire)
+        self.status.is_sealed()
     }
 
     pub(super) fn is_shutdown_complete(&self) -> bool {
-        self.shutdown_complete.load(Ordering::Acquire)
+        self.status.shutdown_complete.load(Ordering::Acquire)
     }
 }
 
@@ -111,13 +191,33 @@ impl Drop for WorkerControl {
     }
 }
 
+fn watch_shutdown(watched: &std::sync::Weak<WorkerStatus>) {
+    let mut sealing_at = None;
+    while let Some(status) = watched.upgrade() {
+        if status.shutdown_complete.load(Ordering::Acquire) {
+            break;
+        }
+        if status.is_sealed() {
+            let started = *sealing_at.get_or_insert_with(Instant::now);
+            if status.emergency_exit.load(Ordering::Acquire)
+                && started.elapsed() >= Duration::from_secs(1)
+            {
+                // A wedged native key owner exits without creating a core dump.
+                std::process::exit(1);
+            }
+        }
+        drop(status);
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 pub(super) enum Command {
     Get {
         scope: DocumentKind,
         partition: Vec<u8>,
         address: SecretAddress,
         now: u64,
-        response: mpsc::Sender<VaultResult<Option<Zeroizing<Vec<u8>>>>>,
+        response: mpsc::Sender<VaultResult<Option<StoredSecret>>>,
     },
     GetMany {
         scope: DocumentKind,
@@ -206,7 +306,15 @@ fn run_worker(
     unsealed: UnsealedVault,
     receiver: mpsc::Receiver<Command>,
     ready: mpsc::SyncSender<VaultResult<()>>,
+    status: Arc<WorkerStatus>,
 ) {
+    // Declared before the key owner, so completion is published after keys
+    // are dropped, including unwinding and startup failures.
+    let _exited = WorkerExit(Arc::clone(&status));
+    // Move argument-owned secrets and queued commands into locals declared
+    // after the completion guard, so they are destroyed before it on every exit.
+    let unsealed = unsealed;
+    let receiver = receiver;
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -227,11 +335,45 @@ fn run_worker(
     if ready.send(Ok(())).is_err() {
         return;
     }
-    while let Ok(command) = receiver.recv() {
-        if !execute_command(&runtime, &mut worker, command) {
-            break;
+    while !status.is_sealed() {
+        match receiver.recv_timeout(Duration::from_millis(20)) {
+            Ok(command) if !status.is_sealed() => {
+                if !execute_command(&runtime, &mut worker, command, &status) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            _ => break,
         }
     }
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "completion consumes the one-shot response sender"
+)]
+fn send_result<T>(
+    response: mpsc::Sender<VaultResult<T>>,
+    result: VaultResult<T>,
+    status: &WorkerStatus,
+) {
+    let fatal = matches!(
+        &result,
+        Err(VaultError::Signature
+            | VaultError::Crypto
+            | VaultError::InvalidData(_)
+            | VaultError::Database(_)
+            | VaultError::Automerge(_))
+    );
+    let result = if status.is_sealed() {
+        Err(VaultError::Sealed)
+    } else {
+        result
+    };
+    if fatal {
+        status.sealed.store(true, Ordering::Release);
+    }
+    let _ = response.send(result);
 }
 
 // One flat dispatch per command keeps every worker entry point visible here.
@@ -240,6 +382,7 @@ fn execute_command(
     runtime: &tokio::runtime::Runtime,
     worker: &mut StoreWorker,
     command: Command,
+    status: &WorkerStatus,
 ) -> bool {
     match command {
         Command::Get {
@@ -252,7 +395,7 @@ fn execute_command(
             let document_id = worker.document_id(scope, &partition);
             let result =
                 runtime.block_on(worker.get(document_id, scope, &partition, &address, now));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::GetMany {
             scope,
@@ -264,7 +407,7 @@ fn execute_command(
             let document_id = worker.document_id(scope, &partition);
             let result =
                 runtime.block_on(worker.get_many(document_id, scope, &partition, &addresses, now));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::Put {
             scope,
@@ -287,7 +430,7 @@ fn execute_command(
                 evict_at,
                 &context,
             ));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::Mutate {
             scope,
@@ -306,7 +449,7 @@ fn execute_command(
                 &operations,
                 &context,
             ));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::Delete {
             scope,
@@ -320,11 +463,11 @@ fn execute_command(
             let context = worker.context(&provenance, now);
             let result =
                 runtime.block_on(worker.delete(document_id, scope, &partition, &address, &context));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::PurgeExpired { now, response } => {
             let result = runtime.block_on(worker.purge_expired(now));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::Clear {
             scope,
@@ -336,7 +479,7 @@ fn execute_command(
             let document_id = worker.document_id(scope, &partition);
             let context = worker.context(&provenance, now);
             let result = runtime.block_on(worker.clear(document_id, scope, &partition, &context));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::ListHistory {
             scope,
@@ -355,7 +498,7 @@ fn execute_command(
                 before_seq,
                 limit,
             ));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::ListProjects {
             cursor,
@@ -364,7 +507,7 @@ fn execute_command(
             response,
         } => {
             let result = runtime.block_on(worker.list_projects(cursor.as_deref(), limit, now));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::ListProjectAddresses {
             project,
@@ -379,7 +522,7 @@ fn execute_command(
                 limit,
                 now,
             ));
-            let _ = response.send(result);
+            send_result(response, result, status);
         }
         Command::Shutdown => return false,
     }
@@ -391,11 +534,45 @@ struct StoreWorker {
     device: VaultMetadata,
     secrets: InstallationSecrets,
     lock_file: fs::File,
+    verified: VerifiedStoreState,
+}
+
+/// The only freshness/scheduling authority during a lease. Never reconstruct
+/// this from mutable SQL rows except during full startup verification.
+#[derive(Default)]
+struct VerifiedStoreState {
+    head: Option<[u8; 32]>,
+    documents: BTreeMap<DocumentId, VerifiedDocument>,
     chain_length: usize,
+}
+
+#[derive(Clone)]
+struct VerifiedDocument {
+    row: DocumentRow,
+    snapshot_digest: [u8; 32],
+}
+
+impl From<&ProtectedCommit> for VerifiedDocument {
+    fn from(commit: &ProtectedCommit) -> Self {
+        Self {
+            row: DocumentRow {
+                vault_id: commit.vault_id,
+                document_id: commit.document_id,
+                scope: commit.scope,
+                generation: commit.generation,
+                key_epoch: commit.key_epoch,
+                wrapped_key_digest: commit.wrapped_key_digest,
+                current_commit_id: commit.commit_id,
+                next_eviction: commit.next_eviction,
+            },
+            snapshot_digest: commit.snapshot_digest,
+        }
+    }
 }
 
 /// One row of `documents`, which always describes the document's current
 /// state rather than any earlier generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct DocumentRow {
     vault_id: crate::vault::VaultId,
     document_id: DocumentId,
@@ -404,6 +581,7 @@ struct DocumentRow {
     key_epoch: u64,
     wrapped_key_digest: [u8; 32],
     current_commit_id: [u8; 32],
+    next_eviction: Option<u64>,
 }
 
 struct LoadedDocument {
@@ -417,6 +595,7 @@ struct LoadedDocument {
 /// envelope and its unwrapped key so a mutation can carry the history log
 /// forward without loading the document a second time.
 struct DocumentHead {
+    current_commit_id: [u8; 32],
     generation: u64,
     key_epoch: u64,
     wrapped_dek: Vec<u8>,
@@ -452,9 +631,9 @@ impl StoreWorker {
             device: opened.device,
             secrets: opened.secrets,
             lock_file: opened.lock_file,
-            chain_length: 0,
+            verified: VerifiedStoreState::default(),
         };
-        worker.chain_length = worker.verify_commit_chain().await?;
+        worker.verified = worker.verify_commit_chain().await?;
         worker.purge_expired(unix_time()?).await?;
         // A database written before compaction existed still carries its whole
         // history; shrink it once here so the next unseal is fast.
@@ -469,16 +648,17 @@ impl StoreWorker {
         partition: &[u8],
         address: &SecretAddress,
         now: u64,
-    ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
+    ) -> VaultResult<Option<StoredSecret>> {
         let Some(LoadedDocument { mut document, head }) = self
             .load_document(document_id, scope, Some(partition))
             .await?
         else {
             return Ok(None);
         };
-        match document.get(address, now)? {
+        let (read, expires_at) = document.get_with_deadline(address, now)?;
+        match read {
             SecretRead::Missing => Ok(None),
-            SecretRead::Value(value) => Ok(Some(value)),
+            SecretRead::Value(value) => Ok(Some(StoredSecret { value, expires_at })),
             SecretRead::Conflict => Err(VaultError::Conflict),
             SecretRead::Expired => {
                 let expiry = EXPIRY;
@@ -601,27 +781,22 @@ impl StoreWorker {
     }
 
     /// Remove every record whose eviction deadline has passed, in every
-    /// document kind. Only documents whose row says a deadline is due are
-    /// loaded; the row's hint is scheduling metadata, and the decrypted
-    /// document decides what is actually expired.
+    /// document kind. Only signed, startup-verified deadlines schedule work;
+    /// changing an SQL hint cannot hide a document from the sweep.
     async fn purge_expired(&mut self, now: u64) -> VaultResult<usize> {
-        let mut rows = self
-            .connection
-            .query(
-                "SELECT document_id, document_kind FROM documents
-                 WHERE next_eviction IS NOT NULL AND next_eviction <= ?1",
-                [to_i64(now)?],
-            )
-            .await
-            .map_err(database_error)?;
-        let mut due = Vec::new();
-        while let Some(row) = rows.next().await.map_err(database_error)? {
-            due.push((
-                document_id_from_blob(&row_blob(&row, 0)?)?,
-                DocumentKind::parse(&row_text(&row, 1)?)?,
-            ));
-        }
-        drop(rows);
+        self.verify_live_inventory().await?;
+        let due: Vec<_> = self
+            .verified
+            .documents
+            .values()
+            .filter(|document| {
+                document
+                    .row
+                    .next_eviction
+                    .is_some_and(|deadline| deadline <= now)
+            })
+            .map(|document| (document.row.document_id, document.row.scope))
+            .collect();
 
         let expiry = EXPIRY;
         let context = self.context(&expiry, now);
@@ -668,19 +843,14 @@ impl StoreWorker {
         limit: u16,
         now: u64,
     ) -> VaultResult<StorePage<String>> {
-        let mut rows = self
-            .connection
-            .query(
-                "SELECT document_id FROM documents WHERE document_kind = 'secretspec-project'",
-                (),
-            )
-            .await
-            .map_err(database_error)?;
-        let mut document_ids = Vec::new();
-        while let Some(row) = rows.next().await.map_err(database_error)? {
-            document_ids.push(document_id_from_blob(&row_blob(&row, 0)?)?);
-        }
-        drop(rows);
+        self.verify_live_inventory().await?;
+        let document_ids: Vec<_> = self
+            .verified
+            .documents
+            .values()
+            .filter(|document| document.row.scope == DocumentKind::SecretSpecProject)
+            .map(|document| document.row.document_id)
+            .collect();
 
         let expiry = EXPIRY;
         let context = self.context(&expiry, now);

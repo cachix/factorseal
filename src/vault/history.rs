@@ -12,10 +12,13 @@ use std::fmt;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(feature = "vault-store", test))]
+use super::VaultError;
 use super::protocol::{CallerIdentity, PermissionPrincipal, VaultApplicationContext};
-use super::{DeviceKeyId, DocumentKind, SecretAddress, VaultError, VaultResult};
+use super::{DeviceKeyId, DocumentKind, SecretAddress, VaultResult};
 
 const HISTORY_ENTRY_VERSION: u8 = 1;
+#[cfg(any(feature = "vault-store", test))]
 const HISTORY_LOG_VERSION: u8 = 1;
 const VERSION_ID_BYTES: usize = 16;
 /// Longest declared application field retained in a history entry. Declared
@@ -183,6 +186,7 @@ pub struct HistoryEntry {
 
 /// Fields of a history entry that a mutation supplies. The sequence number
 /// is assigned when the document is projected.
+#[cfg(any(feature = "vault-store", test))]
 pub(crate) struct PendingHistory {
     pub(crate) operation: HistoryOperation,
     pub(crate) address: SecretAddress,
@@ -195,6 +199,7 @@ impl HistoryEntry {
     /// Format version written by this build.
     pub const CURRENT_VERSION: u8 = HISTORY_ENTRY_VERSION;
 
+    #[cfg(any(feature = "vault-store", test))]
     pub(crate) fn new(
         seq: u64,
         at: u64,
@@ -230,6 +235,7 @@ impl HistoryEntry {
 /// rather than rebuilding it inside Automerge.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(any(feature = "vault-store", test))]
 pub(crate) struct HistoryLog {
     version: u8,
     kind: DocumentKind,
@@ -239,6 +245,7 @@ pub(crate) struct HistoryLog {
     entries: Vec<HistoryEntry>,
 }
 
+#[cfg(any(feature = "vault-store", test))]
 impl HistoryLog {
     pub(crate) fn new(kind: DocumentKind, partition: &[u8]) -> Self {
         Self {

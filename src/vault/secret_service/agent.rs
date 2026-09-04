@@ -24,8 +24,9 @@ pub(super) struct Store {
 impl Store {
     fn call(&self, action: VaultAction) -> VaultResult<VaultResponseBody> {
         let request = VaultRequest::new(action)?;
-        self.service
-            .handle(&self.caller, request, unix_time())
+        let response = self.service.handle(&self.caller, request, unix_time());
+        response.check_delivery()?;
+        response
             .result
             .map_err(|error| VaultError::Protocol(error.message))
     }

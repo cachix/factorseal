@@ -4,12 +4,10 @@ use sha2::{Digest, Sha256};
 use crate::vault::signature::{self, CURRENT_SIGNATURE_ALGORITHM, SignatureAlgorithm};
 use crate::vault::{DeviceKeyId, DocumentId, DocumentKind, VaultError, VaultId, VaultResult};
 
-// Version 5 records the signature algorithm in the commit. The commit is the
-// only signed object per generation, so the closed algorithm identifier lives
-// here rather than on the snapshot.
-const COMMIT_VERSION: u8 = 5;
-const COMMIT_DOMAIN: &[u8] = b"factorseal/protected-commit/v4\0";
-const COMMIT_SIGNATURE_DOMAIN: &[u8] = b"factorseal/protected-commit-signature/v4\0";
+// Version 6 authenticates eviction scheduling as well as document contents.
+const COMMIT_VERSION: u8 = 6;
+const COMMIT_DOMAIN: &[u8] = b"factorseal/protected-commit/v6\0";
+const COMMIT_SIGNATURE_DOMAIN: &[u8] = b"factorseal/protected-commit-signature/v6\0";
 
 #[derive(Clone, Copy)]
 pub(super) struct CommitContents {
@@ -21,6 +19,7 @@ pub(super) struct CommitContents {
     pub(super) key_epoch: u64,
     pub(super) wrapped_key_digest: [u8; 32],
     pub(super) snapshot_digest: [u8; 32],
+    pub(super) next_eviction: Option<u64>,
     pub(super) device_key_id: DeviceKeyId,
 }
 
@@ -38,6 +37,7 @@ pub(super) struct ProtectedCommit {
     pub(super) key_epoch: u64,
     pub(super) wrapped_key_digest: [u8; 32],
     pub(super) snapshot_digest: [u8; 32],
+    pub(super) next_eviction: Option<u64>,
     pub(super) device_key_id: DeviceKeyId,
     pub(super) signature: Vec<u8>,
 }
@@ -57,6 +57,7 @@ impl ProtectedCommit {
             key_epoch,
             wrapped_key_digest,
             snapshot_digest,
+            next_eviction,
             device_key_id,
         } = contents;
         Ok(Self {
@@ -71,6 +72,7 @@ impl ProtectedCommit {
             key_epoch,
             wrapped_key_digest,
             snapshot_digest,
+            next_eviction,
             device_key_id,
             signature,
         })
@@ -99,6 +101,7 @@ impl ProtectedCommit {
                 key_epoch: self.key_epoch,
                 wrapped_key_digest: self.wrapped_key_digest,
                 snapshot_digest: self.snapshot_digest,
+                next_eviction: self.next_eviction,
                 device_key_id: self.device_key_id,
             },
         );
@@ -136,6 +139,13 @@ fn commit_transcript(
     bytes.extend_from_slice(&contents.key_epoch.to_be_bytes());
     bytes.extend_from_slice(&contents.wrapped_key_digest);
     bytes.extend_from_slice(&contents.snapshot_digest);
+    match contents.next_eviction {
+        Some(deadline) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&deadline.to_be_bytes());
+        }
+        None => bytes.push(0),
+    }
     bytes.extend_from_slice(contents.device_key_id.as_bytes());
     bytes
 }
@@ -171,6 +181,7 @@ mod tests {
             key_epoch: 4,
             wrapped_key_digest: [5; 32],
             snapshot_digest: [6; 32],
+            next_eviction: Some(100),
             device_key_id: DeviceKeyId::from_bytes([7; 32]),
         }
     }
@@ -201,6 +212,8 @@ mod tests {
         rejects!(version, COMMIT_VERSION + 1);
         rejects!(commit_id, [0x11; 32]);
         rejects!(previous_commit_id, None);
+        rejects!(next_eviction, None);
+        rejects!(next_eviction, Some(101));
         rejects!(vault_id, VaultId::from_bytes([0x12; 16]));
         rejects!(document_id, DocumentId::from_bytes([0x13; 32]));
         rejects!(scope, DocumentKind::Authorization);

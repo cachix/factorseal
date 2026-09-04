@@ -96,6 +96,16 @@ pub(super) fn row_integer(row: &turso::Row, index: usize) -> VaultResult<i64> {
     }
 }
 
+pub(super) fn row_deadline(row: &turso::Row, index: usize) -> VaultResult<Option<u64>> {
+    match row.get_value(index).map_err(database_error)? {
+        Value::Null => Ok(None),
+        Value::Integer(value) => from_i64(value, "eviction deadline").map(Some),
+        _ => Err(VaultError::InvalidData(
+            "invalid eviction deadline".to_owned(),
+        )),
+    }
+}
+
 pub(super) fn document_id_from_blob(bytes: &[u8]) -> VaultResult<DocumentId> {
     Ok(DocumentId::from_bytes(array_from_blob(
         bytes,

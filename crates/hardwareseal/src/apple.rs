@@ -1,6 +1,8 @@
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::base::Error as SecurityError;
+use security_framework::item::KeyType;
 use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+use security_framework::key::{GenerateKeyOptions, SecKey, Token};
 use security_framework::passwords::{
     AccessControlOptions, PasswordOptions, delete_generic_password_options, generic_password,
     set_generic_password_options,
@@ -34,11 +36,28 @@ const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
 const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34018;
 
 pub(super) fn ensure_available(policy: AccessPolicy) -> Result<(), Error> {
-    // Sealing stores a generic password item in the Data Protection Keychain,
-    // which needs no Secure Enclave key of its own. Probing for one would
-    // reject Macs whose keychain works perfectly well, so the only precondition
-    // checked here is that Security.framework accepts the requested policy.
-    access_control(policy).map(drop)
+    access_control(policy)?;
+    // A Keychain descriptor alone also succeeds on software-only Macs.
+    // Probe a transient, non-exportable SEP key, with no persistent location
+    // and no biometric ceremony. This key never wraps the vault secret: the
+    // payload remains in the device-only Data Protection Keychain.
+    let mut options = GenerateKeyOptions::default();
+    options
+        .set_key_type(KeyType::ec())
+        .set_size_in_bits(256)
+        .set_token(Token::SecureEnclave);
+    SecKey::new(&options)
+        .map(drop)
+        .map_err(|error| match i32::try_from(error.code()) {
+            Ok(
+                code @ (ERR_SEC_USER_CANCELED
+                | ERR_SEC_AUTH_FAILED
+                | ERR_SEC_INTERACTION_NOT_ALLOWED
+                | ERR_SEC_MISSING_ENTITLEMENT),
+            ) => hardware_error(SecurityError::from_code(code)),
+            // Unsupported hardware/token, including simulators, fails closed.
+            _ => Error::NotAvailable,
+        })
 }
 
 pub(super) fn seal(

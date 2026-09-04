@@ -34,7 +34,10 @@ With its platform feature disabled, `Protector::open` returns
 Apple does not expose general symmetric encryption in the Secure Enclave. The
 Data Protection Keychain is therefore the correct native primitive: a
 device-only item is released only after the configured Secure Enclave-backed
-authentication ceremony. No sealed secret or wrapping key depends on P-256.
+authentication ceremony. Opening the protector first requires successful
+transient Secure Enclave P-256 key creation, rejecting software-only Macs and
+simulators. That capability probe is not used to wrap the secret; the payload
+is stored by the Data Protection Keychain under the configured access policy.
 Each `seal` writes its own keychain item and returns an envelope naming that
 item, so re-sealing under a label never destroys or silently repoints the
 previous secret, and `delete` removes every generation stored under the label.

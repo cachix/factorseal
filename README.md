@@ -301,9 +301,11 @@ Every mutation persists one encrypted snapshot. The snapshot is a fresh-genesis
 projection of the document's current records, so deleted and overwritten
 values do not survive in it, and it is encrypted under a fresh DEK for that
 generation with AES-256-GCM and a 96-bit nonce. The AEAD header binds its
-Device-vault ID, document kind, device, generation, key epoch, and Automerge
-heads, and one ML-DSA-65 signed protected commit per generation binds the
-snapshot digest and wrapped key.
+device-vault ID, document ID and kind, generation, and key epoch. Plaintext
+Automerge heads are never published in the header. One ML-DSA-65 signed
+protected commit per generation binds the snapshot digest, wrapped key and
+eviction deadline. Live reads and compaction compare against verified in-memory
+heads; compaction cannot certify a partially rolled-back document.
 
 Each document also keeps a bounded history of its changes: which address
 changed, when, on whose behalf, and which value version replaced which.
@@ -447,12 +449,14 @@ Windows uses `\\.\pipe\factorseal-<installation-id>` instead of a socket.
 `FACTORSEAL_ROOT` overrides the vault directory and `FACTORSEAL_SOCKET`
 overrides the native endpoint.
 
-`factorseal destroy --yes-really-destroy` permanently deletes a sealed vault,
-including every unlock group's hardware keys. It requires one configured unlock
-group and is irreversible. A root written by an earlier metadata version
-cannot be unsealed by the current build; `destroy` still removes it together
-with the hardware keys its metadata names, with no unlock group to prove,
-after which `factorseal init` creates a new vault.
+`factorseal destroy --yes-really-destroy` removes a sealed vault directory and
+asks each backend to remove its locally owned keys. It requires one configured
+unlock group. This is local removal, not backup revocation: self-contained TPM
+envelopes remain usable on the original TPM with valid factors if a copy was
+retained. A root written by an earlier metadata version cannot be unsealed by
+the current build; `destroy` can still remove that directory and backend-owned
+state without proving an unlock group. There is no migration for unreleased
+formats; explicitly preserve any needed data before removing an old vault.
 
 ## Security properties and limitations
 
@@ -470,8 +474,10 @@ Factorseal is designed so that:
   divergent writers, and inconsistent partial rollback when newer protected
   state remains;
 - a deleted or overwritten value is absent from the next persisted snapshot,
-  and the superseded generation's key is replaced, so what lingers until
-  compaction cannot be decrypted.
+  and the superseded generation's key is replaced. This is logical deletion,
+  not cryptographic erasure: a root holder may recover earlier values from
+  retained wrapped keys in database remnants, filesystem snapshots or backups.
+  Checked WAL checkpoint/truncation reduces retention but cannot revoke copies.
 
 The design does not detect rollback of the complete vault directory. Doing so
 requires a trusted checkpoint stored elsewhere. The offline MVP deliberately

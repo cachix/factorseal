@@ -85,6 +85,11 @@ be completely post-quantum certified.
   impersonates each client, verifies its immutable SID against the vault SID,
   and binds the grant to its PID-resolved executable digest.
 
+Clients authenticate the connected server before sending any request bytes:
+Unix clients require their own UID; Windows clients require their own SID as
+both pipe-object owner and server-process identity. Windows opens use
+identification-only security quality of service, not full impersonation.
+
 Caller identity is never accepted from request JSON. Replacing or updating an
 executable changes its digest and invalidates its grant. The digest is taken
 from a descriptor opened once, so the path, size, and bytes always describe the
@@ -107,8 +112,12 @@ resolution, so a reused process ID cannot inherit another process's grant.
   a bound it is re-signed and compacted down to the current state of every
   document, and superseded generations are discarded. Every generation is
   encrypted under a fresh document key and each persisted snapshot contains
-  only current records, so a superseded generation that has not been compacted
-  yet holds no recoverable deleted value. The value-free change history beside
+  only current records. Deletion is logical, not cryptographic erasure: retained
+  wrapped keys and historical ciphertext in database remnants or backups can
+  recover older values when the installation root is available. Checked WAL
+  checkpoint/truncation reduces retention, but does not erase storage-device
+  remnants, free pages, snapshots, backups or already exported copies.
+  The value-free change history beside
   each document is as trustworthy as the installation root holder during a
   lease; it is a record for the user, not an audit log. It cannot detect rollback
   of the complete vault directory. Detecting that needs a checkpoint held
@@ -137,9 +146,31 @@ resolution, so a reused process ID cannot inherit another process's grant.
   `LD_PRELOAD` paths, but a same-user process can inject code and scrub those
   signals before it connects. The boundary the vault does enforce is the Unix
   user or Windows SID.
-- Physical TPM/Secure Enclave matrices, official code signing/notarization,
-  process-dump protection, locked memory, recovery, and independent audit are
-  not complete.
+- The CLI disables Unix core files before acquiring secrets. Linux key-owning
+  agent, initialization, destruction, reauthorization and isolated approval
+  helpers additionally disable process dumpability (including piped core
+  collectors). IPC-only clients stay inspectable for executable authentication.
+  Native emergency termination exits without deliberately creating a core dump.
+  These measures cannot stop privileged memory inspection. Locked memory,
+  comprehensive wiping of library/OS-internal copies, Windows dump policy,
+  physical hardware matrices, code signing/notarization, recovery and independent
+  audit remain release limitations.
+- `destroy` removes local state, not every possible hardware authority. Linux
+  and non-biometric Windows TPM envelopes have no per-label persistent key to
+  revoke. Retained copies can remain usable on the original TPM with valid
+  factors; one surviving OR unlock path suffices. No backup-revocation or
+  cryptographic-erasure guarantee is made.
+- Apple storage uses device-only, non-synchronizing Data Protection Keychain
+  items with the requested access control. Opening a protector also requires
+  successful transient Secure Enclave key creation. The probe does not itself
+  wrap the vault root; native signed/entitled package tests must verify the
+  Keychain policy and rejection of machines without a Secure Enclave.
+- Deadlines are checked after queueing, before authorization and on completion;
+  transport writes are bounded by the lease and known result/grant expiry.
+  Bytes already released to an authorized client cannot be withdrawn. A native
+  agent independently terminates if a wedged worker prevents timely teardown;
+  library embedders do not opt into terminating their host process and must
+  provide process isolation for a hard key-retention bound.
 - Windows biometric groups encrypt a TPM sealed-data object under a Windows
   Hello platform-credential PRF output. Native acceptance must establish PRF
   support, TPM binding, timeout/cancellation behavior, the application-owned

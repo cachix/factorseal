@@ -10,6 +10,7 @@ use super::super::lease::{ReplayWindow, UnsealLease};
 use super::super::{CallerIdentity, Permission, PermissionWaitStatus, VaultInteractionReference};
 use super::super::{RequestId, UnsealLeasePolicy};
 use super::approvals::{ApprovalCandidate, PendingApprovals};
+use super::time::RequestTime;
 
 pub(super) struct ServiceState {
     live: Mutex<LiveState>,
@@ -40,12 +41,23 @@ pub(super) struct LiveStateGuard<'a> {
 }
 
 impl ServiceState {
+    pub(super) fn seal_signal(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.seal_handle.seal_signal()
+    }
+
+    #[cfg(all(test, feature = "hardware"))]
+    pub(super) fn is_sealed(&self) -> bool {
+        self.seal_handle.is_sealed()
+    }
+
     pub(super) fn new(store: VaultStore, now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
         let seal_handle = store.clone();
+        let lease = UnsealLease::new(now, policy)?;
+        store.set_deadline(lease.expires_at())?;
         Ok(Self {
             live: Mutex::new(LiveState {
                 store,
-                lease: UnsealLease::new(now, policy)?,
+                lease,
                 replay: ReplayWindow::new(),
                 approvals: PendingApprovals::default(),
                 granted_permissions: Vec::new(),
@@ -59,17 +71,22 @@ impl ServiceState {
         })
     }
 
-    pub(super) fn is_sealed(&self) -> bool {
-        self.seal_handle.is_sealed()
-    }
-
     pub(super) fn is_seal_complete(&self) -> bool {
         self.seal_handle.is_shutdown_complete()
     }
 
     pub(super) fn seal(&self) {
-        self.seal_handle.seal();
+        self.seal_handle.request_seal();
         self.approval_changed.notify_all();
+        self.seal_handle.seal();
+    }
+
+    pub(super) fn deadline(&self) -> VaultResult<Option<Instant>> {
+        self.seal_handle.deadline()
+    }
+
+    pub(super) fn enable_emergency_exit(&self) {
+        self.seal_handle.enable_emergency_exit();
     }
 
     pub(super) fn lock_live(&self, now: Instant) -> VaultResult<LiveStateGuard<'_>> {
@@ -80,7 +97,9 @@ impl ServiceState {
             .live
             .lock()
             .map_err(|_| VaultError::WorkerUnavailable)?;
-        if live.store.is_sealed() || live.lease.is_expired(now) {
+        // `now` may have been sampled before blocking on the mutex. Never
+        // authorize against an instant older than lock acquisition.
+        if live.store.is_sealed() || live.lease.is_expired(now.max(Instant::now())) {
             live.store.seal();
             return Err(VaultError::Sealed);
         }
@@ -90,7 +109,12 @@ impl ServiceState {
         })
     }
 
+    pub(super) fn check_live(&self, now: Instant) -> VaultResult<()> {
+        self.lock_live(now).map(drop)
+    }
+
     pub(super) fn expire_if_needed(&self, now: u64, monotonic_now: Instant) -> VaultResult<bool> {
+        let clock = RequestTime::new(now, monotonic_now);
         if self.seal_handle.is_sealed() {
             self.approval_changed.notify_all();
             return Ok(true);
@@ -102,7 +126,8 @@ impl ServiceState {
         if live.store.is_sealed() {
             return Ok(true);
         }
-        if live.lease.is_expired(monotonic_now) {
+        let (now, monotonic_now) = clock.sample();
+        if live.lease.is_expired(monotonic_now.max(Instant::now())) {
             live.store.seal();
             self.approval_changed.notify_all();
             return Ok(true);
@@ -218,7 +243,17 @@ impl LiveStateGuard<'_> {
     }
 
     pub(super) fn touch(&mut self, now: u64, monotonic_now: Instant) -> VaultResult<()> {
-        self.live.lease.touch(now, monotonic_now)
+        if self.live.store.is_sealed()
+            || self
+                .live
+                .lease
+                .is_expired(monotonic_now.max(Instant::now()))
+        {
+            self.live.store.seal();
+            return Err(VaultError::Sealed);
+        }
+        self.live.lease.touch(now, monotonic_now)?;
+        self.live.store.set_deadline(self.live.lease.expires_at())
     }
 }
 
@@ -239,7 +274,7 @@ impl LiveStateGuard<'_> {
         caller: &CallerIdentity,
         id: &str,
         timeout: Duration,
-        now: u64,
+        clock: RequestTime,
     ) -> VaultResult<PermissionWaitStatus> {
         let started = Instant::now();
         let deadline = started
@@ -250,7 +285,7 @@ impl LiveStateGuard<'_> {
                 self.live.store.seal();
                 return Err(VaultError::Sealed);
             }
-            let current_now = now.saturating_add(started.elapsed().as_secs());
+            let current_now = clock.wall();
             let status = self.permission_status(caller, id, current_now)?;
             if status != PermissionWaitStatus::Pending {
                 return Ok(status);
@@ -258,23 +293,21 @@ impl LiveStateGuard<'_> {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return Ok(PermissionWaitStatus::Pending);
             };
-            let (live, result) = self
+            let (live, _) = self
                 .approval_changed
                 .wait_timeout(self.live, remaining)
                 .map_err(|_| VaultError::WorkerUnavailable)?;
             self.live = live;
-            if result.timed_out() {
-                let current_now = now.saturating_add(started.elapsed().as_secs());
-                return self.permission_status(caller, id, current_now);
-            }
+            // Even a timeout must pass through lease and status checks.
         }
     }
 
     pub(super) fn wait_for_approvals(
         mut self,
+        caller: &CallerIdentity,
         after_revision: u64,
         timeout: Duration,
-        now: u64,
+        clock: RequestTime,
     ) -> VaultResult<(u64, Vec<Permission>)> {
         let deadline = Instant::now()
             .checked_add(timeout)
@@ -284,21 +317,21 @@ impl LiveStateGuard<'_> {
                 self.live.store.seal();
                 return Err(VaultError::Sealed);
             }
-            let current = self.list_permissions(now)?;
+            // The condition-variable wait releases the guard; a manager's
+            // grant may be revoked or expire before it is reacquired.
+            super::require_permission_manager(&self, caller, clock.wall())?;
+            let current = self.list_permissions(clock.wall())?;
             if current.0 != after_revision {
                 return Ok(current);
             }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return Ok(current);
             };
-            let (live, result) = self
+            let (live, _) = self
                 .approval_changed
                 .wait_timeout(self.live, remaining)
                 .map_err(|_| VaultError::WorkerUnavailable)?;
             self.live = live;
-            if result.timed_out() {
-                return self.list_permissions(now);
-            }
         }
     }
 }

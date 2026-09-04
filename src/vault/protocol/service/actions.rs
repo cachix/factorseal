@@ -7,12 +7,13 @@ use crate::vault::{
     VaultError, VaultResult, VaultStore,
 };
 
-use super::super::grant::{GrantRequirement, require_grant};
+use super::super::grant::{GrantRequirement, require_grant_until};
 use super::super::{
     CallerIdentity, GrantPermission, PermissionPrincipal, VaultAction, VaultMutation,
     VaultResponseBody, WireSecret, WireSecretAddress,
 };
 use super::approvals::PERMISSION_CONTROL_NAMESPACE;
+use super::time::{RequestTime, tighten};
 
 pub(super) struct ScopedAction {
     pub(super) action: VaultAction,
@@ -24,7 +25,8 @@ struct ActionContext<'a> {
     store: &'a VaultStore,
     caller: &'a CallerIdentity,
     scope: DocumentKind,
-    now: u64,
+    clock: RequestTime,
+    valid_until: &'a std::cell::Cell<Option<u64>>,
     provenance: &'a Provenance,
 }
 
@@ -32,16 +34,18 @@ pub(super) fn execute_action(
     store: &VaultStore,
     caller: &CallerIdentity,
     action: VaultAction,
-    now: u64,
     lease_deadlines: (u64, u64),
     provenance: &Provenance,
+    clock: RequestTime,
+    valid_until: &std::cell::Cell<Option<u64>>,
 ) -> VaultResult<(VaultResponseBody, bool)> {
     let ScopedAction { action, scope } = scope_action(action);
     let context = ActionContext {
         store,
         caller,
         scope,
-        now,
+        clock,
+        valid_until,
         provenance,
     };
     match action {
@@ -128,13 +132,18 @@ pub(super) fn execute_action(
 }
 
 impl ActionContext<'_> {
+    fn accept_deadline(self, deadline: Option<u64>) -> VaultResult<()> {
+        tighten(self.valid_until, deadline);
+        self.clock.check(self.valid_until.get())
+    }
+
     fn require(
         self,
         namespace: &[u8],
         address: Option<&SecretAddress>,
         permission: GrantPermission,
     ) -> VaultResult<()> {
-        require_grant(
+        require_grant_until(
             self.store,
             self.caller,
             GrantRequirement {
@@ -144,8 +153,9 @@ impl ActionContext<'_> {
                 project: None,
                 permission,
             },
-            self.now,
+            self.clock.wall(),
         )
+        .and_then(|deadline| self.accept_deadline(deadline))
     }
 
     fn require_project(
@@ -154,7 +164,7 @@ impl ActionContext<'_> {
         address: Option<&SecretAddress>,
         permission: GrantPermission,
     ) -> VaultResult<()> {
-        require_grant(
+        require_grant_until(
             self.store,
             self.caller,
             GrantRequirement {
@@ -164,14 +174,15 @@ impl ActionContext<'_> {
                 project: Some(project),
                 permission,
             },
-            self.now,
+            self.clock.wall(),
         )
+        .and_then(|deadline| self.accept_deadline(deadline))
     }
 
     /// Only a grant on the whole kind satisfies a kind-wide operation; no
     /// namespace grant, whatever its name, can stand in for one.
     fn require_kind(self, permission: GrantPermission) -> VaultResult<()> {
-        require_grant(
+        require_grant_until(
             self.store,
             self.caller,
             GrantRequirement {
@@ -181,8 +192,9 @@ impl ActionContext<'_> {
                 project: None,
                 permission,
             },
-            self.now,
+            self.clock.wall(),
         )
+        .and_then(|deadline| self.accept_deadline(deadline))
     }
 
     fn get(self, namespace: &[u8], address: &WireSecretAddress) -> VaultResult<VaultResponseBody> {
@@ -190,8 +202,12 @@ impl ActionContext<'_> {
         self.require(namespace, Some(&address), GrantPermission::Get)?;
         let value = self
             .store
-            .get_at(self.scope, namespace, &address, self.now)?
-            .map(|value| WireSecret::new(value.to_vec()));
+            .get_with_deadline(self.scope, namespace, &address, self.clock.wall())?
+            .map(|secret| {
+                self.accept_deadline(secret.expires_at)?;
+                Ok::<_, VaultError>(WireSecret::new(secret.value.to_vec()))
+            })
+            .transpose()?;
         Ok(VaultResponseBody::Secret { value })
     }
 
@@ -205,8 +221,12 @@ impl ActionContext<'_> {
         self.require_project(project, Some(&address), GrantPermission::Get)?;
         let value = self
             .store
-            .get_at(self.scope, namespace, &address, self.now)?
-            .map(|value| WireSecret::new(value.to_vec()));
+            .get_with_deadline(self.scope, namespace, &address, self.clock.wall())?
+            .map(|secret| {
+                self.accept_deadline(secret.expires_at)?;
+                Ok::<_, VaultError>(WireSecret::new(secret.value.to_vec()))
+            })
+            .transpose()?;
         Ok(VaultResponseBody::Secret { value })
     }
 
@@ -219,7 +239,7 @@ impl ActionContext<'_> {
     ) -> VaultResult<VaultResponseBody> {
         let address = address.resolve()?;
         self.require(namespace, Some(&address), GrantPermission::Put)?;
-        validate_evict_at(evict_at, self.now)?;
+        validate_evict_at(evict_at, self.clock.wall())?;
         self.store.put_at(
             self.scope,
             namespace,
@@ -227,7 +247,7 @@ impl ActionContext<'_> {
             value.expose(),
             evict_at,
             self.provenance,
-            self.now,
+            self.clock.wall(),
         )?;
         Ok(VaultResponseBody::Stored)
     }
@@ -242,7 +262,7 @@ impl ActionContext<'_> {
         let address = SecretAddress::secret_spec(address.clone())?;
         let namespace = project.as_bytes();
         self.require_project(project, Some(&address), GrantPermission::Put)?;
-        validate_evict_at(evict_at, self.now)?;
+        validate_evict_at(evict_at, self.clock.wall())?;
         self.store.put_at(
             self.scope,
             namespace,
@@ -250,7 +270,7 @@ impl ActionContext<'_> {
             value.expose(),
             evict_at,
             self.provenance,
-            self.now,
+            self.clock.wall(),
         )?;
         Ok(VaultResponseBody::Stored)
     }
@@ -261,8 +281,13 @@ impl ActionContext<'_> {
         mutations: Vec<VaultMutation>,
     ) -> VaultResult<VaultResponseBody> {
         let operations = self.prepare_mutations(namespace, mutations)?;
-        self.store
-            .mutate(self.scope, namespace, operations, self.provenance, self.now)?;
+        self.store.mutate(
+            self.scope,
+            namespace,
+            operations,
+            self.provenance,
+            self.clock.wall(),
+        )?;
         Ok(VaultResponseBody::Mutated)
     }
 
@@ -273,9 +298,13 @@ impl ActionContext<'_> {
     ) -> VaultResult<VaultResponseBody> {
         let address = address.resolve()?;
         self.require(namespace, Some(&address), GrantPermission::Delete)?;
-        let existed =
-            self.store
-                .delete(self.scope, namespace, &address, self.provenance, self.now)?;
+        let existed = self.store.delete(
+            self.scope,
+            namespace,
+            &address,
+            self.provenance,
+            self.clock.wall(),
+        )?;
         Ok(VaultResponseBody::Deleted { existed })
     }
 
@@ -287,23 +316,27 @@ impl ActionContext<'_> {
         let address = SecretAddress::secret_spec(address.clone())?;
         let namespace = project.as_bytes();
         self.require_project(project, Some(&address), GrantPermission::Delete)?;
-        let existed =
-            self.store
-                .delete(self.scope, namespace, &address, self.provenance, self.now)?;
+        let existed = self.store.delete(
+            self.scope,
+            namespace,
+            &address,
+            self.provenance,
+            self.clock.wall(),
+        )?;
         Ok(VaultResponseBody::Deleted { existed })
     }
 
     fn clear(self, namespace: &[u8]) -> VaultResult<VaultResponseBody> {
         self.require(namespace, None, GrantPermission::Clear)?;
-        let entries = self
-            .store
-            .clear(self.scope, namespace, self.provenance, self.now)?;
+        let entries =
+            self.store
+                .clear(self.scope, namespace, self.provenance, self.clock.wall())?;
         Ok(VaultResponseBody::Cleared { entries })
     }
 
     fn list_projects(self, cursor: Option<&str>, limit: u16) -> VaultResult<VaultResponseBody> {
         self.require_kind(GrantPermission::List)?;
-        let page = self.store.list_projects(cursor, limit, self.now)?;
+        let page = self.store.list_projects(cursor, limit, self.clock.wall())?;
         Ok(VaultResponseBody::Projects {
             projects: page.items,
             next_cursor: page.next_cursor,
@@ -319,7 +352,7 @@ impl ActionContext<'_> {
         self.require_project(project, None, GrantPermission::List)?;
         let page = self
             .store
-            .list_project_addresses(project, cursor, limit, self.now)?;
+            .list_project_addresses(project, cursor, limit, self.clock.wall())?;
         Ok(VaultResponseBody::ProjectAddresses {
             addresses: page.items,
             next_cursor: page.next_cursor,
@@ -384,7 +417,7 @@ impl ActionContext<'_> {
     /// shows them; any other reader sees its own entries in full and other
     /// callers' entries with the principal and declared context withheld.
     fn redact_history(self, mut entries: Vec<HistoryEntry>) -> VaultResult<Vec<HistoryEntry>> {
-        let manager = match require_grant(
+        let manager = match require_grant_until(
             self.store,
             self.caller,
             GrantRequirement {
@@ -394,9 +427,12 @@ impl ActionContext<'_> {
                 project: None,
                 permission: GrantPermission::ManagePermissions,
             },
-            self.now,
+            self.clock.wall(),
         ) {
-            Ok(()) => true,
+            Ok(deadline) => {
+                self.accept_deadline(deadline)?;
+                true
+            }
             Err(VaultError::AuthorizationRequired) => false,
             Err(error) => return Err(error),
         };
@@ -434,7 +470,7 @@ impl ActionContext<'_> {
                 } => {
                     let address = address.resolve()?;
                     self.require(namespace, Some(&address), GrantPermission::Put)?;
-                    validate_evict_at(evict_at, self.now)?;
+                    validate_evict_at(evict_at, self.clock.wall())?;
                     operations.push(DocumentOperation::Put {
                         address,
                         value: Zeroizing::new(value.expose().to_vec()),

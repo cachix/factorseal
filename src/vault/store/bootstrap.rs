@@ -16,10 +16,10 @@ use super::database::{
     to_i64,
 };
 
-// Version 4 adds the eviction hint to the documents row so the sweep loads
+// Version 5 authenticates the eviction deadline in each protected commit so the sweep loads
 // only documents with a record due for eviction. Version 3 removed the
 // per-change table: one generation is one snapshot.
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 pub(super) struct OpenedStore {
     pub(super) connection: Connection,

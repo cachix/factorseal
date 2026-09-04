@@ -746,6 +746,11 @@ pub struct VaultResponse {
     pub(super) version: u8,
     pub(super) request_id: RequestId,
     pub result: Result<VaultResponseBody, VaultResponseError>,
+    /// Local delivery bound, never trusted from or disclosed over the wire.
+    #[serde(skip)]
+    pub(crate) delivery_deadline: Option<std::time::Instant>,
+    #[serde(skip)]
+    pub(crate) delivery_cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Transport-independent vault client used by the keyring interface and integrations such
@@ -763,6 +768,8 @@ impl VaultResponse {
             version: PROTOCOL_VERSION,
             request_id,
             result: Ok(body),
+            delivery_deadline: None,
+            delivery_cancelled: None,
         }
     }
 
@@ -773,6 +780,8 @@ impl VaultResponse {
             version: PROTOCOL_VERSION,
             request_id,
             result: Err(error),
+            delivery_deadline: None,
+            delivery_cancelled: None,
         }
     }
 
@@ -796,12 +805,30 @@ impl VaultResponse {
     }
 
     pub fn encode(&self) -> VaultResult<Zeroizing<Vec<u8>>> {
+        self.check_delivery()?;
         let bytes =
             serde_json::to_vec(self).map_err(|error| VaultError::Protocol(error.to_string()))?;
         if bytes.len() > MAX_MESSAGE_BYTES {
             return Err(VaultError::Protocol("response is too large".to_owned()));
         }
         Ok(Zeroizing::new(bytes))
+    }
+
+    pub(crate) fn check_delivery(&self) -> VaultResult<()> {
+        if self
+            .delivery_cancelled
+            .as_ref()
+            .is_some_and(|signal| signal.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Err(VaultError::Sealed);
+        }
+        if self
+            .delivery_deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            return Err(VaultError::Sealed);
+        }
+        Ok(())
     }
 }
 

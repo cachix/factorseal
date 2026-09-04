@@ -1,7 +1,81 @@
 use super::super::protection::TestProtector;
 use super::*;
+use zeroize::Zeroizing;
 
 struct TestProtectorFactory;
+
+#[derive(Clone, Copy)]
+struct FailingProtector(fn() -> VaultError);
+
+impl KeyProtector for FailingProtector {
+    fn backend(&self) -> super::super::HardwareBackend {
+        super::super::HardwareBackend::AndroidTrustedEnvironment
+    }
+    fn wrap(&self, _: &[u8]) -> VaultResult<Vec<u8>> {
+        Err((self.0)())
+    }
+    fn unwrap(&self, _: &[u8]) -> VaultResult<Zeroizing<Vec<u8>>> {
+        Err((self.0)())
+    }
+    fn delete(&self) -> VaultResult<()> {
+        Ok(())
+    }
+}
+
+impl KeyProtectorFactory for FailingProtector {
+    fn create(&self, _: &Path, _: &str, _: bool) -> VaultResult<Box<dyn KeyProtector>> {
+        Ok(Box::new(*self))
+    }
+    fn open(&self, _: &Path, _: &str, _: bool) -> VaultResult<Box<dyn KeyProtector>> {
+        Ok(Box::new(*self))
+    }
+}
+
+#[test]
+fn public_vault_boundary_preserves_all_native_failure_kinds() {
+    use super::super::NativeAuthorizationError as Native;
+    let cases: [fn() -> VaultError; 7] = [
+        || VaultError::NativeAuthorization(Native::Cancelled),
+        || VaultError::NativeAuthorization(Native::Denied),
+        || VaultError::NativeAuthorization(Native::UiUnavailable),
+        || VaultError::NativeAuthorization(Native::SessionLocked),
+        || VaultError::NativeAuthorization(Native::CredentialInvalidated),
+        || VaultError::HardwareUnavailable,
+        || VaultError::HardwarePolicyUnsupported,
+    ];
+    for case in cases {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("factorseal");
+        let error = Vault::create_with_key_protector(
+            &root,
+            VaultPlatform::Android,
+            UnsealFactor::Password(TEST_PASSWORD),
+            true,
+            &FailingProtector(case),
+        )
+        .expect_err("wrap must fail");
+        assert_eq!(format!("{error:?}"), format!("{:?}", case()));
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("factorseal");
+        drop(
+            Vault::create_with_key_protector(
+                &root,
+                VaultPlatform::Android,
+                UnsealFactor::Password(TEST_PASSWORD),
+                true,
+                &TestProtectorFactory,
+            )
+            .unwrap(),
+        );
+        let error = Vault::unseal_with_key_protector(
+            &root,
+            UnsealFactor::Password(TEST_PASSWORD),
+            &FailingProtector(case),
+        )
+        .expect_err("unwrap must fail");
+        assert_eq!(format!("{error:?}"), format!("{:?}", case()));
+    }
+}
 
 impl KeyProtectorFactory for TestProtectorFactory {
     fn create(

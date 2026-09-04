@@ -120,6 +120,9 @@ pub fn serve_windows_vault_with_lifecycle(
     lifecycle_monitor: Option<&WindowsVaultLifecycle>,
 ) -> VaultResult<()> {
     validate_options(options)?;
+    if options.install_lifecycle_monitor {
+        service.enable_emergency_exit();
+    }
     let security_descriptor = same_user_security_descriptor()?;
     let listener = PipeListenerOptions::new()
         .path(Path::new(&options.pipe_name))
@@ -486,9 +489,11 @@ unsafe extern "system" fn lifecycle_window_proc(
         if suspend {
             start_suspend_deadline(Arc::clone(&context.signal));
         }
-        context.signal.trigger();
+        context
+            .signal
+            .trigger_bounded(WINDOWS_SUSPEND_SEAL_DEADLINE);
         if !suspend && context.signal.needs_emergency_exit() {
-            std::process::abort();
+            std::process::exit(1);
         }
         context.stopping.store(true, Ordering::Release);
     }
@@ -524,12 +529,12 @@ fn start_suspend_deadline(signal: Arc<LifecycleSignal>) {
                 // Windows allows only a very short suspend callback. If the
                 // store cannot finish synchronously, terminating the process
                 // drops all remaining key-bearing memory before suspend.
-                std::process::abort();
+                std::process::exit(1);
             }
         })
         .is_err()
     {
-        std::process::abort();
+        std::process::exit(1);
     }
 }
 
@@ -568,9 +573,15 @@ fn handle_connection(
     let request = VaultRequest::decode(&bytes)?;
     let response = service.handle(&caller, request, unix_time()?);
     let bytes = response.encode()?;
-    // The response gets its own budget so a slow store operation cannot make
-    // the vault drop a reply it has already committed.
-    write_frame(stream, &bytes, IoBudget::new(IPC_FRAME_IO_TIMEOUT))
+    // Delivery gets its own I/O budget, capped by this result's authority.
+    // A committed write can outlive its reply.
+    write_frame(
+        stream,
+        &bytes,
+        IoBudget::new(IPC_FRAME_IO_TIMEOUT)
+            .capped(response.delivery_deadline)
+            .cancelled_by(response.delivery_cancelled.as_deref()),
+    )
 }
 
 fn caller_identity(stream: &BytePipe, cache: &CallerIdentityCache) -> VaultResult<CallerIdentity> {
@@ -683,7 +694,7 @@ fn process_executable(process_id: u32) -> VaultResult<(PathBuf, u64)> {
 
 fn same_user_security_descriptor() -> VaultResult<SecurityDescriptor> {
     let sddl = format!(
-        "D:P(A;;GA;;;{})(A;;GA;;;SY)(A;;GA;;;BA)",
+        "O:{0}D:P(A;;GA;;;{0})(A;;GA;;;SY)(A;;GA;;;BA)",
         current_process_sid()?
     );
     let sddl = U16CString::from_str(sddl)

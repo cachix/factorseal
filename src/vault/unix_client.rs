@@ -28,11 +28,31 @@ impl UnixVaultClient {
     fn request_inner(&self, request: &VaultRequest) -> VaultResult<VaultResponse> {
         let mut stream = UnixStream::connect(&self.socket_path)
             .map_err(|error| connect_error(&self.socket_path, &error))?;
+        authenticate_server(&stream)?;
         stream
             .set_nonblocking(true)
             .map_err(|error| io_error(&self.socket_path, &error))?;
         exchange_request(&mut stream, request)
     }
+}
+
+fn authenticate_server(stream: &UnixStream) -> VaultResult<()> {
+    authenticate_server_uid(stream, nix::unistd::getuid().as_raw())
+}
+
+fn authenticate_server_uid(stream: &UnixStream, expected_uid: u32) -> VaultResult<()> {
+    #[cfg(target_os = "linux")]
+    let uid = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+        .map(|credentials| credentials.uid());
+    #[cfg(target_os = "macos")]
+    let uid = nix::unistd::getpeereid(stream).map(|(uid, _)| uid.as_raw());
+    let uid = uid.map_err(|error| {
+        VaultError::Protocol(format!("could not authenticate vault peer: {error}"))
+    })?;
+    if uid != expected_uid {
+        return Err(VaultError::AuthorizationRequired);
+    }
+    Ok(())
 }
 
 impl VaultClient for UnixVaultClient {
@@ -60,6 +80,23 @@ fn io_error(path: &Path, error: &io::Error) -> VaultError {
 mod tests {
     use super::*;
     use crate::vault::{VaultAction, VaultRequest};
+
+    #[test]
+    fn server_uid_is_checked_before_any_request_bytes() {
+        use std::io::Read as _;
+        let (client, mut server) = UnixStream::pair().unwrap();
+        authenticate_server(&client).unwrap();
+        let other_uid = nix::unistd::getuid().as_raw().wrapping_add(1);
+        assert!(matches!(
+            authenticate_server_uid(&client, other_uid),
+            Err(VaultError::AuthorizationRequired)
+        ));
+        server.set_nonblocking(true).unwrap();
+        assert_eq!(
+            server.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn an_absent_socket_reports_that_no_agent_is_listening() {

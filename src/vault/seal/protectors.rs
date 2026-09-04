@@ -95,11 +95,7 @@ pub(super) fn create_with_protectors(
         slots.push(UnlockSlot {
             group: slot.group.clone(),
             wrapping_key_label: slot.wrapping.label.to_owned(),
-            wrapped_vault_root_key: slot
-                .wrapping
-                .key
-                .wrap(&root_payload)
-                .map_err(|error| VaultError::Protection(error.to_string()))?,
+            wrapped_vault_root_key: slot.wrapping.key.wrap(&root_payload)?,
             password_protection,
         });
     }
@@ -175,9 +171,7 @@ pub(super) fn unseal_with_protectors(
             "vault hardware backend does not match its metadata".to_owned(),
         ));
     }
-    let root_payload = wrapping
-        .unwrap(&slot.wrapped_vault_root_key)
-        .map_err(|error| VaultError::Protection(error.to_string()))?;
+    let root_payload = wrapping.unwrap(&slot.wrapped_vault_root_key)?;
     let vault_root_key = if let Some(protection) = &slot.password_protection {
         let password = credentials.password_for(&slot.group)?.ok_or_else(|| {
             VaultError::Protection("password-protected slot has no password factor".to_owned())

@@ -7,7 +7,6 @@
 //! under the same key and header, so a read can decrypt one without the
 //! other while the signed digest still covers both.
 
-use automerge::ChangeHash;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -16,12 +15,10 @@ use crate::crypto::{self, NONCE_BYTES};
 
 use super::{DeviceKeyId, DocumentId, DocumentKind, VaultError, VaultId, VaultResult};
 
-// Version 6 carries the history log as a second ciphertext beside the
-// record document. Version 5 dropped the per-snapshot signature; the
-// protected commit signs the snapshot digest instead.
-const ENVELOPE_VERSION: u8 = 6;
-const DIGEST_BYTES: usize = 32;
-const SNAPSHOT_DOMAIN: &[u8] = b"factorseal/encrypted-snapshot/v6\0";
+// Plaintext content hashes are offline guessing oracles, especially for
+// empty documents. Version 7 keeps Automerge heads inside encryption only.
+const ENVELOPE_VERSION: u8 = 7;
+const SNAPSHOT_DOMAIN: &[u8] = b"factorseal/encrypted-snapshot/v7\0";
 
 /// Which of the two ciphertexts a header authenticates. The tag keeps the
 /// record document and the history log from standing in for each other.
@@ -44,7 +41,6 @@ pub struct EncryptedSnapshot {
     device_key_id: DeviceKeyId,
     generation: u64,
     key_epoch: u64,
-    heads: Vec<[u8; DIGEST_BYTES]>,
     nonce: [u8; NONCE_BYTES],
     ciphertext: Vec<u8>,
     history_nonce: [u8; NONCE_BYTES],
@@ -116,12 +112,7 @@ impl EncryptedSnapshot {
             SnapshotPart::Records => (&self.nonce, &self.ciphertext),
             SnapshotPart::History => (&self.history_nonce, &self.history_ciphertext),
         };
-        let aad = snapshot_header(
-            &self.context(),
-            self.encryption_algorithm,
-            &self.heads,
-            part,
-        );
+        let aad = snapshot_header(&self.context(), self.encryption_algorithm, part);
         crypto::decrypt(self.encryption_algorithm, data_key, nonce, &aad, ciphertext)
             .map_err(|_| VaultError::Crypto)
     }
@@ -138,17 +129,15 @@ pub(crate) struct EnvelopeContext {
 
 pub(crate) fn encrypt_snapshot(
     context: &EnvelopeContext,
-    heads: &[ChangeHash],
     records: &[u8],
     history: &[u8],
     data_key: &[u8; 32],
 ) -> VaultResult<EncryptedSnapshot> {
-    let heads: Vec<[u8; DIGEST_BYTES]> = heads.iter().map(|head| head.0).collect();
     let encryption_algorithm = crypto::CURRENT_ENCRYPTION_ALGORITHM;
-    let records_aad = snapshot_header(context, encryption_algorithm, &heads, SnapshotPart::Records);
+    let records_aad = snapshot_header(context, encryption_algorithm, SnapshotPart::Records);
     let encrypted_records =
         crypto::encrypt(data_key, &records_aad, records).map_err(|_| VaultError::Crypto)?;
-    let history_aad = snapshot_header(context, encryption_algorithm, &heads, SnapshotPart::History);
+    let history_aad = snapshot_header(context, encryption_algorithm, SnapshotPart::History);
     let encrypted_history =
         crypto::encrypt(data_key, &history_aad, history).map_err(|_| VaultError::Crypto)?;
     Ok(EncryptedSnapshot {
@@ -160,7 +149,6 @@ pub(crate) fn encrypt_snapshot(
         device_key_id: context.device_key_id,
         generation: context.generation,
         key_epoch: context.key_epoch,
-        heads,
         nonce: encrypted_records.nonce,
         ciphertext: encrypted_records.ciphertext,
         history_nonce: encrypted_history.nonce,
@@ -193,7 +181,6 @@ pub(crate) fn decrypt_history(
 fn snapshot_header(
     context: &EnvelopeContext,
     encryption_algorithm: EncryptionAlgorithm,
-    heads: &[[u8; DIGEST_BYTES]],
     part: SnapshotPart,
 ) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(160);
@@ -207,20 +194,12 @@ fn snapshot_header(
     bytes.extend_from_slice(context.device_key_id.as_bytes());
     bytes.extend_from_slice(&context.generation.to_be_bytes());
     bytes.extend_from_slice(&context.key_epoch.to_be_bytes());
-    append_array_list(&mut bytes, heads);
     bytes
 }
 
 fn append_bytes(target: &mut Vec<u8>, value: &[u8]) {
     target.extend_from_slice(&(value.len() as u64).to_be_bytes());
     target.extend_from_slice(value);
-}
-
-fn append_array_list(target: &mut Vec<u8>, values: &[[u8; DIGEST_BYTES]]) {
-    target.extend_from_slice(&(values.len() as u64).to_be_bytes());
-    for value in values {
-        target.extend_from_slice(value);
-    }
 }
 
 #[cfg(test)]
@@ -246,14 +225,7 @@ mod tests {
 
     #[test]
     fn envelopes_declare_their_algorithm() {
-        let envelope = encrypt_snapshot(
-            &context(),
-            &[ChangeHash([1; 32])],
-            b"payload",
-            b"history",
-            &[9; 32],
-        )
-        .unwrap();
+        let envelope = encrypt_snapshot(&context(), b"payload", b"history", &[9; 32]).unwrap();
 
         assert_eq!(
             envelope.encryption_algorithm(),
@@ -263,14 +235,7 @@ mod tests {
 
     #[test]
     fn an_unknown_or_missing_encryption_algorithm_is_refused() {
-        let envelope = encrypt_snapshot(
-            &context(),
-            &[ChangeHash([1; 32])],
-            b"payload",
-            b"history",
-            &[10; 32],
-        )
-        .unwrap();
+        let envelope = encrypt_snapshot(&context(), b"payload", b"history", &[10; 32]).unwrap();
 
         let mut json = serde_json::to_value(&envelope).unwrap();
         json["encryption_algorithm"] = serde_json::Value::String("unknown-encryption".to_owned());
@@ -288,14 +253,8 @@ mod tests {
     fn snapshot_is_encrypted_and_bound_to_its_header() {
         let data_key = [4; 32];
         let context = context();
-        let envelope = encrypt_snapshot(
-            &context,
-            &[ChangeHash([1; 32])],
-            b"highly classified",
-            b"change log",
-            &data_key,
-        )
-        .unwrap();
+        let envelope =
+            encrypt_snapshot(&context, b"highly classified", b"change log", &data_key).unwrap();
 
         assert!(
             !envelope
@@ -342,7 +301,6 @@ mod tests {
         rejects!(device_key_id, DeviceKeyId::from_bytes([0x57; 32]));
         rejects!(generation, envelope.generation + 1);
         rejects!(key_epoch, envelope.key_epoch + 1);
-        rejects!(heads, vec![[0x58; DIGEST_BYTES]]);
 
         let mut records_tampered = envelope.clone();
         records_tampered.ciphertext = b"replacement ciphertext".to_vec();

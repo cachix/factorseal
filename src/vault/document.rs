@@ -1,5 +1,5 @@
 use automerge::transaction::Transactable;
-use automerge::{ActorId, AutoCommit, ChangeHash, ObjId, ObjType, ROOT, ReadDoc};
+use automerge::{ActorId, AutoCommit, ObjId, ObjType, ROOT, ReadDoc};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -40,7 +40,6 @@ pub(crate) enum SecretRead {
 /// with the changes that generation makes for the history log.
 pub(crate) struct DocumentMutation {
     pub(crate) snapshot: Zeroizing<Vec<u8>>,
-    pub(crate) heads: Vec<ChangeHash>,
     pub(crate) partition: Vec<u8>,
     pub(crate) history: Vec<PendingHistory>,
     /// Earliest eviction deadline among the records this generation keeps,
@@ -186,9 +185,17 @@ impl SecretDocument {
     }
 
     pub(crate) fn get(&self, address: &SecretAddress, now: u64) -> VaultResult<SecretRead> {
+        self.get_with_deadline(address, now).map(|(read, _)| read)
+    }
+
+    pub(crate) fn get_with_deadline(
+        &self,
+        address: &SecretAddress,
+        now: u64,
+    ) -> VaultResult<(SecretRead, Option<u64>)> {
         let records = self.records(&address.storage_key())?;
         if records.is_empty() {
-            return Ok(SecretRead::Missing);
+            return Ok((SecretRead::Missing, None));
         }
         for record in &records {
             validate_record(record, address)?;
@@ -197,7 +204,7 @@ impl SecretDocument {
             .iter()
             .any(|record| record.evict_at.is_some_and(|deadline| deadline <= now))
         {
-            return Ok(SecretRead::Expired);
+            return Ok((SecretRead::Expired, None));
         }
         let first = &records[0].value;
         if records
@@ -205,9 +212,10 @@ impl SecretDocument {
             .skip(1)
             .any(|record| record.value.as_slice() != first.as_slice())
         {
-            return Ok(SecretRead::Conflict);
+            return Ok((SecretRead::Conflict, None));
         }
-        Ok(SecretRead::Value(first.clone()))
+        let deadline = records.iter().filter_map(|record| record.evict_at).min();
+        Ok((SecretRead::Value(first.clone()), deadline))
     }
 
     pub(crate) fn put(
@@ -444,11 +452,9 @@ impl SecretDocument {
         let (projection, next_eviction) = self.project()?;
         let history = std::mem::take(&mut self.pending);
         *self = projection;
-        let heads = self.document.get_heads();
         let snapshot = Zeroizing::new(self.document.save());
         Ok(DocumentMutation {
             snapshot,
-            heads,
             partition: self.partition.clone(),
             history,
             next_eviction,

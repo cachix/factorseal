@@ -63,16 +63,15 @@ pub(super) fn seal(
         )?;
         update_aad(env, &cipher, label_hash, policy)?;
         let plaintext = env.byte_array_from_slice(secret).map_err(jni_error)?;
-        let plaintext_object = JObject::from(plaintext);
         let ciphertext = call_method(
             env,
             &cipher,
             "doFinal",
             "([B)[B",
-            &[JValue::Object(&plaintext_object)],
-        )?
-        .l()
-        .map_err(jni_error)?;
+            &[JValue::Object(plaintext.as_ref())],
+        )
+        .and_then(|value| value.l().map_err(jni_error));
+        let ciphertext = clear_java_secret(env, &plaintext, ciphertext)?;
         let ciphertext = JByteArray::from(ciphertext);
         let ciphertext = env.convert_byte_array(ciphertext).map_err(jni_error)?;
 
@@ -138,10 +137,46 @@ pub(super) fn unseal(
         )?
         .l()
         .map_err(jni_error)?;
-        env.convert_byte_array(JByteArray::from(plaintext))
+        let plaintext = JByteArray::from(plaintext);
+        let result = env
+            .convert_byte_array(&plaintext)
             .map(Zeroizing::new)
-            .map_err(jni_error)
+            .map_err(jni_error);
+        clear_java_secret(env, &plaintext, result)
     })
+}
+
+/// Clear the JNI-owned copy on both success and error. JNI calls are illegal
+/// with a pending exception, so preserve its typed outcome before cleanup.
+fn clear_java_secret<T>(
+    env: &mut JNIEnv<'_>,
+    array: &JByteArray<'_>,
+    result: Result<T, Error>,
+) -> Result<T, Error> {
+    let result = match take_pending_exception(env) {
+        Some(error) => Err(error),
+        None => result,
+    };
+    let cleanup = (|| {
+        let length = env.get_array_length(array).map_err(jni_error)?;
+        let zeros = [0_i8; 256];
+        let mut offset = 0;
+        while offset < length {
+            let count = (length - offset).min(256);
+            let count_usize = usize::try_from(count).expect("positive bounded JNI array length");
+            env.set_byte_array_region(array, offset, &zeros[..count_usize])
+                .map_err(jni_error)?;
+            offset += count;
+        }
+        Ok(())
+    })();
+    match result {
+        Err(error) => {
+            let _ = take_pending_exception(env);
+            Err(error)
+        }
+        Ok(value) => cleanup.map(|()| value),
+    }
 }
 
 pub(super) fn delete(

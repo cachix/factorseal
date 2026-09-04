@@ -100,7 +100,9 @@ creation and unseal; Linux validates the TPM plus nested password. They verify:
 3. the sealing invariants underneath the vault, through
    `factorseal hardware-self-test`: that re-sealing under one label leaves an
    earlier envelope openable, that another label cannot open it, and that
-   deleting a protector forgets its secrets without deleting another label.
+   deleting a stateful protector removes its owned keys/items without deleting
+   another label. Stateless TPM envelopes are not revoked by `delete`; the
+   test must not be interpreted as retained-backup revocation.
    None is observable from a vault that seals once, and these properties have
    been silently wrong on key-store backends before. The self-test works on
    reserved scratch state and never touches the vault beside it. macOS and

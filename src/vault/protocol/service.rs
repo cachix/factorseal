@@ -24,9 +24,12 @@ mod approvals;
 mod authorization;
 #[cfg(feature = "vault-store")]
 mod state;
+mod time;
+
+use time::{RequestTime, tighten};
 
 #[cfg(feature = "vault-store")]
-use super::grant::{GrantRequirement, require_grant};
+use super::grant::GrantRequirement;
 #[cfg(feature = "vault-store")]
 use actions::execute_action;
 #[cfg(all(test, feature = "hardware"))]
@@ -110,8 +113,10 @@ impl VaultService {
         monotonic_now: Instant,
     ) -> VaultResponse {
         let request_id = request.request_id();
+        let clock = RequestTime::new(now, monotonic_now);
+        let valid_until = std::cell::Cell::new(None);
         let result = self
-            .handle_inner(caller, request, now, monotonic_now)
+            .handle_inner(caller, request, clock, &valid_until)
             .map_err(|failure| {
                 response_error_with_interaction(&failure.error, failure.interaction)
             });
@@ -120,13 +125,33 @@ impl VaultService {
                 self.state.seal();
                 Ok(VaultResponseBody::Sealed)
             }
-            _ if self.state.is_sealed() => Err(response_error(&VaultError::Sealed)),
+            _ if self.state.check_live(clock.sample().1).is_err() => {
+                Err(response_error(&VaultError::Sealed))
+            }
+            Ok(_) if clock.check(valid_until.get()).is_err() => {
+                Err(response_error(&VaultError::Expired))
+            }
             result => result,
+        };
+        let delivery_deadline = if matches!(&result, Ok(body) if !matches!(body, VaultResponseBody::Sealed))
+        {
+            self.state
+                .deadline()
+                .ok()
+                .flatten()
+                .into_iter()
+                .chain(valid_until.get().map(|deadline| clock.deadline(deadline)))
+                .min()
+        } else {
+            // Error and seal acknowledgements contain no released secrets.
+            None
         };
         VaultResponse {
             version: PROTOCOL_VERSION,
             request_id,
             result,
+            delivery_deadline,
+            delivery_cancelled: delivery_deadline.map(|_| self.state.seal_signal()),
         }
     }
 
@@ -152,12 +177,18 @@ impl VaultService {
         self.state.is_seal_complete()
     }
 
+    /// Native desktop agents own their process and terminate if a wedged
+    /// operation prevents timely key teardown. Library embedders do not opt in.
+    pub(crate) fn enable_emergency_exit(&self) {
+        self.state.enable_emergency_exit();
+    }
+
     fn handle_inner(
         &self,
         caller: &CallerIdentity,
         request: VaultRequest,
-        now: u64,
-        monotonic_now: Instant,
+        clock: RequestTime,
+        valid_until: &std::cell::Cell<Option<u64>>,
     ) -> Result<VaultResponseBody, RequestFailure> {
         caller.validate()?;
         request.validate()?;
@@ -165,11 +196,12 @@ impl VaultService {
         let approval =
             ApprovalCandidate::for_request(caller, application.as_ref(), &request.action);
         let provenance = Provenance::caller(caller, application.as_ref());
-        let mut state = self.state.lock_live(monotonic_now)?;
+        let mut state = self.state.lock_live(clock.sample().1)?;
+        let now = clock.wall();
         state.consume(request.request_id())?;
         let result = match request.action {
             VaultAction::ListPermissions => {
-                require_permission_manager(&state, caller, now)?;
+                require_live_manager(&state, caller, clock, valid_until)?;
                 let (revision, permissions) = state.list_permissions(now)?;
                 return Ok(VaultResponseBody::Permissions {
                     revision,
@@ -180,11 +212,12 @@ impl VaultService {
                 after_revision,
                 timeout_ms,
             } => {
-                require_permission_manager(&state, caller, now)?;
+                require_live_manager(&state, caller, clock, valid_until)?;
                 let (revision, permissions) = state.wait_for_approvals(
+                    caller,
                     after_revision,
                     Duration::from_millis(timeout_ms),
-                    now,
+                    clock,
                 )?;
                 return Ok(VaultResponseBody::Permissions {
                     revision,
@@ -196,13 +229,13 @@ impl VaultService {
                     caller,
                     &id,
                     Duration::from_millis(timeout_ms),
-                    now,
+                    clock,
                 )?;
                 return Ok(VaultResponseBody::PermissionWait { status });
             }
             VaultAction::DenyPermission { id } => {
-                require_permission_manager(&state, caller, now)?;
-                state.deny_approval(&id, now)?;
+                require_live_manager(&state, caller, clock, valid_until)?;
+                state.deny_approval(&id, clock.wall())?;
                 return Ok(VaultResponseBody::PermissionChanged {
                     status: super::PermissionChange::Denied,
                 });
@@ -212,16 +245,18 @@ impl VaultService {
                 signature,
                 duration_seconds,
             } => {
-                require_permission_manager(&state, caller, now)?;
-                state.approve(&id, &signature, duration_seconds, now, &provenance)?;
+                require_live_manager(&state, caller, clock, valid_until)?;
+                state.approve(&id, &signature, duration_seconds, clock.wall(), &provenance)?;
+                let (now, monotonic_now) = clock.sample();
                 state.touch(now, monotonic_now)?;
                 return Ok(VaultResponseBody::PermissionChanged {
                     status: super::PermissionChange::Granted,
                 });
             }
             VaultAction::RevokePermission { id } => {
-                require_permission_manager(&state, caller, now)?;
-                state.revoke_permission(&id, now, &provenance)?;
+                require_live_manager(&state, caller, clock, valid_until)?;
+                state.revoke_permission(&id, clock.wall(), &provenance)?;
+                let (now, monotonic_now) = clock.sample();
                 state.touch(now, monotonic_now)?;
                 return Ok(VaultResponseBody::PermissionChanged {
                     status: super::PermissionChange::Revoked,
@@ -231,9 +266,10 @@ impl VaultService {
                 state.store(),
                 caller,
                 action,
-                now,
                 state.lease_deadlines(),
                 &provenance,
+                clock,
+                valid_until,
             ),
         };
         let (result, refresh_lease) = match result {
@@ -248,6 +284,8 @@ impl VaultService {
             Err(error) => return Err(error.into()),
         };
         if refresh_lease {
+            let (now, monotonic_now) = clock.sample();
+            clock.check(valid_until.get())?;
             state.touch(now, monotonic_now)?;
         }
         Ok(result)
@@ -260,7 +298,15 @@ fn require_permission_manager(
     caller: &CallerIdentity,
     now: u64,
 ) -> VaultResult<()> {
-    require_grant(
+    permission_manager_deadline(state, caller, now).map(|_| ())
+}
+
+fn permission_manager_deadline(
+    state: &LiveStateGuard<'_>,
+    caller: &CallerIdentity,
+    now: u64,
+) -> VaultResult<Option<u64>> {
+    super::grant::require_grant_until(
         state.store(),
         caller,
         GrantRequirement {
@@ -272,6 +318,19 @@ fn require_permission_manager(
         },
         now,
     )
+}
+
+fn require_live_manager(
+    state: &LiveStateGuard<'_>,
+    caller: &CallerIdentity,
+    clock: RequestTime,
+    valid_until: &std::cell::Cell<Option<u64>>,
+) -> VaultResult<()> {
+    tighten(
+        valid_until,
+        permission_manager_deadline(state, caller, clock.wall())?,
+    );
+    clock.check(valid_until.get())
 }
 
 #[cfg(feature = "vault-store")]

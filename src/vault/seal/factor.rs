@@ -268,10 +268,13 @@ fn derive_factor_key(
                 .map_err(|error| {
                     VaultError::Protection(format!("invalid Argon2 parameters: {error}"))
                 })?;
+            // The convenience API owns an ordinary Vec<Block> which is not
+            // wiped on drop, even with argon2's zeroize feature enabled.
+            let mut memory = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
             let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
             let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
             argon2
-                .hash_password_into(password, salt, &mut *key)
+                .hash_password_into_with_memory(password, salt, &mut *key, &mut *memory)
                 .map_err(|error| {
                     VaultError::Protection(format!("factor derivation failed: {error}"))
                 })?;

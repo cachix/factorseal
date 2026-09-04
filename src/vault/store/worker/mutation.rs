@@ -1,6 +1,6 @@
 //! Document snapshot loading and transactional commit persistence.
 
-use turso::transaction::Transaction;
+use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Value, params};
 
 use crate::vault::envelope::{EnvelopeContext, decrypt_history, encrypt_snapshot};
@@ -10,11 +10,11 @@ use crate::vault::{
     VaultError, VaultId, VaultResult, WrappedKey, decrypt_snapshot,
 };
 
-use super::{DocumentHead, LoadedDocument, StoreWorker};
+use super::{DocumentHead, DocumentRow, LoadedDocument, StoreWorker, VerifiedDocument};
 use crate::vault::store::chain::{CommitContents, ProtectedCommit, digest};
 use crate::vault::store::database::{
-    array_from_blob, database_error, from_i64, query_optional_blob, row_blob, row_integer,
-    row_text, to_i64,
+    array_from_blob, database_error, from_i64, query_optional_blob, row_blob, row_deadline,
+    row_integer, row_text, to_i64,
 };
 
 struct PreparedCommit {
@@ -40,17 +40,25 @@ impl StoreWorker {
         document_id: DocumentId,
         expected_scope: DocumentKind,
     ) -> VaultResult<Option<DocumentHead>> {
+        if self.current_commit_head().await? != self.verified.head {
+            return Err(VaultError::Signature);
+        }
         let mut rows = self
             .connection
             .query(
                 "SELECT vault_id, document_kind, generation, key_epoch, wrapped_dek,
-                        current_commit_id
+                        current_commit_id, next_eviction
                  FROM documents WHERE document_id = ?1",
                 [document_id.as_bytes().to_vec()],
             )
             .await
             .map_err(database_error)?;
         let Some(row) = rows.next().await.map_err(database_error)? else {
+            if self.verified.documents.contains_key(&document_id) {
+                return Err(VaultError::InvalidData(
+                    "protected document is missing".to_owned(),
+                ));
+            }
             return Ok(None);
         };
         let vault_id = VaultId::from_bytes(array_from_blob(&row_blob(&row, 0)?, "vault ID")?);
@@ -59,6 +67,24 @@ impl StoreWorker {
         let key_epoch = from_i64(row_integer(&row, 3)?, "document key epoch")?;
         let wrapped_bytes = row_blob(&row, 4)?;
         let current_commit_id = array_from_blob(&row_blob(&row, 5)?, "document commit ID")?;
+        let actual = DocumentRow {
+            vault_id,
+            document_id,
+            scope,
+            generation,
+            key_epoch,
+            wrapped_key_digest: digest(&wrapped_bytes),
+            current_commit_id,
+            next_eviction: row_deadline(&row, 6)?,
+        };
+        if self
+            .verified
+            .documents
+            .get(&document_id)
+            .is_none_or(|expected| expected.row != actual)
+        {
+            return Err(VaultError::Signature);
+        }
         let wrapped: WrappedKey = serde_json::from_slice(&wrapped_bytes)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
         if vault_id != self.device.device_vault_id() || scope != expected_scope {
@@ -106,6 +132,7 @@ impl StoreWorker {
         )
         .await?;
         Ok(Some(DocumentHead {
+            current_commit_id,
             generation,
             key_epoch,
             wrapped_dek: wrapped_bytes,
@@ -156,20 +183,19 @@ impl StoreWorker {
         mutation: DocumentMutation,
         context: &MutationContext<'_>,
     ) -> VaultResult<()> {
-        let prepared = self
-            .prepare_commit(document_id, scope, current, mutation, context)
-            .await?;
+        let prepared = self.prepare_commit(document_id, scope, current, mutation, context)?;
         self.persist_commit(prepared).await?;
-        self.chain_length = self.chain_length.saturating_add(1);
+        self.verified.chain_length = self.verified.chain_length.saturating_add(1);
         // The write is durable here and compaction runs in its own
         // transaction, so a compaction failure never loses the write. It is
         // still reported: the next open runs the same compaction and refuses
         // the vault if it keeps failing, so a caller must learn about it while
         // the vault is still open rather than at the next unseal.
-        self.compact_if_needed().await
+        self.compact_if_needed().await?;
+        self.checkpoint().await
     }
 
-    async fn prepare_commit(
+    fn prepare_commit(
         &self,
         document_id: DocumentId,
         scope: DocumentKind,
@@ -191,7 +217,6 @@ impl StoreWorker {
         }
         let DocumentMutation {
             snapshot,
-            heads,
             partition,
             history: pending,
             next_eviction,
@@ -215,8 +240,8 @@ impl StoreWorker {
         )?;
         let history_bytes = history.serialize()?;
         // Every generation is encrypted under a fresh key and the row keeps
-        // only the current wrapped key. A superseded snapshot that lingers
-        // until compaction therefore cannot be decrypted any more.
+        // only the current wrapped key. This is not cryptographic erasure:
+        // recoverable historical wrapped keys remain usable by a root holder.
         let (data_key, wrapped) = self.secrets.generate_document_key(
             self.device.installation_id(),
             self.device.device_vault_id(),
@@ -237,16 +262,10 @@ impl StoreWorker {
             generation,
             key_epoch,
         };
-        let envelope = encrypt_snapshot(
-            &envelope_context,
-            &heads,
-            &snapshot,
-            &history_bytes,
-            &data_key,
-        )?;
+        let envelope = encrypt_snapshot(&envelope_context, &snapshot, &history_bytes, &data_key)?;
         let snapshot_bytes = serde_json::to_vec(&envelope)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-        let previous_commit_id = self.current_commit_head().await?;
+        let previous_commit_id = self.verified.head;
         let protected_commit = ProtectedCommit::new(
             CommitContents {
                 previous_commit_id,
@@ -257,6 +276,7 @@ impl StoreWorker {
                 key_epoch,
                 wrapped_key_digest: digest(&wrapped_dek),
                 snapshot_digest: digest(&snapshot_bytes),
+                next_eviction,
                 device_key_id: self.device.device_key_id(),
             },
             &signing_seed,
@@ -280,11 +300,11 @@ impl StoreWorker {
     }
 
     async fn persist_commit(&mut self, prepared: PreparedCommit) -> VaultResult<()> {
-        let transaction = self
-            .connection
-            .transaction()
-            .await
-            .map_err(database_error)?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .await
+                .map_err(database_error)?;
+        self.verify_live_inventory().await?;
         Self::persist_document_head(&transaction, &prepared).await?;
         let PreparedCommit {
             document_id,
@@ -305,6 +325,10 @@ impl StoreWorker {
         .await?;
         Self::advance_commit_head(&transaction, protected_commit.commit_id).await?;
         transaction.commit().await.map_err(database_error)?;
+        self.verified.head = Some(protected_commit.commit_id);
+        self.verified
+            .documents
+            .insert(document_id, VerifiedDocument::from(&protected_commit));
         Ok(())
     }
 
@@ -312,9 +336,8 @@ impl StoreWorker {
         transaction: &Transaction<'_>,
         prepared: &PreparedCommit,
     ) -> VaultResult<()> {
-        // The eviction hint is scheduling metadata for the sweep, not an
-        // authenticated fact: the sweep re-reads deadlines from the document
-        // itself, and an expired record already reads as absent.
+        // A checked copy of the signed deadline. Scheduling uses the trusted
+        // inventory, never this SQL column alone.
         let next_eviction = prepared
             .next_eviction
             .map(to_i64)
@@ -329,7 +352,8 @@ impl StoreWorker {
                               next_eviction = ?10
                          WHERE document_id = ?5 AND vault_id = ?6
                            AND generation = ?7 AND document_kind = ?8
-                           AND wrapped_dek = ?9",
+                           AND wrapped_dek = ?9 AND current_commit_id = ?11
+                           AND key_epoch = ?12",
                         params![
                             to_i64(prepared.generation)?,
                             to_i64(prepared.key_epoch)?,
@@ -341,6 +365,8 @@ impl StoreWorker {
                             prepared.scope.as_str(),
                             expected.wrapped_dek.clone(),
                             next_eviction,
+                            expected.current_commit_id.to_vec(),
+                            to_i64(expected.key_epoch)?,
                         ],
                     )
                     .await

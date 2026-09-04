@@ -24,7 +24,7 @@ const VAULT_FORMAT: &str = "factorseal-vault";
 // Version 7 hardware-wraps only the installation root per unlock group. The
 // signing seed is root-wrapped once and the index key is derived from the
 // root. Earlier formats are deliberately rejected.
-const VAULT_VERSION: u32 = 7;
+const VAULT_VERSION: u32 = 8;
 const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -259,6 +259,28 @@ impl LifecycleSignal {
         }
     }
 
+    /// Start the watchdog before touching a mutex or joining a worker. Native
+    /// callbacks must not wait indefinitely inside `trigger` before checking
+    /// whether teardown completed.
+    fn trigger_bounded(self: &Arc<Self>, timeout: std::time::Duration) {
+        if !self.requested.load(Ordering::Acquire) {
+            let signal = Arc::clone(self);
+            if std::thread::Builder::new()
+                .name("factorseal-lifecycle-deadline".to_owned())
+                .spawn(move || {
+                    std::thread::sleep(timeout);
+                    if signal.needs_emergency_exit() {
+                        std::process::exit(1);
+                    }
+                })
+                .is_err()
+            {
+                std::process::exit(1);
+            }
+        }
+        self.trigger();
+    }
+
     fn requested(&self) -> bool {
         self.requested.load(Ordering::Acquire)
     }

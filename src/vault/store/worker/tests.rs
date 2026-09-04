@@ -6,6 +6,212 @@ use crate::vault::{
 };
 
 const TEST_NOW: u64 = 10;
+
+#[test]
+fn watchdog_terminates_a_wedged_native_owner_without_aborting() {
+    const CHILD: &str = "FACTORSEAL_TEST_WEDGED_OWNER";
+    if std::env::var_os(CHILD).is_some() {
+        let status = Arc::new(WorkerStatus::default());
+        status.sealed.store(true, Ordering::Release);
+        status.emergency_exit.store(true, Ordering::Release);
+        watch_shutdown(&Arc::downgrade(&status));
+        panic!("watchdog returned while teardown was incomplete");
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "vault::store::worker::tests::watchdog_terminates_a_wedged_native_owner_without_aborting"])
+        .env(CHILD, "1").spawn().unwrap();
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert_eq!(
+                status.code(),
+                Some(1),
+                "must exit normally, not abort/core dump"
+            );
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(15) {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("watchdog did not terminate the wedged owner");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+#[test]
+fn live_partial_rollback_is_rejected_without_compaction_blessing_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut worker = StoreWorker::open(&root, Vault::create_for_test(&root).unwrap()).await.unwrap();
+        let scope = DocumentKind::LocalKeyring;
+        let partition = b"audit";
+        let address = SecretAddress::new("rollback-token", None).unwrap();
+        let document_id = worker.document_id(scope, partition);
+        let provenance = provenance();
+        let context = worker.context(&provenance, TEST_NOW);
+        worker.put(document_id, scope, partition, &address, b"old-value", None, &context).await.unwrap();
+        let old_wrapped = super::super::database::query_optional_blob(&worker.connection,
+            "SELECT wrapped_dek FROM documents", ()).await.unwrap().unwrap();
+        let old_commit = super::super::database::query_optional_blob(&worker.connection,
+            "SELECT current_commit_id FROM documents", ()).await.unwrap().unwrap();
+        worker.put(document_id, scope, partition, &address, b"new-value", None, &context).await.unwrap();
+        // Simulate a partial on-disk rollback with the original signed blobs.
+        worker.connection.execute("UPDATE documents SET generation=1, key_epoch=1, wrapped_dek=?1, current_commit_id=?2",
+            params![old_wrapped, old_commit]).await.unwrap();
+        assert!(worker.verify_commit_chain().await.is_err());
+        assert!(worker.get(document_id, scope, partition, &address, TEST_NOW).await.is_err());
+        worker.verified.chain_length = MAX_RETAINED_COMMITS + 1;
+        assert!(worker.compact_if_needed().await.is_err());
+        assert!(worker.verify_commit_chain().await.is_err());
+    });
+    assert!(VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).is_err());
+}
+
+#[test]
+fn signed_eviction_metadata_cannot_be_changed_live_or_offline() {
+    for mutation in [
+        "UPDATE documents SET next_eviction = NULL",
+        "UPDATE documents SET next_eviction = 4102444801",
+        "UPDATE documents SET next_eviction = 1",
+        "UPDATE documents SET next_eviction = 'invalid'",
+    ] {
+        let (_directory, root, store) = store();
+        let address = SecretAddress::new("expiry", None).unwrap();
+        store
+            .put_at(
+                DocumentKind::LocalKeyring,
+                b"expiry",
+                &address,
+                b"value",
+                Some(FAR_FUTURE),
+                &provenance(),
+                TEST_NOW,
+            )
+            .unwrap();
+        execute_database_mutation(&root, mutation);
+        assert!(
+            store.purge_expired_at(FAR_FUTURE + 2).is_err(),
+            "{mutation}"
+        );
+        assert!(store.is_sealed());
+        store.seal();
+        assert!(
+            VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).is_err(),
+            "{mutation}"
+        );
+    }
+}
+
+#[test]
+fn missing_live_document_is_corruption_not_an_empty_result() {
+    let (_directory, root, store) = store();
+    let address = put_two_generations(&store);
+    execute_database_mutation(&root, "DELETE FROM documents");
+    assert!(
+        store
+            .get_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"secretspec",
+                &address,
+                TEST_NOW
+            )
+            .is_err()
+    );
+    assert!(store.is_sealed());
+}
+
+#[test]
+fn empty_snapshots_expose_no_plaintext_content_hashes() {
+    for scope in [
+        DocumentKind::SecretSpecProject,
+        DocumentKind::SecretSpecProviderCache,
+        DocumentKind::LocalKeyring,
+    ] {
+        for cleanup in [0, 1, 2] {
+            let (_directory, root, store) = store();
+            let partition = b"confidential-acquisition";
+            let address = if scope == DocumentKind::SecretSpecProject {
+                SecretAddress::secret_spec(
+                    SecretSpecAddress::convention("confidential-acquisition", "default", "TOKEN")
+                        .unwrap(),
+                )
+                .unwrap()
+            } else {
+                SecretAddress::new("TOKEN", None).unwrap()
+            };
+            store
+                .put_at(
+                    scope,
+                    partition,
+                    &address,
+                    b"secret",
+                    Some(FAR_FUTURE),
+                    &provenance(),
+                    TEST_NOW,
+                )
+                .unwrap();
+            match cleanup {
+                0 => {
+                    store
+                        .delete(scope, partition, &address, &provenance(), TEST_NOW)
+                        .unwrap();
+                }
+                1 => {
+                    store
+                        .clear(scope, partition, &provenance(), TEST_NOW)
+                        .unwrap();
+                }
+                _ => {
+                    store.purge_expired_at(FAR_FUTURE).unwrap();
+                }
+            }
+            store.seal();
+            for bytes in database_blobs(&root, "SELECT envelope FROM document_snapshots") {
+                let mut envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert!(envelope.get("heads").is_none());
+                // Old public plaintext hashes are not merely ignored during decode.
+                envelope["heads"] = serde_json::json!([]);
+                assert!(serde_json::from_value::<EncryptedSnapshot>(envelope).is_err());
+            }
+            assert_eq!(
+                fs::metadata(root.join("factorseal.db-wal")).map_or(0, |meta| meta.len()),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn shutdown_intent_does_not_wait_for_a_full_command_queue() {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    sender.send(Command::Shutdown).unwrap();
+    let control = WorkerControl {
+        sender,
+        join: Mutex::new(None),
+        status: Arc::new(WorkerStatus::default()),
+    };
+    let started = Instant::now();
+    control.request_shutdown();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(control.is_sealed());
+    assert!(!control.is_shutdown_complete());
+    drop(receiver);
+}
+
+#[test]
+fn a_result_finishing_after_the_worker_deadline_is_discarded() {
+    let status = WorkerStatus::default();
+    *status.deadline.lock().unwrap() = Some(Instant::now());
+    let (sender, receiver) = mpsc::channel();
+    send_result(sender, Ok(Zeroizing::new(b"late-secret".to_vec())), &status);
+    assert!(matches!(receiver.recv().unwrap(), Err(VaultError::Sealed)));
+    assert!(status.is_sealed());
+}
 /// A deadline the eviction sweep that runs on every open cannot have reached.
 const FAR_FUTURE: u64 = 4_102_444_800;
 
@@ -633,18 +839,16 @@ fn failed_persistence_rolls_back_the_entire_document_generation() {
         ),
         Err(VaultError::Database(_))
     ));
-    assert_eq!(
+    assert!(store.is_sealed());
+    assert!(
         store
             .get_at(
                 DocumentKind::SecretSpecProviderCache,
                 b"secretspec",
                 &address,
-                10,
+                10
             )
-            .unwrap()
-            .unwrap()
-            .as_slice(),
-        b"committed"
+            .is_err()
     );
     drop(store);
     execute_database_mutation(&root, "DELETE FROM document_snapshots WHERE generation = 2");
