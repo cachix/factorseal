@@ -104,6 +104,7 @@ impl Snapshot {
 
 pub(crate) struct DesktopRuntime {
     config: RuntimeConfig,
+    next_lease: Mutex<LeasePolicy>,
     events: smol::channel::Sender<Snapshot>,
     lifeline: Mutex<Option<std::process::ChildStdin>>,
     unlock_in_progress: AtomicBool,
@@ -114,6 +115,7 @@ impl DesktopRuntime {
         let (events, receiver) = smol::channel::bounded(16);
         (
             Arc::new(Self {
+                next_lease: Mutex::new(config.lease),
                 config,
                 events,
                 lifeline: Mutex::new(None),
@@ -154,6 +156,12 @@ impl DesktopRuntime {
                 error: None,
             },
             Err(error) => Snapshot::Uninitialized { error: Some(error) },
+        }
+    }
+
+    pub(crate) fn set_next_lease(&self, lease: LeasePolicy) {
+        if let Ok(mut next) = self.next_lease.lock() {
+            *next = lease;
         }
     }
 
@@ -508,20 +516,28 @@ impl DesktopRuntime {
         Ok(worker)
     }
 
+    fn unlock_operation(
+        &self,
+        group: UnlockGroup,
+    ) -> Result<factorseal::desktop_worker::Operation, String> {
+        let lease = *self
+            .next_lease
+            .lock()
+            .map_err(|_| "desktop lease lock is unavailable".to_owned())?;
+        Ok(factorseal::desktop_worker::Operation::Unlock {
+            group,
+            idle_seconds: lease.idle_timeout.as_secs(),
+            maximum_seconds: lease.maximum_lifetime.as_secs(),
+        })
+    }
+
     fn supervise_worker(
         &self,
         metadata: &VaultMetadata,
         group: UnlockGroup,
         password: Zeroizing<Vec<u8>>,
     ) -> Result<(), String> {
-        let mut worker = self.spawn_worker(
-            factorseal::desktop_worker::Operation::Unlock {
-                group,
-                idle_seconds: self.config.lease.idle_timeout.as_secs(),
-                maximum_seconds: self.config.lease.maximum_lifetime.as_secs(),
-            },
-            password,
-        )?;
+        let mut worker = self.spawn_worker(self.unlock_operation(group)?, password)?;
         worker.read_ready()?;
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let (idle_deadline, absolute_deadline) = loop {
@@ -844,6 +860,35 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::factorseal_secret_service;
     use super::load_vault_contents;
+
+    #[test]
+    fn lease_changes_preserve_the_captured_unlock_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, _) = super::DesktopRuntime::new(super::RuntimeConfig {
+            root: directory.path().to_path_buf(),
+            socket: None,
+            lease: super::lease_policy(300, 28_800).unwrap(),
+        });
+        let group = factorseal::UnlockGroup::new([factorseal::UnlockFactorKind::Password]).unwrap();
+        let captured = runtime.unlock_operation(group.clone()).unwrap();
+        runtime.set_next_lease(super::lease_policy(60, 3600).unwrap());
+        let next = runtime.unlock_operation(group.clone()).unwrap();
+        for (operation, expected_idle, expected_maximum) in
+            [(captured, 300, 28_800), (next, 60, 3600)]
+        {
+            let factorseal::desktop_worker::Operation::Unlock {
+                group: worker_group,
+                idle_seconds,
+                maximum_seconds,
+            } = operation
+            else {
+                panic!("expected an unlock operation");
+            };
+            assert_eq!(worker_group, group);
+            assert_eq!(idle_seconds, expected_idle);
+            assert_eq!(maximum_seconds, expected_maximum);
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

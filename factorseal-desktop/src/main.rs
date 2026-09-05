@@ -1,8 +1,11 @@
 mod app;
+mod appearance;
 mod branding;
 mod instance;
 mod runtime;
 mod secret_input;
+mod settings;
+mod settings_view;
 mod theming;
 mod timing;
 
@@ -76,12 +79,12 @@ struct Args {
     keyring_activation: bool,
 
     /// Idle seconds before hardware-unwrapped keys are discarded.
-    #[arg(long, env = "FACTORSEAL_IDLE_SECONDS", default_value_t = 300)]
-    idle_seconds: u64,
+    #[arg(long, env = "FACTORSEAL_IDLE_SECONDS")]
+    idle_seconds: Option<u64>,
 
     /// Absolute maximum seconds for one unseal lease.
-    #[arg(long, env = "FACTORSEAL_MAXIMUM_SECONDS", default_value_t = 28_800)]
-    maximum_seconds: u64,
+    #[arg(long, env = "FACTORSEAL_MAXIMUM_SECONDS")]
+    maximum_seconds: Option<u64>,
 }
 
 fn main() {
@@ -104,11 +107,23 @@ fn main() {
         eprintln!("factorseal-desktop: {error}");
         std::process::exit(1);
     });
-    let lease =
-        runtime::lease_policy(args.idle_seconds, args.maximum_seconds).unwrap_or_else(|error| {
-            eprintln!("factorseal-desktop: {error}");
-            std::process::exit(1);
+    let saved = settings::path()
+        .map_or_else(
+            || Ok(settings::DesktopSettings::default()),
+            |path| settings::load(&path),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("could not read desktop settings: {error:#}");
+            settings::DesktopSettings::default()
         });
+    let lease = runtime::lease_policy(
+        args.idle_seconds.unwrap_or(saved.idle_seconds),
+        args.maximum_seconds.unwrap_or(saved.maximum_seconds),
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("factorseal-desktop: {error}");
+        std::process::exit(1);
+    });
     let config = runtime::RuntimeConfig {
         root,
         socket: args.socket,

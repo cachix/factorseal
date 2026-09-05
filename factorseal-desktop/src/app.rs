@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Div, Global, Hsla, MenuItem, Render, Subscription, Task,
-    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, size, svg,
+    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rems, size, svg,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Root, Selectable as _, Sizable as _, Size, StyledExt as _,
+    ActiveTheme as _, Disableable as _, IconName, Root, Selectable as _, Sizable as _, Size,
+    StyledExt as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
@@ -49,6 +50,12 @@ impl Global for DesktopWindow {}
 struct RuntimeGlobal(Arc<DesktopRuntime>);
 
 impl Global for RuntimeGlobal {}
+
+pub(crate) fn set_next_lease(lease: crate::runtime::LeasePolicy, cx: &App) {
+    if let Some(runtime) = cx.try_global::<RuntimeGlobal>() {
+        runtime.0.set_next_lease(lease);
+    }
+}
 
 struct DesktopStatus {
     unsealed: bool,
@@ -146,7 +153,7 @@ fn brand_mark(size: f32, color: Hsla) -> impl IntoElement {
         } else {
             branding::MARK_ASSET
         })
-        .size(px(size))
+        .size(rems(size / 16.))
         .text_color(color)
 }
 
@@ -171,14 +178,14 @@ fn field_label(label: &'static str, field: impl IntoElement) -> Div {
 fn search_icon(color: Hsla) -> impl IntoElement {
     svg()
         .path(branding::SEARCH_ASSET)
-        .size(px(14.))
+        .size(rems(0.875))
         .text_color(color)
 }
 
 fn close_icon(color: Hsla) -> impl IntoElement {
     svg()
         .path(branding::CLOSE_ASSET)
-        .size(px(14.))
+        .size(rems(0.875))
         .text_color(color)
 }
 
@@ -535,6 +542,8 @@ fn selection_for_search(selection: Option<&VaultSelection>) -> Option<VaultSelec
 
 #[allow(clippy::struct_excessive_bools)]
 struct DesktopView {
+    settings_open: bool,
+    settings: gpui::Entity<crate::settings_view::SettingsView>,
     runtime: Arc<DesktopRuntime>,
     snapshot: Snapshot,
     selected_group: Option<factorseal::UnlockGroup>,
@@ -588,6 +597,7 @@ impl DesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let settings = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -639,6 +649,8 @@ impl DesktopView {
             },
         );
         Self {
+            settings_open: false,
+            settings,
             runtime,
             snapshot,
             selected_group,
@@ -1249,9 +1261,9 @@ impl DesktopView {
                 )
                 .child(
                     div()
-                        .min_w(px(24.))
+                        .min_w(rems(24. / 16.))
                         .px_2()
-                        .py(px(2.))
+                        .py(rems(2. / 16.))
                         .rounded_full()
                         .bg(if category_selected {
                             theme.primary_foreground.opacity(0.16)
@@ -1324,9 +1336,9 @@ impl DesktopView {
                     .child("Personal secrets")
                     .child(
                         div()
-                            .min_w(px(24.))
+                            .min_w(rems(24. / 16.))
                             .px_2()
-                            .py(px(2.))
+                            .py(rems(2. / 16.))
                             .rounded_full()
                             .bg(if selected {
                                 theme.primary_foreground.opacity(0.16)
@@ -1388,9 +1400,9 @@ impl DesktopView {
                 .child("Access")
                 .child(
                     div()
-                        .min_w(px(24.))
+                        .min_w(rems(24. / 16.))
                         .px_2()
-                        .py(px(2.))
+                        .py(rems(2. / 16.))
                         .rounded_full()
                         .bg(if access_selected {
                             theme.primary_foreground.opacity(0.16)
@@ -1781,8 +1793,8 @@ impl DesktopView {
                     .child(
                         h_flex()
                             .flex_none()
-                            .w(px(24.))
-                            .h(px(24.))
+                            .w(rems(24. / 16.))
+                            .h(rems(24. / 16.))
                             .items_center()
                             .justify_center()
                             .rounded_full()
@@ -2125,7 +2137,7 @@ impl DesktopView {
             v_flex()
                 .w_full()
                 .min_w_0()
-                .max_w(px(820.))
+                .max_w(rems(820. / 16.))
                 .gap_4()
                 .p_6()
                 .child(div().text_color(theme.muted_foreground).child(description))
@@ -2196,7 +2208,7 @@ impl DesktopView {
                 )
                 .child(
                     div()
-                        .max_w(px(420.))
+                        .max_w(rems(420. / 16.))
                         .text_center()
                         .text_color(theme.muted_foreground)
                         .child(if entry_count == 0 {
@@ -2293,19 +2305,65 @@ impl DesktopView {
         }
     }
 
+    fn render_vault_workspace(
+        &self,
+        contents: &VaultContents,
+        browser_height: gpui::Pixels,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = cx.theme().clone();
+        let corner = crate::appearance::rem_size(cx) * 0.75 - px(1.);
+        let transfer_selected = matches!(
+            self.selected_vault_item.as_ref(),
+            Some(VaultSelection::Import | VaultSelection::Export)
+        );
+        h_flex()
+            .w_full()
+            .h(browser_height)
+            .when(compact, gpui::Styled::flex_col)
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .overflow_hidden()
+            .bg(theme.popover)
+            .when(!transfer_selected, |workspace| {
+                workspace.child(
+                    div()
+                        .w(rems(232. / 16.))
+                        .flex_none()
+                        .h_full()
+                        .when(compact, |sidebar| sidebar.w_full().h(rems(180. / 16.)))
+                        .pl_5()
+                        .py_5()
+                        .bg(theme.sidebar)
+                        .rounded_tl(corner)
+                        .when(compact, |sidebar| sidebar.rounded_tr(corner).border_b_1())
+                        .when(!compact, |sidebar| sidebar.rounded_bl(corner).border_r_1())
+                        .border_color(theme.sidebar_border)
+                        .child(self.render_vault_sidebar(contents, cx)),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .when(!compact, gpui::Styled::h_full)
+                    .child(self.render_vault_detail(contents, cx)),
+            )
+    }
+
     fn render_unsealed(
         &self,
         contents: &VaultContents,
         errors: (Option<&str>, Option<&str>),
         browser_height: gpui::Pixels,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme().clone();
         let (contents_error, error) = errors;
-        let transfer_selected = matches!(
-            self.selected_vault_item.as_ref(),
-            Some(VaultSelection::Import | VaultSelection::Export)
-        );
         let header_title = self.render_vault_breadcrumb(cx);
         v_flex()
             .gap_5()
@@ -2313,6 +2371,7 @@ impl DesktopView {
                 h_flex()
                     .w_full()
                     .items_end()
+                    .flex_wrap()
                     .justify_between()
                     .gap_4()
                     .child(
@@ -2352,37 +2411,7 @@ impl DesktopView {
                             ),
                     ),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .h(browser_height)
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme.border)
-                    .overflow_hidden()
-                    .bg(theme.popover)
-                    .when(!transfer_selected, |workspace| {
-                        workspace.child(
-                            div()
-                                .w(px(232.))
-                                .flex_none()
-                                .h_full()
-                                .pl_5()
-                                .py_5()
-                                .bg(theme.sidebar)
-                                .border_r_1()
-                                .border_color(theme.sidebar_border)
-                                .child(self.render_vault_sidebar(contents, cx)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(self.render_vault_detail(contents, cx)),
-                    ),
-            )
+            .child(self.render_vault_workspace(contents, browser_height, compact, cx))
             .when_some(contents_error.map(str::to_owned), |element, error| {
                 element.child(
                     div()
@@ -2411,7 +2440,8 @@ impl DesktopView {
                     h_flex()
                         .id("unsealed-control")
                         .flex_none()
-                        .items_center()
+                        .h_10()
+                        .items_stretch()
                         .rounded_lg()
                         .border_1()
                         .border_color(theme.border)
@@ -2426,7 +2456,13 @@ impl DesktopView {
                                 .text_color(theme.muted_foreground)
                                 .text_sm()
                                 .font_semibold()
-                                .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(theme.success))
+                                .child(
+                                    div()
+                                        .w(rems(8. / 16.))
+                                        .h(rems(8. / 16.))
+                                        .rounded_full()
+                                        .bg(theme.success),
+                                )
                                 .child("Vault is unsealed")
                                 .tooltip(move |window, cx| {
                                     Tooltip::new(tooltip.clone()).build(window, cx)
@@ -2442,6 +2478,8 @@ impl DesktopView {
                                 .border_l_1()
                                 .border_color(theme.border)
                                 .bg(theme.muted)
+                                .rounded_tr(crate::appearance::rem_size(cx) * 0.5 - px(1.))
+                                .rounded_br(crate::appearance::rem_size(cx) * 0.5 - px(1.))
                                 .text_sm()
                                 .font_semibold()
                                 .child("Seal now")
@@ -2554,7 +2592,27 @@ impl DesktopView {
             )
     }
 
-    fn render_body(&self, browser_height: gpui::Pixels, cx: &mut Context<Self>) -> Div {
+    fn render_settings_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("open-settings")
+            .h_10()
+            .icon(gpui_component::Icon::new(IconName::Settings).text_color(cx.theme().foreground))
+            .label("Settings")
+            .selected(self.settings_open)
+            .on_click(cx.listener(|view, _, _, cx| {
+                view.settings_open = !view.settings_open;
+                cx.notify();
+            }))
+    }
+
+    fn render_body(
+        &self,
+        browser_height: gpui::Pixels,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if self.settings_open {
+            return div().w_full().child(self.settings.clone());
+        }
         let theme = cx.theme().clone();
         match &self.snapshot {
             Snapshot::Uninitialized { error } => self.render_uninitialized(error.as_deref(), cx),
@@ -2622,6 +2680,7 @@ impl DesktopView {
                 contents,
                 (contents_error.as_deref(), error.as_deref()),
                 browser_height,
+                compact,
                 cx,
             ),
             Snapshot::Error(error) => vault_card(&theme)
@@ -2638,23 +2697,35 @@ impl DesktopView {
     }
 }
 
+fn vault_browser_height(window: &Window, compact: bool, cx: &App) -> gpui::Pixels {
+    let scale = crate::appearance::scale(cx);
+    let available = window.viewport_size().height - px(272.) * scale;
+    let minimum = px(if compact { 500. } else { 320. }) * scale;
+    if available < minimum {
+        minimum
+    } else {
+        available
+    }
+}
+
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(crate::appearance::rem_size(cx));
         let theme = cx.theme().clone();
         let header_status = self.render_header_status(cx);
         let security_label = self.security_label();
-        let unsealed = matches!(self.snapshot, Snapshot::Unsealed { .. });
-        let body_max_width = match &self.snapshot {
-            Snapshot::Unsealed { .. } => 1200.,
-            Snapshot::Uninitialized { .. } => 520.,
-            _ => 440.,
-        };
-        let available_browser_height = window.viewport_size().height - px(272.);
-        let browser_height = if available_browser_height < px(320.) {
-            px(320.)
+        let unsealed = !self.settings_open && matches!(self.snapshot, Snapshot::Unsealed { .. });
+        let compact = window.viewport_size().width < px(800.) * crate::appearance::scale(cx);
+        let body_max_width = if self.settings_open {
+            1040.
         } else {
-            available_browser_height
+            match &self.snapshot {
+                Snapshot::Unsealed { .. } => 1200.,
+                Snapshot::Uninitialized { .. } => 520.,
+                _ => 440.,
+            }
         };
+        let browser_height = vault_browser_height(window, compact, cx);
         v_flex()
             .size_full()
             .px_6()
@@ -2666,7 +2737,9 @@ impl Render for DesktopView {
                 h_flex()
                     .w_full()
                     .flex_none()
-                    .h(px(80.))
+                    .min_h(rems(80. / 16.))
+                    .py_3()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap_4()
@@ -2677,9 +2750,20 @@ impl Render for DesktopView {
                             .items_center()
                             .gap_2()
                             .child(brand_mark(36., theme.foreground))
-                            .child(div().text_size(px(23.)).font_semibold().child("FactorSeal")),
+                            .child(
+                                div()
+                                    .text_size(rems(23. / 16.))
+                                    .font_semibold()
+                                    .child("FactorSeal"),
+                            ),
                     )
-                    .when_some(header_status, gpui::ParentElement::child),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .when_some(header_status, gpui::ParentElement::child)
+                            .child(self.render_settings_button(cx)),
+                    ),
             )
             .child(
                 div()
@@ -2694,13 +2778,13 @@ impl Render for DesktopView {
                             .py_8()
                             .flex()
                             .justify_center()
-                            .when(!unsealed, gpui::Styled::items_center)
+                            .when(!unsealed && !self.settings_open, gpui::Styled::items_center)
                             .child(
                                 div()
                                     .w_full()
-                                    .max_w(px(body_max_width))
+                                    .max_w(rems(body_max_width / 16.))
                                     .flex_none()
-                                    .child(self.render_body(browser_height, cx)),
+                                    .child(self.render_body(browser_height, compact, cx)),
                             ),
                     )
                     .overflow_y_scrollbar(),
@@ -2709,7 +2793,7 @@ impl Render for DesktopView {
                 h_flex()
                     .w_full()
                     .flex_none()
-                    .h(px(48.))
+                    .h(rems(48. / 16.))
                     .items_center()
                     .justify_between()
                     .gap_4()
@@ -2741,19 +2825,12 @@ fn forget_desktop_window(handle: AnyWindowHandle, cx: &mut App) -> bool {
 }
 
 fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
-    let window_height = desired_window_height(snapshot, cx);
-    let (handle, view_holder) = {
+    let view_holder = {
         let desktop = cx.global_mut::<DesktopWindow>();
         desktop.snapshot = snapshot.clone();
         desktop.refresh_generation = desktop.refresh_generation.wrapping_add(1);
-        (desktop.handle, Arc::clone(&desktop.view))
+        Arc::clone(&desktop.view)
     };
-
-    if let Some(handle) = handle {
-        let _ = handle.update(cx, |_, window, _| {
-            window.resize(size(px(1040.), window_height));
-        });
-    }
     if let Ok(holder) = view_holder.lock()
         && let Some(view) = holder.as_ref()
     {
@@ -3000,6 +3077,7 @@ pub(crate) fn setup(
 ) {
     gpui_component::init(cx);
     theming::initialize(cx);
+    crate::appearance::use_launch_lease(config.lease, cx);
     cx.on_action(open_desktop);
     cx.on_action(close_desktop);
     cx.on_action(toggle_desktop);

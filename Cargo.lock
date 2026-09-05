@@ -2492,6 +2492,7 @@ dependencies = [
  "native-theme-qt",
  "notify 8.2.0",
  "rfd",
+ "serde",
  "serde_json",
  "smol",
  "tempfile",
