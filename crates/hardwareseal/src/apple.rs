@@ -47,11 +47,13 @@ pub(super) fn ensure_available(policy: AccessPolicy) -> Result<(), Error> {
         .set_token(Token::SecureEnclave);
     SecKey::new(&options)
         .map(drop)
-        .map_err(|error| match error.code() {
-            ERR_SEC_USER_CANCELED
-            | ERR_SEC_AUTH_FAILED
-            | ERR_SEC_INTERACTION_NOT_ALLOWED
-            | ERR_SEC_MISSING_ENTITLEMENT => hardware_error(error),
+        .map_err(|error| match i32::try_from(error.code()) {
+            Ok(
+                code @ (ERR_SEC_USER_CANCELED
+                | ERR_SEC_AUTH_FAILED
+                | ERR_SEC_INTERACTION_NOT_ALLOWED
+                | ERR_SEC_MISSING_ENTITLEMENT),
+            ) => hardware_error(SecurityError::from_code(code)),
             // Unsupported hardware/token, including simulators, fails closed.
             _ => Error::NotAvailable,
         })
