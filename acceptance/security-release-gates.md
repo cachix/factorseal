@@ -1,8 +1,9 @@
 # Security remediation release gates
 
-This unreleased format replaces metadata v7/schema v4/envelope v6/commit v5
-with v8/v5/v7/v6. Older vaults are rejected, not migrated or automatically
-deleted. Do not destroy the only copy of needed data to test an upgrade.
+The current unreleased formats are metadata v8, database schema v5, snapshot
+envelope v7, protected commit v6, document v3, record v2, and native protocol v9.
+Older vaults are rejected, not migrated or automatically deleted. Do not destroy
+the only copy of needed data to test an upgrade.
 
 ## Implemented checks
 

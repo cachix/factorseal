@@ -192,11 +192,11 @@ device-signed data.
           authenticated, length-bounded native transport
                               |
                    per-user VaultService
-              caller grants | replay | lease | expiry
+         caller grants | request deduplication | lease | expiry
                               |
                   scoped Automerge operations
                               |
-            encrypted and device-signed envelopes
+          encrypted snapshots + device-signed commits
                               |
                      embedded Turso database
 ```
@@ -215,7 +215,7 @@ only for the operation that needs them and zeroized immediately afterward.
 
 Creation generates distinct random installation and device-vault IDs, a
 256-bit installation root, and a separate ML-DSA-65 signing seed; the
-document-index key is derived from the root and the installation identity.
+document-index key is derived from the root and both IDs.
 The signing identity also determines the permanent `DeviceKeyId`
 and stable Automerge actor ID. Each document generation is encrypted under its
 own random 256-bit DEK; the document row keeps only the current wrapped key.
@@ -250,6 +250,10 @@ Caller identity comes from the native transport, never from request JSON:
 - Windows uses a same-user named pipe, client impersonation, SID and PID
   verification, and the executable digest.
 
+Clients also authenticate the server before sending request bytes: its UID must
+match on Unix, and both the pipe owner and server process must have the client's
+SID on Windows. Windows clients request identification-only tokens.
+
 Durable grants bind the complete caller identity to a document kind, partition,
 or exact address, explicit permissions, and an optional expiry. An executable
 change therefore requires a new grant. These grants are defense in depth between
@@ -268,17 +272,18 @@ reveal or permit offline guessing of project names. Secret names, addresses,
 project partitions, and values live only inside encrypted Automerge snapshots,
 not in SQL columns or filenames.
 
-Every Automerge document has this version-1 root shape:
+Every Automerge document has this version-3 root shape:
 
 ```text
 format:          <document-kind>
-format-version:  1
+format-version:  3
 partition:       <bytes>
 entries:         { <address-digest>: <serialized-record> }
 ```
 
-Each record contains `version`, the complete typed address, `value`, and an
-optional `evict_at` deadline. SecretSpec convention addresses retain project,
+Each version-2 record contains the complete typed address, base64-encoded
+`value`, an optional `evict_at` deadline, a `version_id`, and `created_at` and
+`updated_at` timestamps. SecretSpec convention addresses retain project,
 profile, and key; native addresses retain item plus optional field, vault,
 section, and version. The map key is only an index—the record is validated
 against the requested full address on every read.
@@ -314,17 +319,18 @@ a busy cache cannot grow without bound. The history is its own ciphertext in
 the same envelope as the record document, under the same key and covered by
 the same signed commit, so reading records never decrypts it, a write appends
 to it without rebuilding it inside the record document, and listing history
-never decrypts a value. An entry made by another application is shown with
-its principal and declared context redacted unless the reader holds the
-`manage-permissions` grant.
+never decrypts a value. History listing requires the scoped `List` permission.
+An entry made by another application is shown with its principal and declared
+context redacted unless the reader holds the `manage-permissions` grant.
 
 One worker thread owns the Turso connection, exclusive `factorseal.lock`, and
 lease-scoped installation root/index capability. It unwraps only the requested
 document DEK and the signing seed while processing an operation. A mutation
 uses one transaction to compare-and-swap the document generation, append its
 encrypted state, append a signed protected commit, and advance the global head.
-The history is periodically compacted to the current state of every document;
-it is a tamper check, not an audit log.
+The protected commit chain is periodically compacted to the current state of
+every document; it is a tamper check, not an audit log. The separate value-free
+history log retains entries according to its document kind's limits.
 
 The store re-verifies these storage and protected-chain invariants whenever
 the vault is opened.
@@ -356,8 +362,8 @@ connects to the already-running native vault service. It never opens the
 database, receives vault keys, or accepts the embedding application's identity
 as authority.
 
-`factorseal init` publishes the installed binary as the `factorseal` scheme in
-SecretSpec's user provider directory:
+For the default vault root, `factorseal init` publishes the installed binary as
+the `factorseal` scheme in SecretSpec's user provider directory:
 
 ```json
 {
@@ -412,9 +418,9 @@ and digest from caller-declared project, profile, base directory, and reason.
 They require a terminal and never approve by default. A vault with multiple
 unlock groups asks which one to use only after the user chooses Approve.
 
-Factorseal currently follows the SecretSpec IPC API from the sibling
-`../secretspec` checkout. Release packaging still depends on publishing and
-pinning that API, then passing installed end-to-end conformance on Linux,
+Factorseal currently pins the SecretSpec IPC API to an unpublished Git revision.
+Release packaging still depends on publishing and pinning that API, then
+passing installed end-to-end conformance on Linux,
 macOS, and Windows.
 
 ### Linux Secret Service
@@ -470,9 +476,9 @@ Factorseal is designed so that:
   boundary;
 - an application receives a secret only after its transport-derived identity
   matches a suitable grant;
-- signed snapshots and commits detect content tampering, missing generations,
-  divergent writers, and inconsistent partial rollback when newer protected
-  state remains;
+- snapshots authenticated by signed commits detect content tampering, missing
+  generations, divergent writers, and inconsistent partial rollback when newer
+  protected state remains;
 - a deleted or overwritten value is absent from the next persisted snapshot,
   and the superseded generation's key is replaced. This is logical deletion,
   not cryptographic erasure: a root holder may recover earlier values from
@@ -518,16 +524,16 @@ reporting instructions.
 The repository uses [devenv](https://devenv.sh/) on Linux:
 
 ```console
-$ devenv shell cargo test --all-targets --all-features
-$ devenv shell cargo clippy --all-targets --all-features -- -D warnings
+$ devenv shell cargo test --workspace --all-targets --all-features
+$ devenv shell cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ devenv shell cargo fmt --all -- --check
 ```
 
 On macOS and Windows with Rust 1.91 or newer:
 
 ```console
-$ cargo test --all-targets --all-features
-$ cargo clippy --all-targets --all-features -- -D warnings
+$ cargo test --workspace --all-targets --all-features
+$ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo fmt --all -- --check
 ```
 
@@ -558,7 +564,10 @@ runners are implemented. Before an MVP release, Factorseal still needs:
   release matrix, including Windows prompt and modern Windows Hello behavior;
 - independent security review.
 
-The release-candidate procedures are in
+The outstanding security checks are tracked in the
+[security release gates](acceptance/security-release-gates.md), including
+cross-account transport tests and packaged-build crash recovery and fault
+injection. The release-candidate procedures are in
 [Physical enclave and lifecycle acceptance](acceptance/README.md). Passing one
 runner proves only that machine and event; it does not approve the release
 matrix. On NixOS/Linux, the real-TPM suite can be run with:

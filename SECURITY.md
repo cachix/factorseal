@@ -2,7 +2,8 @@
 
 Factorseal is an unaudited prototype. Do not use it for production secrets
 until its native Linux, macOS, and Windows acceptance suites pass and an
-independent review has been completed.
+independent review has been completed. The remaining checks are tracked in the
+[security release gates](acceptance/security-release-gates.md).
 
 Please report suspected vulnerabilities privately to the maintainers. Do not
 open a public issue before a coordinated fix is available.
@@ -14,9 +15,9 @@ is one authorized way to retrieve and update credentials:
 
 - one per-user process is the sole owner of the embedded Turso database, the
   lease-scoped installation root/index capability, and active operation keys;
-- every Automerge document has an independent random DEK; snapshots and
-  changes are encrypted with AES-256-GCM, and every durable change and commit
-  is signed by the installation's device key;
+- every document generation has an independent random DEK; its current-record
+  snapshot and separate value-free history are encrypted with AES-256-GCM and
+  authenticated by one commit signed by the installation's device key;
 - secret names and values exist inside encrypted documents, not plaintext SQL
   columns or filenames;
 - the vault root directory is created mode 0700 on Unix and with a protected,
@@ -117,10 +118,10 @@ resolution, so a reused process ID cannot inherit another process's grant.
   recover older values when the installation root is available. Checked WAL
   checkpoint/truncation reduces retention, but does not erase storage-device
   remnants, free pages, snapshots, backups or already exported copies.
-  The value-free change history beside
-  each document is as trustworthy as the installation root holder during a
-  lease; it is a record for the user, not an audit log. It cannot detect rollback
-  of the complete vault directory. Detecting that needs a checkpoint held
+  The value-free change history beside each document is as trustworthy as the
+  installation root holder during a lease; it is a record for the user, not an
+  audit log. It cannot detect rollback of the complete vault directory.
+  Detecting that needs a checkpoint held
   outside the directory; the offline MVP does not claim whole-directory
   rollback detection.
 - The implemented `factorseal provider` endpoint uses SecretSpec's typed IPC
@@ -129,8 +130,9 @@ resolution, so a reused process ID cannot inherit another process's grant.
   through the native `VaultClient`. The
   endpoint executable—not the SecretSpec CLI or embedding application—is the
   authenticated vault principal. Its IPC dependency is still pinned to an
-  unpublished Git revision, registration is not installed by the packages,
-  and installed end-to-end conformance remains required on every target.
+  unpublished Git revision. For the default vault root, `init` publishes the
+  user's provider claim and the agent refreshes it at startup; installed
+  end-to-end conformance remains required on every target.
 - Linux executable authentication depends on access to the ptrace-gated
   `/proc/<pid>/exe` link. The current systemd user unit therefore cannot use
   filesystem mount-namespace hardening. A verified IPC sandbox/application
