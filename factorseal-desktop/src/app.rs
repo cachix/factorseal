@@ -2642,11 +2642,14 @@ impl DesktopView {
                     .items_center()
                     .text_center()
                     .child(brand_mark(56., theme.foreground))
-                    .child(Spinner::new().with_size(Size::Large).color(theme.primary))
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
                             .text_2xl()
                             .font_semibold()
+                            .child(Spinner::new().with_size(Size::Large).color(theme.primary))
                             .child("Unlocking your vault…"),
                     )
                     .child(
