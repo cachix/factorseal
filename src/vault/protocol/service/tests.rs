@@ -986,15 +986,21 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     };
     let get = |project: &str| get_scoped(project, project);
 
+    // Authorization advances the entry timestamp while a request runs. Even
+    // a short request can cross a wall-clock second under parallel test load.
+    let denied_started = Instant::now();
     let denied = service.handle(&provider, get("demo"), 101);
+    let denied_elapsed = denied_started.elapsed().as_secs() + 1;
     let interaction = denied.result.unwrap_err().interaction.unwrap();
     assert!(interaction.id.starts_with("prm_"));
-    assert_eq!(interaction.expires_at, 101 + 7 * 24 * 60 * 60);
+    assert!((101..=101 + denied_elapsed).contains(&(interaction.expires_at - 7 * 24 * 60 * 60)));
 
+    let repeated_started = Instant::now();
     let repeated = service.handle(&provider, get("demo"), 201);
+    let repeated_elapsed = repeated_started.elapsed().as_secs() + 1;
     let refreshed = repeated.result.unwrap_err().interaction.unwrap();
     assert_eq!(refreshed.id, interaction.id);
-    assert_eq!(refreshed.expires_at, 201 + 7 * 24 * 60 * 60);
+    assert!((201..=201 + repeated_elapsed).contains(&(refreshed.expires_at - 7 * 24 * 60 * 60)));
 
     let pending = service.handle(
         &provider,
@@ -1082,6 +1088,7 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         203,
     );
     assert!(duration_tampered.result.is_err());
+    let approved_started = Instant::now();
     let approved = service.handle(
         &manager,
         VaultRequest::new(VaultAction::ApprovePermission {
@@ -1092,6 +1099,7 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         .unwrap(),
         204,
     );
+    let approved_elapsed = approved_started.elapsed().as_secs() + 1;
     assert!(matches!(
         approved.result,
         Ok(VaultResponseBody::PermissionChanged {
@@ -1127,13 +1135,15 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     };
     assert_eq!(permissions.len(), 1);
     assert_eq!(permissions[0].id, interaction.id);
-    assert!(matches!(
-        permissions[0].state,
-        PermissionState::Granted {
-            granted_at: 204,
-            expires_at: Some(deadline)
-        } if deadline == 204 + 60 * 60
-    ));
+    let PermissionState::Granted {
+        granted_at,
+        expires_at: Some(deadline),
+    } = permissions[0].state
+    else {
+        panic!("expected a time-bounded grant");
+    };
+    assert!((204..=204 + approved_elapsed).contains(&granted_at));
+    assert_eq!(deadline, granted_at + 60 * 60);
     assert!(
         service
             .handle(&provider, get("other-project"), 207)
