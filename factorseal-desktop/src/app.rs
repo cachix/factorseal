@@ -207,6 +207,18 @@ fn password_strength_error(password: &str) -> Option<String> {
     Some(format!("Choose a stronger password. {guidance}"))
 }
 
+fn setup_password_error(password: &str, confirmation: &str, allow_simple: bool) -> Option<String> {
+    if password.is_empty() {
+        Some("Choose a non-empty password.".to_owned())
+    } else if password != confirmation {
+        Some("The passwords do not match.".to_owned())
+    } else if allow_simple {
+        None
+    } else {
+        password_strength_error(password)
+    }
+}
+
 fn hardware_backend_label(backend: &str) -> &str {
     match backend {
         "tpm" => "TPM",
@@ -557,6 +569,7 @@ struct DesktopView {
     archive_passphrase_confirmation: gpui::Entity<InputState>,
     setup_method: SetupMethod,
     setup_error: Option<String>,
+    allow_simple_passwords: bool,
     selected_vault_item: Option<VaultSelection>,
     personal_panel: PersonalPanel,
     personal_error: Option<String>,
@@ -681,6 +694,7 @@ impl DesktopView {
             archive_passphrase_confirmation,
             setup_method: SetupMethod::default(),
             setup_error: None,
+            allow_simple_passwords: false,
             selected_vault_item: None,
             personal_panel: PersonalPanel::Overview,
             personal_error: None,
@@ -711,18 +725,9 @@ impl DesktopView {
         }
         let password = self.password.read(cx).value().to_string();
         let confirmation = self.password_confirmation.read(cx).value().to_string();
-        if self.setup_method.needs_password() && password.is_empty() {
-            self.setup_error = Some("Choose a non-empty password.".to_owned());
-            cx.notify();
-            return;
-        }
-        if self.setup_method.needs_password() && password != confirmation {
-            self.setup_error = Some("The passwords do not match.".to_owned());
-            cx.notify();
-            return;
-        }
         if self.setup_method.needs_password()
-            && let Some(error) = password_strength_error(&password)
+            && let Some(error) =
+                setup_password_error(&password, &confirmation, self.allow_simple_passwords)
         {
             self.setup_error = Some(error);
             cx.notify();
@@ -2553,6 +2558,14 @@ impl DesktopView {
                 element
                     .child(field_label("Password", Input::new(&self.password).mask_toggle().large()))
                     .child(field_label("Confirm password", Input::new(&self.password_confirmation).mask_toggle().large()))
+                    .child(Checkbox::new("allow-simple-passwords")
+                        .label("Allow simple passwords")
+                        .checked(self.allow_simple_passwords)
+                        .on_click(cx.listener(|view, checked, _, cx| {
+                            view.allow_simple_passwords = *checked;
+                            view.setup_error = None;
+                            cx.notify();
+                        })))
             })
             .when_some(self.setup_error.clone(), |element, error| {
                 element.child(error_banner(error, theme.danger))
@@ -3086,6 +3099,15 @@ mod tests {
     fn rejects_guessable_passwords() {
         assert!(password_strength_error("P@ssword1").is_some());
         assert!(password_strength_error("factorseal").is_some());
+    }
+
+    #[test]
+    fn simple_password_opt_in_keeps_required_setup_checks() {
+        assert!(super::setup_password_error("1234", "1234", false).is_some());
+        assert!(super::setup_password_error("1234", "1234", true).is_none());
+        assert!(super::setup_password_error("", "", true).is_some());
+        assert!(super::setup_password_error("1234", "4321", true).is_some());
+        assert!(password_strength_error("1234").is_some());
     }
 
     #[test]
