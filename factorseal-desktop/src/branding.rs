@@ -1,4 +1,4 @@
-use gpui::{App, Hsla, px, rgb};
+use gpui::{Hsla, px, rgb};
 use gpui_component::{scroll::ScrollbarMode, theme::Theme};
 
 pub(crate) const MARK_ASSET: &str = "factorseal-mark.svg";
@@ -59,9 +59,8 @@ fn color(hex: u32) -> Hsla {
 /// We retain the system light/dark preference and typography, then replace the
 /// visual tokens so the application remains recognizably `FactorSeal` on every
 /// desktop environment.
-pub(crate) fn apply(cx: &mut App) {
-    let dark = Theme::global(cx).is_dark();
-    let theme = Theme::global_mut(cx);
+pub(crate) fn apply(theme: &mut Theme) {
+    let dark = theme.is_dark();
     let palette = if dark { DARK } else { LIGHT };
     let Palette {
         canvas,

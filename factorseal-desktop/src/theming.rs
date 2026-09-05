@@ -66,7 +66,6 @@ struct InputBackground(gpui::Hsla);
 
 impl Global for InputBackground {}
 
-#[cfg(target_os = "linux")]
 pub(crate) fn set_input_background(color: gpui::Hsla, cx: &mut App) {
     cx.set_global(InputBackground(color));
 }
@@ -144,10 +143,7 @@ pub(crate) fn initialize(cx: &mut App) {
         last_change_source: None,
     });
 
-    if cx.global::<ThemeState>().backend.is_none() {
-        crate::branding::apply(cx);
-        sync_component_colors(gpui_component::theme::Theme::global_mut(cx));
-    }
+    crate::appearance::initialize(cx);
 }
 
 #[cfg(target_os = "linux")]
@@ -191,6 +187,7 @@ fn refresh_native_theme(cx: &mut App) {
             state.backend = Some(backend);
             state.summary = summary;
             state.error = None;
+            crate::appearance::system_changed(cx);
         }
         Err(error) => {
             let state = cx.global_mut::<ThemeState>();
@@ -548,7 +545,7 @@ fn install_theme(loaded: &LoadedTheme, cx: &mut App) {
     let theme = Theme::global_mut(cx);
     apply_native_theme(theme, &loaded.resolved);
     let background = loaded.resolved.input.background_color;
-    set_input_background(
+    cx.set_global(InputBackground(
         gpui::rgba(u32::from_be_bytes([
             background.r,
             background.g,
@@ -556,12 +553,10 @@ fn install_theme(loaded: &LoadedTheme, cx: &mut App) {
             background.a,
         ]))
         .into(),
-        cx,
-    );
+    ));
     Theme::sync_base(cx);
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn apply_native_theme(
     theme: &mut gpui_component::theme::Theme,
     native: &native_theme::theme::ResolvedTheme,

@@ -17,11 +17,13 @@ fs2 = "0.4.3"
 gpui = "=0.2.2"
 gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "39c2c86dbee7" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component.git", rev = "39c2c86dbee7" }
-native-theme = "=0.5.7"
 gpui_platform = { git = "https://github.com/zed-industries/zed.git" }
 gpui-tray = { path = "../crates/gpui-tray" }
 rfd = { version = "0.15.4", default-features = false, features = ["async-std", "xdg-portal"] }
 serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+native-theme = "=0.5.7"
+tempfile = "3.23"
 smol = "2.0"
 zeroize = "1.8"
 
@@ -34,9 +36,6 @@ native-theme-gtk = "=0.1.1"
 native-theme-qt = "=0.1.0"
 notify = "=8.2.0"
 xdg = "=3.0.0"
-
-[dev-dependencies]
-tempfile = "3.23"
 
 [lints.rust]
 unsafe_code = "deny"
