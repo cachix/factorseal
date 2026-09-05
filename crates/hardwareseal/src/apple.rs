@@ -1,8 +1,7 @@
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::base::Error as SecurityError;
-use security_framework::item::KeyType;
 use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
-use security_framework::key::{GenerateKeyOptions, SecKey, Token};
+use security_framework::key::{GenerateKeyOptions, KeyType, SecKey, Token};
 use security_framework::passwords::{
     AccessControlOptions, PasswordOptions, delete_generic_password_options, generic_password,
     set_generic_password_options,
@@ -48,13 +47,11 @@ pub(super) fn ensure_available(policy: AccessPolicy) -> Result<(), Error> {
         .set_token(Token::SecureEnclave);
     SecKey::new(&options)
         .map(drop)
-        .map_err(|error| match i32::try_from(error.code()) {
-            Ok(
-                code @ (ERR_SEC_USER_CANCELED
-                | ERR_SEC_AUTH_FAILED
-                | ERR_SEC_INTERACTION_NOT_ALLOWED
-                | ERR_SEC_MISSING_ENTITLEMENT),
-            ) => hardware_error(SecurityError::from_code(code)),
+        .map_err(|error| match error.code() {
+            ERR_SEC_USER_CANCELED
+            | ERR_SEC_AUTH_FAILED
+            | ERR_SEC_INTERACTION_NOT_ALLOWED
+            | ERR_SEC_MISSING_ENTITLEMENT => hardware_error(error),
             // Unsupported hardware/token, including simulators, fails closed.
             _ => Error::NotAvailable,
         })
