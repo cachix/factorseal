@@ -598,6 +598,13 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
+        let settings_back = cx.subscribe(
+            &settings,
+            |view, _, _: &crate::settings_view::BackToVault, cx| {
+                view.settings_open = false;
+                cx.notify();
+            },
+        );
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -672,7 +679,7 @@ impl DesktopView {
             transfer_plaintext_confirmed: false,
             transfer_notice: None,
             system_integrations_expanded: false,
-            _subscriptions: vec![password_submit, vault_search_change],
+            _subscriptions: vec![password_submit, vault_search_change, settings_back],
         }
     }
 
@@ -2592,14 +2599,13 @@ impl DesktopView {
             )
     }
 
-    fn render_settings_button(&self, cx: &mut Context<Self>) -> Button {
+    fn render_settings_button(cx: &mut Context<Self>) -> Button {
         Button::new("open-settings")
             .h_10()
             .icon(gpui_component::Icon::new(IconName::Settings).text_color(cx.theme().foreground))
             .label("Settings")
-            .selected(self.settings_open)
             .on_click(cx.listener(|view, _, _, cx| {
-                view.settings_open = !view.settings_open;
+                view.settings_open = true;
                 cx.notify();
             }))
     }
@@ -2717,7 +2723,7 @@ impl Render for DesktopView {
         let unsealed = !self.settings_open && matches!(self.snapshot, Snapshot::Unsealed { .. });
         let compact = window.viewport_size().width < px(800.) * crate::appearance::scale(cx);
         let body_max_width = if self.settings_open {
-            1040.
+            1200.
         } else {
             match &self.snapshot {
                 Snapshot::Unsealed { .. } => 1200.,
@@ -2762,7 +2768,9 @@ impl Render for DesktopView {
                             .gap_2()
                             .items_center()
                             .when_some(header_status, gpui::ParentElement::child)
-                            .child(self.render_settings_button(cx)),
+                            .when(!self.settings_open, |element| {
+                                element.child(Self::render_settings_button(cx))
+                            }),
                     ),
             )
             .child(

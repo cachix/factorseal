@@ -1,9 +1,8 @@
 use gpui::{
-    App, Context, Div, Entity, Render, SharedString, Subscription, Window, div, prelude::*, px,
-    rems,
+    App, Context, Div, Entity, Render, SharedString, Subscription, Window, div, prelude::*, rems,
 };
 use gpui_component::{
-    ActiveTheme as _, IndexPath, Selectable as _, StyledExt as _,
+    ActiveTheme as _, IndexPath, Selectable as _, Sizable as _, StyledExt as _,
     button::Button,
     h_flex,
     select::{Select, SelectEvent, SelectItem, SelectState},
@@ -97,6 +96,10 @@ pub(crate) struct SettingsView {
     error: Option<&'static str>,
     _subscriptions: Vec<Subscription>,
 }
+
+pub(crate) struct BackToVault;
+
+impl gpui::EventEmitter<BackToVault> for SettingsView {}
 
 fn values(settings: &DesktopSettings) -> [Value; 6] {
     [
@@ -274,8 +277,7 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = window.viewport_size().width < px(900.) * appearance::scale(cx);
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let section = self.section;
         let content = if section == Section::Appearance {
             self.appearance(cx)
@@ -283,80 +285,75 @@ impl Render for SettingsView {
             self.security(cx)
         };
         let theme = cx.theme();
-        h_flex()
+        v_flex()
             .w_full()
             .min_w_0()
-            .gap_6()
-            .items_start()
-            .when(compact, gpui::Styled::flex_col)
+            .gap_5()
             .child(
-                v_flex()
-                    .w(rems(12.))
-                    .flex_none()
-                    .gap_2()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(theme.sidebar)
-                    .when(compact, gpui::Styled::w_full)
+                h_flex()
+                    .w_full()
+                    .items_end()
+                    .justify_between()
+                    .flex_wrap()
+                    .gap_4()
                     .child(
                         h_flex()
-                            .gap_2()
                             .items_center()
-                            .mb_3()
+                            .gap_2()
+                            .text_2xl()
+                            .font_semibold()
                             .child(
-                                gpui_component::Icon::new(gpui_component::IconName::Settings)
-                                    .text_color(theme.foreground),
+                                div()
+                                    .id("settings-vault-breadcrumb")
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(theme.muted_foreground))
+                                    .child("Your vault")
+                                    .on_click(cx.listener(|_, _, _, cx| cx.emit(BackToVault))),
                             )
-                            .child(div().text_lg().font_semibold().child("Settings")),
+                            .child(div().text_color(theme.muted_foreground).child("←"))
+                            .child("Settings"),
                     )
-                    .children(
-                        [
-                            (
-                                Section::Appearance,
-                                "Appearance",
-                                gpui_component::Icon::new(gpui_component::IconName::Palette),
-                            ),
-                            (
-                                Section::Security,
-                                "Security",
-                                gpui_component::Icon::default()
-                                    .path(crate::branding::MICRO_MARK_ASSET),
-                            ),
-                        ]
-                        .into_iter()
-                        .map(|(section, label, icon)| {
-                            Button::new(label)
-                                .icon(icon.text_color(theme.foreground))
-                                .justify_start()
-                                .label(label)
-                                .w_full()
-                                .selected(self.section == section)
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.section = section;
-                                    view.error = None;
-                                    cx.notify();
-                                }))
-                        }),
+                    .child(
+                        h_flex().id("settings-tabs").gap_2().children(
+                            [
+                                (Section::Appearance, "Appearance"),
+                                (Section::Security, "Security"),
+                            ]
+                            .into_iter()
+                            .map(|(section, label)| {
+                                Button::new(label)
+                                    .small()
+                                    .label(label)
+                                    .selected(self.section == section)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.section = section;
+                                        view.error = None;
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
                     ),
             )
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
+                div()
                     .w_full()
-                    .gap_4()
-                    .py_4()
-                    .child(div().text_2xl().font_semibold().child(
-                        if section == Section::Appearance {
-                            "Appearance"
-                        } else {
-                            "Security"
-                        },
-                    ))
-                    .child(content)
-                    .when_some(self.error, |view, error| {
-                        view.child(div().text_color(theme.danger).child(error))
-                    }),
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .overflow_hidden()
+                    .bg(theme.popover)
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .min_w_0()
+                            .max_w(rems(820. / 16.))
+                            .gap_4()
+                            .p_6()
+                            .child(content)
+                            .when_some(self.error, |view, error| {
+                                view.child(div().text_color(theme.danger).child(error))
+                            }),
+                    ),
             )
     }
 }
