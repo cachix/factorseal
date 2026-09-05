@@ -52,6 +52,7 @@ impl Global for RuntimeGlobal {}
 struct DesktopStatus {
     unsealed: bool,
     quitting: bool,
+    no_tray: bool,
 }
 
 impl Global for DesktopStatus {}
@@ -2984,6 +2985,10 @@ fn open_desktop_window(
         },
         move |window, cx| {
             window.on_window_should_close(cx, |window, cx| {
+                if cx.global::<DesktopStatus>().no_tray {
+                    quit(&Quit, cx);
+                    return true;
+                }
                 if cx.global::<DesktopStatus>().quitting {
                     return true;
                 }
@@ -3005,6 +3010,7 @@ fn open_desktop_window(
 pub(crate) fn setup(
     config: RuntimeConfig,
     background: bool,
+    no_tray: bool,
     activations: smol::channel::Receiver<()>,
     cx: &mut App,
 ) {
@@ -3022,6 +3028,7 @@ pub(crate) fn setup(
     cx.set_global(DesktopStatus {
         unsealed: matches!(initial, Snapshot::Unsealed { .. }),
         quitting: false,
+        no_tray,
     });
 
     let view_holder = Arc::new(std::sync::Mutex::new(None));
@@ -3045,7 +3052,9 @@ pub(crate) fn setup(
         desktop.handle = Some(handle);
         desktop.visible = !background;
     }
-    install_tray(cx);
+    if !no_tray {
+        install_tray(cx);
+    }
 
     let task = cx.spawn(async move |cx| {
         while let Ok(snapshot) = receiver.recv().await {

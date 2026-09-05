@@ -61,6 +61,9 @@ struct Args {
     #[arg(long)]
     background: bool,
 
+    #[arg(long, hide = true, conflicts_with_all = ["background", "keyring_activation"])]
+    no_tray: bool,
+
     /// Activate Desktop for a queued Secret Service request.
     #[arg(long, hide = true)]
     keyring_activation: bool,
@@ -124,7 +127,7 @@ fn main() {
     gpui_platform::application()
         .with_assets(Assets)
         .with_quit_mode(QuitMode::Explicit)
-        .run(move |cx| app::setup(config, args.background, activations, cx));
+        .run(move |cx| app::setup(config, args.background, args.no_tray, activations, cx));
     drop(instance_lock);
 }
 
@@ -172,5 +175,17 @@ mod tests {
 
         let help = Args::command().render_long_help().to_string();
         assert!(!help.contains("keyring-activation"));
+    }
+
+    #[test]
+    fn tray_free_mode_requires_a_visible_launch() {
+        assert!(
+            Args::try_parse_from(["factorseal-desktop", "--no-tray"])
+                .unwrap()
+                .no_tray
+        );
+        for argument in ["--background", "--keyring-activation"] {
+            assert!(Args::try_parse_from(["factorseal-desktop", "--no-tray", argument]).is_err());
+        }
     }
 }
