@@ -4,16 +4,21 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::encoding::base64_bytes;
-use super::history::{HistoryOperation, PendingHistory, Provenance, VersionId};
+use super::history::{
+    HistoryEntry, HistoryLog, HistoryOperation, PendingHistory, Provenance, VersionId,
+};
 use super::{DeviceKeyId, DocumentKind, SecretAddress, VaultError, VaultResult};
 
 const ENTRIES_KEY: &str = "entries";
+const LEGACY_HISTORY_KEY: &str = "history";
+const LEGACY_NEXT_SEQ_KEY: &str = "next-seq";
 const FORMAT_KEY: &str = "format";
 const FORMAT_VERSION_KEY: &str = "format-version";
 const PARTITION_KEY: &str = "partition";
 // Version 3 holds only current records; history lives in its own log beside
 // the document. Version 2 added per-record value versions.
 const FORMAT_VERSION: u64 = 3;
+const LEGACY_FORMAT_VERSION: u64 = 2;
 const RECORD_VERSION: u8 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,6 +49,13 @@ pub(crate) struct DocumentMutation {
     pub(crate) history: Vec<PendingHistory>,
     /// Earliest eviction deadline among the records this generation keeps,
     /// so the eviction sweep knows when the document next needs a look.
+    pub(crate) next_eviction: Option<u64>,
+}
+
+/// Current-format plaintext produced while upgrading a format-2 document.
+pub(crate) struct MigratedDocument {
+    pub(crate) snapshot: Zeroizing<Vec<u8>>,
+    pub(crate) history: Zeroizing<Vec<u8>>,
     pub(crate) next_eviction: Option<u64>,
 }
 
@@ -151,6 +163,170 @@ impl SecretDocument {
             partition,
             pending: Vec::new(),
         })
+    }
+
+    /// Project a format-2 snapshot into the current records-only Automerge
+    /// document and move its value-free history into a separate log. The
+    /// caller re-encrypts both outputs as one new signed generation.
+    pub(crate) fn migrate_v2(
+        snapshot: &[u8],
+        actor_id: &[u8],
+        kind: DocumentKind,
+    ) -> VaultResult<MigratedDocument> {
+        let document = AutoCommit::load(snapshot).map_err(automerge_error)?;
+        let format = document
+            .get(ROOT, FORMAT_KEY)
+            .map_err(automerge_error)?
+            .and_then(|(value, _)| value.to_str().map(str::to_owned));
+        let version = document
+            .get(ROOT, FORMAT_VERSION_KEY)
+            .map_err(automerge_error)?
+            .and_then(|(value, _)| value.to_u64());
+        let partition = document
+            .get(ROOT, PARTITION_KEY)
+            .map_err(automerge_error)?
+            .and_then(|(value, _)| value.into_bytes().ok())
+            .ok_or_else(descriptor_mismatch)?;
+        if format.as_deref() != Some(kind.as_str()) || version != Some(LEGACY_FORMAT_VERSION) {
+            return Err(descriptor_mismatch());
+        }
+        let entries = root_object(&document, ENTRIES_KEY, ObjType::Map)?;
+        let history = root_object(&document, LEGACY_HISTORY_KEY, ObjType::List)?;
+        let next_seq = document
+            .get(ROOT, LEGACY_NEXT_SEQ_KEY)
+            .map_err(automerge_error)?
+            .and_then(|(value, _)| value.to_u64())
+            .ok_or_else(descriptor_mismatch)?;
+
+        let mut projection = Self::new(actor_id, kind, &partition)?;
+        let mut next_eviction: Option<u64> = None;
+        let mut keys: Vec<String> = document.keys(&entries).collect();
+        keys.sort_unstable();
+        for key in keys {
+            let values = document.get_all(&entries, &key).map_err(automerge_error)?;
+            let mut visible: Option<Zeroizing<Vec<u8>>> = None;
+            for (value, _) in values {
+                let bytes = record_bytes(value)?;
+                let record: SecretRecord = serde_json::from_slice(&bytes)
+                    .map_err(|error| VaultError::InvalidData(error.to_string()))?;
+                validate_record_key(&record, &key)?;
+                if visible
+                    .as_ref()
+                    .is_some_and(|current| current.as_slice() != bytes.as_slice())
+                {
+                    return Err(VaultError::Conflict);
+                }
+                visible = Some(bytes);
+            }
+            let bytes = visible.ok_or_else(|| {
+                VaultError::InvalidData("secret document entry has no visible record".to_owned())
+            })?;
+            let deadline: RecordDeadline = serde_json::from_slice(&bytes)
+                .map_err(|error| VaultError::InvalidData(error.to_string()))?;
+            if let Some(deadline) = deadline.evict_at {
+                next_eviction =
+                    Some(next_eviction.map_or(deadline, |current| current.min(deadline)));
+            }
+            projection
+                .document
+                .put(&projection.entries, key, bytes.to_vec())
+                .map_err(automerge_error)?;
+        }
+
+        let mut history_entries = Vec::with_capacity(document.length(&history));
+        for index in 0..document.length(&history) {
+            let bytes = document
+                .get(&history, index)
+                .map_err(automerge_error)?
+                .and_then(|(value, _)| value.into_bytes().ok())
+                .ok_or_else(|| {
+                    VaultError::InvalidData("secret document history entry is not bytes".to_owned())
+                })?;
+            let entry: HistoryEntry = serde_json::from_slice(&bytes)
+                .map_err(|error| VaultError::InvalidData(error.to_string()))?;
+            history_entries.push(entry);
+        }
+        let history =
+            HistoryLog::from_legacy_document(kind, &partition, next_seq, history_entries)?;
+
+        Ok(MigratedDocument {
+            snapshot: Zeroizing::new(projection.document.save()),
+            history: Zeroizing::new(history.serialize()?),
+            next_eviction,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_v2_fixture(
+        actor_id: &[u8],
+        kind: DocumentKind,
+        partition: &[u8],
+        address: &SecretAddress,
+        value: &[u8],
+        evict_at: Option<u64>,
+        context: &MutationContext<'_>,
+    ) -> VaultResult<(Vec<u8>, Vec<[u8; 32]>)> {
+        let mut document = AutoCommit::new().with_actor(ActorId::from(actor_id));
+        document
+            .put(ROOT, FORMAT_KEY, kind.as_str())
+            .map_err(automerge_error)?;
+        document
+            .put(ROOT, FORMAT_VERSION_KEY, LEGACY_FORMAT_VERSION)
+            .map_err(automerge_error)?;
+        document
+            .put(ROOT, PARTITION_KEY, partition.to_vec())
+            .map_err(automerge_error)?;
+        let entries = document
+            .put_object(ROOT, ENTRIES_KEY, ObjType::Map)
+            .map_err(automerge_error)?;
+        let history = document
+            .put_object(ROOT, LEGACY_HISTORY_KEY, ObjType::List)
+            .map_err(automerge_error)?;
+        document
+            .put(ROOT, LEGACY_NEXT_SEQ_KEY, 1_u64)
+            .map_err(automerge_error)?;
+        let version_id = VersionId::from_bytes([3; 16]);
+        let record = SecretRecord {
+            version: RECORD_VERSION,
+            address: address.clone(),
+            value: Zeroizing::new(value.to_vec()),
+            evict_at,
+            version_id,
+            created_at: context.now,
+            updated_at: context.now,
+        };
+        document
+            .put(
+                &entries,
+                address.storage_key(),
+                serde_json::to_vec(&record)
+                    .map_err(|error| VaultError::InvalidData(error.to_string()))?,
+            )
+            .map_err(automerge_error)?;
+        let history_entry = HistoryEntry::new(
+            0,
+            context.now,
+            PendingHistory {
+                operation: HistoryOperation::Put { changed: true },
+                address: address.clone(),
+                version_id: Some(version_id),
+                previous_version_id: None,
+                evict_at,
+            },
+            context.provenance.clone(),
+            context.device_key_id,
+        );
+        document
+            .insert(
+                &history,
+                0,
+                serde_json::to_vec(&history_entry)
+                    .map_err(|error| VaultError::InvalidData(error.to_string()))?,
+            )
+            .map_err(automerge_error)?;
+        document.commit();
+        let heads = document.get_heads().iter().map(|head| head.0).collect();
+        Ok((document.save(), heads))
     }
 
     pub(crate) fn partition(&self) -> &[u8] {

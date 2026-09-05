@@ -267,36 +267,61 @@ impl HistoryLog {
     ) -> VaultResult<Self> {
         let log: Self = serde_json::from_slice(bytes)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-        if log.version != HISTORY_LOG_VERSION {
+        log.validate(kind, expected_partition)?;
+        Ok(log)
+    }
+
+    /// Convert the value-free history embedded by document format 2 into the
+    /// independently encrypted log used by current snapshots.
+    pub(crate) fn from_legacy_document(
+        kind: DocumentKind,
+        partition: &[u8],
+        next_seq: u64,
+        entries: Vec<HistoryEntry>,
+    ) -> VaultResult<Self> {
+        let log = Self {
+            version: HISTORY_LOG_VERSION,
+            kind,
+            partition: partition.to_vec(),
+            next_seq,
+            entries,
+        };
+        log.validate(kind, Some(partition))?;
+        Ok(log)
+    }
+
+    fn validate(&self, kind: DocumentKind, expected_partition: Option<&[u8]>) -> VaultResult<()> {
+        if self.version != HISTORY_LOG_VERSION {
             return Err(VaultError::InvalidData(
                 "unsupported secret document history version".to_owned(),
             ));
         }
-        if log.kind != kind || expected_partition.is_some_and(|expected| log.partition != expected)
+        if self.kind != kind
+            || expected_partition.is_some_and(|expected| self.partition != expected)
         {
             return Err(VaultError::InvalidData(
                 "secret document history does not match its document".to_owned(),
             ));
         }
-        if log.entries.iter().any(|entry| !entry.is_supported()) {
+        if self.entries.iter().any(|entry| !entry.is_supported()) {
             return Err(VaultError::InvalidData(
                 "unsupported secret document history entry".to_owned(),
             ));
         }
-        if log
+        if self
             .entries
             .windows(2)
             .any(|pair| pair[0].seq >= pair[1].seq)
-            || log
+            || self
                 .entries
                 .last()
-                .is_some_and(|last| last.seq >= log.next_seq)
+                .is_some_and(|last| last.seq >= self.next_seq)
         {
             return Err(VaultError::InvalidData(
                 "secret document history is not strictly ordered".to_owned(),
             ));
         }
-        Ok(log)
+        Ok(())
     }
 
     pub(crate) fn serialize(&self) -> VaultResult<Vec<u8>> {

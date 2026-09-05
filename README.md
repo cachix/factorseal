@@ -521,10 +521,11 @@ overrides the native endpoint.
 asks each backend to remove its locally owned keys. It requires one configured
 unlock group. This is local removal, not backup revocation: self-contained TPM
 envelopes remain usable on the original TPM with valid factors if a copy was
-retained. A root written by an earlier metadata version cannot be unsealed by
-the current build; `destroy` can still remove that directory and backend-owned
-state without proving an unlock group. There is no migration for unreleased
-formats; explicitly preserve any needed data before removing an old vault.
+retained. Public metadata and encrypted database schemas are versioned
+independently. Supported database upgrades run transactionally after unseal;
+the service verifies the old signed chain before rewriting it and advances the
+schema version only when the new signed state is durable. Unknown formats are
+rejected and never automatically removed.
 
 ## Security properties and limitations
 

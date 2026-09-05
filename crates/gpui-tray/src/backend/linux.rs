@@ -6,7 +6,7 @@ use std::{
 };
 
 use zbus::{
-    blocking::{Connection, Proxy},
+    blocking::{Connection, Proxy, connection::Builder},
     zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Str, StructureBuilder},
 };
 
@@ -172,14 +172,6 @@ fn worker_main(
         std::process::id(),
         unique_worker_id()
     );
-    let connection = match create_connection(&service_name) {
-        Ok(connection) => connection,
-        Err(error) => {
-            let _ = ready.send(Err(error.to_string()));
-            return;
-        }
-    };
-
     let (menu, next_external_id) = compile_dbus_menu(snapshot.menu.as_ref(), 1);
     let state = Arc::new(Mutex::new(ServiceState {
         tray: snapshot,
@@ -188,24 +180,13 @@ fn worker_main(
         events,
         next_external_id,
     }));
-    if let Err(error) = connection.object_server().at(
-        ITEM_PATH,
-        StatusNotifierItem {
-            state: state.clone(),
-        },
-    ) {
-        let _ = ready.send(Err(error.to_string()));
-        return;
-    }
-    if let Err(error) = connection.object_server().at(
-        MENU_PATH,
-        DbusMenu {
-            state: state.clone(),
-        },
-    ) {
-        let _ = ready.send(Err(error.to_string()));
-        return;
-    }
+    let connection = match create_connection(&service_name, state.clone()) {
+        Ok(connection) => connection,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return;
+        }
+    };
 
     // A missing watcher is a normal desktop state, not a construction error.
     let _ = register_with_watcher(&connection, &service_name);
@@ -246,10 +227,20 @@ fn worker_main(
     }
 }
 
-fn create_connection(service_name: &str) -> zbus::Result<Connection> {
-    let connection = Connection::session()?;
-    connection.request_name(service_name)?;
-    Ok(connection)
+fn create_connection(
+    service_name: &str,
+    state: Arc<Mutex<ServiceState>>,
+) -> zbus::Result<Connection> {
+    Builder::session()?
+        .serve_at(
+            ITEM_PATH,
+            StatusNotifierItem {
+                state: state.clone(),
+            },
+        )?
+        .serve_at(MENU_PATH, DbusMenu { state })?
+        .name(service_name)?
+        .build()
 }
 
 fn unique_worker_id() -> u64 {

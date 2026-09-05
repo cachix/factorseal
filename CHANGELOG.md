@@ -5,9 +5,11 @@ All notable changes to FactorSeal will be documented in this file.
 ## Unreleased
 
 The current formats are metadata v8, database schema v5, snapshot envelope v7,
-protected commit v6, document v3, record v2, and native protocol v9. Earlier
-unreleased formats are rejected, not migrated or automatically deleted. Preserve
-any needed data before explicitly removing an old vault.
+protected commit v6, document v3, record v2, and native protocol v9. Database
+schema v3 is authenticated and migrated transactionally after unseal: current
+document heads are projected into the new record/history envelope, document
+keys are rotated, and a compact current-format commit chain is signed before
+the schema version advances. Unknown formats are rejected and never deleted.
 
 - Split the installation root from per-document keys: a permanent
   `InstallationId`, a distinct non-replicating Device `VaultId`, a

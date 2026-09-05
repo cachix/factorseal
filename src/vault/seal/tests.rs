@@ -320,6 +320,19 @@ fn older_metadata_versions_are_rejected_cleanly() {
 }
 
 #[test]
+fn metadata_version_seven_remains_compatible_with_schema_migration() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    Vault::create_for_test(&root).unwrap();
+    let mut stored = read_vault(&root).unwrap();
+    stored.version = 7;
+    fs::write(root.join(VAULT_FILE), serde_json::to_vec(&stored).unwrap()).unwrap();
+
+    assert_eq!(Vault::inspect(&root).unwrap(), stored.public());
+    Vault::unseal_for_test(&root).unwrap();
+}
+
+#[test]
 fn profile_and_password_kdf_must_agree() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("factorseal");

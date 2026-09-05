@@ -13,14 +13,9 @@ use crate::vault::{
 };
 
 use super::database::{
-    database_error, open_lock, query_count, query_optional_blob, row_blob, row_integer, row_text,
-    to_i64,
+    database_error, open_lock, query_count, row_blob, row_integer, row_text, to_i64,
 };
-
-// Version 5 authenticates the eviction deadline in each protected commit so the sweep loads
-// only documents with a record due for eviction. Version 3 removed the
-// per-change table: one generation is one snapshot.
-const SCHEMA_VERSION: u32 = 5;
+use super::migration::{SCHEMA_VERSION, migrate_schema, verify_schema};
 
 pub(super) struct OpenedStore {
     pub(super) connection: Connection,
@@ -110,7 +105,7 @@ pub(super) async fn open_store(root: &Path, unsealed: UnsealedVault) -> VaultRes
         }
         .await
     } else {
-        verify_schema(&connection).await
+        migrate_schema(&connection, &device, &secrets).await
     };
     crate::timing::record_result("store_bootstrap", "schema", schema_started, &schema_result);
     schema_result?;
@@ -205,23 +200,6 @@ async fn initialize_schema(connection: &Connection) -> VaultResult<()> {
         .await
         .map_err(database_error)?;
     verify_schema(connection).await
-}
-
-async fn verify_schema(connection: &Connection) -> VaultResult<()> {
-    let schema = SCHEMA_VERSION.to_be_bytes().to_vec();
-    let stored = query_optional_blob(
-        connection,
-        "SELECT value FROM store_meta WHERE key = 'schema-version'",
-        (),
-    )
-    .await?
-    .ok_or_else(|| VaultError::Database("missing schema version".to_owned()))?;
-    if stored != schema {
-        return Err(VaultError::Database(
-            "unsupported vault database schema version".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 async fn insert_installation_row(

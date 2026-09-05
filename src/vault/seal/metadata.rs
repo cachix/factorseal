@@ -23,8 +23,10 @@ pub(super) const PENDING_VAULT_FILE: &str = ".factorseal.json.pending";
 const VAULT_FORMAT: &str = "factorseal-vault";
 // Version 7 hardware-wraps only the installation root per unlock group. The
 // signing seed is root-wrapped once and the index key is derived from the
-// root. Earlier formats are deliberately rejected.
+// root. Version 8 changed only the independently migrated database schema, so
+// its metadata shape is identical and both versions remain readable.
 const VAULT_VERSION: u32 = 8;
+const COMPATIBLE_VAULT_VERSION: u32 = 7;
 const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -131,7 +133,9 @@ impl VaultFile {
     }
 
     pub(super) fn validate(&self) -> VaultResult<()> {
-        if self.format != VAULT_FORMAT || self.version != VAULT_VERSION {
+        if self.format != VAULT_FORMAT
+            || !matches!(self.version, COMPATIBLE_VAULT_VERSION | VAULT_VERSION)
+        {
             return Err(VaultError::Protection(
                 "unsupported vault metadata format or version".to_owned(),
             ));

@@ -11,6 +11,7 @@ use super::{
 mod bootstrap;
 mod chain;
 mod database;
+mod migration;
 mod worker;
 
 pub(crate) use worker::StoredSecret;
