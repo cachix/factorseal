@@ -774,6 +774,11 @@ impl DesktopView {
         cx.notify();
     }
 
+    fn show_vault_browser(&mut self, cx: &mut Context<Self>) {
+        self.selected_vault_item = None;
+        cx.notify();
+    }
+
     fn select_transfer_format(&mut self, format: TransferFormat, cx: &mut Context<Self>) {
         if self.transfer_busy {
             return;
@@ -1969,11 +1974,6 @@ impl DesktopView {
     #[allow(clippy::too_many_lines)]
     fn render_transfer_detail(&self, is_import: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
-        let title = if is_import {
-            "Import secrets"
-        } else {
-            "Export secrets"
-        };
         let description = if is_import {
             "Restore a FactorSeal backup or bring personal items from another password manager."
         } else {
@@ -2144,7 +2144,6 @@ impl DesktopView {
                 .max_w(px(820.))
                 .gap_4()
                 .p_6()
-                .child(div().text_xl().font_semibold().child(title))
                 .child(div().text_color(theme.muted_foreground).child(description))
                 .child(form),
         )
@@ -2280,6 +2279,36 @@ impl DesktopView {
         }
     }
 
+    fn render_vault_breadcrumb(&self, cx: &mut Context<Self>) -> Div {
+        let title = match self.selected_vault_item.as_ref() {
+            Some(VaultSelection::Import) => Some("Import"),
+            Some(VaultSelection::Export) => Some("Export"),
+            _ => None,
+        };
+        let theme = cx.theme();
+        if let Some(title) = title {
+            h_flex()
+                .items_center()
+                .gap_2()
+                .text_2xl()
+                .font_semibold()
+                .child(
+                    div()
+                        .id("vault-breadcrumb")
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.muted_foreground))
+                        .child("Your vault")
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.show_vault_browser(cx);
+                        })),
+                )
+                .child(div().text_color(theme.muted_foreground).child("←"))
+                .child(title)
+        } else {
+            h_flex().text_2xl().font_semibold().child("Your vault")
+        }
+    }
+
     fn render_unsealed(
         &self,
         contents: &VaultContents,
@@ -2293,6 +2322,7 @@ impl DesktopView {
             self.selected_vault_item.as_ref(),
             Some(VaultSelection::Import | VaultSelection::Export)
         );
+        let header_title = self.render_vault_breadcrumb(cx);
         v_flex()
             .gap_5()
             .child(
@@ -2302,15 +2332,12 @@ impl DesktopView {
                     .justify_between()
                     .gap_4()
                     .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_2xl().font_semibold().child("Your vault"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child("On this device. Available to authorized applications."),
-                            ),
+                        v_flex().gap_1().child(header_title).child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("On this device. Available to authorized applications."),
+                        ),
                     )
                     .child(
                         h_flex()
@@ -2562,19 +2589,34 @@ impl DesktopView {
             Snapshot::Sealed { metadata, error } => {
                 self.render_sealed(metadata, error.as_deref(), cx)
             }
-            Snapshot::Unlocking { group, .. } => vault_card(&theme)
-                .items_center()
-                .text_center()
-                .child(brand_mark(56., theme.foreground))
-                .child(Spinner::new().with_size(Size::Large).color(theme.primary))
-                .child(div().text_2xl().font_semibold().child("Unsealing vault…"))
-                .child(div().text_sm().text_color(theme.muted_foreground).child(
-                    if group.requires(factorseal::UnlockFactorKind::Biometric) {
-                        "Complete the device authorization prompt if one appears."
-                    } else {
-                        "Checking your password with this device."
-                    },
-                )),
+            Snapshot::Unlocking { group, .. } => {
+                vault_card(&theme)
+                    .items_center()
+                    .text_center()
+                    .child(brand_mark(56., theme.foreground))
+                    .child(Spinner::new().with_size(Size::Large).color(theme.primary))
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_semibold()
+                            .child("Unlocking your vault…"),
+                    )
+                    .child(
+                        div().text_sm().text_color(theme.muted_foreground).child(
+                            "FactorSeal’s secure unlock process normally takes a few seconds.",
+                        ),
+                    )
+                    .when(
+                        group.requires(factorseal::UnlockFactorKind::Biometric),
+                        |element| {
+                            element.child(
+                                div().text_sm().text_color(theme.muted_foreground).child(
+                                    "Complete the device authorization prompt if one appears.",
+                                ),
+                            )
+                        },
+                    )
+            }
             Snapshot::Sealing { .. } => vault_card(&theme)
                 .items_center()
                 .text_center()
