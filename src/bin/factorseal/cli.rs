@@ -2,8 +2,25 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum, ValueHint};
 use factorseal::UnlockGroup;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(super) enum CompletionShell {
+    /// Bourne Again Shell
+    Bash,
+    /// Elvish shell
+    Elvish,
+    /// Friendly Interactive Shell
+    Fish,
+    /// Nushell
+    Nushell,
+    /// PowerShell
+    #[value(name = "powershell")]
+    PowerShell,
+    /// Z shell
+    Zsh,
+}
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(super) enum TransferFormat {
@@ -36,21 +53,21 @@ impl From<TransferFormat> for factorseal::transfer::TransferFormat {
 )]
 pub(super) struct Cli {
     /// Vault directory. Defaults to platform-local user data.
-    #[arg(long, global = true, env = "FACTORSEAL_ROOT")]
+    #[arg(long, global = true, env = "FACTORSEAL_ROOT", value_hint = ValueHint::DirPath)]
     pub(super) root: Option<PathBuf>,
 
     /// Local service socket or named pipe override.
-    #[arg(long, global = true, env = "FACTORSEAL_SOCKET")]
+    #[arg(long, global = true, env = "FACTORSEAL_SOCKET", value_hint = ValueHint::FilePath)]
     pub(super) socket: Option<PathBuf>,
 
     /// Read the password factor from a private regular file.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, value_hint = ValueHint::FilePath)]
     pub(super) password_file: Option<PathBuf>,
 
     /// Run this helper to obtain the password factor and read it from the
     /// helper's standard output. Packages use it to prompt without a
     /// controlling terminal; the prompt text is passed as the one argument.
-    #[arg(long, global = true, env = "FACTORSEAL_ASKPASS")]
+    #[arg(long, global = true, env = "FACTORSEAL_ASKPASS", value_hint = ValueHint::ExecutablePath)]
     pub(super) askpass: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -142,7 +159,7 @@ pub(super) enum Command {
         field: Option<String>,
 
         /// Read the value from this file instead of prompting or standard input.
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         value_file: Option<PathBuf>,
     },
 
@@ -205,6 +222,7 @@ pub(super) enum Command {
     /// Export an encrypted backup or personal secrets for a password manager.
     Export {
         /// Destination file. Existing files are replaced with mode 0600 on Unix.
+        #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,
 
         /// Export format. Password-manager formats are plaintext and include personal secrets only.
@@ -212,13 +230,14 @@ pub(super) enum Command {
         format: TransferFormat,
 
         /// Read the native archive passphrase from a private regular file.
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         passphrase_file: Option<PathBuf>,
     },
 
     /// Import an encrypted backup or personal secrets from a password manager.
     Import {
         /// Source archive or password-manager export.
+        #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,
 
         /// Import format.
@@ -226,7 +245,7 @@ pub(super) enum Command {
         format: TransferFormat,
 
         /// Read the native archive passphrase from a private regular file.
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         passphrase_file: Option<PathBuf>,
 
         /// Replace entries whose vault address already exists.
@@ -267,6 +286,13 @@ pub(super) enum Command {
     Permissions {
         #[command(subcommand)]
         action: PermissionCommand,
+    },
+
+    /// Generate a shell completion script.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: CompletionShell,
     },
 
     /// Serve the SecretSpec external-provider protocol over standard I/O.

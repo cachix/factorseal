@@ -158,3 +158,10 @@ the schema version advances. Unknown formats are rejected and never deleted.
   unavailable hardware, unsupported policy, cancellation, denial, unavailable
   authorization UI, locked sessions, invalidated credentials, and generic
   hardware failures remain distinguishable without parsing error strings.
+- Add `factorseal completions <SHELL>`, which writes a completion script for
+  Bash, Elvish, Fish, Nushell, PowerShell, or Zsh to standard output. The
+  script asks `factorseal` for suggestions as you type, so completions always
+  match the installed binary and cover every command, option, and possible
+  value. Path arguments complete files and directories, and internal commands
+  stay hidden. Completion answers from the command definition alone: it never
+  resolves a vault root, reads vault metadata, or contacts the service.

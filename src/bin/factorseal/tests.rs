@@ -1,4 +1,4 @@
-use super::cli::{Cli, Command, PermissionCommand, TransferFormat};
+use super::cli::{Cli, Command, CompletionShell, PermissionCommand, TransferFormat};
 #[cfg(feature = "secretspec-provider")]
 use super::commands::write_secretspec_claim;
 use super::commands::{
@@ -726,6 +726,33 @@ fn permissions_use_explicit_subcommands() {
         ])
         .is_err()
     );
+}
+
+#[test]
+fn cli_command_definition_is_valid() {
+    use clap::CommandFactory as _;
+
+    Cli::command().debug_assert();
+}
+
+#[test]
+fn completions_accept_every_supported_shell() {
+    let cases = [
+        ("bash", CompletionShell::Bash),
+        ("elvish", CompletionShell::Elvish),
+        ("fish", CompletionShell::Fish),
+        ("nushell", CompletionShell::Nushell),
+        ("powershell", CompletionShell::PowerShell),
+        ("zsh", CompletionShell::Zsh),
+    ];
+
+    for (name, expected) in cases {
+        let cli = Cli::try_parse_from(["factorseal", "completions", name]).unwrap();
+        assert!(matches!(cli.command, Command::Completions { shell } if shell == expected));
+    }
+
+    assert!(Cli::try_parse_from(["factorseal", "completions", "tcsh"]).is_err());
+    assert!(Cli::try_parse_from(["factorseal", "completions"]).is_err());
 }
 
 #[test]
