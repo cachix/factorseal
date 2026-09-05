@@ -1189,7 +1189,10 @@ impl DesktopView {
             .when(needs_password, |element| {
                 element.child(field_label(
                     "Password",
-                    Input::new(&self.password).mask_toggle().large(),
+                    Input::new(&self.password)
+                        .bg(theming::input_background(cx))
+                        .mask_toggle()
+                        .large(),
                 ))
             })
             .when_some(error.map(str::to_owned), |element, error| {
@@ -1500,6 +1503,7 @@ impl DesktopView {
         let theme = cx.theme().clone();
         div().flex_none().pr_5().child(
             Input::new(&self.vault_search)
+                .bg(theming::input_background(cx))
                 .prefix(search_icon(theme.muted_foreground))
                 .when(has_query, |input| {
                     input.suffix(
@@ -1941,10 +1945,15 @@ impl DesktopView {
             .border_color(theme.border)
             .bg(theme.popover)
             .child(div().font_semibold().child("New personal secret"))
-            .child(field_label("Name", Input::new(&self.personal_name)))
+            .child(field_label(
+                "Name",
+                Input::new(&self.personal_name).bg(theming::input_background(cx)),
+            ))
             .child(field_label(
                 "Secret value",
-                Input::new(&self.personal_value).mask_toggle(),
+                Input::new(&self.personal_value)
+                    .bg(theming::input_background(cx))
+                    .mask_toggle(),
             ))
             .when_some(self.personal_error.clone(), |panel, error| {
                 panel.child(error_banner(error, theme.danger))
@@ -2050,10 +2059,10 @@ impl DesktopView {
                                 "Includes durable vault items, but not provider caches, application authorizations, history, or device keys. Choose a separate passphrase for this portable backup."
                             }),
                     )
-                    .child(field_label("Archive passphrase", Input::new(&self.archive_passphrase).mask_toggle()))
+                    .child(field_label("Archive passphrase", Input::new(&self.archive_passphrase).bg(theming::input_background(cx)).mask_toggle()))
                     .when(!is_import, |panel| {
                         panel.child(
-                            field_label("Confirm archive passphrase", Input::new(&self.archive_passphrase_confirmation).mask_toggle()),
+                            field_label("Confirm archive passphrase", Input::new(&self.archive_passphrase_confirmation).bg(theming::input_background(cx)).mask_toggle()),
                         )
                     }),
             );
@@ -2551,8 +2560,8 @@ impl DesktopView {
             })
             .when(self.setup_method.needs_password(), |element| {
                 element
-                    .child(field_label("Password", Input::new(&self.password).mask_toggle().large()))
-                    .child(field_label("Confirm password", Input::new(&self.password_confirmation).mask_toggle().large()))
+                    .child(field_label("Password", Input::new(&self.password).bg(theming::input_background(cx)).mask_toggle().large()))
+                    .child(field_label("Confirm password", Input::new(&self.password_confirmation).bg(theming::input_background(cx)).mask_toggle().large()))
             })
             .when_some(self.setup_error.clone(), |element, error| {
                 element.child(error_banner(error, theme.danger))

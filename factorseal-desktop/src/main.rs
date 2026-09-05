@@ -27,17 +27,23 @@ impl AssetSource for Assets {
             branding::CLOSE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../../assets/logo/factorseal-close.svg"
             )))),
-            _ => Ok(None),
+            _ => gpui_component_assets::Assets.load(path),
         }
     }
 
-    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
-        Ok(vec![
-            branding::MARK_ASSET.into(),
-            branding::MICRO_MARK_ASSET.into(),
-            branding::SEARCH_ASSET.into(),
-            branding::CLOSE_ASSET.into(),
-        ])
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        let mut assets = gpui_component_assets::Assets.list(path)?;
+        assets.extend(
+            vec![
+                branding::MARK_ASSET.into(),
+                branding::MICRO_MARK_ASSET.into(),
+                branding::SEARCH_ASSET.into(),
+                branding::CLOSE_ASSET.into(),
+            ]
+            .into_iter()
+            .filter(|asset: &SharedString| asset.starts_with(path)),
+        );
+        Ok(assets)
     }
 }
 
@@ -163,6 +169,30 @@ mod tests {
     use clap::{CommandFactory as _, Parser as _};
 
     use super::Args;
+
+    #[test]
+    fn component_and_brand_icons_are_available() {
+        use gpui::AssetSource as _;
+
+        let assets = super::Assets;
+        for path in assets.list("").unwrap() {
+            assert!(!assets.load(&path).unwrap().unwrap().is_empty(), "{path}");
+        }
+        for path in [
+            "icons/eye.svg",
+            "icons/chevron-down.svg",
+            super::branding::MARK_ASSET,
+        ] {
+            assert!(assets.load(path).unwrap().is_some(), "{path}");
+        }
+        assert!(
+            assets
+                .list("icons/")
+                .unwrap()
+                .iter()
+                .all(|path| path.starts_with("icons/"))
+        );
+    }
 
     #[test]
     fn keyring_activation_is_a_hidden_foreground_launch() {

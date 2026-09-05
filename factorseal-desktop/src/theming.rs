@@ -62,11 +62,28 @@ pub(crate) struct ThemeState {
 
 impl Global for ThemeState {}
 
+struct InputBackground(gpui::Hsla);
+
+impl Global for InputBackground {}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn set_input_background(color: gpui::Hsla, cx: &mut App) {
+    cx.set_global(InputBackground(color));
+}
+
+pub(crate) fn input_background(cx: &App) -> gpui::Hsla {
+    cx.try_global::<InputBackground>().map_or_else(
+        || gpui_component::theme::Theme::global(cx).input_background(),
+        |background| background.0,
+    )
+}
+
 #[cfg(target_os = "linux")]
 struct LoadedTheme {
     backend: Backend,
     summary: String,
     mode: gpui_component::ThemeMode,
+    resolved: native_theme::theme::ResolvedTheme,
 }
 
 #[cfg(target_os = "linux")]
@@ -127,7 +144,10 @@ pub(crate) fn initialize(cx: &mut App) {
         last_change_source: None,
     });
 
-    crate::branding::apply(cx);
+    if cx.global::<ThemeState>().backend.is_none() {
+        crate::branding::apply(cx);
+        sync_component_colors(gpui_component::theme::Theme::global_mut(cx));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -135,16 +155,15 @@ fn initialize_linux(cx: &mut App) {
     let initial = load_automatic();
     let state = match initial {
         Ok(loaded) => {
-            let state = ThemeState {
+            install_theme(&loaded, cx);
+            ThemeState {
                 backend: Some(loaded.backend),
                 summary: loaded.summary,
                 error: None,
                 monitor_status: "starting".to_owned(),
                 automatic_refreshes: 0,
                 last_change_source: None,
-            };
-            gpui_component::theme::Theme::change(loaded.mode, None, cx);
-            state
+            }
         }
         Err(error) => ThemeState {
             backend: None,
@@ -164,10 +183,10 @@ fn initialize_linux(cx: &mut App) {
 fn refresh_native_theme(cx: &mut App) {
     match load_automatic() {
         Ok(loaded) => {
+            install_theme(&loaded, cx);
             let backend = loaded.backend;
             let summary = loaded.summary;
             eprintln!("active theme backend is {backend}: {summary}");
-            gpui_component::theme::Theme::change(loaded.mode, None, cx);
             let state = cx.global_mut::<ThemeState>();
             state.backend = Some(backend);
             state.summary = summary;
@@ -178,7 +197,6 @@ fn refresh_native_theme(cx: &mut App) {
             state.error = Some(format!("Theme refresh failed: {error:#}"));
         }
     }
-    crate::branding::apply(cx);
     crate::app::refresh_tray_icon(cx);
     cx.refresh_windows();
 }
@@ -453,7 +471,18 @@ fn load_backend(backend: Backend) -> Result<LoadedTheme> {
         Backend::Gtk => {
             let snapshot: native_theme_gtk::ThemeSnapshot =
                 serde_json::from_slice(&json).context("GTK probe returned invalid JSON")?;
-            let bridge = snapshot.resolve_native_theme()?;
+            let mut bridge = snapshot.resolve_native_theme()?;
+            bridge.resolved.popover.background_color = bridge.resolved.tooltip.background_color;
+            bridge.resolved.popover.font = bridge.resolved.tooltip.font.clone();
+            bridge.resolved.sidebar.background_color = bridge.resolved.defaults.surface_color;
+            bridge.resolved.sidebar.font.color = bridge.resolved.defaults.text_color;
+            bridge.resolved.sidebar.border.color = bridge.resolved.defaults.border.color;
+            bridge.resolved.sidebar.hover_background =
+                bridge.resolved.defaults.selection_background;
+            bridge.resolved.sidebar.selection_background =
+                bridge.resolved.defaults.selection_background;
+            bridge.resolved.sidebar.selection_text_color =
+                bridge.resolved.defaults.selection_text_color;
             let mode = if bridge.mode.is_dark() {
                 "dark"
             } else {
@@ -466,6 +495,7 @@ fn load_backend(backend: Backend) -> Result<LoadedTheme> {
             Ok(LoadedTheme {
                 backend,
                 summary,
+                resolved: bridge.resolved,
                 mode: if bridge.mode.is_dark() {
                     gpui_component::ThemeMode::Dark
                 } else {
@@ -489,6 +519,7 @@ fn load_backend(backend: Backend) -> Result<LoadedTheme> {
             Ok(LoadedTheme {
                 backend,
                 summary,
+                resolved: bridge.resolved,
                 mode: if bridge.mode.is_dark() {
                     gpui_component::ThemeMode::Dark
                 } else {
@@ -507,6 +538,144 @@ fn load_automatic() -> Result<LoadedTheme> {
         Err(preferred_error) => load_backend(fallback)
             .with_context(|| format!("preferred {preferred} backend failed: {preferred_error:#}")),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn install_theme(loaded: &LoadedTheme, cx: &mut App) {
+    use gpui_component::theme::Theme;
+
+    Theme::change(loaded.mode, None, cx);
+    let theme = Theme::global_mut(cx);
+    apply_native_theme(theme, &loaded.resolved);
+    let background = loaded.resolved.input.background_color;
+    set_input_background(
+        gpui::rgba(u32::from_be_bytes([
+            background.r,
+            background.g,
+            background.b,
+            background.a,
+        ]))
+        .into(),
+        cx,
+    );
+    Theme::sync_base(cx);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_native_theme(
+    theme: &mut gpui_component::theme::Theme,
+    native: &native_theme::theme::ResolvedTheme,
+) {
+    let color = |value: native_theme::color::Rgba| -> gpui::Hsla {
+        gpui::rgba(u32::from_be_bytes([value.r, value.g, value.b, value.a])).into()
+    };
+    let defaults = &native.defaults;
+    theme.font_family = defaults.font.family.to_string().into();
+    theme.font_size = gpui::px(defaults.font.size);
+    theme.background = color(native.window.background_color);
+    theme.foreground = color(defaults.text_color);
+    theme.border = color(defaults.border.color);
+    theme.input = color(native.input.border.color);
+    theme.caret = color(native.input.caret_color);
+    theme.ring = color(defaults.focus_ring_color);
+    theme.selection = color(native.input.selection_background);
+    theme.muted = color(defaults.surface_color);
+    theme.muted_foreground = color(defaults.muted_color);
+    theme.secondary = color(native.button.background_color);
+    theme.secondary_foreground = color(native.button.font.color);
+    theme.secondary_hover = color(native.button.hover_background);
+    theme.secondary_active = color(
+        native
+            .button
+            .active_background
+            .unwrap_or(native.button.hover_background),
+    );
+    theme.primary = color(native.button.primary_background);
+    theme.primary_foreground = color(native.button.primary_text_color);
+    theme.primary_hover = theme.primary;
+    theme.primary_active = theme.primary;
+    theme.accent = color(defaults.accent_color);
+    theme.accent_foreground = color(defaults.accent_text_color);
+    theme.popover = color(native.popover.background_color);
+    theme.popover_foreground = color(native.popover.font.color);
+    theme.group_box = color(defaults.surface_color);
+    theme.group_box_foreground = theme.foreground;
+    theme.colors.list = color(native.list.background_color);
+    theme.list_hover = color(native.list.hover_background);
+    theme.list_active = color(native.list.selection_background);
+    theme.list_active_border = color(native.list.border.color);
+    theme.sidebar = color(native.sidebar.background_color);
+    theme.sidebar_foreground = color(native.sidebar.font.color);
+    theme.sidebar_accent = color(native.sidebar.hover_background);
+    theme.sidebar_accent_foreground = theme.sidebar_foreground;
+    theme.sidebar_border = color(native.sidebar.border.color);
+    theme.sidebar_primary = color(native.sidebar.selection_background);
+    theme.sidebar_primary_foreground = color(native.sidebar.selection_text_color);
+    theme.link = color(defaults.link_color);
+    theme.link_hover = color(native.link.hover_text_color);
+    theme.link_active = color(native.link.active_text_color);
+    theme.success = color(defaults.success_color);
+    theme.success_foreground = color(defaults.success_text_color);
+    theme.success_hover = theme.success;
+    theme.success_active = theme.success;
+    theme.danger = color(defaults.danger_color);
+    theme.danger_foreground = color(defaults.danger_text_color);
+    theme.danger_hover = theme.danger;
+    theme.danger_active = theme.danger;
+    theme.warning = color(defaults.warning_color);
+    theme.warning_foreground = color(defaults.warning_text_color);
+    theme.info = color(defaults.info_color);
+    theme.info_foreground = color(defaults.info_text_color);
+    theme.progress_bar = theme.primary;
+    theme.title_bar = color(native.window.title_bar_background);
+    theme.title_bar_border = color(native.window.border.color);
+    theme.window_border = theme.title_bar_border;
+    theme.scrollbar = color(native.scrollbar.track_color);
+    theme.scrollbar_thumb = color(native.scrollbar.thumb_color);
+    theme.scrollbar_thumb_hover = color(native.scrollbar.thumb_hover_color);
+    theme.radius = gpui::px(defaults.border.corner_radius);
+    theme.radius_lg = gpui::px(defaults.border.corner_radius_lg);
+    theme.shadow = defaults.border.shadow_enabled;
+    theme.tile_shadow = native.card.border.shadow_enabled;
+    theme.tile_radius = gpui::px(native.card.border.corner_radius);
+    sync_component_colors(theme);
+}
+
+pub(crate) fn sync_component_colors(theme: &mut gpui_component::theme::Theme) {
+    theme.tab = theme.background;
+    theme.tab_foreground = theme.muted_foreground;
+    theme.tab_active = theme.popover;
+    theme.tab_active_foreground = theme.foreground;
+    theme.tab_bar = theme.background;
+    theme.button = theme.secondary;
+    theme.button_foreground = theme.secondary_foreground;
+    theme.button_hover = theme.secondary_hover;
+    theme.button_active = theme.secondary_active;
+    theme.button_primary = theme.primary;
+    theme.button_primary_foreground = theme.primary_foreground;
+    theme.button_primary_hover = theme.primary_hover;
+    theme.button_primary_active = theme.primary_active;
+    theme.button_secondary = theme.secondary;
+    theme.button_secondary_foreground = theme.secondary_foreground;
+    theme.button_secondary_hover = theme.secondary_hover;
+    theme.button_secondary_active = theme.secondary_active;
+    theme.button_danger = theme.danger;
+    theme.button_danger_foreground = theme.danger_foreground;
+    theme.button_danger_hover = theme.danger_hover;
+    theme.button_danger_active = theme.danger_active;
+    theme.button_success = theme.success;
+    theme.button_success_foreground = theme.success_foreground;
+    theme.button_success_hover = theme.success_hover;
+    theme.button_success_active = theme.success_active;
+    theme.button_info = theme.info;
+    theme.button_info_foreground = theme.info_foreground;
+    theme.button_info_hover = theme.info;
+    theme.button_info_active = theme.info;
+    theme.button_warning = theme.warning;
+    theme.button_warning_foreground = theme.warning_foreground;
+    theme.button_warning_hover = theme.warning;
+    theme.button_warning_active = theme.warning;
+    theme.tokens = (&theme.colors).into();
 }
 
 /// Emit a toolkit snapshot for the parent process, then terminate.
@@ -554,6 +723,52 @@ mod tests {
         Backend, ChangeSource, ChangeSources, DesktopEnvironment, candidate_theme_paths,
         create_file_watcher, is_theme_setting, preference_from,
     };
+
+    #[test]
+    fn native_palette_and_typography_survive_repeated_theme_changes() {
+        use native_theme::theme::{ColorMode, Theme};
+
+        let mut target = gpui_component::theme::Theme::default();
+        for preset in ["adwaita", "kde-breeze", "adwaita"] {
+            for mode in [ColorMode::Light, ColorMode::Dark] {
+                let native = Theme::preset(preset)
+                    .unwrap()
+                    .resolve(mode)
+                    .unwrap()
+                    .variant;
+                super::apply_native_theme(&mut target, &native);
+                let background = native.window.background_color;
+                let expected: gpui::Hsla = gpui::rgba(u32::from_be_bytes([
+                    background.r,
+                    background.g,
+                    background.b,
+                    background.a,
+                ]))
+                .into();
+                assert_eq!(target.background, expected);
+                assert_eq!(target.button_primary, target.primary);
+                assert_eq!(target.button_primary_foreground, target.primary_foreground);
+                assert_eq!(
+                    target.tokens.button_primary.background,
+                    target.primary.into()
+                );
+                assert_eq!(target.tokens.popover.background, target.popover.into());
+                assert_eq!(
+                    target.tokens.scrollbar_thumb.background,
+                    target.scrollbar_thumb.into()
+                );
+                assert_eq!(
+                    target.font_family.as_ref(),
+                    native.defaults.font.family.as_ref()
+                );
+                assert_eq!(target.font_size, gpui::px(native.defaults.font.size));
+                assert_eq!(
+                    target.radius,
+                    gpui::px(native.defaults.border.corner_radius)
+                );
+            }
+        }
+    }
 
     #[test]
     fn explicit_backend_wins() {

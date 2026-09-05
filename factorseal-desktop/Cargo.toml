@@ -16,6 +16,8 @@ factorseal = { path = "..", default-features = false, features = ["vault", "hard
 fs2 = "0.4.3"
 gpui = "=0.2.2"
 gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "39c2c86dbee7" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component.git", rev = "39c2c86dbee7" }
+native-theme = "=0.5.7"
 gpui_platform = { git = "https://github.com/zed-industries/zed.git" }
 gpui-tray = { path = "../crates/gpui-tray" }
 rfd = { version = "0.15.4", default-features = false, features = ["async-std", "xdg-portal"] }
