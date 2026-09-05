@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 use fs2::FileExt;
 use turso::{Connection, params};
@@ -29,42 +30,99 @@ pub(super) struct OpenedStore {
 }
 
 pub(super) async fn open_store(root: &Path, unsealed: UnsealedVault) -> VaultResult<OpenedStore> {
-    let lock_file = open_lock(root)?;
-    lock_file.try_lock_exclusive().map_err(|error| {
-        VaultError::Database(format!(
-            "another Factorseal vault owns `{}`: {error}",
-            root.display()
-        ))
-    })?;
+    let lock_started = Instant::now();
+    let lock_result: VaultResult<fs::File> = (|| {
+        let lock_file = open_lock(root)?;
+        lock_file.try_lock_exclusive().map_err(|error| {
+            VaultError::Database(format!(
+                "another Factorseal vault owns `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        Ok(lock_file)
+    })();
+    crate::timing::record_result(
+        "store_bootstrap",
+        "acquire_lock",
+        lock_started,
+        &lock_result,
+    );
+    let lock_file = lock_result?;
 
+    let state_started = Instant::now();
     let database_path = root.join(DATABASE_FILE);
     let database_exists = database_path
         .try_exists()
         .map_err(|error| VaultError::Database(error.to_string()))?;
     let (device, secrets, initialize_store) = unsealed.into_parts();
-    validate_database_state(database_exists, initialize_store)?;
+    let state_result = validate_database_state(database_exists, initialize_store);
+    crate::timing::record_result(
+        "store_bootstrap",
+        "validate_database_state",
+        state_started,
+        &state_result,
+    );
+    state_result?;
 
     let database_path = database_path.to_str().ok_or_else(|| {
         VaultError::Database("vault database path is not valid Unicode".to_owned())
     })?;
-    let database = turso::Builder::new_local(database_path)
+    let database_started = Instant::now();
+    let database_result = turso::Builder::new_local(database_path)
         .build()
         .await
-        .map_err(database_error)?;
-    let connection = database.connect().map_err(database_error)?;
-    connection
+        .map_err(database_error);
+    crate::timing::record_result(
+        "store_bootstrap",
+        "open_database",
+        database_started,
+        &database_result,
+    );
+    let database = database_result?;
+    let connection_started = Instant::now();
+    let connection_result = database.connect().map_err(database_error);
+    crate::timing::record_result(
+        "store_bootstrap",
+        "connect_database",
+        connection_started,
+        &connection_result,
+    );
+    let connection = connection_result?;
+    let pragma_started = Instant::now();
+    let pragma_result = connection
         .execute_batch("PRAGMA foreign_keys = ON;")
         .await
-        .map_err(database_error)?;
+        .map_err(database_error);
+    crate::timing::record_result(
+        "store_bootstrap",
+        "configure_connection",
+        pragma_started,
+        &pragma_result,
+    );
+    pragma_result?;
 
-    if initialize_store {
-        initialize_schema(&connection).await?;
-        insert_installation_row(&connection, &device).await?;
-        insert_device_vault_row(&connection, &device).await?;
+    let schema_started = Instant::now();
+    let schema_result = if initialize_store {
+        async {
+            initialize_schema(&connection).await?;
+            insert_installation_row(&connection, &device).await?;
+            insert_device_vault_row(&connection, &device).await
+        }
+        .await
     } else {
-        verify_schema(&connection).await?;
-    }
-    verify_installation_row(&connection, &device).await?;
+        verify_schema(&connection).await
+    };
+    crate::timing::record_result("store_bootstrap", "schema", schema_started, &schema_result);
+    schema_result?;
+    let identity_started = Instant::now();
+    let identity_result = verify_installation_row(&connection, &device).await;
+    crate::timing::record_result(
+        "store_bootstrap",
+        "verify_installation_identity",
+        identity_started,
+        &identity_result,
+    );
+    identity_result?;
 
     Ok(OpenedStore {
         connection,

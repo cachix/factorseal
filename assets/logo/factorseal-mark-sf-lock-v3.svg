@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 160 160"
+     role="img"
+     aria-labelledby="title description">
+  <title id="title">FactorSeal local hardware lock</title>
+  <desc id="description">A quiet one-color hardware padlock with a compact F and S keyway in its vault body.</desc>
+
+  <defs>
+    <mask id="sf-keyway">
+      <rect width="160" height="160" fill="#fff"/>
+      <path d="M55 79h25v10H66v9h12v10H66v12H55Z" fill="#000"/>
+      <path d="M104 86c-4-6-13-8-18-4-6 5-3 11 6 14 10 4 14 10 11 17-3 8-14 10-21 4"
+            fill="none" stroke="#000" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+
+  <g fill="currentColor" mask="url(#sf-keyway)">
+    <rect x="33" y="57" width="94" height="76" rx="18"/>
+    <path d="M59 57v-8c0-18 8-27 21-27s21 9 21 27v8"
+          fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round"/>
+
+    <rect x="18" y="82" width="17" height="11" rx="4"/>
+    <rect x="125" y="82" width="17" height="11" rx="4"/>
+    <rect x="58" y="131" width="13" height="13" rx="4"/>
+    <rect x="89" y="131" width="13" height="13" rx="4"/>
+  </g>
+</svg>

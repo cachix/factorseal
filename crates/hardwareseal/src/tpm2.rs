@@ -181,6 +181,7 @@ fn submit(
     command_code: u32,
     body: Writer,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let started = std::time::Instant::now();
     let body = body.finish();
     let length = u32::try_from(RESPONSE_HEADER_BYTES + body.len())
         .map_err(|_| Error::Hardware("TPM command is too large".to_owned()))?;
@@ -191,9 +192,29 @@ fn submit(
     command.extend_from_slice(&length.to_be_bytes());
     command.extend_from_slice(&command_code.to_be_bytes());
     command.extend_from_slice(&body);
-    let response = transport.execute(&command)?;
-    validate_response(&response)?;
-    Ok(response)
+    let response = transport.execute(&command);
+    let outcome = match response {
+        Ok(response) => validate_response(&response).map(|()| response),
+        Err(error) => Err(error),
+    };
+    crate::timing::record(
+        "tpm_command",
+        command_name(command_code),
+        started,
+        if outcome.is_ok() { "ok" } else { "error" },
+    );
+    outcome
+}
+
+const fn command_name(command_code: u32) -> &'static str {
+    match command_code {
+        TPM_CC_CREATE_PRIMARY => "create_primary",
+        TPM_CC_CREATE => "create_sealed",
+        TPM_CC_LOAD => "load_sealed_object",
+        TPM_CC_UNSEAL => "unseal",
+        TPM_CC_FLUSH_CONTEXT => "flush_context",
+        _ => "unknown",
+    }
 }
 
 fn validate_response(response: &[u8]) -> Result<(), Error> {

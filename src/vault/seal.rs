@@ -550,7 +550,9 @@ impl Vault {
         group: &UnlockGroup,
         credentials: UnlockCredentials<'_>,
     ) -> VaultResult<UnsealedVault> {
-        validate_native_biometric(group.requires(UnlockFactorKind::Biometric))?;
+        crate::timing::result("vault_unseal", "validate_native_biometric", || {
+            validate_native_biometric(group.requires(UnlockFactorKind::Biometric))
+        })?;
         Self::unseal_with_key_protector_group(root, group, credentials, &PlatformProtectorFactory)
     }
 
@@ -576,22 +578,40 @@ impl Vault {
         credentials: UnlockCredentials<'_>,
         factory: &dyn KeyProtectorFactory,
     ) -> VaultResult<UnsealedVault> {
+        let total = std::time::Instant::now();
         let root = root.as_ref();
-        validate_root(root)?;
-        let stored = read_vault(root)?;
-        group.validate()?;
-        let slot = stored
-            .unlock_slots
-            .iter()
-            .find(|slot| &slot.group == group)
-            .ok_or_else(|| {
-                VaultError::Protection(format!(
-                    "the {group} unlock group is not configured for this vault"
-                ))
+        let result = (|| {
+            crate::timing::result("vault_unseal", "validate_root", || validate_root(root))?;
+            let stored =
+                crate::timing::result("vault_unseal", "read_metadata", || read_vault(root))?;
+            crate::timing::result("vault_unseal", "validate_unlock_group", || group.validate())?;
+            let slot = crate::timing::result("vault_unseal", "find_unlock_slot", || {
+                stored
+                    .unlock_slots
+                    .iter()
+                    .find(|slot| &slot.group == group)
+                    .ok_or_else(|| {
+                        VaultError::Protection(format!(
+                            "the {group} unlock group is not configured for this vault"
+                        ))
+                    })
             })?;
-        let biometric = group.requires(UnlockFactorKind::Biometric);
-        let wrapping = factory.open(root, &slot.wrapping_key_label, biometric)?;
-        unseal_with_protectors(&stored, slot, wrapping.as_ref(), credentials)
+            let biometric = group.requires(UnlockFactorKind::Biometric);
+            let wrapping =
+                crate::timing::result("vault_unseal", "open_hardware_protector", || {
+                    factory.open(root, &slot.wrapping_key_label, biometric)
+                })?;
+            crate::timing::result("vault_unseal", "unseal_key_hierarchy", || {
+                unseal_with_protectors(&stored, slot, wrapping.as_ref(), credentials)
+            })
+        })();
+        crate::timing::record(
+            "vault_unseal",
+            "total",
+            total,
+            if result.is_ok() { "ok" } else { "error" },
+        );
+        result
     }
 
     #[cfg(not(feature = "hardware"))]

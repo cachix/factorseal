@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FactorSeal — DMS CPU → Lock</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #f4f1e9; color: #171717; display: grid; place-items: center; }
+    main { width: min(1040px, calc(100vw - 64px)); padding: 52px 0; }
+    h1 { margin: 0 0 10px; font-size: 34px; letter-spacing: -.03em; }
+    .subtitle { margin: 0 0 34px; color: #6f6b63; font-size: 16px; }
+    .compare { display: grid; grid-template-columns: 1fr 70px 1fr; gap: 24px; align-items: center; }
+    .card { min-height: 390px; border: 1px solid #d8d2c6; border-radius: 26px; background: white; padding: 30px; display: grid; place-items: center; box-shadow: 0 8px 30px rgb(60 48 24 / 5%); }
+    .card-content { text-align: center; }
+    .dms-icon { font-family: "Material Symbols Rounded"; font-size: 190px; line-height: 1; font-weight: 400; font-style: normal; font-variation-settings: "FILL" 0, "GRAD" 0, "opsz" 24, "wght" 400; }
+    .new-icon { display: block; width: 190px; height: 190px; margin: 0 auto; }
+    h2 { margin: 26px 0 5px; font-size: 18px; }
+    .label { color: #777168; font-size: 14px; }
+    .arrow { color: #928b80; font-size: 42px; text-align: center; }
+    .sizes { margin-top: 24px; padding: 22px 28px; border-radius: 20px; background: #171717; color: white; display: flex; align-items: center; gap: 28px; }
+    .sizes strong { margin-right: auto; font-size: 14px; letter-spacing: .02em; }
+    .sizes img { display: block; filter: invert(1); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>FactorSeal — DMS CPU → lock</h1>
+    <p class="subtitle">The DMS CPU silhouette, filled in and finished with the original FactorSeal keyhole.</p>
+    <section class="compare">
+      <div class="card">
+        <div class="card-content">
+          <div class="dms-icon" aria-label="DMS memory icon">memory</div>
+          <h2>DMS CPU</h2>
+          <div class="label">memory · rounded · 400 · 24px</div>
+        </div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="card">
+        <div class="card-content">
+          <img class="new-icon" src="factorseal-dms-lock.svg" alt="FactorSeal chip lock">
+          <h2>FactorSeal lock</h2>
+          <div class="label">DMS body + pins · filled · original keyhole</div>
+        </div>
+      </div>
+    </section>
+    <section class="sizes" aria-label="Small size tests">
+      <strong>Scale test</strong>
+      <img src="factorseal-dms-lock.svg" width="96" height="96" alt="96 pixels">
+      <img src="factorseal-dms-lock.svg" width="64" height="64" alt="64 pixels">
+      <img src="factorseal-dms-lock.svg" width="40" height="40" alt="40 pixels">
+      <img src="factorseal-dms-lock.svg" width="24" height="24" alt="24 pixels">
+    </section>
+  </main>
+</body>
+</html>

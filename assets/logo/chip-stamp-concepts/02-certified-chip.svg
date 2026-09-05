@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal certified chip</title>
+  <desc id="desc">A microchip enclosed by an official circular certification stamp.</desc>
+  <g fill="none" stroke="currentColor">
+    <circle cx="80" cy="80" r="61" stroke-width="9"/>
+    <circle cx="80" cy="80" r="48" stroke-width="3" stroke-dasharray="3 8" stroke-linecap="round"/>
+  </g>
+  <g fill="currentColor">
+    <rect x="51" y="49" width="58" height="62" rx="8"/>
+    <path d="M62 38h7v11h-7zm15 0h7v11h-7zm15 0h7v11h-7zM62 111h7v11h-7zm15 0h7v11h-7zm15 0h7v11h-7zM40 59h11v7H40zm0 17h11v7H40zm0 17h11v7H40zm69-34h11v7h-11zm0 17h11v7h-11zm0 17h11v7h-11z"/>
+  </g>
+  <path d="m65 80 10 10 21-24" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

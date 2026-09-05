@@ -80,10 +80,15 @@ pub(crate) fn serve_secret_service(
         };
         let agent = Arc::new(Agent::load(store)?);
         let connection = Connection::session().await.map_err(dbus_error)?;
-        connection
+        let name_claim = connection
             .request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into())
-            .await
-            .map_err(dbus_error)?;
+            .await;
+        if !secret_service_name_claimed(name_claim)? {
+            eprintln!(
+                "FactorSeal: Secret Service integration is unavailable because {BUS_NAME} is already provided by another process"
+            );
+            return Ok(());
+        }
         let server = connection.object_server();
         server
             .at(
@@ -281,6 +286,14 @@ fn unix_time() -> u64 {
 fn dbus_error(error: zbus::Error) -> VaultError {
     VaultError::Protocol(format!("Secret Service D-Bus error: {error}"))
 }
+
+fn secret_service_name_claimed<T>(result: Result<T, zbus::Error>) -> VaultResult<bool> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(zbus::Error::NameTaken) => Ok(false),
+        Err(error) => Err(dbus_error(error)),
+    }
+}
 fn failed(error: impl std::fmt::Display) -> fdo::Error {
     fdo::Error::Failed(error.to_string())
 }
@@ -314,6 +327,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use zbus::Proxy;
+
+    #[test]
+    fn an_owned_secret_service_name_is_a_nonfatal_integration_conflict() {
+        assert!(!secret_service_name_claimed(Err::<(), _>(zbus::Error::NameTaken)).unwrap());
+        assert!(secret_service_name_claimed(Ok(())).unwrap());
+    }
 
     fn agent() -> (tempfile::TempDir, Agent) {
         let directory = tempfile::tempdir().unwrap();

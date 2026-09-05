@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal S/F mark refinement</title>
+  <desc id="desc">The current FactorSeal chip and keyhole compared with three refined S/F lock constructions at product and tray sizes.</desc>
+
+  <defs>
+    <g id="pins">
+      <rect x="59" y="18" width="12" height="18" rx="4"/><rect x="89" y="18" width="12" height="18" rx="4"/>
+      <rect x="59" y="124" width="12" height="18" rx="4"/><rect x="89" y="124" width="12" height="18" rx="4"/>
+      <rect x="18" y="59" width="18" height="12" rx="4"/><rect x="18" y="89" width="18" height="12" rx="4"/>
+      <rect x="124" y="59" width="18" height="12" rx="4"/><rect x="124" y="89" width="18" height="12" rx="4"/>
+    </g>
+    <g id="chip"><rect x="34" y="34" width="92" height="92" rx="16"/><use href="#pins"/></g>
+
+    <mask id="baseline-cutout">
+      <rect width="160" height="160" fill="white"/>
+      <circle cx="80" cy="68" r="13" fill="black"/>
+      <path d="M75 78 69 108h22L85 78Z" fill="black"/>
+    </mask>
+
+    <mask id="clear-sf-cutout">
+      <rect width="160" height="160" fill="white"/>
+      <path d="M49 48h34v14H64v15h16v14H64v23H49Z" fill="black"/>
+      <path d="M112 57c-5-8-17-11-24-5-7 7-1 14 10 18 14 5 20 15 16 27-4 14-19 20-33 12l6-12c8 4 16 3 18-3 2-5-2-8-11-11-14-5-21-14-18-26 4-13 18-19 31-15 6 2 11 5 15 10Z" fill="black"/>
+    </mask>
+
+    <mask id="ligature-cutout">
+      <rect width="160" height="160" fill="white"/>
+      <path d="M51 46h59v15H69v14h23c16 0 26 9 26 22 0 15-11 24-28 24H51v-16h38c8 0 12-3 12-8s-4-7-12-7H51Z" fill="black"/>
+      <rect x="51" y="90" width="18" height="31" rx="2" fill="black"/>
+    </mask>
+
+    <mask id="lock-sf-cutout">
+      <rect width="160" height="160" fill="white"/>
+      <path d="M53 73h29v11H65v10h15v11H65v14H53Z" fill="black"/>
+      <path d="M109 82c-5-7-15-9-21-4-6 6-1 12 9 15 12 5 17 13 14 22-4 11-17 15-29 9l5-10c7 3 13 3 15-2 1-4-2-6-10-9-12-4-17-12-14-21 3-11 15-15 26-12 5 2 9 4 13 8Z" fill="black"/>
+    </mask>
+
+    <g id="baseline" mask="url(#baseline-cutout)"><use href="#chip"/></g>
+    <g id="clear-sf" mask="url(#clear-sf-cutout)"><use href="#chip"/></g>
+    <g id="ligature" mask="url(#ligature-cutout)"><use href="#chip"/></g>
+    <g id="hardware-lock" mask="url(#lock-sf-cutout)">
+      <rect x="34" y="58" width="92" height="74" rx="17"/>
+      <path fill-rule="evenodd" d="M51 60v-9c0-21 11-34 29-34s29 13 29 34v9H92v-9c0-12-4-18-12-18s-12 6-12 18v9Z"/>
+      <rect x="18" y="76" width="18" height="12" rx="4"/><rect x="124" y="76" width="18" height="12" rx="4"/>
+      <rect x="58" y="130" width="13" height="13" rx="4"/><rect x="89" y="130" width="13" height="13" rx="4"/>
+    </g>
+  </defs>
+
+  <rect width="1440" height="900" fill="#F7F3EA"/>
+  <text x="72" y="72" fill="#151515" font-family="Inter, system-ui, sans-serif" font-size="34" font-weight="700">FactorSeal — mark refinement</text>
+  <text x="72" y="108" fill="#68635B" font-family="Inter, system-ui, sans-serif" font-size="18">Keep the local hardware signal. Find the smallest credible S/F lock.</text>
+
+  <g fill="#FFFCF6" stroke="#D9D2C7" stroke-width="2">
+    <rect x="72" y="150" width="306" height="408" rx="22"/>
+    <rect x="402" y="150" width="306" height="408" rx="22"/>
+    <rect x="732" y="150" width="306" height="408" rx="22"/>
+    <rect x="1062" y="150" width="306" height="408" rx="22"/>
+  </g>
+
+  <g fill="#151515">
+    <g transform="translate(129 181) scale(1.2)"><use href="#baseline"/></g>
+    <g transform="translate(459 181) scale(1.2)"><use href="#clear-sf"/></g>
+    <g transform="translate(789 181) scale(1.2)"><use href="#ligature"/></g>
+    <g transform="translate(1119 181) scale(1.2)"><use href="#hardware-lock"/></g>
+  </g>
+
+  <g fill="#151515" font-family="Inter, system-ui, sans-serif" text-anchor="middle">
+    <g font-size="17" font-weight="700">
+      <text x="225" y="415">A · Current keyhole</text><text x="555" y="415">B · Clear S/F</text>
+      <text x="885" y="415">C · Sealed ligature</text><text x="1215" y="415">D · Hardware lock</text>
+    </g>
+    <g fill="#68635B" font-size="14">
+      <text x="225" y="446">clearest lock, least ownable</text><text x="555" y="446">clearest initials</text>
+      <text x="885" y="446">most compact and distinctive</text><text x="1215" y="446">clearest lock + initials</text>
+      <text x="225" y="475">baseline</text><text x="555" y="475">chip / vault</text>
+      <text x="885" y="475">F resolves into S</text><text x="1215" y="475">device-bound padlock</text>
+    </g>
+  </g>
+
+  <text x="72" y="626" fill="#151515" font-family="Inter, system-ui, sans-serif" font-size="16" font-weight="700">PRODUCT SCALE</text>
+  <rect x="72" y="650" width="1296" height="178" rx="22" fill="#151515"/>
+  <g fill="#F7F3EA">
+    <g transform="translate(220 667) scale(.8)"><use href="#baseline"/></g>
+    <g transform="translate(397 691) scale(.5)"><use href="#baseline"/></g>
+    <g transform="translate(497 706) scale(.31)"><use href="#baseline"/></g>
+
+    <g transform="translate(620 667) scale(.8)"><use href="#ligature"/></g>
+    <g transform="translate(797 691) scale(.5)"><use href="#ligature"/></g>
+    <g transform="translate(897 706) scale(.31)"><use href="#ligature"/></g>
+
+    <g transform="translate(1020 667) scale(.8)"><use href="#hardware-lock"/></g>
+    <g transform="translate(1197 691) scale(.5)"><use href="#hardware-lock"/></g>
+    <g transform="translate(1297 706) scale(.31)"><use href="#hardware-lock"/></g>
+  </g>
+  <g fill="#B9B5AC" font-family="Inter, system-ui, sans-serif" font-size="12" text-anchor="middle">
+    <text x="284" y="810">128</text><text x="437" y="810">80</text><text x="522" y="810">50</text>
+    <text x="684" y="810">128</text><text x="837" y="810">80</text><text x="922" y="810">50</text>
+    <text x="1084" y="810">128</text><text x="1237" y="810">80</text><text x="1322" y="810">50</text>
+  </g>
+</svg>

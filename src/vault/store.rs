@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 use super::{
     DocumentKind, DocumentOperation, HistoryEntry, Provenance, SecretAddress, UnsealedVault,
-    VaultMetadata, VaultResult,
+    VaultEntryMetadata, VaultMetadata, VaultResult,
 };
 
 mod bootstrap;
@@ -44,7 +44,9 @@ impl VaultStore {
     pub(crate) fn open(root: impl AsRef<Path>, unsealed: UnsealedVault) -> VaultResult<Self> {
         let root = root.as_ref().to_owned();
         let device = unsealed.public().clone();
-        let control = WorkerControl::start(root, unsealed)?;
+        let control = crate::timing::result("vault_store", "start_worker", || {
+            WorkerControl::start(root, unsealed)
+        })?;
         Ok(Self {
             control: Arc::new(control),
             device,
@@ -151,6 +153,16 @@ impl VaultStore {
         })
     }
 
+    pub(crate) fn export_at(
+        &self,
+        scope: DocumentKind,
+        namespace: &[u8],
+        address: &SecretAddress,
+        now: u64,
+    ) -> VaultResult<Option<StoredSecret>> {
+        self.get_with_deadline(scope, namespace, address, now)
+    }
+
     // Every argument is a distinct, required input of one write.
     #[allow(clippy::too_many_arguments)]
     /// Read several addresses from one document load without writing. An
@@ -253,6 +265,23 @@ impl VaultStore {
                 now,
                 response,
             }
+        })
+    }
+
+    /// List value-free coordinates across user-facing document kinds. The
+    /// authorization document is intentionally excluded and exposed through
+    /// the permission-management API instead.
+    pub(crate) fn list_vault_entries(
+        &self,
+        cursor: Option<&str>,
+        limit: u16,
+        now: u64,
+    ) -> VaultResult<StorePage<VaultEntryMetadata>> {
+        request(&self.control.sender, |response| Command::ListVaultEntries {
+            cursor: cursor.map(str::to_owned),
+            limit,
+            now,
+            response,
         })
     }
 

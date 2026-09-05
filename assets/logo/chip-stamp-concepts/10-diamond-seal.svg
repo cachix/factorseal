@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal diamond seal</title>
+  <desc id="desc">A rotated microchip forms a compact embossed seal.</desc>
+  <g transform="rotate(45 80 80)" fill="currentColor">
+    <rect x="43" y="43" width="74" height="74" rx="12"/>
+    <path d="M54 28h9v15h-9zm22 0h9v15h-9zm22 0h9v15h-9zM54 117h9v15h-9zm22 0h9v15h-9zm22 0h9v15h-9zM28 54h15v9H28zm0 22h15v9H28zm0 22h15v9H28zm89-44h15v9h-15zm0 22h15v9h-15zm0 22h15v9h-15z"/>
+  </g>
+  <circle cx="80" cy="80" r="25" fill="none" stroke="#fff" stroke-width="7"/>
+  <path d="M68 80h24M80 68v24" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round"/>
+</svg>

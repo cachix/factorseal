@@ -1,17 +1,22 @@
 <p align="center">
-  <img src="assets/logo/factorseal-logo-fused.svg" alt="Factorseal logo" width="660">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/factorseal-mark-paper.svg">
+    <img src="assets/logo/factorseal-mark-ink.svg" alt="FactorSeal logo" width="120">
+  </picture>
 </p>
+
+<h1 align="center">FactorSeal</h1>
 
 <p align="center">
   <a href="https://github.com/domenkozar/factorseal/actions/workflows/ci.yml"><img src="https://github.com/domenkozar/factorseal/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-16697A.svg" alt="License: Apache-2.0"></a>
-  <img src="https://img.shields.io/badge/rust-1.91%2B-16697A.svg" alt="Rust 1.91+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-151515.svg" alt="License: Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/rust-1.91%2B-151515.svg" alt="Rust 1.91+">
 </p>
 
 > [!WARNING]
-> Factorseal is an unaudited prototype. It is not ready for production secrets.
+> FactorSeal is an unaudited prototype. It is not ready for production secrets.
 
-Factorseal is a hardware-backed local secrets vault. It stores encrypted
+FactorSeal is a hardware-backed local secrets vault. It stores encrypted
 secrets on your device and makes them available through a per-user service
 protected by [TPM 2.0](https://trustedcomputinggroup.org/resource/tpm-library-specification/)
 on Linux and Windows or Apple's
@@ -179,6 +184,38 @@ Seal the running service immediately when it is no longer needed:
 ```console
 $ factorseal seal
 ```
+
+### Import and export
+
+Create or restore a portable, versioned FactorSeal archive while the vault is
+unsealed:
+
+```console
+$ factorseal export backup.factorseal
+Archive passphrase:
+Confirm archive passphrase:
+$ factorseal import backup.factorseal
+Archive passphrase:
+$ factorseal import backup.factorseal --replace-existing
+```
+
+Native archives include every portable vault document and are encrypted with
+AES-256-GCM using a separate Argon2id-stretched passphrase. For unattended
+jobs, use `--passphrase-file` with a private regular file (mode `0600` on
+Unix). Imports preserve existing entries unless `--replace-existing` is
+explicitly passed.
+
+Password-manager formats operate on Personal Secrets only:
+
+```console
+$ factorseal import bitwarden.json --format bitwarden-json
+$ factorseal export onepassword.csv --format 1password-csv
+$ factorseal export keepass.csv --format keepass-csv
+```
+
+Bitwarden JSON, 1Password CSV, and KeePass CSV are plaintext formats. FactorSeal
+prints a warning and writes exports through a private temporary file before
+atomically replacing the destination.
 
 ## How it works
 
@@ -365,6 +402,12 @@ the vault is opened.
 Each row is a separate authorization domain. In particular, a provider-cache
 grant cannot read or modify a durable project document, even when both use the
 same project name.
+
+FactorSeal Desktop uses a permission-manager-only, value-free inventory request
+to group entry addresses under Projects, System keyring, Application
+keyrings, Portal secrets, and the advanced provider cache. Authorization
+documents remain separate and are represented through the Access view. Secret
+values are never returned by the inventory operation.
 
 In the Rust API, `Keyring` is the credential capability implemented by a
 `VaultClient`; it does not refer to Linux's in-kernel `keyctl` keyrings.

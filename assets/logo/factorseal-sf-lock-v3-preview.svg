@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal local hardware lock</title>
+  <desc id="desc">The third S/F hardware-lock refinement shown as an app mark, wordmark, light icon, dark icon, and tray-scale symbol.</desc>
+  <defs>
+    <mask id="sf-keyway">
+      <rect width="160" height="160" fill="white"/>
+      <path d="M55 79h25v10H66v9h12v10H66v12H55Z" fill="black"/>
+      <path d="M104 86c-4-6-13-8-18-4-6 5-3 11 6 14 10 4 14 10 11 17-3 8-14 10-21 4" fill="none" stroke="black" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+    <g id="mark" mask="url(#sf-keyway)">
+      <rect x="33" y="57" width="94" height="76" rx="18"/>
+      <path d="M59 57v-8c0-18 8-27 21-27s21 9 21 27v8" fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round"/>
+      <rect x="18" y="82" width="17" height="11" rx="4"/><rect x="125" y="82" width="17" height="11" rx="4"/>
+      <rect x="58" y="131" width="13" height="13" rx="4"/><rect x="89" y="131" width="13" height="13" rx="4"/>
+    </g>
+  </defs>
+
+  <rect width="1200" height="720" fill="#F7F3EA"/>
+  <text x="64" y="68" fill="#151515" font-family="Inter, system-ui, sans-serif" font-size="32" font-weight="700">FactorSeal — local hardware lock</text>
+  <text x="64" y="102" fill="#68635B" font-family="Inter, system-ui, sans-serif" font-size="17">Lock first. Device second. F/S in the keyway.</text>
+
+  <rect x="64" y="144" width="500" height="300" rx="24" fill="#FFFCF6" stroke="#D9D2C7" stroke-width="2"/>
+  <g color="#151515" fill="currentColor" transform="translate(105 190) scale(1.1)"><use href="#mark"/></g>
+  <text x="315" y="273" fill="#151515" font-family="Inter, system-ui, sans-serif" font-size="35" font-weight="700">FactorSeal</text>
+  <text x="315" y="310" fill="#68635B" font-family="Inter, system-ui, sans-serif" font-size="16">Your secrets stay here.</text>
+
+  <rect x="596" y="144" width="540" height="300" rx="24" fill="#151515"/>
+  <g color="#F7F3EA" fill="currentColor" transform="translate(656 178) scale(1.25)"><use href="#mark"/></g>
+  <g color="#F7F3EA" fill="currentColor" transform="translate(884 210) scale(.85)"><use href="#mark"/></g>
+  <g color="#F7F3EA" fill="currentColor" transform="translate(1042 239) scale(.48)"><use href="#mark"/></g>
+  <text x="756" y="398" fill="#B9B5AC" font-family="Inter, system-ui, sans-serif" font-size="12" text-anchor="middle">200 px</text>
+  <text x="952" y="398" fill="#B9B5AC" font-family="Inter, system-ui, sans-serif" font-size="12" text-anchor="middle">136 px</text>
+  <text x="1080" y="398" fill="#B9B5AC" font-family="Inter, system-ui, sans-serif" font-size="12" text-anchor="middle">77 px</text>
+
+  <text x="64" y="504" fill="#151515" font-family="Inter, system-ui, sans-serif" font-size="15" font-weight="700">TRAY SCALE</text>
+  <rect x="64" y="528" width="1072" height="128" rx="22" fill="#151515"/>
+  <g color="#F7F3EA" fill="currentColor">
+    <g transform="translate(224 532) scale(.7)"><use href="#mark"/></g>
+    <g transform="translate(420 552) scale(.45)"><use href="#mark"/></g>
+    <g transform="translate(568 566) scale(.28)"><use href="#mark"/></g>
+    <g transform="translate(684 573) scale(.19)"><use href="#mark"/></g>
+  </g>
+  <g fill="#B9B5AC" font-family="Inter, system-ui, sans-serif" font-size="12" text-anchor="middle">
+    <text x="280" y="638">112</text><text x="456" y="638">72</text><text x="590" y="638">45</text><text x="699" y="638">30</text>
+  </g>
+</svg>

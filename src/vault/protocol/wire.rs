@@ -9,10 +9,12 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::vault::encoding::base64_bytes;
-use crate::vault::{HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult};
+use crate::vault::{
+    DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
+};
 
-// Version 9 adds history listing and carries secret bytes as base64.
-pub(super) const PROTOCOL_VERSION: u8 = 9;
+// Version 11 adds permission-manager-only portable vault entry transfer.
+pub(super) const PROTOCOL_VERSION: u8 = 11;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -449,6 +451,25 @@ impl io::Write for BoundedMessageWriter {
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VaultAction {
     Status,
+    /// List value-free entry metadata across user-facing vault documents.
+    /// The service permits this only to the permission manager.
+    ListVaultEntries {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+        limit: u16,
+    },
+    /// Read one inventory entry for a portable backup. Permission managers only.
+    ExportVaultEntry {
+        entry: VaultEntryMetadata,
+    },
+    /// Restore one portable backup entry. Permission managers only.
+    ImportVaultEntry {
+        entry: VaultEntryMetadata,
+        value: WireSecret,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evict_at: Option<u64>,
+        replace_existing: bool,
+    },
     /// Read from the durable local keyring.
     Get {
         namespace: Vec<u8>,
@@ -599,6 +620,16 @@ impl VaultAction {
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
             Self::Status | Self::ListPermissions => Ok(()),
+            Self::ListVaultEntries { cursor, limit } => {
+                validate_list_limit(*limit)?;
+                if let Some(cursor) = cursor {
+                    validate_address_cursor(cursor)?;
+                }
+                Ok(())
+            }
+            Self::ExportVaultEntry { entry } | Self::ImportVaultEntry { entry, .. } => {
+                validate_transfer_entry(entry)
+            }
             Self::WaitPermissions { timeout_ms, .. } | Self::WaitPermission { timeout_ms, .. } => {
                 if !(1..=MAX_PERMISSION_WAIT_MS).contains(timeout_ms) {
                     return Err(VaultError::Protocol(
@@ -847,6 +878,19 @@ pub enum VaultResponseBody {
         idle_deadline: u64,
         absolute_deadline: u64,
     },
+    VaultEntries {
+        entries: Vec<VaultEntryMetadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
+    },
+    VaultEntrySecret {
+        value: WireSecret,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evict_at: Option<u64>,
+    },
+    VaultEntryImported {
+        status: VaultEntryImportStatus,
+    },
     Secret {
         value: Option<WireSecret>,
     },
@@ -886,6 +930,56 @@ pub enum VaultResponseBody {
     PermissionWait {
         status: PermissionWaitStatus,
     },
+}
+
+/// Value-free coordinates for one entry in a user-facing vault document.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultEntryMetadata {
+    pub document_kind: DocumentKind,
+    #[serde(with = "base64_bytes")]
+    pub partition: Vec<u8>,
+    pub address: SecretAddress,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VaultEntryImportStatus {
+    Added,
+    Replaced,
+    KeptExisting,
+}
+
+impl VaultEntryMetadata {
+    pub(crate) fn validate_transfer(&self) -> VaultResult<()> {
+        match self.document_kind {
+            DocumentKind::Authorization | DocumentKind::SecretSpecProviderCache => {
+                return Err(VaultError::Protocol(
+                    "that document kind is not portable".to_owned(),
+                ));
+            }
+            DocumentKind::SecretSpecProject => {
+                if self.address.as_secret_spec().is_none() {
+                    return Err(VaultError::Protocol(
+                        "project transfer entry has a local address".to_owned(),
+                    ));
+                }
+            }
+            DocumentKind::LinuxSecretService | DocumentKind::LocalKeyring => {
+                if self.address.as_local().is_none() {
+                    return Err(VaultError::Protocol(
+                        "keyring transfer entry has a project address".to_owned(),
+                    ));
+                }
+            }
+        }
+        validate_namespace(&self.partition)?;
+        self.address.validate()
+    }
+}
+
+fn validate_transfer_entry(entry: &VaultEntryMetadata) -> VaultResult<()> {
+    entry.validate_transfer()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

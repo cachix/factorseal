@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use turso::Connection;
@@ -18,7 +19,8 @@ use crate::vault::{DATABASE_FILE, VaultStore};
 use crate::vault::{
     DocumentId, DocumentKind, DocumentOperation, EncryptedSnapshot, HistoryEntry,
     InstallationSecrets, MutationContext, Provenance, SecretAddress, SecretDocument, SecretRead,
-    SecretSpecAddress, ServiceReason, UnsealedVault, VaultError, VaultMetadata, VaultResult,
+    SecretSpecAddress, ServiceReason, UnsealedVault, VaultEntryMetadata, VaultError, VaultMetadata,
+    VaultResult,
 };
 
 use super::bootstrap::open_store;
@@ -91,16 +93,41 @@ impl WorkerControl {
     }
 
     pub(super) fn start(root: PathBuf, unsealed: UnsealedVault) -> VaultResult<Self> {
+        let total = Instant::now();
         let (sender, receiver) = mpsc::sync_channel(COMMAND_QUEUE);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let status = Arc::new(WorkerStatus::default());
         let worker_status = Arc::clone(&status);
+        let spawn_started = Instant::now();
         let join = thread::Builder::new()
             .name("factorseal-store".to_owned())
             .spawn(move || run_worker(root, unsealed, receiver, ready_sender, worker_status))
             .map_err(|error| VaultError::Database(error.to_string()))?;
+        crate::timing::record("store_worker", "spawn_thread", spawn_started, "ok");
 
-        match ready_receiver.recv() {
+        let ready_started = Instant::now();
+        let ready_result = ready_receiver.recv();
+        crate::timing::record(
+            "store_worker",
+            "wait_until_ready",
+            ready_started,
+            if matches!(&ready_result, Ok(Ok(()))) {
+                "ok"
+            } else {
+                "error"
+            },
+        );
+        crate::timing::record(
+            "store_worker",
+            "total",
+            total,
+            if matches!(&ready_result, Ok(Ok(()))) {
+                "ok"
+            } else {
+                "error"
+            },
+        );
+        match ready_result {
             Ok(Ok(())) => {
                 let watched = Arc::downgrade(&status);
                 let control = Self {
@@ -284,6 +311,12 @@ pub(super) enum Command {
         now: u64,
         response: mpsc::Sender<VaultResult<StorePage<SecretSpecAddress>>>,
     },
+    ListVaultEntries {
+        cursor: Option<String>,
+        limit: u16,
+        now: u64,
+        response: mpsc::Sender<VaultResult<StorePage<VaultEntryMetadata>>>,
+    },
     Shutdown,
 }
 
@@ -315,6 +348,7 @@ fn run_worker(
     // after the completion guard, so they are destroyed before it on every exit.
     let unsealed = unsealed;
     let receiver = receiver;
+    let runtime_started = Instant::now();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -325,7 +359,16 @@ fn run_worker(
             return;
         }
     };
-    let mut worker = match runtime.block_on(StoreWorker::open(&root, unsealed)) {
+    crate::timing::record("store_worker", "build_async_runtime", runtime_started, "ok");
+    let open_started = Instant::now();
+    let opened = runtime.block_on(StoreWorker::open(&root, unsealed));
+    crate::timing::record(
+        "store_worker",
+        "open_encrypted_store",
+        open_started,
+        if opened.is_ok() { "ok" } else { "error" },
+    );
+    let mut worker = match opened {
         Ok(worker) => worker,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -524,6 +567,15 @@ fn execute_command(
             ));
             send_result(response, result, status);
         }
+        Command::ListVaultEntries {
+            cursor,
+            limit,
+            now,
+            response,
+        } => {
+            let result = runtime.block_on(worker.list_vault_entries(cursor.as_deref(), limit, now));
+            send_result(response, result, status);
+        }
         Command::Shutdown => return false,
     }
     true
@@ -625,7 +677,15 @@ impl StoreWorker {
     }
 
     async fn open(root: &Path, unsealed: UnsealedVault) -> VaultResult<Self> {
-        let opened = open_store(root, unsealed).await?;
+        let bootstrap_started = Instant::now();
+        let opened_result = open_store(root, unsealed).await;
+        crate::timing::record(
+            "store_open",
+            "bootstrap_database",
+            bootstrap_started,
+            if opened_result.is_ok() { "ok" } else { "error" },
+        );
+        let opened = opened_result?;
         let mut worker = Self {
             connection: opened.connection,
             device: opened.device,
@@ -633,11 +693,39 @@ impl StoreWorker {
             lock_file: opened.lock_file,
             verified: VerifiedStoreState::default(),
         };
-        worker.verified = worker.verify_commit_chain().await?;
-        worker.purge_expired(unix_time()?).await?;
+        let chain_started = Instant::now();
+        let chain_result = worker.verify_commit_chain().await;
+        crate::timing::record(
+            "store_open",
+            "verify_commit_chain",
+            chain_started,
+            if chain_result.is_ok() { "ok" } else { "error" },
+        );
+        worker.verified = chain_result?;
+        let purge_started = Instant::now();
+        let purge_result = worker.purge_expired(unix_time()?).await;
+        crate::timing::record(
+            "store_open",
+            "purge_expired",
+            purge_started,
+            if purge_result.is_ok() { "ok" } else { "error" },
+        );
+        purge_result?;
         // A database written before compaction existed still carries its whole
         // history; shrink it once here so the next unseal is fast.
-        worker.compact_if_needed().await?;
+        let compact_started = Instant::now();
+        let compact_result = worker.compact_if_needed().await;
+        crate::timing::record(
+            "store_open",
+            "compact_if_needed",
+            compact_started,
+            if compact_result.is_ok() {
+                "ok"
+            } else {
+                "error"
+            },
+        );
+        compact_result?;
         Ok(worker)
     }
 
@@ -835,6 +923,70 @@ impl StoreWorker {
         self.commit_mutation(document_id, scope, Some(head), mutation, context)
             .await?;
         Ok(count)
+    }
+
+    async fn list_vault_entries(
+        &mut self,
+        cursor: Option<&str>,
+        limit: u16,
+        now: u64,
+    ) -> VaultResult<StorePage<VaultEntryMetadata>> {
+        self.verify_live_inventory().await?;
+        let documents: Vec<_> = self
+            .verified
+            .documents
+            .values()
+            .filter(|document| document.row.scope != DocumentKind::Authorization)
+            .map(|document| (document.row.document_id, document.row.scope))
+            .collect();
+
+        let expiry = EXPIRY;
+        let context = self.context(&expiry, now);
+        let mut entries = Vec::new();
+        for (document_id, document_kind) in documents {
+            let Some(LoadedDocument { mut document, head }) =
+                self.load_document(document_id, document_kind, None).await?
+            else {
+                continue;
+            };
+            if let Some(mutation) = document.purge_expired(now)? {
+                self.commit_mutation(document_id, document_kind, Some(head), mutation, &context)
+                    .await?;
+            }
+            let partition = document.partition().to_vec();
+            for (storage_key, address) in document.addresses()? {
+                entries.push((
+                    self.vault_entry_cursor(document_kind, document_id, &storage_key),
+                    VaultEntryMetadata {
+                        document_kind,
+                        partition: partition.clone(),
+                        address,
+                    },
+                ));
+            }
+        }
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(VaultError::InvalidData(
+                "duplicate vault inventory cursors".to_owned(),
+            ));
+        }
+        Ok(paginate(entries, cursor, limit))
+    }
+
+    fn vault_entry_cursor(
+        &self,
+        document_kind: DocumentKind,
+        document_id: DocumentId,
+        storage_key: &str,
+    ) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.secrets.index_key())
+            .expect("HMAC accepts a 256-bit vault index key");
+        mac.update(b"factorseal/vault-entry-cursor/v1\0");
+        mac.update(document_kind.as_str().as_bytes());
+        mac.update(document_id.as_bytes());
+        mac.update(storage_key.as_bytes());
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
     }
 
     async fn list_projects(

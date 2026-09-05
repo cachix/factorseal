@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal offset imprint</title>
+  <desc id="desc">A solid chip overlaps its dotted stamped impression.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="5" stroke-dasharray="3 8" stroke-linecap="round" opacity=".45">
+    <rect x="51" y="50" width="78" height="82" rx="12"/>
+    <circle cx="90" cy="91" r="22"/>
+  </g>
+  <g fill="currentColor">
+    <rect x="28" y="25" width="82" height="88" rx="12"/>
+    <path d="M43 11h9v14h-9zm22 0h9v14h-9zm22 0h9v14h-9zM43 113h9v15h-9zm22 0h9v15h-9zm22 0h9v15h-9zM14 40h14v9H14zm0 22h14v9H14zm0 22h14v9H14zm96-44h14v9h-14zm0 22h14v9h-14zm0 22h14v9h-14z"/>
+  </g>
+  <circle cx="69" cy="69" r="21" fill="none" stroke="#fff" stroke-width="7"/>
+  <path d="m57 69 8 8 17-19" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -12,9 +12,14 @@ mod algorithm;
 mod crypto;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod error;
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
+mod timing;
 
 #[cfg(feature = "vault-client")]
 pub mod keyring;
+
+#[cfg(feature = "transfer")]
+pub mod transfer;
 
 #[cfg(any(
     feature = "key-protection",
@@ -50,9 +55,13 @@ pub use vault::{
     MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
     PermissionChange, PermissionOperation, PermissionPrincipal, PermissionState,
     PermissionWaitStatus, VaultAction, VaultApplicationContext, VaultClient,
-    VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse, VaultResponseBody,
-    VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference, VaultMutation,
+    VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
+    WireSecret, WireSecretAddress,
 };
+
+#[cfg(all(feature = "key-protection", feature = "vault-client"))]
+pub use vault::{VaultArchive, VaultArchiveEntry, decrypt_vault_archive, encrypt_vault_archive};
 
 #[cfg(feature = "vault-store")]
 pub use vault::{CallerIdentity, CallerPlatform, GrantPermission, UnsealLeasePolicy, VaultService};

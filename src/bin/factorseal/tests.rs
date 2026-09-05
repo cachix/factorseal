@@ -1,4 +1,4 @@
-use super::cli::{Cli, Command, PermissionCommand};
+use super::cli::{Cli, Command, PermissionCommand, TransferFormat};
 #[cfg(feature = "secretspec-provider")]
 use super::commands::write_secretspec_claim;
 use super::commands::{
@@ -7,7 +7,7 @@ use super::commands::{
     read_project_value, read_unlock_group_choice, require_prompt_terminal, resolve_unlock_group,
     wait_for_initialization, write_metadata,
 };
-use super::factor::read_factor;
+use super::factor::{read_archive_passphrase, read_factor};
 use super::*;
 
 use std::fs;
@@ -222,11 +222,56 @@ fn desktop_launch_options_are_explicitly_configurable() {
     ));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn secret_portal_backend_is_an_internal_cli_command() {
-    let cli = Cli::try_parse_from(["factorseal", "portal"]).unwrap();
-    assert!(matches!(cli.command, Command::Portal));
+fn transfer_commands_parse_native_and_password_manager_options() {
+    let export = Cli::try_parse_from([
+        "factorseal",
+        "export",
+        "/tmp/secrets.json",
+        "--format",
+        "bitwarden-json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        export.command,
+        Command::Export {
+            format: TransferFormat::BitwardenJson,
+            passphrase_file: None,
+            ..
+        }
+    ));
+
+    let import = Cli::try_parse_from([
+        "factorseal",
+        "import",
+        "/tmp/backup.factorseal",
+        "--passphrase-file",
+        "/tmp/archive-passphrase",
+        "--replace-existing",
+    ])
+    .unwrap();
+    assert!(matches!(
+        import.command,
+        Command::Import {
+            format: TransferFormat::FactorSeal,
+            replace_existing: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn archive_passphrase_can_be_read_from_a_private_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("archive-passphrase");
+    fs::write(&path, b"correct horse battery staple\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let passphrase = read_archive_passphrase(Some(&path), true).unwrap();
+    assert_eq!(passphrase.as_slice(), b"correct horse battery staple");
 }
 
 #[test]

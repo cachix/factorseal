@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal pin seal</title>
+  <desc id="desc">Chip pins radiate from a compact circular seal with an abstract F.</desc>
+  <g fill="currentColor">
+    <circle cx="80" cy="80" r="45"/>
+    <path d="M51 16h9v23h-9zm25-6h9v25h-9zm25 6h9v23h-9zM51 121h9v23h-9zm25 4h9v25h-9zm25-4h9v23h-9zM16 51h23v9H16zm-6 25h25v9H10zm6 25h23v9H16zm105-50h23v9h-23zm4 25h25v9h-25zm-4 25h23v9h-23z"/>
+  </g>
+  <path d="M65 104V56h33v9H76v11h18v9H76v19z" fill="#fff"/>
+</svg>

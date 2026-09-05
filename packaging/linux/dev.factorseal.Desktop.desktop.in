@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Factorseal Desktop
-Comment=Unlock and manage the Factorseal hardware-backed vault
+Name=FactorSeal Desktop
+Comment=Unlock and manage the FactorSeal hardware-backed vault
 Exec=@DESKTOP_EXECUTABLE@
 Icon=dev.factorseal.Desktop
 Terminal=false

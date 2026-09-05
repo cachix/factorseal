@@ -30,10 +30,10 @@ use time::{RequestTime, tighten};
 
 #[cfg(feature = "vault-store")]
 use super::grant::GrantRequirement;
-#[cfg(feature = "vault-store")]
-use actions::execute_action;
 #[cfg(all(test, feature = "hardware"))]
-use actions::{ScopedAction, scope_action, validate_evict_at};
+use actions::{ScopedAction, scope_action};
+#[cfg(feature = "vault-store")]
+use actions::{execute_action, validate_evict_at};
 #[cfg(feature = "vault-store")]
 use approvals::{ApprovalCandidate, PERMISSION_CONTROL_NAMESPACE};
 #[cfg(feature = "vault-store")]
@@ -73,7 +73,12 @@ impl VaultService {
         now: u64,
         policy: UnsealLeasePolicy,
     ) -> VaultResult<Self> {
-        Self::new(VaultStore::open(root, unsealed)?, now, policy)
+        let store = crate::timing::result("vault_service", "open_store_worker", || {
+            VaultStore::open(root, unsealed)
+        })?;
+        crate::timing::result("vault_service", "initialize_service_state", || {
+            Self::new(store, now, policy)
+        })
     }
 
     pub(crate) fn new(store: VaultStore, now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
@@ -183,6 +188,7 @@ impl VaultService {
         self.state.enable_emergency_exit();
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_inner(
         &self,
         caller: &CallerIdentity,
@@ -200,6 +206,69 @@ impl VaultService {
         let now = clock.wall();
         state.consume(request.request_id())?;
         let result = match request.action {
+            VaultAction::ListVaultEntries { cursor, limit } => {
+                return inventory(
+                    &mut state,
+                    caller,
+                    cursor.as_deref(),
+                    limit,
+                    clock,
+                    valid_until,
+                );
+            }
+            VaultAction::ExportVaultEntry { entry } => {
+                require_live_manager(&state, caller, clock, valid_until)?;
+                let secret = state
+                    .store()
+                    .export_at(entry.document_kind, &entry.partition, &entry.address, now)?
+                    .ok_or_else(|| {
+                        VaultError::InvalidData("vault entry disappeared during export".to_owned())
+                    })?;
+                let (now, monotonic_now) = clock.sample();
+                clock.check(valid_until.get())?;
+                state.touch(now, monotonic_now)?;
+                return Ok(VaultResponseBody::VaultEntrySecret {
+                    value: super::WireSecret::new(secret.value.to_vec()),
+                    evict_at: secret.expires_at,
+                });
+            }
+            VaultAction::ImportVaultEntry {
+                entry,
+                value,
+                evict_at,
+                replace_existing,
+            } => {
+                require_live_manager(&state, caller, clock, valid_until)?;
+                validate_evict_at(evict_at, now)?;
+                let existing = state.store().get_at(
+                    entry.document_kind,
+                    &entry.partition,
+                    &entry.address,
+                    now,
+                )?;
+                let status = if existing.is_some() && !replace_existing {
+                    super::VaultEntryImportStatus::KeptExisting
+                } else {
+                    state.store().put_at(
+                        entry.document_kind,
+                        &entry.partition,
+                        &entry.address,
+                        value.expose(),
+                        evict_at,
+                        &provenance,
+                        now,
+                    )?;
+                    if existing.is_some() {
+                        super::VaultEntryImportStatus::Replaced
+                    } else {
+                        super::VaultEntryImportStatus::Added
+                    }
+                };
+                let (now, monotonic_now) = clock.sample();
+                clock.check(valid_until.get())?;
+                state.touch(now, monotonic_now)?;
+                return Ok(VaultResponseBody::VaultEntryImported { status });
+            }
             VaultAction::ListPermissions => {
                 require_live_manager(&state, caller, clock, valid_until)?;
                 let (revision, permissions) = state.list_permissions(now)?;
@@ -293,12 +362,24 @@ impl VaultService {
 }
 
 #[cfg(feature = "vault-store")]
-fn require_permission_manager(
-    state: &LiveStateGuard<'_>,
+fn inventory(
+    state: &mut LiveStateGuard<'_>,
     caller: &CallerIdentity,
-    now: u64,
-) -> VaultResult<()> {
-    permission_manager_deadline(state, caller, now).map(|_| ())
+    cursor: Option<&str>,
+    limit: u16,
+    clock: RequestTime,
+    valid_until: &std::cell::Cell<Option<u64>>,
+) -> Result<VaultResponseBody, RequestFailure> {
+    require_live_manager(state, caller, clock, valid_until)?;
+    let now = clock.wall();
+    let page = state.store().list_vault_entries(cursor, limit, now)?;
+    let (now, monotonic_now) = clock.sample();
+    clock.check(valid_until.get())?;
+    state.touch(now, monotonic_now)?;
+    Ok(VaultResponseBody::VaultEntries {
+        entries: page.items,
+        next_cursor: page.next_cursor,
+    })
 }
 
 fn permission_manager_deadline(
@@ -318,6 +399,15 @@ fn permission_manager_deadline(
         },
         now,
     )
+}
+
+#[cfg(feature = "vault-store")]
+fn require_permission_manager(
+    state: &LiveStateGuard<'_>,
+    caller: &CallerIdentity,
+    now: u64,
+) -> VaultResult<()> {
+    permission_manager_deadline(state, caller, now).map(|_| ())
 }
 
 fn require_live_manager(

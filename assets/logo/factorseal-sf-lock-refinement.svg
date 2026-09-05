@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 860" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal hardware lock refinement</title>
+  <desc id="desc">A focused comparison of the current FactorSeal mark, the first S/F hardware lock, and a balanced second refinement.</desc>
+
+  <defs>
+    <mask id="keyhole-cutout">
+      <rect width="160" height="160" fill="white"/>
+      <circle cx="80" cy="68" r="13" fill="black"/>
+      <path d="M75 78 69 108h22L85 78Z" fill="black"/>
+    </mask>
+    <mask id="v1-cutout">
+      <rect width="160" height="160" fill="white"/>
+      <path d="M53 73h29v11H65v10h15v11H65v14H53Z" fill="black"/>
+      <path d="M109 82c-5-7-15-9-21-4-6 6-1 12 9 15 12 5 17 13 14 22-4 11-17 15-29 9l5-10c7 3 13 3 15-2 1-4-2-6-10-9-12-4-17-12-14-21 3-11 15-15 26-12 5 2 9 4 13 8Z" fill="black"/>
+    </mask>
+    <mask id="v2-cutout">
+      <rect width="160" height="160" fill="white"/>
+      <path d="M50 74h30v12H63v10h15v12H63v14H50Z" fill="black"/>
+      <path d="M108 82c-5-7-14-9-20-5-7 5-5 12 7 16 13 4 18 11 15 20-3 10-14 14-24 10-4-1-7-4-9-7" fill="none" stroke="black" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+
+    <g id="chip-body">
+      <rect x="34" y="34" width="92" height="92" rx="16"/>
+      <rect x="59" y="18" width="12" height="18" rx="4"/><rect x="89" y="18" width="12" height="18" rx="4"/>
+      <rect x="59" y="124" width="12" height="18" rx="4"/><rect x="89" y="124" width="12" height="18" rx="4"/>
+      <rect x="18" y="59" width="18" height="12" rx="4"/><rect x="18" y="89" width="18" height="12" rx="4"/>
+      <rect x="124" y="59" width="18" height="12" rx="4"/><rect x="124" y="89" width="18" height="12" rx="4"/>
+    </g>
+    <g id="lock-v1-body">
+      <rect x="34" y="58" width="92" height="74" rx="17"/>
+      <path fill-rule="evenodd" d="M51 60v-9c0-21 11-34 29-34s29 13 29 34v9H92v-9c0-12-4-18-12-18s-12 6-12 18v9Z"/>
+      <rect x="18" y="76" width="18" height="12" rx="4"/><rect x="124" y="76" width="18" height="12" rx="4"/>
+      <rect x="58" y="130" width="13" height="13" rx="4"/><rect x="89" y="130" width="13" height="13" rx="4"/>
+    </g>
+    <g id="lock-v2-body">
+      <rect x="32" y="56" width="96" height="78" rx="18"/>
+      <path fill-rule="evenodd" d="M51 59v-8c0-22 11-35 29-35s29 13 29 35v8H92v-8c0-13-4-19-12-19s-12 6-12 19v8Z"/>
+      <rect x="18" y="74" width="16" height="11" rx="4"/><rect x="18" y="103" width="16" height="11" rx="4"/>
+      <rect x="126" y="74" width="16" height="11" rx="4"/><rect x="126" y="103" width="16" height="11" rx="4"/>
+      <rect x="59" y="132" width="12" height="12" rx="4"/><rect x="89" y="132" width="12" height="12" rx="4"/>
+    </g>
+
+    <g id="current" mask="url(#keyhole-cutout)"><use href="#chip-body"/></g>
+    <g id="v1" mask="url(#v1-cutout)"><use href="#lock-v1-body"/></g>
+    <g id="v2" mask="url(#v2-cutout)"><use href="#lock-v2-body"/></g>
+  </defs>
+
+  <rect width="1320" height="860" fill="#F7F3EA"/>
+  <text x="72" y="72" fill="#151515" font-family="Inter, system-ui, sans-serif" font-size="34" font-weight="700">FactorSeal — hardware lock refinement</text>
+  <text x="72" y="108" fill="#68635B" font-family="Inter, system-ui, sans-serif" font-size="18">Less logo trick. More dependable local vault.</text>
+
+  <g fill="#FFFCF6" stroke="#D9D2C7" stroke-width="2">
+    <rect x="72" y="150" width="360" height="410" rx="22"/>
+    <rect x="480" y="150" width="360" height="410" rx="22"/>
+    <rect x="888" y="150" width="360" height="410" rx="22"/>
+  </g>
+  <rect x="896" y="158" width="344" height="394" rx="17" fill="none" stroke="#151515" stroke-width="3"/>
+  <rect x="1091" y="172" width="128" height="30" rx="15" fill="#151515"/>
+  <text x="1155" y="193" fill="#F7F3EA" font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="700" text-anchor="middle">REFINED</text>
+
+  <g fill="#151515">
+    <g transform="translate(156 188) scale(1.2)"><use href="#current"/></g>
+    <g transform="translate(564 188) scale(1.2)"><use href="#v1"/></g>
+    <g transform="translate(972 188) scale(1.2)"><use href="#v2"/></g>
+  </g>
+  <g fill="#151515" font-family="Inter, system-ui, sans-serif" text-anchor="middle">
+    <g font-size="18" font-weight="700">
+      <text x="252" y="430">Current mark</text><text x="660" y="430">S/F lock · v1</text><text x="1068" y="430">S/F lock · v2</text>
+    </g>
+    <g fill="#68635B" font-size="14">
+      <text x="252" y="462">clear, compact, generic</text><text x="660" y="462">right idea, uneven monogram</text><text x="1068" y="462">balanced strokes, stronger hardware</text>
+      <text x="252" y="489">chip + keyhole</text><text x="660" y="489">one pin per edge</text><text x="1068" y="489">quiet two-pin rhythm</text>
+    </g>
+  </g>
+
+  <text x="72" y="628" fill="#151515" font-family="Inter, system-ui, sans-serif" font-size="16" font-weight="700">TRAY + APP SCALE</text>
+  <rect x="72" y="650" width="1176" height="154" rx="22" fill="#151515"/>
+  <g fill="#F7F3EA">
+    <g transform="translate(210 663) scale(.7)"><use href="#current"/></g>
+    <g transform="translate(345 688) scale(.4)"><use href="#current"/></g>
+    <g transform="translate(425 700) scale(.25)"><use href="#current"/></g>
+
+    <g transform="translate(600 663) scale(.7)"><use href="#v1"/></g>
+    <g transform="translate(735 688) scale(.4)"><use href="#v1"/></g>
+    <g transform="translate(815 700) scale(.25)"><use href="#v1"/></g>
+
+    <g transform="translate(990 663) scale(.7)"><use href="#v2"/></g>
+    <g transform="translate(1125 688) scale(.4)"><use href="#v2"/></g>
+    <g transform="translate(1205 700) scale(.25)"><use href="#v2"/></g>
+  </g>
+</svg>

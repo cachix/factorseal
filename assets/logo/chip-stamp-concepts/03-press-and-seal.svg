@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal press and seal</title>
+  <desc id="desc">A classic stamp handle pressing onto a microchip base.</desc>
+  <g fill="currentColor">
+    <path d="M80 17c-15 0-24 9-24 20 0 8 5 13 10 18v18H45c-7 0-12 5-12 12v9h94v-9c0-7-5-12-12-12H94V55c5-5 10-10 10-18 0-11-9-20-24-20z"/>
+    <rect x="35" y="102" width="90" height="31" rx="7"/>
+    <path d="M49 91h9v11h-9zm18 0h9v11h-9zm18 0h9v11h-9zm18 0h9v11h-9zM49 133h9v12h-9zm18 0h9v12h-9zm18 0h9v12h-9zm18 0h9v12h-9zM23 109h12v8H23zm0 13h12v8H23zm102-13h12v8h-12zm0 13h12v8h-12z"/>
+  </g>
+  <path d="m62 118 10 9 24-17" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

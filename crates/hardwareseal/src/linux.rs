@@ -29,27 +29,50 @@ pub(super) fn unseal(
     expected_policy: AccessPolicy,
     input: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    ensure_supported_policy(expected_policy)?;
-    let parsed = envelope::parse(input)?;
-    if parsed.policy != expected_policy {
-        return Err(Error::InvalidEnvelope(
-            "stored access policy does not match the requested policy".to_owned(),
-        ));
-    }
-    if parsed.label_hash != expected_label_hash {
-        return Err(Error::InvalidEnvelope(
-            "sealed secret belongs to another label".to_owned(),
-        ));
-    }
+    let total = std::time::Instant::now();
+    let result = (|| {
+        crate::timing::result("hardware_unseal", "validate_policy", || {
+            ensure_supported_policy(expected_policy)
+        })?;
+        let parsed = crate::timing::result("hardware_unseal", "parse_envelope", || {
+            envelope::parse(input)
+        })?;
+        if parsed.policy != expected_policy {
+            return Err(Error::InvalidEnvelope(
+                "stored access policy does not match the requested policy".to_owned(),
+            ));
+        }
+        if parsed.label_hash != expected_label_hash {
+            return Err(Error::InvalidEnvelope(
+                "sealed secret belongs to another label".to_owned(),
+            ));
+        }
 
-    let cleartext = tpm2::Session::open(DeviceTransport::open()?)?
-        .unseal(parsed.public_blob, parsed.private_blob)?;
-    if cleartext.len() < LABEL_HASH_BYTES || cleartext[..LABEL_HASH_BYTES] != expected_label_hash {
-        return Err(Error::InvalidEnvelope(
-            "sealed label binding is missing or invalid".to_owned(),
-        ));
-    }
-    Ok(Zeroizing::new(cleartext[LABEL_HASH_BYTES..].to_vec()))
+        let transport = crate::timing::result("hardware_unseal", "open_tpm_device", || {
+            DeviceTransport::open()
+        })?;
+        let mut session = crate::timing::result("hardware_unseal", "open_tpm_session", || {
+            tpm2::Session::open(transport)
+        })?;
+        let cleartext = crate::timing::result("hardware_unseal", "release_sealed_payload", || {
+            session.unseal(parsed.public_blob, parsed.private_blob)
+        })?;
+        if cleartext.len() < LABEL_HASH_BYTES
+            || cleartext[..LABEL_HASH_BYTES] != expected_label_hash
+        {
+            return Err(Error::InvalidEnvelope(
+                "sealed label binding is missing or invalid".to_owned(),
+            ));
+        }
+        Ok(Zeroizing::new(cleartext[LABEL_HASH_BYTES..].to_vec()))
+    })();
+    crate::timing::record(
+        "hardware_unseal",
+        "total",
+        total,
+        if result.is_ok() { "ok" } else { "error" },
+    );
+    result
 }
 
 struct DeviceTransport {

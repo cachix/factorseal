@@ -17,9 +17,10 @@ mod provider;
 
 use cli::{Cli, Command};
 use commands::{
-    delete_project_value, destroy_vault, get_project_value, grant_cli, hardware_self_test,
-    initialize, list_project_addresses, list_project_history, list_projects, manage_permissions,
-    resolve_root, run_agent, seal_vault, set_project_value, show_status,
+    delete_project_value, destroy_vault, export_vault, get_project_value, grant_cli,
+    hardware_self_test, import_vault, initialize, list_project_addresses, list_project_history,
+    list_projects, manage_permissions, resolve_root, run_agent, seal_vault, set_project_value,
+    show_status,
 };
 use factor::FactorSource;
 
@@ -28,6 +29,7 @@ const MAX_PROJECT_VALUE_BYTES: u64 = 64 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const DEFAULT_UNIX_SOCKET: &str = "factorseal.sock";
 const CLI_CONTROL_NAMESPACE: &[u8] = b"factorseal/cli-control/v1";
+const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";
 const PROJECT_PERMISSIONS: [GrantPermission; 4] = [
     GrantPermission::List,
     GrantPermission::Get,
@@ -57,6 +59,15 @@ enum CliError {
 
     #[error("project metadata output failed: {0}")]
     ProjectOutput(String),
+
+    #[error("vault transfer failed: {0}")]
+    Transfer(String),
+
+    #[error("archive passphrase input failed: {0}")]
+    ArchivePassphrase(String),
+
+    #[error("no way to obtain the archive passphrase: use a terminal or pass --passphrase-file")]
+    NoArchivePassphraseSource,
 
     #[error("unlock group `{0}` is not configured for this vault")]
     UnlockGroupNotConfigured(String),
@@ -125,6 +136,10 @@ fn main() {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one exhaustive CLI dispatch keeps every command route visible"
+)]
 fn run(cli: Cli) -> Result<(), CliError> {
     platform::disable_core_dumps()?;
     let root = resolve_root(cli.root.as_deref())?;
@@ -199,6 +214,30 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Projects { json } => list_projects(&root, socket, json),
         Command::List { project, json } => list_project_addresses(&root, socket, &project, json),
         Command::History { project, json } => list_project_history(&root, socket, &project, json),
+        Command::Export {
+            file,
+            format,
+            passphrase_file,
+        } => export_vault(
+            &root,
+            socket,
+            &file,
+            format.into(),
+            passphrase_file.as_deref(),
+        ),
+        Command::Import {
+            file,
+            format,
+            passphrase_file,
+            replace_existing,
+        } => import_vault(
+            &root,
+            socket,
+            &file,
+            format.into(),
+            passphrase_file.as_deref(),
+            replace_existing,
+        ),
         Command::Destroy {
             yes_really_destroy,
             unlock,

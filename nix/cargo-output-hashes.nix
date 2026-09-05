@@ -1,0 +1,39 @@
+{ lib }:
+
+{
+  "collections-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "derive_refineable-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui-0.2.2" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui-base-0.5.2" = "sha256-1x467getYUbc0A7jy8JG2phrhfD/5aT297bcb7Fp5Lg=";
+  "gpui-component-0.5.2" = "sha256-1x467getYUbc0A7jy8JG2phrhfD/5aT297bcb7Fp5Lg=";
+  "gpui-component-assets-0.5.1" = "sha256-1x467getYUbc0A7jy8JG2phrhfD/5aT297bcb7Fp5Lg=";
+  "gpui-component-macros-0.5.1" = "sha256-1x467getYUbc0A7jy8JG2phrhfD/5aT297bcb7Fp5Lg=";
+  "gpui_apple-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui_linux-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui_macos-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui_macros-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui_platform-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui_shared_string-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui_util-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui_web-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui_wgpu-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "gpui_windows-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "http_client-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "media-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "perf-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "refineable-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "scheduler-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "secretspec-ipc-0.19.1" = "sha256-QZ0RyffatI1ulF+jzZEHlUsjQeDoiIRV6nX4x3OkpIo=";
+  "sum_tree-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "util_macros-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "wasm_thread-0.3.3" = "sha256-+lRLCIk0S6Y5ORYjDKsYYHia2FtoSoh+rWkQh7mnPBE=";
+  "xim-ctext-0.3.0" = "sha256-pRT4Sz1JU9ros47/7pmIW9kosWOGMOItcnNd+VrvnpE=";
+  "xim-parser-0.2.1" = "sha256-pRT4Sz1JU9ros47/7pmIW9kosWOGMOItcnNd+VrvnpE=";
+  "zed-font-kit-0.14.1-zed" = "sha256-KXygi0olNQi5yM8eaJVykNDtbPMDjT+cWPBF8UrtXR4=";
+  "zed-reqwest-0.12.15-zed" = "sha256-p4SiUrOrbTlk/3bBrzN/mq/t+1Gzy2ot4nso6w6S+F8=";
+  "zed-scap-0.0.8-zed" = "sha256-BihiQHlal/eRsktyf0GI3aSWsUCW7WcICMsC2Xvb7kw=";
+  "zed-xim-0.4.0-zed" = "sha256-pRT4Sz1JU9ros47/7pmIW9kosWOGMOItcnNd+VrvnpE=";
+  "zlog-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "ztracing-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "ztracing_macro-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+}

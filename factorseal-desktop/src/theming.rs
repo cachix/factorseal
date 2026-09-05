@@ -66,7 +66,7 @@ impl Global for ThemeState {}
 struct LoadedTheme {
     backend: Backend,
     summary: String,
-    theme: gpui_component::theme::Theme,
+    mode: gpui_component::ThemeMode,
 }
 
 #[cfg(target_os = "linux")]
@@ -126,6 +126,8 @@ pub(crate) fn initialize(cx: &mut App) {
         automatic_refreshes: 0,
         last_change_source: None,
     });
+
+    crate::branding::apply(cx);
 }
 
 #[cfg(target_os = "linux")]
@@ -141,7 +143,7 @@ fn initialize_linux(cx: &mut App) {
                 automatic_refreshes: 0,
                 last_change_source: None,
             };
-            cx.set_global(loaded.theme);
+            gpui_component::theme::Theme::change(loaded.mode, None, cx);
             state
         }
         Err(error) => ThemeState {
@@ -165,7 +167,7 @@ fn refresh_native_theme(cx: &mut App) {
             let backend = loaded.backend;
             let summary = loaded.summary;
             eprintln!("active theme backend is {backend}: {summary}");
-            cx.set_global(loaded.theme);
+            gpui_component::theme::Theme::change(loaded.mode, None, cx);
             let state = cx.global_mut::<ThemeState>();
             state.backend = Some(backend);
             state.summary = summary;
@@ -176,6 +178,8 @@ fn refresh_native_theme(cx: &mut App) {
             state.error = Some(format!("Theme refresh failed: {error:#}"));
         }
     }
+    crate::branding::apply(cx);
+    crate::app::refresh_tray_icon(cx);
     cx.refresh_windows();
 }
 
@@ -370,7 +374,7 @@ fn setup_theme_monitor(cx: &mut App) {
                 }
             }
 
-            let update = cx.update(|cx| {
+            cx.update(|cx| {
                 refresh_native_theme(cx);
                 let state = cx.global_mut::<ThemeState>();
                 state.automatic_refreshes += 1;
@@ -378,9 +382,6 @@ fn setup_theme_monitor(cx: &mut App) {
                 cx.refresh_windows();
                 eprintln!("automatic theme refresh from {}", sources.label());
             });
-            if update.is_err() {
-                break;
-            }
         }
     });
 
@@ -465,7 +466,11 @@ fn load_backend(backend: Backend) -> Result<LoadedTheme> {
             Ok(LoadedTheme {
                 backend,
                 summary,
-                theme: bridge.to_gpui_theme(),
+                mode: if bridge.mode.is_dark() {
+                    gpui_component::ThemeMode::Dark
+                } else {
+                    gpui_component::ThemeMode::Light
+                },
             })
         }
         Backend::Qt => {
@@ -484,7 +489,11 @@ fn load_backend(backend: Backend) -> Result<LoadedTheme> {
             Ok(LoadedTheme {
                 backend,
                 summary,
-                theme: bridge.to_gpui_theme(),
+                mode: if bridge.mode.is_dark() {
+                    gpui_component::ThemeMode::Dark
+                } else {
+                    gpui_component::ThemeMode::Light
+                },
             })
         }
     }

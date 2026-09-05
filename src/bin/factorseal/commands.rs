@@ -1,6 +1,6 @@
 //! Command implementations for vault lifecycle, project secrets, and grants.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 #[cfg(all(feature = "secretspec-provider", unix))]
 use std::fs::OpenOptions;
@@ -15,18 +15,27 @@ use factorseal::{
     DocumentKind, GrantPermission, HistoryEntry, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
     MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionState, SecretSpecAddress,
     UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealLeasePolicy,
-    UnsealedVault, Vault, VaultAction, VaultClient, VaultCryptoProfile, VaultError, VaultMetadata,
-    VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService,
+    UnsealedVault, Vault, VaultAction, VaultArchive, VaultArchiveEntry, VaultClient,
+    VaultCryptoProfile, VaultEntryImportStatus, VaultEntryMetadata, VaultError, VaultMetadata,
+    VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService, WireSecret,
+    decrypt_vault_archive, encrypt_vault_archive,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
 
 use super::cli::PermissionCommand;
-use super::factor::{FactorSource, read_factor};
+use super::factor::{FactorSource, read_archive_passphrase, read_factor};
 use super::platform::{
     caller_identity_for_executable, native_client, prepare_lifecycle, serve_vault,
 };
-use super::{CLI_CONTROL_NAMESPACE, CliError, MAX_PROJECT_VALUE_BYTES, PROJECT_PERMISSIONS};
+use super::{
+    CLI_CONTROL_NAMESPACE, CliError, MAX_PROJECT_VALUE_BYTES, PERSONAL_SECRET_NAMESPACE,
+    PROJECT_PERMISSIONS,
+};
+use factorseal::transfer::{
+    PersonalSecret, TransferFormat, export_manager, import_manager, read_transfer_file,
+    write_private_file,
+};
 
 #[derive(Serialize)]
 struct Status<'a> {
@@ -237,6 +246,280 @@ pub(super) fn seal_vault(root: &Path, socket: Option<&Path>) -> Result<(), CliEr
             message: error.message,
         }),
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct TransferSummary {
+    added: usize,
+    replaced: usize,
+    kept_existing: usize,
+}
+
+impl TransferSummary {
+    fn record(&mut self, status: VaultEntryImportStatus) {
+        match status {
+            VaultEntryImportStatus::Added => self.added += 1,
+            VaultEntryImportStatus::Replaced => self.replaced += 1,
+            VaultEntryImportStatus::KeptExisting => self.kept_existing += 1,
+        }
+    }
+}
+
+pub(super) fn export_vault(
+    root: &Path,
+    socket: Option<&Path>,
+    file: &Path,
+    format: TransferFormat,
+    passphrase_file: Option<&Path>,
+) -> Result<(), CliError> {
+    validate_transfer_options(format, passphrase_file)?;
+    let client = native_client(root, socket)?;
+    let entries = list_vault_entries(&client)?;
+    let output = if format.is_native() {
+        let passphrase = read_archive_passphrase(passphrase_file, true)?;
+        let mut archived = Vec::new();
+        for entry in entries.iter().filter(|entry| portable_entry(entry)) {
+            let body = request_body(
+                &client,
+                VaultAction::ExportVaultEntry {
+                    entry: entry.clone(),
+                },
+            )?;
+            let VaultResponseBody::VaultEntrySecret { value, evict_at } = body else {
+                return Err(unexpected_transfer_response("archive export"));
+            };
+            archived.push(VaultArchiveEntry {
+                metadata: entry.clone(),
+                value,
+                evict_at,
+            });
+        }
+        encrypt_vault_archive(&VaultArchive::new(unix_time()?, archived), &passphrase)?
+    } else {
+        eprintln!("factorseal: warning: password-manager exports are plaintext");
+        let secrets = read_personal_secrets(&client, &entries)?;
+        export_manager(format, &secrets).map_err(transfer_error)?
+    };
+    write_private_file(file, &output).map_err(transfer_error)?;
+    println!("Exported FactorSeal secrets to {}", file.display());
+    Ok(())
+}
+
+pub(super) fn import_vault(
+    root: &Path,
+    socket: Option<&Path>,
+    file: &Path,
+    format: TransferFormat,
+    passphrase_file: Option<&Path>,
+    replace_existing: bool,
+) -> Result<(), CliError> {
+    validate_transfer_options(format, passphrase_file)?;
+    let bytes = read_transfer_file(file).map_err(transfer_error)?;
+    let client = native_client(root, socket)?;
+    let summary = if format.is_native() {
+        let passphrase = read_archive_passphrase(passphrase_file, false)?;
+        let archive = decrypt_vault_archive(&bytes, &passphrase)?;
+        reject_expired_archive(&archive)?;
+        import_entries(&client, archive.entries, replace_existing)?
+    } else {
+        eprintln!("factorseal: warning: password-manager imports are read from plaintext");
+        import_personal_secrets(&client, format, &bytes, replace_existing)?
+    };
+    println!(
+        "Imported {} items: {} added, {} replaced, {} kept existing",
+        summary.added + summary.replaced + summary.kept_existing,
+        summary.added,
+        summary.replaced,
+        summary.kept_existing
+    );
+    Ok(())
+}
+
+fn validate_transfer_options(
+    format: TransferFormat,
+    passphrase_file: Option<&Path>,
+) -> Result<(), CliError> {
+    if !format.is_native() && passphrase_file.is_some() {
+        return Err(CliError::Transfer(
+            "--passphrase-file is only valid with --format factorseal".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn list_vault_entries(client: &dyn VaultClient) -> Result<Vec<VaultEntryMetadata>, CliError> {
+    let mut entries = Vec::new();
+    let mut cursor = None;
+    loop {
+        let body = request_body(
+            client,
+            VaultAction::ListVaultEntries {
+                cursor: cursor.clone(),
+                limit: MAX_LIST_PAGE_SIZE,
+            },
+        )?;
+        let VaultResponseBody::VaultEntries {
+            entries: page,
+            next_cursor,
+        } = body
+        else {
+            return Err(unexpected_transfer_response("vault inventory"));
+        };
+        entries.extend(page);
+        if next_cursor.is_none() {
+            break;
+        }
+        if next_cursor == cursor {
+            return Err(CliError::Transfer(
+                "vault returned a repeated inventory cursor".to_owned(),
+            ));
+        }
+        cursor = next_cursor;
+    }
+    Ok(entries)
+}
+
+fn read_personal_secrets(
+    client: &dyn VaultClient,
+    entries: &[VaultEntryMetadata],
+) -> Result<Vec<PersonalSecret>, CliError> {
+    entries
+        .iter()
+        .filter(|entry| is_personal_entry(entry))
+        .map(|entry| {
+            let title = entry
+                .address
+                .as_local()
+                .map(|(item, _)| item)
+                .ok_or_else(|| CliError::Transfer("invalid personal-secret address".to_owned()))?;
+            let body = request_body(
+                client,
+                VaultAction::ExportVaultEntry {
+                    entry: entry.clone(),
+                },
+            )?;
+            let VaultResponseBody::VaultEntrySecret { value, .. } = body else {
+                return Err(unexpected_transfer_response("personal-secret export"));
+            };
+            PersonalSecret::decode(title, value.expose()).map_err(transfer_error)
+        })
+        .collect()
+}
+
+fn import_personal_secrets(
+    client: &dyn VaultClient,
+    format: TransferFormat,
+    bytes: &[u8],
+    replace_existing: bool,
+) -> Result<TransferSummary, CliError> {
+    let secrets = import_manager(format, bytes).map_err(transfer_error)?;
+    let entries = list_vault_entries(client)?;
+    let mut occupied = entries
+        .iter()
+        .filter(|entry| is_personal_entry(entry))
+        .filter_map(|entry| entry.address.as_local().map(|(item, _)| item.to_owned()))
+        .collect::<Vec<_>>();
+    let mut source_names = HashMap::<String, usize>::new();
+    let mut prepared = Vec::with_capacity(secrets.len());
+    for secret in secrets {
+        let occurrence = source_names.entry(secret.title.clone()).or_default();
+        *occurrence += 1;
+        let name = if *occurrence == 1 {
+            secret.title.clone()
+        } else {
+            unique_personal_name(&secret.title, &occupied)
+        };
+        occupied.push(name.clone());
+        prepared.push(VaultArchiveEntry {
+            metadata: VaultEntryMetadata {
+                document_kind: DocumentKind::LocalKeyring,
+                partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
+                address: factorseal::SecretAddress::new(name, None)?,
+            },
+            value: WireSecret::new(secret.encode().map_err(transfer_error)?.to_vec()),
+            evict_at: None,
+        });
+    }
+    import_entries(client, prepared, replace_existing)
+}
+
+fn import_entries(
+    client: &dyn VaultClient,
+    entries: Vec<VaultArchiveEntry>,
+    replace_existing: bool,
+) -> Result<TransferSummary, CliError> {
+    let mut summary = TransferSummary::default();
+    for entry in entries {
+        let body = request_body(
+            client,
+            VaultAction::ImportVaultEntry {
+                entry: entry.metadata,
+                value: entry.value,
+                evict_at: entry.evict_at,
+                replace_existing,
+            },
+        )?;
+        let VaultResponseBody::VaultEntryImported { status } = body else {
+            return Err(unexpected_transfer_response("vault import"));
+        };
+        summary.record(status);
+    }
+    Ok(summary)
+}
+
+fn reject_expired_archive(archive: &VaultArchive) -> Result<(), CliError> {
+    let now = unix_time()?;
+    if archive
+        .entries
+        .iter()
+        .any(|entry| entry.evict_at.is_some_and(|deadline| deadline < now))
+    {
+        return Err(CliError::Transfer(
+            "archive contains an entry that has already expired".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn request_body(
+    client: &dyn VaultClient,
+    action: VaultAction,
+) -> Result<VaultResponseBody, CliError> {
+    let response = client.request(&VaultRequest::new(action)?)?;
+    response.result.map_err(vault_request_error)
+}
+
+fn portable_entry(entry: &VaultEntryMetadata) -> bool {
+    !matches!(
+        entry.document_kind,
+        DocumentKind::Authorization | DocumentKind::SecretSpecProviderCache
+    )
+}
+
+fn is_personal_entry(entry: &VaultEntryMetadata) -> bool {
+    entry.document_kind == DocumentKind::LocalKeyring
+        && entry.partition == PERSONAL_SECRET_NAMESPACE
+}
+
+fn unique_personal_name(title: &str, occupied: &[String]) -> String {
+    let mut suffix = 2_u64;
+    loop {
+        let candidate = format!("{title} ({suffix})");
+        if !occupied.contains(&candidate) {
+            return candidate;
+        }
+        suffix = suffix.saturating_add(1);
+    }
+}
+
+fn transfer_error(error: impl std::fmt::Display) -> CliError {
+    CliError::Transfer(error.to_string())
+}
+
+fn unexpected_transfer_response(operation: &str) -> CliError {
+    CliError::Transfer(format!(
+        "vault returned an unexpected response during {operation}"
+    ))
 }
 
 /// Ask the running agent which state this vault is in.

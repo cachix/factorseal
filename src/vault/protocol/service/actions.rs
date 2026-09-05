@@ -120,7 +120,10 @@ pub(super) fn execute_action(
         | VaultAction::ListCacheHistory { .. } => Ok((context.history(action)?, true)),
         VaultAction::ClearCache { project } => Ok((context.clear(project.as_bytes())?, true)),
         VaultAction::SealCache { project } => Ok((context.seal(project.as_bytes())?, false)),
-        VaultAction::ListPermissions
+        VaultAction::ListVaultEntries { .. }
+        | VaultAction::ExportVaultEntry { .. }
+        | VaultAction::ImportVaultEntry { .. }
+        | VaultAction::ListPermissions
         | VaultAction::WaitPermissions { .. }
         | VaultAction::WaitPermission { .. }
         | VaultAction::ApprovePermission { .. }

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" role="img" aria-labelledby="title description">
+  <title id="title">FactorSeal small icon</title>
+  <desc id="description">An optically adjusted chip and keyhole for icons from 16 to 24 pixels.</desc>
+  <g fill="#F7F3EA">
+    <path fill-rule="evenodd" d="M5 3H11Q13 3 13 5V11Q13 13 11 13H5Q3 13 3 11V5Q3 3 5 3Z M8 4A2 2 0 0 1 9 7.732V9H10V11H6V9H7V7.732A2 2 0 0 1 8 4Z"/>
+    <rect x="5" y="1" width="2" height="3" rx=".5"/>
+    <rect x="9" y="1" width="2" height="3" rx=".5"/>
+    <rect x="5" y="12" width="2" height="3" rx=".5"/>
+    <rect x="9" y="12" width="2" height="3" rx=".5"/>
+    <rect x="1" y="5" width="3" height="2" rx=".5"/>
+    <rect x="1" y="9" width="3" height="2" rx=".5"/>
+    <rect x="12" y="5" width="3" height="2" rx=".5"/>
+    <rect x="12" y="9" width="3" height="2" rx=".5"/>
+  </g>
+</svg>

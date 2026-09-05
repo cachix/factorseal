@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal chip and stamp logo explorations</title>
+  <desc id="desc">Ten monochrome vector directions combining a microchip and a stamp or seal.</desc>
+  <rect width="1200" height="760" fill="#f5f2ea"/>
+  <text x="60" y="65" fill="#151515" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700">FactorSeal — chip × stamp</text>
+  <text x="60" y="96" fill="#64615b" font-family="Inter, Arial, sans-serif" font-size="16">10 compact, monochrome directions · editable SVG</text>
+
+  <g fill="#fff" stroke="#ddd8cc" stroke-width="2">
+    <rect x="60" y="130" width="200" height="260" rx="18"/><rect x="280" y="130" width="200" height="260" rx="18"/>
+    <rect x="500" y="130" width="200" height="260" rx="18"/><rect x="720" y="130" width="200" height="260" rx="18"/>
+    <rect x="940" y="130" width="200" height="260" rx="18"/><rect x="60" y="420" width="200" height="260" rx="18"/>
+    <rect x="280" y="420" width="200" height="260" rx="18"/><rect x="500" y="420" width="200" height="260" rx="18"/>
+    <rect x="720" y="420" width="200" height="260" rx="18"/><rect x="940" y="420" width="200" height="260" rx="18"/>
+  </g>
+
+  <g color="#191919">
+    <image x="90" y="150" width="140" height="140" href="01-stamp-footprint.svg" xlink:href="01-stamp-footprint.svg"/>
+    <image x="310" y="150" width="140" height="140" href="02-certified-chip.svg" xlink:href="02-certified-chip.svg"/>
+    <image x="530" y="150" width="140" height="140" href="03-press-and-seal.svg" xlink:href="03-press-and-seal.svg"/>
+    <image x="750" y="150" width="140" height="140" href="04-circuit-impression.svg" xlink:href="04-circuit-impression.svg"/>
+    <image x="970" y="150" width="140" height="140" href="05-wax-chip.svg" xlink:href="05-wax-chip.svg"/>
+    <image x="90" y="440" width="140" height="140" href="06-pin-seal.svg" xlink:href="06-pin-seal.svg"/>
+    <image x="310" y="440" width="140" height="140" href="07-offset-imprint.svg" xlink:href="07-offset-imprint.svg"/>
+    <image x="530" y="440" width="140" height="140" href="08-negative-stamp.svg" xlink:href="08-negative-stamp.svg"/>
+    <image x="750" y="440" width="140" height="140" href="09-shield-impression.svg" xlink:href="09-shield-impression.svg"/>
+    <image x="970" y="440" width="140" height="140" href="10-diamond-seal.svg" xlink:href="10-diamond-seal.svg"/>
+  </g>
+
+  <g fill="#151515" font-family="Inter, Arial, sans-serif" text-anchor="middle">
+    <g font-size="14" font-weight="700">
+      <text x="160" y="324">01 · Stamp footprint</text><text x="380" y="324">02 · Certified chip</text>
+      <text x="600" y="324">03 · Press &amp; seal</text><text x="820" y="324">04 · Circuit impression</text>
+      <text x="1040" y="324">05 · Wax chip</text><text x="160" y="614">06 · Pin seal</text>
+      <text x="380" y="614">07 · Offset imprint</text><text x="600" y="614">08 · Negative stamp</text>
+      <text x="820" y="614">09 · Shield impression</text><text x="1040" y="614">10 · Diamond seal</text>
+    </g>
+    <g fill="#77736b" font-size="12">
+      <text x="160" y="348">chip becomes the stamp</text><text x="380" y="348">official certification</text>
+      <text x="600" y="348">literal stamp silhouette</text><text x="820" y="348">circuit-built seal</text>
+      <text x="1040" y="348">tamper-evident wax</text><text x="160" y="638">compact lettermark</text>
+      <text x="380" y="638">physical impression</text><text x="600" y="638">stamp in negative space</text>
+      <text x="820" y="638">security certification</text><text x="1040" y="638">app-icon geometry</text>
+    </g>
+  </g>
+</svg>

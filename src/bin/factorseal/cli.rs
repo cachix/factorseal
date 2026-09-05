@@ -2,8 +2,31 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use factorseal::UnlockGroup;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(super) enum TransferFormat {
+    #[value(name = "factorseal")]
+    FactorSeal,
+    #[value(name = "bitwarden-json")]
+    BitwardenJson,
+    #[value(name = "1password-csv")]
+    OnePasswordCsv,
+    #[value(name = "keepass-csv")]
+    KeePassCsv,
+}
+
+impl From<TransferFormat> for factorseal::transfer::TransferFormat {
+    fn from(format: TransferFormat) -> Self {
+        match format {
+            TransferFormat::FactorSeal => Self::FactorSeal,
+            TransferFormat::BitwardenJson => Self::BitwardenJson,
+            TransferFormat::OnePasswordCsv => Self::OnePasswordCsv,
+            TransferFormat::KeePassCsv => Self::KeePassCsv,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -174,6 +197,38 @@ pub(super) enum Command {
         /// Emit one JSON array instead of one entry object per line.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Export an encrypted backup or personal secrets for a password manager.
+    Export {
+        /// Destination file. Existing files are replaced with mode 0600 on Unix.
+        file: PathBuf,
+
+        /// Export format. Password-manager formats are plaintext and include personal secrets only.
+        #[arg(long, value_enum, default_value_t = TransferFormat::FactorSeal)]
+        format: TransferFormat,
+
+        /// Read the native archive passphrase from a private regular file.
+        #[arg(long)]
+        passphrase_file: Option<PathBuf>,
+    },
+
+    /// Import an encrypted backup or personal secrets from a password manager.
+    Import {
+        /// Source archive or password-manager export.
+        file: PathBuf,
+
+        /// Import format.
+        #[arg(long, value_enum, default_value_t = TransferFormat::FactorSeal)]
+        format: TransferFormat,
+
+        /// Read the native archive passphrase from a private regular file.
+        #[arg(long)]
+        passphrase_file: Option<PathBuf>,
+
+        /// Replace entries whose vault address already exists.
+        #[arg(long)]
+        replace_existing: bool,
     },
 
     /// Remove this vault and backend-owned keys; retained TPM backups are not revoked.

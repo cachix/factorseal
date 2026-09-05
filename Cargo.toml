@@ -10,6 +10,7 @@ repository = "https://github.com/domenkozar/factorseal"
 [workspace]
 members = [
     "crates/hardwareseal",
+    "crates/gpui-tray",
     "crates/secret-service-protocol",
     "factorseal-desktop",
 ]
@@ -50,7 +51,13 @@ vault = [
     "dep:widestring",
     "dep:windows",
 ]
-cli = ["dep:clap", "dep:directories", "dep:rpassword"]
+cli = [
+    "dep:clap",
+    "dep:directories",
+    "dep:rpassword",
+    "transfer",
+]
+transfer = ["dep:anyhow", "dep:csv", "dep:tempfile", "dep:uuid"]
 secretspec-provider = [
     "dep:async-trait",
     "dep:percent-encoding",
@@ -86,11 +93,13 @@ required-features = ["vault", "cli", "hardware"]
 aes = { version = "0.8.4", features = ["zeroize"], optional = true }
 aes-gcm = { version = "0.10.3", features = ["zeroize"], optional = true }
 argon2 = { version = "0.5.3", features = ["zeroize"], optional = true }
+anyhow = { version = "1.0", optional = true }
 async-trait = { version = "0.1.89", optional = true }
 automerge = { version = "0.11.0", optional = true }
 base64 = "0.22.1"
 clap = { version = "4.5.41", features = ["derive", "env"], optional = true }
 ctrlc = { version = "3.5.1", features = ["termination"], optional = true }
+csv = { version = "1.3", optional = true }
 directories = { version = "6.0.0", optional = true }
 getrandom = "0.3.3"
 getrandom_04 = { package = "getrandom", version = "0.4.3", features = ["sys_rng"], optional = true }
@@ -110,8 +119,10 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"
 sha2 = "0.10.9"
 thiserror = "2.0.12"
+tempfile = { version = "3.20.0", optional = true }
 tokio = { version = "1.47.1", features = ["rt", "sync", "time"], optional = true }
 turso = { version = "0.8.0-pre.4", default-features = false, optional = true }
+uuid = { version = "1.0", features = ["v4"], optional = true }
 zeroize = "1.8.1"
 
 [dev-dependencies]
@@ -169,3 +180,12 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+[patch.crates-io]
+gpui = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f", version = "=0.2.2" }
+
+[patch."https://github.com/zed-industries/zed.git"]
+gpui = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f", version = "=0.2.2" }
+gpui_macros = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f" }
+gpui_platform = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f" }
+gpui_web = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f" }

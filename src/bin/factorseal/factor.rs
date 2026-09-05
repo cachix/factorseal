@@ -39,9 +39,10 @@ pub(super) fn read_factor(
         }
         first
     } else if std::io::stdin().is_terminal() {
-        let first = prompt_on_terminal("Factorseal password: ")?;
+        let first = prompt_on_terminal("Factorseal password: ").map_err(CliError::Password)?;
         if confirm {
-            let second = prompt_on_terminal("Confirm Factorseal password: ")?;
+            let second =
+                prompt_on_terminal("Confirm Factorseal password: ").map_err(CliError::Password)?;
             if first.as_slice() != second.as_slice() {
                 return Err(CliError::Password("passwords do not match".to_owned()));
             }
@@ -63,10 +64,40 @@ pub(super) fn read_factor(
     Ok(secret)
 }
 
-fn prompt_on_terminal(label: &str) -> Result<Zeroizing<Vec<u8>>, CliError> {
+fn prompt_on_terminal(label: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     rpassword::prompt_password(label)
         .map(|secret| Zeroizing::new(secret.into_bytes()))
-        .map_err(|error| CliError::Password(error.to_string()))
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn read_archive_passphrase(
+    passphrase_file: Option<&Path>,
+    confirm: bool,
+) -> Result<Zeroizing<Vec<u8>>, CliError> {
+    let passphrase = if let Some(path) = passphrase_file {
+        read_private_secret_file(path).map_err(CliError::ArchivePassphrase)?
+    } else if std::io::stdin().is_terminal() {
+        let first =
+            prompt_on_terminal("Archive passphrase: ").map_err(CliError::ArchivePassphrase)?;
+        if confirm {
+            let second = prompt_on_terminal("Confirm archive passphrase: ")
+                .map_err(CliError::ArchivePassphrase)?;
+            if first.as_slice() != second.as_slice() {
+                return Err(CliError::ArchivePassphrase(
+                    "passphrases do not match".to_owned(),
+                ));
+            }
+        }
+        first
+    } else {
+        return Err(CliError::NoArchivePassphraseSource);
+    };
+    if passphrase.is_empty() {
+        return Err(CliError::ArchivePassphrase(
+            "the archive passphrase must not be empty".to_owned(),
+        ));
+    }
+    Ok(passphrase)
 }
 
 /// Run the askpass helper and take its standard output as the factor.
@@ -118,33 +149,36 @@ fn strip_one_line_ending(bytes: &mut Zeroizing<Vec<u8>>) {
 }
 
 fn read_password_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, CliError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| CliError::Password(format!("{}: {error}", path.display())))?;
+    read_private_secret_file(path).map_err(CliError::Password)
+}
+
+fn read_private_secret_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_FACTOR_BYTES {
-        return Err(CliError::Password(format!(
+        return Err(format!(
             "{} must be a regular file no larger than 64 KiB",
             path.display()
-        )));
+        ));
     }
     #[cfg(unix)]
     {
         let mode = metadata.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
-            return Err(CliError::Password(format!(
+            return Err(format!(
                 "{} is accessible by group or other users (mode {mode:o})",
                 path.display()
-            )));
+            ));
         }
     }
-    let file = fs::File::open(path)
-        .map_err(|error| CliError::Password(format!("{}: {error}", path.display())))?;
+    let file = fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut bytes = read_bounded(file, MAX_FACTOR_BYTES)
-        .map_err(|error| CliError::Password(format!("{}: {error}", path.display())))?;
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     if bytes.len() as u64 > MAX_FACTOR_BYTES {
-        return Err(CliError::Password(format!(
+        return Err(format!(
             "{} must be a regular file no larger than 64 KiB",
             path.display()
-        )));
+        ));
     }
     strip_one_line_ending(&mut bytes);
     Ok(bytes)

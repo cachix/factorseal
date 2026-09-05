@@ -23,9 +23,7 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    outputHashes = {
-      "secretspec-ipc-0.19.1" = "sha256-QZ0RyffatI1ulF+jzZEHlUsjQeDoiIRV6nX4x3OkpIo=";
-    };
+    outputHashes = import ./cargo-output-hashes.nix { inherit lib; };
   };
 
   nativeBuildInputs = [ pkg-config ];

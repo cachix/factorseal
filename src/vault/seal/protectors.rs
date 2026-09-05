@@ -165,42 +165,55 @@ pub(super) fn unseal_with_protectors(
     wrapping: &dyn KeyProtector,
     credentials: UnlockCredentials<'_>,
 ) -> VaultResult<UnsealedVault> {
-    stored.validate()?;
+    crate::timing::result("key_hierarchy", "validate_metadata", || stored.validate())?;
     if wrapping.backend().as_str() != stored.hardware_backend {
         return Err(VaultError::Protection(
             "vault hardware backend does not match its metadata".to_owned(),
         ));
     }
-    let root_payload = wrapping.unwrap(&slot.wrapped_vault_root_key)?;
+    let root_payload = crate::timing::result("key_hierarchy", "hardware_unwrap", || {
+        wrapping.unwrap(&slot.wrapped_vault_root_key)
+    })?;
     let vault_root_key = if let Some(protection) = &slot.password_protection {
         let password = credentials.password_for(&slot.group)?.ok_or_else(|| {
             VaultError::Protection("password-protected slot has no password factor".to_owned())
         })?;
-        unprotect_with_factor(
-            stored.installation_id,
-            protection,
-            &root_payload,
-            UnsealFactor::Password(password),
-        )?
+        crate::timing::result("key_hierarchy", "password_unprotect", || {
+            unprotect_with_factor(
+                stored.installation_id,
+                protection,
+                &root_payload,
+                UnsealFactor::Password(password),
+            )
+        })?
     } else {
         if slot.group.requires(UnlockFactorKind::Password) {
             return Err(VaultError::Protection(
                 "password unlock group has no password protection".to_owned(),
             ));
         }
-        decode_key::<KEY_BYTES>(&root_payload, "vault root key")?
+        crate::timing::result("key_hierarchy", "decode_root_key", || {
+            decode_key::<KEY_BYTES>(&root_payload, "vault root key")
+        })?
     };
-    let secrets = InstallationSecrets::open(
-        stored.installation_id,
-        stored.device_vault_id,
-        vault_root_key,
-        &stored.wrapped_installation_secrets,
-    )?;
+    let secrets = crate::timing::result("key_hierarchy", "open_installation_secrets", || {
+        InstallationSecrets::open(
+            stored.installation_id,
+            stored.device_vault_id,
+            vault_root_key,
+            &stored.wrapped_installation_secrets,
+        )
+    })?;
     // The root-wrapped seed is the only copy of the signing identity, so
     // derive the public key from it and refuse a metadata file whose public
     // identity does not match before anything is opened with it.
-    let signing_seed = secrets.signing_seed(stored.installation_id, stored.device_vault_id)?;
-    let public_signing_key = public_key_for_seed(&signing_seed);
+    let signing_seed = crate::timing::result("key_hierarchy", "derive_signing_seed", || {
+        secrets.signing_seed(stored.installation_id, stored.device_vault_id)
+    })?;
+    let public_signing_key =
+        crate::timing::result("key_hierarchy", "derive_public_identity", || {
+            Ok::<_, VaultError>(public_key_for_seed(&signing_seed))
+        })?;
     if public_signing_key != stored.public_signing_key
         || DeviceKeyId::for_public_key(&public_signing_key) != stored.device_key_id
         || actor_id_for_public_key(&public_signing_key).as_slice() != stored.actor_id

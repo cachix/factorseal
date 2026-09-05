@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 960" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal S/F vault mark study</title>
+  <desc id="desc">Six monochrome logo directions combining an S and F monogram with a local hardware vault or lock.</desc>
+
+  <defs>
+    <g id="chip">
+      <rect x="34" y="34" width="92" height="92" rx="16"/>
+      <rect x="58" y="18" width="13" height="18" rx="5"/>
+      <rect x="89" y="18" width="13" height="18" rx="5"/>
+      <rect x="58" y="124" width="13" height="18" rx="5"/>
+      <rect x="89" y="124" width="13" height="18" rx="5"/>
+      <rect x="18" y="58" width="18" height="13" rx="5"/>
+      <rect x="18" y="89" width="18" height="13" rx="5"/>
+      <rect x="124" y="58" width="18" height="13" rx="5"/>
+      <rect x="124" y="89" width="18" height="13" rx="5"/>
+    </g>
+
+    <path id="f-glyph" d="M49 48h37v14H64v15h19v14H64v23H49Z"/>
+    <path id="s-glyph" d="M111 57c-6-8-20-11-27-4-7 8 0 15 12 20 15 6 21 16 17 28-5 15-22 19-36 10l7-12c8 5 18 5 21-2 2-5-2-9-13-13-16-6-23-16-20-28 4-14 19-20 33-15 7 2 13 6 17 11Z"/>
+    <path id="fused-glyph" d="M53 47h55v15H70v14h22c16 0 25 8 25 21 0 14-10 23-27 23H53v-15h36c8 0 12-3 12-8s-4-7-12-7H53Z"/>
+
+    <mask id="m1">
+      <rect width="160" height="160" fill="white"/>
+      <use href="#f-glyph" fill="black"/>
+      <use href="#s-glyph" fill="black"/>
+    </mask>
+    <mask id="m2">
+      <rect width="160" height="160" fill="white"/>
+      <use href="#fused-glyph" fill="black"/>
+    </mask>
+    <mask id="m3">
+      <rect width="160" height="160" fill="white"/>
+      <circle cx="80" cy="80" r="34" fill="none" stroke="black" stroke-width="7"/>
+      <path d="M55 56h29v12H68v10h14v12H68v17H55Z" fill="black"/>
+      <path d="M104 61c-5-6-14-7-18-2-5 5 0 10 8 13 11 4 16 11 13 20-3 11-15 15-26 9l5-10c6 3 11 3 13-1 2-4-2-6-9-9-11-4-16-11-13-20 3-10 14-14 24-11 5 2 9 4 12 8Z" fill="black"/>
+    </mask>
+    <mask id="m4">
+      <rect width="160" height="160" fill="white"/>
+      <path d="M56 54h31v13H70v13h15v13H70v19H56Z" fill="black"/>
+      <path d="M111 62c-6-8-19-9-24-3-6 7 0 13 11 17 13 5 19 14 15 25-4 13-19 17-32 10l6-11c7 4 15 4 18-2 2-5-2-8-11-11-14-5-20-14-17-25 4-12 17-17 29-13 6 2 11 5 15 9Z" fill="black"/>
+    </mask>
+    <mask id="m5">
+      <rect width="160" height="160" fill="white"/>
+      <path d="M54 47h34v14H69v16h16v14H69v23H54Z" fill="black"/>
+      <path d="M110 56c-6-7-18-9-24-3-6 7 0 14 11 18 14 5 20 15 16 26-4 14-20 18-33 10l6-11c7 4 16 4 18-2 2-5-2-8-11-12-14-5-21-14-17-26 4-13 18-18 31-14 6 2 11 5 14 10Z" fill="black"/>
+    </mask>
+    <mask id="m6">
+      <rect width="160" height="160" fill="white"/>
+      <circle cx="80" cy="63" r="13" fill="black"/>
+      <path d="M74 73h13v11h14v12H87v18H73V84Z" fill="black"/>
+      <path d="M91 45c-5-5-13-7-20-4-8 3-11 10-8 16 3 7 12 9 21 13 13 5 19 14 16 25-2 8-8 14-16 18" fill="none" stroke="black" stroke-width="7" stroke-linecap="round"/>
+    </mask>
+
+    <g id="mark1" mask="url(#m1)"><use href="#chip"/></g>
+    <g id="mark2" mask="url(#m2)"><use href="#chip"/></g>
+    <g id="mark3" mask="url(#m3)"><use href="#chip"/></g>
+    <g id="mark4" mask="url(#m4)">
+      <path d="M34 35h92v61c0 24-17 39-46 49-29-10-46-25-46-49Z"/>
+      <rect x="59" y="19" width="13" height="18" rx="5"/><rect x="88" y="19" width="13" height="18" rx="5"/>
+      <rect x="19" y="60" width="17" height="12" rx="5"/><rect x="19" y="88" width="17" height="12" rx="5"/>
+      <rect x="124" y="60" width="17" height="12" rx="5"/><rect x="124" y="88" width="17" height="12" rx="5"/>
+    </g>
+    <g id="mark5" mask="url(#m5)">
+      <rect x="34" y="56" width="92" height="75" rx="17"/>
+      <path d="M53 60V51c0-19 11-31 27-31s27 12 27 31v9H91v-8c0-11-4-17-11-17s-11 6-11 17v8Z"/>
+      <rect x="18" y="76" width="18" height="13" rx="5"/><rect x="124" y="76" width="18" height="13" rx="5"/>
+      <rect x="58" y="129" width="13" height="14" rx="5"/><rect x="89" y="129" width="13" height="14" rx="5"/>
+    </g>
+    <g id="mark6" mask="url(#m6)"><use href="#chip"/></g>
+  </defs>
+
+  <rect width="1440" height="960" fill="#F7F3EA"/>
+  <text x="72" y="72" fill="#151515" font-family="Inter, system-ui, sans-serif" font-size="34" font-weight="700">FactorSeal — S/F vault study</text>
+  <text x="72" y="108" fill="#68635B" font-family="Inter, system-ui, sans-serif" font-size="18">Six focused, one-color marks · local hardware outside · Factor + Seal inside</text>
+
+  <g fill="#FFFCF6" stroke="#D9D2C7" stroke-width="2">
+    <rect x="72" y="150" width="408" height="300" rx="22"/><rect x="516" y="150" width="408" height="300" rx="22"/><rect x="960" y="150" width="408" height="300" rx="22"/>
+    <rect x="72" y="486" width="408" height="300" rx="22"/><rect x="516" y="486" width="408" height="300" rx="22"/><rect x="960" y="486" width="408" height="300" rx="22"/>
+  </g>
+
+  <g fill="#151515">
+    <use href="#mark1" x="194" y="170" width="164" height="164"/>
+    <use href="#mark2" x="638" y="170" width="164" height="164"/>
+    <use href="#mark3" x="1082" y="170" width="164" height="164"/>
+    <use href="#mark4" x="194" y="506" width="164" height="164"/>
+    <use href="#mark5" x="638" y="506" width="164" height="164"/>
+    <use href="#mark6" x="1082" y="506" width="164" height="164"/>
+  </g>
+
+  <g fill="#151515" font-family="Inter, system-ui, sans-serif" text-anchor="middle">
+    <g font-size="17" font-weight="700">
+      <text x="276" y="372">01 · Clear monogram</text><text x="720" y="372">02 · F/S ligature</text><text x="1164" y="372">03 · Vault dial</text>
+      <text x="276" y="708">04 · Shielded chip</text><text x="720" y="708">05 · Hardware lock</text><text x="1164" y="708">06 · Keyway S/F</text>
+    </g>
+    <g fill="#68635B" font-size="14">
+      <text x="276" y="400">most literal and legible</text><text x="720" y="400">one compact shared gesture</text><text x="1164" y="400">vault door, not generic cloud security</text>
+      <text x="276" y="736">device-bound protection</text><text x="720" y="736">strongest lock read</text><text x="1164" y="736">closest to the current keyhole</text>
+    </g>
+  </g>
+
+  <rect x="72" y="824" width="1296" height="92" rx="22" fill="#151515"/>
+  <text x="104" y="860" fill="#F7F3EA" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="700">TRAY SCALE</text>
+  <g fill="#F7F3EA">
+    <use href="#mark1" x="260" y="838" width="64" height="64"/><use href="#mark1" x="337" y="846" width="48" height="48"/><use href="#mark1" x="398" y="854" width="32" height="32"/>
+    <use href="#mark2" x="520" y="838" width="64" height="64"/><use href="#mark2" x="597" y="846" width="48" height="48"/><use href="#mark2" x="658" y="854" width="32" height="32"/>
+    <use href="#mark5" x="780" y="838" width="64" height="64"/><use href="#mark5" x="857" y="846" width="48" height="48"/><use href="#mark5" x="918" y="854" width="32" height="32"/>
+    <use href="#mark6" x="1040" y="838" width="64" height="64"/><use href="#mark6" x="1117" y="846" width="48" height="48"/><use href="#mark6" x="1178" y="854" width="32" height="32"/>
+  </g>
+</svg>

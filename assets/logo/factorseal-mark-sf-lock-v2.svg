@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 160 160"
+     role="img"
+     aria-labelledby="title description">
+  <title id="title">FactorSeal S/F hardware lock</title>
+  <desc id="description">A one-color padlock rooted in local hardware, with a balanced F and S cut into its vault body.</desc>
+
+  <defs>
+    <mask id="sf-cutout">
+      <rect width="160" height="160" fill="#fff"/>
+      <path d="M50 74h30v12H63v10h15v12H63v14H50Z" fill="#000"/>
+      <path d="M108 82c-5-7-14-9-20-5-7 5-5 12 7 16 13 4 18 11 15 20-3 10-14 14-24 10-4-1-7-4-9-7"
+            fill="none" stroke="#000" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+
+  <g fill="currentColor" mask="url(#sf-cutout)">
+    <rect x="32" y="56" width="96" height="78" rx="18"/>
+    <path fill-rule="evenodd" d="M51 59v-8c0-22 11-35 29-35s29 13 29 35v8H92v-8c0-13-4-19-12-19s-12 6-12 19v8Z"/>
+
+    <rect x="18" y="74" width="16" height="11" rx="4"/>
+    <rect x="18" y="103" width="16" height="11" rx="4"/>
+    <rect x="126" y="74" width="16" height="11" rx="4"/>
+    <rect x="126" y="103" width="16" height="11" rx="4"/>
+    <rect x="59" y="132" width="12" height="12" rx="4"/>
+    <rect x="89" y="132" width="12" height="12" rx="4"/>
+  </g>
+</svg>

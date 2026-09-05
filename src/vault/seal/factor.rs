@@ -231,15 +231,19 @@ pub(super) fn unprotect_with_factor(
     factor: UnsealFactor<'_>,
 ) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
     let factor_key = derive_factor_key(factor, &protection.factor)?;
-    let vault_root_key = crate::crypto::decrypt(
-        protection.encryption_algorithm,
-        &factor_key,
-        &protection.vault_root_key_nonce,
-        &factor_aad(installation_id, b"vault-root-key"),
-        vault_root_key_payload,
-    )
-    .map_err(|_| factor_incorrect_error(protection.factor.kind()))?;
-    decode_key::<KEY_BYTES>(&vault_root_key, "vault root key")
+    let vault_root_key = crate::timing::result("password_factor", "decrypt_root_key", || {
+        crate::crypto::decrypt(
+            protection.encryption_algorithm,
+            &factor_key,
+            &protection.vault_root_key_nonce,
+            &factor_aad(installation_id, b"vault-root-key"),
+            vault_root_key_payload,
+        )
+        .map_err(|_| factor_incorrect_error(protection.factor.kind()))
+    })?;
+    crate::timing::result("password_factor", "decode_root_key", || {
+        decode_key::<KEY_BYTES>(&vault_root_key, "vault root key")
+    })
 }
 
 /// Derive the nested factor's key. The supplied factor must match the one the
@@ -273,11 +277,13 @@ fn derive_factor_key(
             let mut memory = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
             let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
             let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
-            argon2
-                .hash_password_into_with_memory(password, salt, &mut *key, &mut *memory)
-                .map_err(|error| {
-                    VaultError::Protection(format!("factor derivation failed: {error}"))
-                })?;
+            crate::timing::result("password_factor", "argon2id", || {
+                argon2
+                    .hash_password_into_with_memory(password, salt, &mut *key, &mut memory)
+                    .map_err(|error| {
+                        VaultError::Protection(format!("factor derivation failed: {error}"))
+                    })
+            })?;
             Ok(key)
         }
         (
@@ -287,11 +293,13 @@ fn derive_factor_key(
             if password.is_empty() {
                 return Err(factor_empty_error(parameters.kind()));
             }
-            Ok(crate::crypto::derive_pbkdf2_password_key(
-                password,
-                salt,
-                *iterations,
-            ))
+            crate::timing::result("password_factor", "pbkdf2_hmac_sha256", || {
+                Ok(crate::crypto::derive_pbkdf2_password_key(
+                    password,
+                    salt,
+                    *iterations,
+                ))
+            })
         }
     }
 }

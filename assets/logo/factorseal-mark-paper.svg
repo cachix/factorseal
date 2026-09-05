@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title description">
+  <title id="title">FactorSeal</title>
+  <desc id="description">A rounded hardware chip with paired pins and a stepped keyhole cut through its center.</desc>
+  <g fill="#F7F3EA">
+    <path fill-rule="evenodd" d="M48 32H112Q128 32 128 48V112Q128 128 112 128H48Q32 128 32 112V48Q32 32 48 32Z M80 50A16 16 0 0 1 89 79.23V89H94V108H66V89H71V79.23A16 16 0 0 1 80 50Z"/>
+    <rect x="56" y="16" width="16" height="24" rx="5"/>
+    <rect x="88" y="16" width="16" height="24" rx="5"/>
+    <rect x="56" y="120" width="16" height="24" rx="5"/>
+    <rect x="88" y="120" width="16" height="24" rx="5"/>
+    <rect x="16" y="56" width="24" height="16" rx="5"/>
+    <rect x="16" y="88" width="24" height="16" rx="5"/>
+    <rect x="120" y="56" width="24" height="16" rx="5"/>
+    <rect x="120" y="88" width="24" height="16" rx="5"/>
+  </g>
+</svg>

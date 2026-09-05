@@ -4,6 +4,8 @@
 //! callers use domain operations; raw Automerge mutation is deliberately not
 //! part of the public API.
 
+#[cfg(all(feature = "key-protection", feature = "vault-client"))]
+mod archive;
 #[cfg(feature = "vault-store")]
 mod document;
 mod encoding;
@@ -70,6 +72,8 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(all(feature = "key-protection", feature = "vault-client"))]
+pub use archive::{VaultArchive, VaultArchiveEntry, decrypt_vault_archive, encrypt_vault_archive};
 #[cfg(feature = "vault-store")]
 pub(crate) use document::{
     DocumentMutation, DocumentOperation, MutationContext, SecretDocument, SecretRead,
@@ -89,8 +93,9 @@ pub use protocol::{
     CallerIdentity, CallerPlatform, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
     MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionOperation, PermissionPrincipal,
     PermissionState, PermissionWaitStatus, RequestId, VaultAction, VaultApplicationContext,
-    VaultClient, VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse,
-    VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    VaultClient, VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference,
+    VaultMutation, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
+    VaultResponseErrorCode, WireSecret, WireSecretAddress,
 };
 #[cfg(feature = "vault-store")]
 pub use protocol::{GrantPermission, UnsealLeasePolicy, VaultService};

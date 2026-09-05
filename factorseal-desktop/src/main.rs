@@ -1,12 +1,45 @@
 mod app;
+mod branding;
 mod instance;
 mod runtime;
 mod theming;
+mod timing;
 
-use std::path::PathBuf;
+use std::{borrow::Cow, path::PathBuf};
 
 use clap::Parser;
-use gpui::Application;
+use gpui::{AssetSource, QuitMode, SharedString};
+
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        match path {
+            branding::MARK_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-mark.svg"
+            )))),
+            branding::MICRO_MARK_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-mark-micro.svg"
+            )))),
+            branding::SEARCH_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-search.svg"
+            )))),
+            branding::CLOSE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-close.svg"
+            )))),
+            _ => Ok(None),
+        }
+    }
+
+    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(vec![
+            branding::MARK_ASSET.into(),
+            branding::MICRO_MARK_ASSET.into(),
+            branding::SEARCH_ASSET.into(),
+            branding::CLOSE_ASSET.into(),
+        ])
+    }
+}
 
 #[cfg(target_os = "linux")]
 const SECRET_SERVICE_NAME: &str = "org.freedesktop.secrets";
@@ -88,7 +121,10 @@ fn main() {
     else {
         unreachable!("secondary Desktop instances return before application startup")
     };
-    Application::new().run(move |cx| app::setup(config, args.background, activations, cx));
+    gpui_platform::application()
+        .with_assets(Assets)
+        .with_quit_mode(QuitMode::Explicit)
+        .run(move |cx| app::setup(config, args.background, activations, cx));
     drop(instance_lock);
 }
 

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal chip stamp footprint</title>
+  <desc id="desc">A microchip whose lower edge becomes the teeth of a rubber stamp.</desc>
+  <g fill="currentColor">
+    <rect x="38" y="31" width="84" height="78" rx="12"/>
+    <path d="M52 15h9v16h-9zm23 0h10v16H75zm24 0h9v16h-9zM21 47h17v9H21zm0 19h17v9H21zm0 19h17v9H21zm101-38h17v9h-17zm0 19h17v9h-17zm0 19h17v9h-17z"/>
+    <path d="M49 106h62v14H49zM42 119h76l10 13v8H32v-8z"/>
+  </g>
+  <circle cx="80" cy="69" r="20" fill="none" stroke="#fff" stroke-width="7"/>
+  <path d="m69 69 8 8 16-18" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

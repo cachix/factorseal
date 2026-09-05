@@ -90,11 +90,12 @@ in
         message = "services.factorseal.users requires security.tpm2.tssGroup to name a group";
       }
       {
-        assertion = cfg.mode != "desktop" || !config.services.gnome.gnome-keyring.enable;
+        assertion = !config.services.gnome.gnome-keyring.enable;
         message = ''
-          services.factorseal.mode = "desktop" provides org.freedesktop.secrets;
-          disable services.gnome.gnome-keyring (use lib.mkForce false when a
-          desktop module enables it) so only one Secret Service provider runs
+          services.factorseal provides org.freedesktop.secrets in both agent
+          and desktop modes; disable services.gnome.gnome-keyring (use
+          lib.mkForce false when a desktop module enables it) so only one
+          Secret Service provider runs
         '';
       }
     ];

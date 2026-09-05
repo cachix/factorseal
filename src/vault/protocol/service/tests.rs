@@ -135,7 +135,8 @@ use super::super::grant::{
 use super::*;
 use crate::vault::{
     DeviceKeyId, HistoryEntry, HistoryOperation, MAX_HISTORY_PAGE_SIZE, Permission,
-    PermissionOperation, PermissionPrincipal, Provenance, SecretAddress, ServiceReason, VersionId,
+    PermissionOperation, PermissionPrincipal, Provenance, SecretAddress, ServiceReason,
+    VaultEntryImportStatus, VaultEntryMetadata, VersionId,
 };
 use crate::{DocumentKind, MAX_LIST_PAGE_SIZE, SecretSpecAddress, SecretSpecCoordinates, Vault};
 
@@ -529,6 +530,204 @@ fn project_metadata_listing_is_paginated_value_free_and_separately_authorized() 
 }
 
 #[test]
+fn vault_inventory_is_value_free_paginated_and_permission_manager_only() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let manager = caller();
+    service
+        .authorize_document_kind(
+            &manager,
+            DocumentKind::LocalKeyring,
+            [GrantPermission::Put],
+            None,
+            100,
+        )
+        .unwrap();
+    service
+        .authorize_document_kind(
+            &manager,
+            DocumentKind::SecretSpecProject,
+            [GrantPermission::Put],
+            None,
+            100,
+        )
+        .unwrap();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    for action in [
+        VaultAction::Put {
+            namespace: b"application".to_vec(),
+            address: WireSecretAddress::new("account", Some("password".to_owned())),
+            value: WireSecret::new(b"local-secret-value".to_vec()),
+            evict_at: None,
+        },
+        VaultAction::PutProject {
+            project: "demo".to_owned(),
+            address: project_key("demo", "TOKEN"),
+            value: WireSecret::new(b"project-secret-value".to_vec()),
+        },
+    ] {
+        assert!(matches!(
+            service
+                .handle(&manager, VaultRequest::new(action).unwrap(), 101)
+                .result,
+            Ok(VaultResponseBody::Stored)
+        ));
+    }
+
+    let unauthorized = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.untrusted",
+        [19; 32],
+        None,
+    )
+    .unwrap();
+    let denied = service.handle(
+        &unauthorized,
+        VaultRequest::new(VaultAction::ListVaultEntries {
+            cursor: None,
+            limit: 1,
+        })
+        .unwrap(),
+        102,
+    );
+    assert_eq!(
+        denied.result.unwrap_err().code,
+        VaultResponseErrorCode::AuthorizationRequired
+    );
+
+    let mut entries = Vec::new();
+    let mut cursor = None;
+    loop {
+        let response = service.handle(
+            &manager,
+            VaultRequest::new(VaultAction::ListVaultEntries { cursor, limit: 1 }).unwrap(),
+            103,
+        );
+        let encoded = response.encode().unwrap();
+        for secret in [b"local-secret-value".as_slice(), b"project-secret-value"] {
+            assert!(!encoded.windows(secret.len()).any(|part| part == secret));
+        }
+        let Ok(VaultResponseBody::VaultEntries {
+            entries: page,
+            next_cursor,
+        }) = response.result
+        else {
+            panic!("expected a vault inventory page");
+        };
+        entries.extend(page);
+        cursor = next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.document_kind == DocumentKind::LocalKeyring)
+    );
+    assert!(entries.iter().any(|entry| {
+        entry.document_kind == DocumentKind::SecretSpecProject
+            && entry.partition == b"demo"
+            && entry.address.as_secret_spec() == Some(&project_key("demo", "TOKEN"))
+    }));
+}
+
+#[test]
+fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let manager = caller();
+    service
+        .authorize_document_kind(
+            &manager,
+            DocumentKind::LocalKeyring,
+            [GrantPermission::Put],
+            None,
+            100,
+        )
+        .unwrap();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    let source = VaultEntryMetadata {
+        document_kind: DocumentKind::LocalKeyring,
+        partition: b"factorseal/personal-secrets/v1".to_vec(),
+        address: SecretAddress::new("source", None).unwrap(),
+    };
+    assert!(matches!(
+        service
+            .handle(
+                &manager,
+                VaultRequest::new(VaultAction::ImportVaultEntry {
+                    entry: source.clone(),
+                    value: WireSecret::new(b"first".to_vec()),
+                    evict_at: None,
+                    replace_existing: false,
+                })
+                .unwrap(),
+                101,
+            )
+            .result,
+        Ok(VaultResponseBody::VaultEntryImported {
+            status: VaultEntryImportStatus::Added
+        })
+    ));
+
+    let exported = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ExportVaultEntry {
+            entry: source.clone(),
+        })
+        .unwrap(),
+        102,
+    );
+    let Ok(VaultResponseBody::VaultEntrySecret { value, .. }) = exported.result else {
+        panic!("expected an exported vault entry");
+    };
+    assert_eq!(value.expose(), b"first");
+
+    let untrusted = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.untrusted",
+        [29; 32],
+        None,
+    )
+    .unwrap();
+    let denied = service.handle(
+        &untrusted,
+        VaultRequest::new(VaultAction::ExportVaultEntry {
+            entry: source.clone(),
+        })
+        .unwrap(),
+        103,
+    );
+    assert_eq!(
+        denied.result.unwrap_err().code,
+        VaultResponseErrorCode::AuthorizationRequired
+    );
+
+    for (replace_existing, expected) in [
+        (false, VaultEntryImportStatus::KeptExisting),
+        (true, VaultEntryImportStatus::Replaced),
+    ] {
+        let response = service.handle(
+            &manager,
+            VaultRequest::new(VaultAction::ImportVaultEntry {
+                entry: source.clone(),
+                value: WireSecret::new(b"second".to_vec()),
+                evict_at: None,
+                replace_existing,
+            })
+            .unwrap(),
+            104,
+        );
+        assert!(matches!(
+            response.result,
+            Ok(VaultResponseBody::VaultEntryImported { status }) if status == expected
+        ));
+    }
+}
+
+#[test]
 fn list_requests_are_bounded_and_maximum_pages_fit_the_wire_limit() {
     for limit in [0, MAX_LIST_PAGE_SIZE + 1] {
         assert!(
@@ -544,6 +743,15 @@ fn list_requests_are_bounded_and_maximum_pages_fit_the_wire_limit() {
     assert!(
         VaultRequest::new(VaultAction::ListProjectAddresses {
             project: "demo".to_owned(),
+            cursor: Some("not-a-digest".to_owned()),
+            limit: 1,
+        })
+        .unwrap()
+        .encode()
+        .is_err()
+    );
+    assert!(
+        VaultRequest::new(VaultAction::ListVaultEntries {
             cursor: Some("not-a-digest".to_owned()),
             limit: 1,
         })

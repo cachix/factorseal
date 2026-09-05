@@ -20,7 +20,7 @@
   languages.rust = {
     enable = true;
     channel = "stable";
-    version = "1.94.0";
+    version = "1.97.1";
     targets = [ "x86_64-pc-windows-msvc" ];
   };
 

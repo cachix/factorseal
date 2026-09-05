@@ -16,8 +16,9 @@ pub use wire::{
     CallerIdentity, CallerPlatform, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
     MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionOperation, PermissionPrincipal,
     PermissionState, PermissionWaitStatus, RequestId, VaultAction, VaultApplicationContext,
-    VaultClient, VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse,
-    VaultResponseBody, VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    VaultClient, VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference,
+    VaultMutation, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
+    VaultResponseErrorCode, WireSecret, WireSecretAddress,
 };
 
 #[cfg(test)]

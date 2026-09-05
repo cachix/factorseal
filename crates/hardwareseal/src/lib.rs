@@ -21,6 +21,8 @@ mod envelope;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
+mod timing;
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod tpm2;
 #[cfg(any(test, target_os = "windows"))]

@@ -29,9 +29,7 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    outputHashes = {
-      "secretspec-ipc-0.19.1" = "sha256-QZ0RyffatI1ulF+jzZEHlUsjQeDoiIRV6nX4x3OkpIo=";
-    };
+    outputHashes = import ./cargo-output-hashes.nix { inherit lib; };
   };
 
   nativeBuildInputs = [
@@ -60,8 +58,12 @@ rustPlatform.buildRustPackage {
     install -Dm0755 \
       target/${stdenv.hostPlatform.rust.rustcTarget}/release/factorseal-desktop \
       "$out/bin/factorseal-desktop"
-    install -Dm0644 ${../assets/logo/factorseal-logo-fused.svg} \
+    install -Dm0644 ${../assets/logo/factorseal-app-icon.svg} \
       "$out/share/icons/hicolor/scalable/apps/dev.factorseal.Desktop.svg"
+    install -Dm0644 ${../assets/logo/dev.factorseal.Desktop-symbolic.svg} \
+      "$out/share/icons/hicolor/scalable/status/dev.factorseal.Desktop-symbolic.svg"
+    install -Dm0644 ${../assets/logo/dev.factorseal.Desktop-light-symbolic.svg} \
+      "$out/share/icons/hicolor/scalable/status/dev.factorseal.Desktop-light-symbolic.svg"
     mkdir -p "$out/share/applications"
     substitute ${../packaging/linux/dev.factorseal.Desktop.desktop.in} \
       "$out/share/applications/dev.factorseal.Desktop.desktop" \
@@ -75,7 +77,7 @@ rustPlatform.buildRustPackage {
   '';
 
   meta = {
-    description = "Graphical host for the Factorseal hardware-backed vault";
+    description = "Graphical host for the FactorSeal hardware-backed vault";
     homepage = "https://github.com/domenkozar/factorseal";
     license = lib.licenses.asl20;
     mainProgram = "factorseal-desktop";

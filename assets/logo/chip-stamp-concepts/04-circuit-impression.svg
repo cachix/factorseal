@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal circuit impression</title>
+  <desc id="desc">A circular stamp impression built from circuit traces and a central seal.</desc>
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="80" cy="80" r="58" stroke-width="9"/>
+    <circle cx="80" cy="80" r="27" stroke-width="8"/>
+    <path d="M80 53V35M80 125v-18M53 80H35M125 80h-18M61 61 48 48M112 112 99 99M99 61l13-13M48 112l13-13" stroke-width="7"/>
+    <path d="m66 80 9 9 20-22" stroke-width="7"/>
+  </g>
+  <g fill="currentColor">
+    <circle cx="80" cy="22" r="5"/><circle cx="80" cy="138" r="5"/><circle cx="22" cy="80" r="5"/><circle cx="138" cy="80" r="5"/>
+    <circle cx="39" cy="39" r="5"/><circle cx="121" cy="39" r="5"/><circle cx="39" cy="121" r="5"/><circle cx="121" cy="121" r="5"/>
+  </g>
+</svg>

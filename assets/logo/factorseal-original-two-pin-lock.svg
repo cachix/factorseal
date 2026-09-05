@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title description">
+  <title id="title">FactorSeal original two-pin lock</title>
+  <desc id="description">The original FactorSeal chip and keyhole mark with two short pins on each side.</desc>
+  <defs>
+    <mask id="keyhole-cutout">
+      <rect width="160" height="160" fill="#fff"/>
+      <circle cx="80" cy="68" r="13" fill="#000"/>
+      <path d="M75 78 69 108h22L85 78Z" fill="#000"/>
+    </mask>
+  </defs>
+  <g fill="currentColor" mask="url(#keyhole-cutout)">
+    <rect x="36" y="32" width="88" height="96" rx="11"/>
+    <rect x="63" y="18" width="9" height="15" rx="1.5"/>
+    <rect x="88" y="18" width="9" height="15" rx="1.5"/>
+    <rect x="63" y="127" width="9" height="15" rx="1.5"/>
+    <rect x="88" y="127" width="9" height="15" rx="1.5"/>
+    <rect x="22" y="62" width="15" height="9" rx="1.5"/>
+    <rect x="22" y="89" width="15" height="9" rx="1.5"/>
+    <rect x="123" y="62" width="15" height="9" rx="1.5"/>
+    <rect x="123" y="89" width="15" height="9" rx="1.5"/>
+  </g>
+</svg>

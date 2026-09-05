@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal shield impression</title>
+  <desc id="desc">A square chip shaped like a stamp impression around a verified shield.</desc>
+  <g fill="currentColor">
+    <path d="M43 27h74l12 12v82l-12 12H43l-12-12V39z"/>
+    <path d="M52 11h9v16h-9zm23 0h10v16H75zm24 0h9v16h-9zM52 133h9v16h-9zm23 0h10v16H75zm24 0h9v16h-9zM15 49h16v9H15zm0 22h16v9H15zm0 22h16v9H15zm114-44h16v9h-16zm0 22h16v9h-16zm0 22h16v9h-16z"/>
+  </g>
+  <path d="M80 49 105 59v20c0 18-10 29-25 36-15-7-25-18-25-36V59z" fill="none" stroke="#fff" stroke-width="7" stroke-linejoin="round"/>
+  <path d="m68 80 8 8 17-19" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

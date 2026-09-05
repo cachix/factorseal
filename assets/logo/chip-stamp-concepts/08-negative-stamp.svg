@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FactorSeal negative stamp</title>
+  <desc id="desc">A microchip with a classic rubber stamp carved out in negative space.</desc>
+  <defs>
+    <mask id="stamp-cutout">
+      <rect width="160" height="160" fill="#fff"/>
+      <path fill="#000" d="M80 45c-12 0-19 7-19 16 0 6 4 11 8 14v12H54c-5 0-9 4-9 9v7h70v-7c0-5-4-9-9-9H91V75c4-3 8-8 8-14 0-9-7-16-19-16z"/>
+      <rect x="48" y="108" width="64" height="8" rx="4" fill="#000"/>
+    </mask>
+  </defs>
+  <g fill="currentColor" mask="url(#stamp-cutout)">
+    <rect x="36" y="31" width="88" height="98" rx="12"/>
+    <path d="M52 14h10v17H52zm23 0h10v17H75zm23 0h10v17H98zM52 129h10v17H52zm23 0h10v17H75zm23 0h10v17H98zM19 48h17v10H19zm0 23h17v10H19zm0 23h17v10H19zm105-46h17v10h-17zm0 23h17v10h-17zm0 23h17v10h-17z"/>
+  </g>
+</svg>
