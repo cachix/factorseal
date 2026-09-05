@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::LazyLock};
 
 use anyhow::{Context as _, Result};
 use gpui::{App, Global, Hsla};
@@ -30,74 +30,60 @@ pub(crate) enum Choice {
     CatppuccinMacchiato,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Catalog {
+    themes: Vec<ThemeEntry>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeEntry {
+    id: Choice,
+    label: String,
+    preset: Option<String>,
+    mode: Option<Variant>,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Variant {
+    Light,
+    Dark,
+}
+
+static CATALOG: LazyLock<Catalog> = LazyLock::new(|| {
+    toml::from_str(include_str!("../themes/catalog.toml")).expect("invalid embedded theme catalog")
+});
+
 impl Choice {
     pub(crate) fn all() -> impl Iterator<Item = Self> {
-        [
-            Self::FactorSeal,
-            Self::System,
-            Self::GruvboxLight,
-            Self::GruvboxDark,
-            Self::OneLight,
-            Self::OneDark,
-            Self::DraculaLight,
-            Self::Dracula,
-            Self::SolarizedLight,
-            Self::SolarizedDark,
-            Self::NordLight,
-            Self::Nord,
-            Self::TokyoNightDay,
-            Self::TokyoNight,
-            Self::CatppuccinLatte,
-            Self::CatppuccinFrappe,
-            Self::CatppuccinMacchiato,
-            Self::CatppuccinMocha,
-        ]
-        .into_iter()
+        CATALOG.themes.iter().map(|entry| entry.id)
+    }
+
+    fn entry(self) -> &'static ThemeEntry {
+        CATALOG
+            .themes
+            .iter()
+            .find(|entry| entry.id == self)
+            .expect("theme missing from embedded catalog")
     }
 
     pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::FactorSeal => "FactorSeal",
-            Self::System => "System",
-            Self::GruvboxLight => "Gruvbox Light",
-            Self::GruvboxDark => "Gruvbox Dark",
-            Self::OneLight => "One Light",
-            Self::OneDark => "One Dark",
-            Self::DraculaLight => "Dracula Light",
-            Self::Dracula => "Dracula",
-            Self::SolarizedLight => "Solarized Light",
-            Self::SolarizedDark => "Solarized Dark",
-            Self::NordLight => "Nord Light",
-            Self::Nord => "Nord",
-            Self::TokyoNightDay => "Tokyo Night Day",
-            Self::TokyoNight => "Tokyo Night",
-            Self::CatppuccinLatte => "Catppuccin Latte",
-            Self::CatppuccinFrappe => "Catppuccin Frappé",
-            Self::CatppuccinMacchiato => "Catppuccin Macchiato",
-            Self::CatppuccinMocha => "Catppuccin Mocha",
-        }
+        &self.entry().label
     }
 
     fn preset(self) -> Option<(&'static str, ColorMode)> {
-        match self {
-            Self::FactorSeal | Self::System => None,
-            Self::GruvboxLight => Some(("gruvbox", ColorMode::Light)),
-            Self::GruvboxDark => Some(("gruvbox", ColorMode::Dark)),
-            Self::OneLight => Some(("one-dark", ColorMode::Light)),
-            Self::OneDark => Some(("one-dark", ColorMode::Dark)),
-            Self::DraculaLight => Some(("dracula", ColorMode::Light)),
-            Self::Dracula => Some(("dracula", ColorMode::Dark)),
-            Self::SolarizedLight => Some(("solarized", ColorMode::Light)),
-            Self::SolarizedDark => Some(("solarized", ColorMode::Dark)),
-            Self::NordLight => Some(("nord", ColorMode::Light)),
-            Self::Nord => Some(("nord", ColorMode::Dark)),
-            Self::TokyoNightDay => Some(("tokyo-night", ColorMode::Light)),
-            Self::TokyoNight => Some(("tokyo-night", ColorMode::Dark)),
-            Self::CatppuccinLatte => Some(("catppuccin-latte", ColorMode::Light)),
-            Self::CatppuccinFrappe => Some(("catppuccin-frappe", ColorMode::Dark)),
-            Self::CatppuccinMacchiato => Some(("catppuccin-macchiato", ColorMode::Dark)),
-            Self::CatppuccinMocha => Some(("catppuccin-mocha", ColorMode::Dark)),
-        }
+        let entry = self.entry();
+        entry.preset.as_deref().zip(entry.mode).map(|(name, mode)| {
+            (
+                name,
+                match mode {
+                    Variant::Light => ColorMode::Light,
+                    Variant::Dark => ColorMode::Dark,
+                },
+            )
+        })
     }
 }
 
@@ -246,6 +232,40 @@ pub(crate) fn system_changed(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_catalog_preserves_theme_ids_and_valid_sources() {
+        let expected = [
+            "factorseal",
+            "system",
+            "gruvbox-light",
+            "gruvbox-dark",
+            "one-light",
+            "one-dark",
+            "dracula-light",
+            "dracula",
+            "solarized-light",
+            "solarized-dark",
+            "nord-light",
+            "nord",
+            "tokyo-night-day",
+            "tokyo-night",
+            "catppuccin-latte",
+            "catppuccin-frappe",
+            "catppuccin-macchiato",
+            "catppuccin-mocha",
+        ];
+        let ids: Vec<_> = Choice::all()
+            .map(|choice| serde_json::to_value(choice).unwrap())
+            .collect();
+        assert_eq!(ids, expected.map(serde_json::Value::from));
+        for entry in &CATALOG.themes {
+            assert!(!entry.label.trim().is_empty());
+            let builtin = matches!(entry.id, Choice::FactorSeal | Choice::System);
+            assert_eq!(entry.preset.is_none(), builtin);
+            assert_eq!(entry.mode.is_none(), builtin);
+        }
+    }
 
     #[test]
     fn additional_bundled_variants_have_distinct_palettes() {
