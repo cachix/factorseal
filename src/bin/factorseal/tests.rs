@@ -16,8 +16,10 @@ use std::time::Duration;
 
 use clap::Parser;
 use factorseal::{
-    MAX_LIST_PAGE_SIZE, SecretSpecAddress, SecretSpecCoordinates, UnlockFactorKind, UnlockGroup,
-    VaultAction, VaultClient, VaultRequest, VaultResponse, VaultResponseBody, VaultResult,
+    DeviceKeyId, HistoryEntry, HistoryOperation, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
+    Provenance, SecretAddress, SecretSpecAddress, SecretSpecCoordinates, ServiceReason,
+    UnlockFactorKind, UnlockGroup, VaultAction, VaultClient, VaultRequest, VaultResponse,
+    VaultResponseBody, VaultResult, VersionId,
 };
 
 #[test]
@@ -395,6 +397,31 @@ fn metadata_list_commands_are_explicit_and_project_aware() {
         list.command,
         Command::List { project, json: true } if project == "demo"
     ));
+
+    let history =
+        Cli::try_parse_from(["factorseal", "history", "--project", "demo", "--json"]).unwrap();
+    assert!(matches!(
+        history.command,
+        Command::History { project, json: true } if project == "demo"
+    ));
+}
+
+fn history_entry(seq: u64) -> HistoryEntry {
+    HistoryEntry {
+        version: HistoryEntry::CURRENT_VERSION,
+        seq,
+        at: 1_700_000_000 + seq,
+        operation: HistoryOperation::Put { changed: true },
+        address: SecretAddress::secret_spec(
+            SecretSpecAddress::convention("alpha", "default", "TOKEN").unwrap(),
+        )
+        .unwrap(),
+        version_id: Some(VersionId::from_bytes([u8::try_from(seq).unwrap(); 16])),
+        previous_version_id: None,
+        evict_at: None,
+        provenance: Provenance::service(ServiceReason::GrantStorage),
+        device_key_id: DeviceKeyId::from_bytes([7; 32]),
+    }
 }
 
 struct ListingClient;
@@ -448,10 +475,66 @@ impl VaultClient for ListingClient {
                     }
                 }
             }
+            VaultAction::ListProjectHistory {
+                project,
+                address,
+                cursor,
+                limit,
+            } => {
+                assert_eq!(project, "alpha");
+                assert!(address.is_none());
+                assert_eq!(*limit, MAX_HISTORY_PAGE_SIZE);
+                match cursor {
+                    None => VaultResponseBody::History {
+                        entries: vec![history_entry(5), history_entry(4)],
+                        next_cursor: Some(4),
+                    },
+                    Some(4) => VaultResponseBody::History {
+                        entries: vec![history_entry(1)],
+                        next_cursor: None,
+                    },
+                    Some(other) => panic!("unexpected history cursor {other}"),
+                }
+            }
             _ => panic!("listing client received an unexpected request"),
         };
         Ok(VaultResponse::success(request.request_id(), body))
     }
+}
+
+/// A cursor must be exactly the last entry's sequence number, so a server
+/// that hands back anything else cannot make the CLI loop or skip entries.
+struct StalledHistoryClient;
+
+impl VaultClient for StalledHistoryClient {
+    fn request(&self, request: &VaultRequest) -> VaultResult<VaultResponse> {
+        let VaultAction::ListProjectHistory { cursor, .. } = &request.action else {
+            panic!("stalled history client received an unexpected request");
+        };
+        let body = match cursor {
+            None => VaultResponseBody::History {
+                entries: vec![history_entry(3)],
+                next_cursor: Some(4),
+            },
+            Some(_) => panic!("the CLI must not follow a stalled cursor"),
+        };
+        Ok(VaultResponse::success(request.request_id(), body))
+    }
+}
+
+#[test]
+fn history_command_consumes_every_page_newest_first_and_rejects_stalls() {
+    let entries = super::commands::fetch_project_history(&ListingClient, "alpha").unwrap();
+    assert_eq!(
+        entries.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+        [5, 4, 1]
+    );
+    let mut rendered = Vec::new();
+    write_metadata(&mut rendered, &entries, true).unwrap();
+    let parsed: Vec<HistoryEntry> = serde_json::from_slice(&rendered).unwrap();
+    assert_eq!(parsed, entries);
+
+    assert!(super::commands::fetch_project_history(&StalledHistoryClient, "alpha").is_err());
 }
 
 #[test]

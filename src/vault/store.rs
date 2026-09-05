@@ -4,7 +4,8 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use super::{
-    DocumentKind, DocumentOperation, SecretAddress, UnsealedVault, VaultMetadata, VaultResult,
+    DocumentKind, DocumentOperation, HistoryEntry, Provenance, SecretAddress, UnsealedVault,
+    VaultMetadata, VaultResult,
 };
 
 mod bootstrap;
@@ -12,7 +13,8 @@ mod chain;
 mod database;
 mod worker;
 
-use worker::{Command, WorkerControl, request};
+pub(crate) use worker::StoredSecret;
+use worker::{Command, SecretValues, WorkerControl, request};
 
 #[derive(Clone)]
 pub(crate) struct VaultStore {
@@ -25,7 +27,18 @@ pub(crate) struct StorePage<T> {
     pub(crate) next_cursor: Option<String>,
 }
 
+/// One newest-first page of history with the sequence number to continue
+/// below, absent on the last page.
+pub(crate) struct HistoryPage {
+    pub(crate) items: Vec<HistoryEntry>,
+    pub(crate) next_before_seq: Option<u64>,
+}
+
 impl VaultStore {
+    pub(crate) fn seal_signal(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.control.seal_signal()
+    }
+
     /// Open the vault's embedded Turso database and consume its
     /// hardware-unwrapped secrets into the worker.
     pub(crate) fn open(root: impl AsRef<Path>, unsealed: UnsealedVault) -> VaultResult<Self> {
@@ -49,6 +62,22 @@ impl VaultStore {
         self.control.shutdown();
     }
 
+    pub(crate) fn request_seal(&self) {
+        self.control.request_shutdown();
+    }
+
+    pub(crate) fn set_deadline(&self, deadline: std::time::Instant) -> VaultResult<()> {
+        self.control.set_deadline(deadline)
+    }
+
+    pub(crate) fn deadline(&self) -> VaultResult<Option<std::time::Instant>> {
+        self.control.deadline()
+    }
+
+    pub(crate) fn enable_emergency_exit(&self) {
+        self.control.enable_emergency_exit();
+    }
+
     #[must_use]
     pub(crate) fn is_sealed(&self) -> bool {
         self.control.is_sealed()
@@ -59,26 +88,38 @@ impl VaultStore {
         self.control.is_shutdown_complete()
     }
 
-    /// Delete one secret idempotently.
+    /// Delete one secret idempotently, recording who asked and when.
     pub(crate) fn delete(
         &self,
         scope: DocumentKind,
         namespace: &[u8],
         address: &SecretAddress,
+        provenance: &Provenance,
+        now: u64,
     ) -> VaultResult<bool> {
         request(&self.control.sender, |response| Command::Delete {
             scope,
             partition: namespace.to_vec(),
             address: address.clone(),
+            provenance: provenance.clone(),
+            now,
             response,
         })
     }
 
     /// Clear every secret from one scoped document.
-    pub(crate) fn clear(&self, scope: DocumentKind, namespace: &[u8]) -> VaultResult<usize> {
+    pub(crate) fn clear(
+        &self,
+        scope: DocumentKind,
+        namespace: &[u8],
+        provenance: &Provenance,
+        now: u64,
+    ) -> VaultResult<usize> {
         request(&self.control.sender, |response| Command::Clear {
             scope,
             partition: namespace.to_vec(),
+            provenance: provenance.clone(),
+            now,
             response,
         })
     }
@@ -90,6 +131,17 @@ impl VaultStore {
         address: &SecretAddress,
         now: u64,
     ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
+        self.get_with_deadline(scope, namespace, address, now)
+            .map(|value| value.map(|secret| secret.value))
+    }
+
+    pub(crate) fn get_with_deadline(
+        &self,
+        scope: DocumentKind,
+        namespace: &[u8],
+        address: &SecretAddress,
+        now: u64,
+    ) -> VaultResult<Option<StoredSecret>> {
         request(&self.control.sender, |response| Command::Get {
             scope,
             partition: namespace.to_vec(),
@@ -99,6 +151,29 @@ impl VaultStore {
         })
     }
 
+    // Every argument is a distinct, required input of one write.
+    #[allow(clippy::too_many_arguments)]
+    /// Read several addresses from one document load without writing. An
+    /// expired record reads as absent and is left for the eviction sweep, so
+    /// an authorization check never commits a generation.
+    pub(crate) fn get_many(
+        &self,
+        scope: DocumentKind,
+        namespace: &[u8],
+        addresses: &[SecretAddress],
+        now: u64,
+    ) -> VaultResult<SecretValues> {
+        request(&self.control.sender, |response| Command::GetMany {
+            scope,
+            partition: namespace.to_vec(),
+            addresses: addresses.to_vec(),
+            now,
+            response,
+        })
+    }
+
+    // Every argument is a distinct, required input of one write.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn put_at(
         &self,
         scope: DocumentKind,
@@ -106,6 +181,8 @@ impl VaultStore {
         address: &SecretAddress,
         value: &[u8],
         evict_at: Option<u64>,
+        provenance: &Provenance,
+        now: u64,
     ) -> VaultResult<()> {
         request(&self.control.sender, |response| Command::Put {
             scope,
@@ -113,6 +190,8 @@ impl VaultStore {
             address: address.clone(),
             value: Zeroizing::new(value.to_vec()),
             evict_at,
+            provenance: provenance.clone(),
+            now,
             response,
         })
     }
@@ -125,11 +204,15 @@ impl VaultStore {
         scope: DocumentKind,
         namespace: &[u8],
         operations: Vec<DocumentOperation>,
+        provenance: &Provenance,
+        now: u64,
     ) -> VaultResult<()> {
         request(&self.control.sender, |response| Command::Mutate {
             scope,
             partition: namespace.to_vec(),
             operations,
+            provenance: provenance.clone(),
+            now,
             response,
         })
     }
@@ -170,6 +253,27 @@ impl VaultStore {
                 now,
                 response,
             }
+        })
+    }
+
+    /// Recorded changes for one document, newest first. The cursor is the
+    /// sequence number below which to continue, so a page never repeats an
+    /// entry that a later trim removed.
+    pub(crate) fn list_history(
+        &self,
+        scope: DocumentKind,
+        namespace: &[u8],
+        address: Option<&SecretAddress>,
+        before_seq: Option<u64>,
+        limit: u16,
+    ) -> VaultResult<HistoryPage> {
+        request(&self.control.sender, |response| Command::ListHistory {
+            scope,
+            partition: namespace.to_vec(),
+            address: address.cloned(),
+            before_seq,
+            limit,
+            response,
         })
     }
 }

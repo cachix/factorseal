@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-use crate::vault::{DocumentKind, VaultError, VaultResult, VaultStore};
+use crate::vault::{DocumentKind, Provenance, VaultError, VaultResult, VaultStore};
 
 use super::super::grant::{GrantTarget, promote_permission};
 use super::super::{
@@ -295,6 +295,7 @@ impl PendingApprovals {
         signature: &[u8],
         grant_duration_seconds: Option<u64>,
         now: u64,
+        provenance: &Provenance,
     ) -> VaultResult<()> {
         self.purge_expired(now);
         let index = self
@@ -335,8 +336,8 @@ impl PendingApprovals {
             },
             record.permission,
             permission,
-            grant_expires_at,
             now,
+            provenance,
         )?;
         let caller_fingerprint = record.caller.fingerprint();
         self.records.remove(index);

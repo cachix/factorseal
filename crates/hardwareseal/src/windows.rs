@@ -882,6 +882,21 @@ impl AssertionGuard {
 
 impl Drop for AssertionGuard {
     fn drop(&mut self) {
+        // WebAuthN owns these writable output arrays until FreeAssertion. Wipe
+        // each PRF result before freeing the allocation, including error paths.
+        // The API specifies exactly 32 bytes per HMAC output.
+        unsafe {
+            if let Some(secret) = (*self.0).pHmacSecret.as_ref() {
+                for (pointer, length) in [
+                    (secret.pbFirst, secret.cbFirst),
+                    (secret.pbSecond, secret.cbSecond),
+                ] {
+                    if !pointer.is_null() && length == 32 {
+                        zeroize::Zeroize::zeroize(std::slice::from_raw_parts_mut(pointer, 32));
+                    }
+                }
+            }
+        }
         unsafe { WebAuthNFreeAssertion(self.0) };
     }
 }

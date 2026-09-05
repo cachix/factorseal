@@ -64,7 +64,6 @@ pub(crate) fn serve_secret_service(
             GrantPermission::Delete,
             GrantPermission::Seal,
         ],
-        None,
         unix_time(),
     )?;
 
@@ -340,7 +339,6 @@ mod tests {
                     GrantPermission::Put,
                     GrantPermission::Delete,
                 ],
-                None,
                 100,
             )
             .unwrap();

@@ -7,15 +7,50 @@
 #[cfg(feature = "vault-store")]
 use core::convert::TryFrom;
 
-#[cfg(feature = "key-protection")]
+#[cfg(any(feature = "key-protection", test))]
 use ml_dsa::{KeyExport, Keypair};
-use ml_dsa::{KeyInit, MlDsa65, SigningKey};
+use ml_dsa::{KeyInit, MlDsa65, Seed, SigningKey};
 #[cfg(feature = "vault-store")]
 use ml_dsa::{Signature, SignatureEncoding, Verifier, VerifyingKey};
 
+#[cfg(feature = "vault-store")]
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+#[cfg(feature = "vault-store")]
 use super::{VaultError, VaultResult};
 
 pub(crate) const SIGNING_SEED_BYTES: usize = 32;
+#[cfg(feature = "vault-store")]
+pub(crate) const CURRENT_SIGNATURE_ALGORITHM: SignatureAlgorithm = SignatureAlgorithm::MlDsa65;
+
+/// Algorithm that authenticates a signed vault object.
+///
+/// The identifier is written into every signed transcript, so it cannot be
+/// swapped without breaking verification. It is a closed enum, so an
+/// unrecognized name fails to deserialize instead of selecting a weaker
+/// algorithm, and there is no "none" variant to downgrade to.
+///
+/// ML-DSA-65 is the only variant today. The identifier is still explicit so a
+/// later algorithm migration cannot silently weaken verification.
+#[cfg(feature = "vault-store")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum SignatureAlgorithm {
+    MlDsa65,
+}
+
+#[cfg(feature = "vault-store")]
+impl SignatureAlgorithm {
+    /// Stable byte written into signed transcripts. Never reuse a code.
+    pub(crate) const fn code(self) -> u8 {
+        match self {
+            Self::MlDsa65 => 2,
+        }
+    }
+}
+#[cfg(feature = "vault-store")]
 const PERMISSION_SIGNATURE_DOMAIN: &[u8] = b"factorseal/permission/v1\0";
 
 type DeviceSigningKey = SigningKey<MlDsa65>;
@@ -24,18 +59,18 @@ type DeviceVerifyingKey = VerifyingKey<MlDsa65>;
 #[cfg(feature = "vault-store")]
 type DeviceSignature = Signature<MlDsa65>;
 
-#[cfg(feature = "key-protection")]
-pub(crate) fn public_key_for_seed(seed: &[u8; SIGNING_SEED_BYTES]) -> VaultResult<Vec<u8>> {
-    Ok(signing_key_from_seed(seed)?
+#[cfg(any(feature = "key-protection", test))]
+pub(crate) fn public_key_for_seed(seed: &[u8; SIGNING_SEED_BYTES]) -> Vec<u8> {
+    signing_key_from_seed(seed)
         .verifying_key()
         .to_bytes()
-        .to_vec())
+        .to_vec()
 }
 
 #[cfg(feature = "vault-store")]
 pub(crate) fn sign(seed: &[u8; SIGNING_SEED_BYTES], payload: &[u8]) -> VaultResult<Vec<u8>> {
     let mut rng = getrandom_04::SysRng;
-    Ok(signing_key_from_seed(seed)?
+    Ok(signing_key_from_seed(seed)
         .expanded_key()
         .sign_randomized(payload, b"", &mut rng)
         .map_err(|_| VaultError::Crypto)?
@@ -53,6 +88,19 @@ pub(crate) fn verify(public_key: &[u8], payload: &[u8], signature: &[u8]) -> Vau
         .map_err(|_| VaultError::Signature)
 }
 
+#[cfg(feature = "vault-store")]
+pub(crate) fn verify_with(
+    algorithm: SignatureAlgorithm,
+    public_key: &[u8],
+    payload: &[u8],
+    signature: &[u8],
+) -> VaultResult<()> {
+    match algorithm {
+        SignatureAlgorithm::MlDsa65 => verify(public_key, payload, signature),
+    }
+}
+
+#[cfg(feature = "vault-store")]
 pub(crate) fn permission_payload(
     id: &str,
     challenge: &[u8; 32],
@@ -73,13 +121,10 @@ pub(crate) fn permission_payload(
     payload
 }
 
-fn signing_key_from_seed(seed: &[u8; SIGNING_SEED_BYTES]) -> VaultResult<DeviceSigningKey> {
-    Ok(DeviceSigningKey::new(
-        &seed
-            .as_slice()
-            .try_into()
-            .map_err(|_| VaultError::Signature)?,
-    ))
+fn signing_key_from_seed(seed: &[u8; SIGNING_SEED_BYTES]) -> DeviceSigningKey {
+    let mut protected_seed = Zeroizing::new(Seed::default());
+    protected_seed.copy_from_slice(seed);
+    DeviceSigningKey::new(&protected_seed)
 }
 
 #[cfg(all(test, feature = "vault-store"))]
@@ -90,7 +135,7 @@ mod tests {
     #[test]
     fn mldsa_signatures_round_trip_and_reject_tampering() {
         let seed = [0x2a; SIGNING_SEED_BYTES];
-        let public_key = public_key_for_seed(&seed).unwrap();
+        let public_key = public_key_for_seed(&seed);
         let mut signature = sign(&seed, b"Factorseal durable state").unwrap();
 
         verify(&public_key, b"Factorseal durable state", &signature).unwrap();
@@ -101,7 +146,7 @@ mod tests {
     #[test]
     fn mldsa_signatures_are_randomized() {
         let seed = [0x2a; SIGNING_SEED_BYTES];
-        let public_key = public_key_for_seed(&seed).unwrap();
+        let public_key = public_key_for_seed(&seed);
         let first = sign(&seed, b"Factorseal durable state").unwrap();
         let second = sign(&seed, b"Factorseal durable state").unwrap();
 
@@ -119,7 +164,7 @@ mod tests {
             .unwrap()
             .try_into()
             .unwrap();
-        let public_key = public_key_for_seed(&seed).unwrap();
+        let public_key = public_key_for_seed(&seed);
 
         assert_eq!(public_key.len(), 1_952);
         assert_eq!(
@@ -131,7 +176,7 @@ mod tests {
     #[test]
     fn malformed_mldsa_inputs_are_rejected() {
         let seed = [0x7b; SIGNING_SEED_BYTES];
-        let public_key = public_key_for_seed(&seed).unwrap();
+        let public_key = public_key_for_seed(&seed);
         let signature = sign(&seed, b"Factorseal durable state").unwrap();
 
         assert!(

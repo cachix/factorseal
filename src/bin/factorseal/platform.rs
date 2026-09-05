@@ -23,6 +23,56 @@ use factorseal::{
 };
 
 use super::CliError;
+#[cfg(unix)]
+use factorseal::VaultError;
+
+#[cfg_attr(
+    target_os = "windows",
+    expect(clippy::unnecessary_wraps, reason = "Unix core limits are fallible")
+)]
+pub(super) fn disable_core_dumps() -> Result<(), CliError> {
+    #[cfg(unix)]
+    nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0).map_err(
+        |error| VaultError::Protection(format!("could not disable core dumps: {error}")),
+    )?;
+    Ok(())
+}
+
+/// The key-owning process needs stronger Linux dump suppression, including
+/// piped core collectors. Do not apply this to IPC clients: authenticating
+/// their executable currently requires ptrace-gated /proc access.
+pub(super) fn harden_key_owner() -> Result<(), CliError> {
+    disable_core_dumps()?;
+    #[cfg(target_os = "linux")]
+    nix::sys::prctl::set_dumpable(false).map_err(|error| {
+        VaultError::Protection(format!("could not disable process dumps: {error}"))
+    })?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn key_owner_disables_dumpability_and_core_limits_in_a_child() {
+    const CHILD: &str = "FACTORSEAL_TEST_DUMP_POLICY";
+    if std::env::var_os(CHILD).is_some() {
+        harden_key_owner().unwrap();
+        assert!(!nix::sys::prctl::get_dumpable().unwrap());
+        assert_eq!(
+            nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_CORE).unwrap(),
+            (0, 0)
+        );
+        return;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "platform::key_owner_disables_dumpability_and_core_limits_in_a_child",
+        ])
+        .env(CHILD, "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::DEFAULT_UNIX_SOCKET;
 
@@ -84,7 +134,9 @@ pub(super) fn native_client(
         ));
     }
     let device = Vault::inspect(root)?;
-    Ok(WindowsVaultClient::for_vault(device.vault_id()))
+    Ok(WindowsVaultClient::for_installation(
+        device.installation_id(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -122,7 +174,7 @@ pub(super) fn serve_vault(
     lifecycle: &NativeVaultLifecycle,
 ) -> Result<(), CliError> {
     let pipe_name = socket.map_or_else(
-        || default_windows_pipe_name(device.vault_id()),
+        || default_windows_pipe_name(device.installation_id()),
         |path| path.to_string_lossy().into_owned(),
     );
     serve_windows_vault_with_lifecycle(

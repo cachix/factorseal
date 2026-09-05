@@ -2,13 +2,11 @@
 use std::fs;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
-
 #[cfg(feature = "hardware")]
 use crate::hardware::{PlatformProtectorFactory, validate_native_biometric};
+use serde::{Deserialize, Serialize};
 
-use super::{DeviceKeyId, VaultError, VaultId, VaultResult};
+use super::{DeviceKeyId, InstallationId, InstallationSecrets, VaultError, VaultId, VaultResult};
 #[cfg(feature = "key-protection")]
 use super::{KeyProtector, KeyProtectorFactory};
 
@@ -23,11 +21,13 @@ use filesystem::validate_root;
 #[cfg(feature = "key-protection")]
 use filesystem::{prepare_root, unix_time};
 #[cfg(feature = "key-protection")]
+use metadata::read_pending_vault;
+use metadata::read_vault;
+#[cfg(feature = "key-protection")]
 use metadata::{PENDING_VAULT_FILE, VAULT_FILE};
-use metadata::{read_pending_vault, read_vault};
 #[cfg(feature = "key-protection")]
 use protectors::{
-    LabeledProtector, SlotProtectors, VaultCreation, create_with_protectors, unseal_with_protectors,
+    LabeledProtector, SlotProtector, VaultCreation, create_with_protectors, unseal_with_protectors,
 };
 
 const KEY_BYTES: usize = 32;
@@ -50,10 +50,11 @@ fn validate_native_unlock_policy(policy: &UnlockPolicy) -> VaultResult<()> {
     Ok(())
 }
 
-/// Public, stable identity of this vault.
+/// Public, stable identity and local device-vault assignment of an installation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultMetadata {
-    vault_id: VaultId,
+    installation_id: InstallationId,
+    device_vault_id: VaultId,
     device_key_id: DeviceKeyId,
     public_signing_key: Vec<u8>,
     actor_id: Vec<u8>,
@@ -62,14 +63,19 @@ pub struct VaultMetadata {
     cryptographic_profile: VaultCryptoProfile,
     unlock_policy: UnlockPolicy,
     preferred_unlock_group: UnlockGroup,
-    key_epoch: u64,
     created_at: u64,
 }
 
 impl VaultMetadata {
     #[must_use]
-    pub const fn vault_id(&self) -> VaultId {
-        self.vault_id
+    pub const fn installation_id(&self) -> InstallationId {
+        self.installation_id
+    }
+
+    /// The installation's sole non-replicating document container.
+    #[must_use]
+    pub const fn device_vault_id(&self) -> VaultId {
+        self.device_vault_id
     }
 
     #[must_use]
@@ -122,11 +128,6 @@ impl VaultMetadata {
     }
 
     #[must_use]
-    pub const fn key_epoch(&self) -> u64 {
-        self.key_epoch
-    }
-
-    #[must_use]
     pub const fn created_at(&self) -> u64 {
         self.created_at
     }
@@ -136,8 +137,7 @@ impl VaultMetadata {
 #[allow(dead_code)]
 pub struct UnsealedVault {
     public: VaultMetadata,
-    data_key: Zeroizing<[u8; KEY_BYTES]>,
-    signing_seed: Zeroizing<[u8; KEY_BYTES]>,
+    secrets: InstallationSecrets,
     initialize_store: bool,
 }
 
@@ -146,8 +146,7 @@ impl std::fmt::Debug for UnsealedVault {
         formatter
             .debug_struct("UnsealedVault")
             .field("public", &self.public)
-            .field("data_key", &"[REDACTED]")
-            .field("signing_seed", &"[REDACTED]")
+            .field("secrets", &"[REDACTED]")
             .field("initialize_store", &self.initialize_store)
             .finish()
     }
@@ -168,27 +167,18 @@ impl UnsealedVault {
         challenge: &[u8; 32],
         duration_seconds: Option<u64>,
     ) -> VaultResult<Vec<u8>> {
+        let signing_seed = self
+            .secrets
+            .signing_seed(self.public.installation_id(), self.public.device_vault_id())?;
         super::signature::sign(
-            &self.signing_seed,
+            &signing_seed,
             &super::signature::permission_payload(id, challenge, duration_seconds),
         )
     }
 
     #[allow(dead_code)]
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        VaultMetadata,
-        Zeroizing<[u8; KEY_BYTES]>,
-        Zeroizing<[u8; KEY_BYTES]>,
-        bool,
-    ) {
-        (
-            self.public,
-            self.data_key,
-            self.signing_seed,
-            self.initialize_store,
-        )
+    pub(crate) fn into_parts(self) -> (VaultMetadata, InstallationSecrets, bool) {
+        (self.public, self.secrets, self.initialize_store)
     }
 }
 
@@ -215,10 +205,11 @@ impl Vault {
         discard_initialization_with_factory(root.as_ref(), &PlatformProtectorFactory, true)
     }
 
-    /// Permanently destroy a legacy single-password vault after proving
+    /// Remove a single-password vault after proving
     /// possession of its password factor.
     ///
-    /// This deletes all native hardware keys and the local vault directory.
+    /// This removes backend-owned key state and the local vault directory.
+    /// Retained TPM envelopes and backups are not revoked by local removal.
     /// Callers must first stop any running vault service; destruction is an
     /// explicit recovery or disposable-test operation, not a substitute for
     /// sealing a live vault.
@@ -232,7 +223,8 @@ impl Vault {
         Self::discard_initialization(root)
     }
 
-    /// Permanently destroy a native vault after satisfying one unlock group.
+    /// Remove a native vault after satisfying one unlock group.
+    /// Retained TPM envelopes and backups are not revoked by local removal.
     #[cfg(feature = "hardware")]
     pub fn destroy_with_unlock_group(
         root: impl AsRef<Path>,
@@ -289,7 +281,7 @@ impl Vault {
         factor: UnsealFactor<'_>,
         biometric: bool,
     ) -> VaultResult<UnsealedVault> {
-        let (policy, credentials) = legacy_policy(factor, biometric)?;
+        let (policy, credentials) = password_policy(factor, biometric)?;
         Self::create_with_unlock_policy(root, &policy, credentials)
     }
 
@@ -378,7 +370,7 @@ impl Vault {
         biometric: bool,
         factory: &dyn KeyProtectorFactory,
     ) -> VaultResult<UnsealedVault> {
-        let (policy, credentials) = legacy_policy(factor, biometric)?;
+        let (policy, credentials) = password_policy(factor, biometric)?;
         Self::create_with_key_protector_policy(root, platform, &policy, credentials, factory)
     }
 
@@ -438,50 +430,38 @@ impl Vault {
         for group in policy.groups() {
             let _ = credentials.password_for(group)?;
         }
-        let mut protectors: Vec<Box<dyn KeyProtector>> =
-            Vec::with_capacity(policy.groups().len() * 2);
+        let mut protectors: Vec<Box<dyn KeyProtector>> = Vec::with_capacity(policy.groups().len());
         let result = (|| {
-            let vault_id = VaultId::random()?;
-            let label_suffix = hex::encode(vault_id.as_bytes());
+            let (installation_id, device_vault_id) = random_installation_and_device_vault_ids()?;
+            let label_suffix = hex::encode(installation_id.as_bytes());
             let labels: Vec<_> = policy
                 .groups()
                 .iter()
                 .enumerate()
-                .map(|(index, _)| {
-                    (
-                        format!("vault-slot-{index}-wrap-{label_suffix}"),
-                        format!("vault-slot-{index}-sign-{label_suffix}"),
-                    )
-                })
+                .map(|(index, _)| format!("vault-slot-{index}-root-{label_suffix}"))
                 .collect();
-            for (group, (wrapping_label, signing_label)) in policy.groups().iter().zip(&labels) {
+            for (group, label) in policy.groups().iter().zip(&labels) {
                 let biometric = group.requires(UnlockFactorKind::Biometric);
-                protectors.push(factory.create(root, wrapping_label, biometric)?);
-                protectors.push(factory.create(root, signing_label, biometric)?);
+                protectors.push(factory.create(root, label, biometric)?);
             }
             let slot_protectors: Vec<_> = policy
                 .groups()
                 .iter()
                 .zip(&labels)
-                .enumerate()
-                .map(
-                    |(index, (group, (wrapping_label, signing_label)))| SlotProtectors {
-                        group,
-                        wrapping: LabeledProtector {
-                            label: wrapping_label,
-                            key: protectors[index * 2].as_ref(),
-                        },
-                        signing: LabeledProtector {
-                            label: signing_label,
-                            key: protectors[index * 2 + 1].as_ref(),
-                        },
+                .zip(&protectors)
+                .map(|((group, label), key)| SlotProtector {
+                    group,
+                    wrapping: LabeledProtector {
+                        label,
+                        key: key.as_ref(),
                     },
-                )
+                })
                 .collect();
             create_with_protectors(
                 root,
                 VaultCreation {
-                    vault_id,
+                    installation_id,
+                    device_vault_id,
                     created_at: unix_time()?,
                     platform,
                     cryptographic_profile,
@@ -611,14 +591,7 @@ impl Vault {
             })?;
         let biometric = group.requires(UnlockFactorKind::Biometric);
         let wrapping = factory.open(root, &slot.wrapping_key_label, biometric)?;
-        let signing = factory.open(root, &slot.signing_key_label, biometric)?;
-        unseal_with_protectors(
-            &stored,
-            slot,
-            wrapping.as_ref(),
-            signing.as_ref(),
-            credentials,
-        )
+        unseal_with_protectors(&stored, slot, wrapping.as_ref(), credentials)
     }
 
     #[cfg(not(feature = "hardware"))]
@@ -637,27 +610,24 @@ impl Vault {
 
         prepare_root(root)?;
         let wrapping = TestProtector::new([0x35; KEY_BYTES]);
-        let signing = TestProtector::new([0x97; KEY_BYTES]);
         let group = UnlockGroup::new([UnlockFactorKind::Password])?;
         let policy = UnlockPolicy::new([group.clone()])?;
+        let (installation_id, device_vault_id) = random_installation_and_device_vault_ids()?;
         create_with_protectors(
             root,
             VaultCreation {
-                vault_id: VaultId::random()?,
+                installation_id,
+                device_vault_id,
                 created_at: 1_700_000_000,
                 platform: VaultPlatform::Test,
                 cryptographic_profile: VaultCryptoProfile::Default,
             },
             policy,
-            &[SlotProtectors {
+            &[SlotProtector {
                 group: &group,
                 wrapping: LabeledProtector {
-                    label: "test-vault-wrap",
+                    label: "test-vault-root",
                     key: &wrapping,
-                },
-                signing: LabeledProtector {
-                    label: "test-vault-sign",
-                    key: &signing,
                 },
             }],
             UnlockCredentials::with_password(TEST_PASSWORD),
@@ -672,7 +642,6 @@ impl Vault {
         validate_root(root)?;
         let stored = read_vault(root)?;
         let wrapping = TestProtector::new([0x35; KEY_BYTES]);
-        let signing = TestProtector::new([0x97; KEY_BYTES]);
         let slot = stored
             .unlock_slots
             .first()
@@ -681,10 +650,21 @@ impl Vault {
             &stored,
             slot,
             &wrapping,
-            &signing,
             UnlockCredentials::with_password(TEST_PASSWORD),
         )
     }
+}
+
+#[cfg(feature = "key-protection")]
+fn random_installation_and_device_vault_ids() -> VaultResult<(InstallationId, VaultId)> {
+    let installation_id = InstallationId::random()?;
+    let device_vault_id = VaultId::random()?;
+    if installation_id.as_bytes() == device_vault_id.as_bytes() {
+        return Err(VaultError::Random(
+            "installation and device vault identifiers collided; retry".to_owned(),
+        ));
+    }
+    Ok((installation_id, device_vault_id))
 }
 
 #[cfg(feature = "key-protection")]
@@ -730,16 +710,14 @@ fn discard_initialization_with_factory(
                 if delete_keys {
                     for slot in &stored.unlock_slots {
                         let biometric = slot.group.requires(UnlockFactorKind::Biometric);
-                        for label in [&slot.wrapping_key_label, &slot.signing_key_label] {
-                            match factory
-                                .open(root, label, biometric)
-                                .and_then(|protector| protector.delete())
-                            {
-                                Err(error) if cleanup_error.is_none() => {
-                                    cleanup_error = Some(error);
-                                }
-                                Ok(()) | Err(_) => {}
+                        match factory
+                            .open(root, &slot.wrapping_key_label, biometric)
+                            .and_then(|protector| protector.delete())
+                        {
+                            Err(error) if cleanup_error.is_none() => {
+                                cleanup_error = Some(error);
                             }
+                            Ok(()) | Err(_) => {}
                         }
                     }
                 }
@@ -764,7 +742,7 @@ fn credentials_for_factor(factor: UnsealFactor<'_>) -> UnlockCredentials<'_> {
 }
 
 #[cfg(feature = "key-protection")]
-fn legacy_policy(
+fn password_policy(
     factor: UnsealFactor<'_>,
     biometric: bool,
 ) -> VaultResult<(UnlockPolicy, UnlockCredentials<'_>)> {

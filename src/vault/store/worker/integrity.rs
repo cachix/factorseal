@@ -2,17 +2,19 @@
 
 use std::collections::HashSet;
 
+use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Value, params};
 
-use crate::vault::{DocumentId, DocumentKind, SignedChangeEnvelope, VaultError, VaultResult};
+use crate::vault::{DocumentId, DocumentKind, VaultError, VaultId, VaultResult};
 
-use super::{DocumentRow, MAX_COMMIT_CHAIN, MAX_RETAINED_COMMITS, StoreWorker};
-use crate::vault::store::chain::{
-    CommitContents, ProtectedCommit, digest, digest_change_envelopes,
+use super::{
+    DocumentRow, MAX_COMMIT_CHAIN, MAX_RETAINED_COMMITS, StoreWorker, VerifiedDocument,
+    VerifiedStoreState,
 };
+use crate::vault::store::chain::{CommitContents, ProtectedCommit, digest};
 use crate::vault::store::database::{
     array_from_blob, database_error, document_id_from_blob, from_i64, query_count,
-    query_optional_blob, row_blob, row_integer, row_optional_blob, row_text, to_i64,
+    query_optional_blob, row_blob, row_deadline, row_integer, row_optional_blob, row_text, to_i64,
 };
 
 impl StoreWorker {
@@ -27,9 +29,24 @@ impl StoreWorker {
         .transpose()
     }
 
-    /// Verify the whole protected chain and return the number of commits in it.
-    pub(super) async fn verify_commit_chain(&self) -> VaultResult<usize> {
-        let mut current = self.current_commit_head().await?;
+    /// Build trusted state from a consistent, fully verified startup snapshot.
+    pub(super) async fn verify_commit_chain(&self) -> VaultResult<VerifiedStoreState> {
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+                .await
+                .map_err(database_error)?;
+        let verified = self.verify_chain_in_snapshot().await?;
+        transaction.commit().await.map_err(database_error)?;
+        Ok(verified)
+    }
+
+    async fn verify_chain_in_snapshot(&self) -> VaultResult<VerifiedStoreState> {
+        let head = self.current_commit_head().await?;
+        let mut current = head;
+        let mut verified = VerifiedStoreState {
+            head,
+            ..VerifiedStoreState::default()
+        };
         let mut visited = HashSet::new();
         let mut count = 0_usize;
         while let Some(commit_id) = current {
@@ -41,11 +58,65 @@ impl StoreWorker {
             }
             let record = self.verify_protected_commit(commit_id).await?;
             current = record.previous_commit_id;
+            // Traversal starts at the global head: first seen is newest.
+            verified
+                .documents
+                .entry(record.document_id)
+                .or_insert_with(|| VerifiedDocument::from(&record));
         }
 
         self.verify_protected_row_sets(count).await?;
-        self.verify_document_heads(&visited).await?;
-        Ok(count)
+        self.verify_inventory(&verified).await?;
+        verified.chain_length = count;
+        Ok(verified)
+    }
+
+    /// The commit chain, not the snapshot, carries the device signature. A
+    /// load therefore checks the snapshot bytes against the signed commit the
+    /// document row points at.
+    pub(super) async fn verify_snapshot_against_commit(
+        &self,
+        commit_id: [u8; 32],
+        document_id: DocumentId,
+        generation: u64,
+        key_epoch: u64,
+        snapshot_envelope: &[u8],
+    ) -> VaultResult<()> {
+        let trusted = self
+            .verified
+            .documents
+            .get(&document_id)
+            .ok_or(VaultError::Signature)?;
+        if trusted.row.current_commit_id != commit_id
+            || trusted.row.generation != generation
+            || trusted.row.key_epoch != key_epoch
+            || trusted.snapshot_digest != digest(snapshot_envelope)
+        {
+            return Err(VaultError::Signature);
+        }
+        let record = query_optional_blob(
+            &self.connection,
+            "SELECT record FROM protected_commits WHERE commit_id = ?1",
+            [commit_id.to_vec()],
+        )
+        .await?
+        .ok_or_else(|| VaultError::InvalidData("document commit is missing".to_owned()))?;
+        let record: ProtectedCommit = serde_json::from_slice(&record)
+            .map_err(|error| VaultError::InvalidData(error.to_string()))?;
+        record.verify(
+            commit_id,
+            self.device.device_key_id(),
+            self.device.public_signing_key(),
+        )?;
+        if record.vault_id != self.device.device_vault_id()
+            || record.document_id != document_id
+            || record.generation != generation
+            || record.key_epoch != key_epoch
+            || record.snapshot_digest != digest(snapshot_envelope)
+        {
+            return Err(VaultError::Signature);
+        }
+        Ok(())
     }
 
     async fn verify_protected_commit(&self, commit_id: [u8; 32]) -> VaultResult<ProtectedCommit> {
@@ -78,6 +149,7 @@ impl StoreWorker {
         if stored_previous != record.previous_commit_id
             || stored_document_id != record.document_id
             || stored_generation != record.generation
+            || record.vault_id != self.device.device_vault_id()
         {
             return Err(VaultError::InvalidData(
                 "protected commit SQL metadata does not match its signed record".to_owned(),
@@ -104,41 +176,7 @@ impl StoreWorker {
         if digest(&snapshot) != record.snapshot_digest {
             return Err(VaultError::Signature);
         }
-        let (envelopes, serialized_changes) = self
-            .change_envelopes(record.document_id, record.generation)
-            .await?;
-        if digest_change_envelopes(&envelopes, &serialized_changes) != record.changes_digest {
-            return Err(VaultError::Signature);
-        }
         Ok(())
-    }
-
-    /// Read one generation's change envelopes together with the exact bytes
-    /// the commit digest was taken over.
-    async fn change_envelopes(
-        &self,
-        document_id: DocumentId,
-        generation: u64,
-    ) -> VaultResult<(Vec<SignedChangeEnvelope>, Vec<Vec<u8>>)> {
-        let mut rows = self
-            .connection
-            .query(
-                "SELECT envelope FROM document_changes
-                 WHERE document_id = ?1 AND generation = ?2 ORDER BY change_hash",
-                params![document_id.as_bytes().to_vec(), to_i64(generation)?],
-            )
-            .await
-            .map_err(database_error)?;
-        let mut serialized = Vec::new();
-        let mut envelopes = Vec::new();
-        while let Some(row) = rows.next().await.map_err(database_error)? {
-            let bytes = row_blob(&row, 0)?;
-            let envelope: SignedChangeEnvelope = serde_json::from_slice(&bytes)
-                .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-            serialized.push(bytes);
-            envelopes.push(envelope);
-        }
-        Ok((envelopes, serialized))
     }
 
     async fn verify_protected_row_sets(&self, chain_count: usize) -> VaultResult<()> {
@@ -179,22 +217,6 @@ impl StoreWorker {
                 "protected commit refers to a missing document".to_owned(),
             ));
         }
-        let orphan_changes = query_count(
-            &self.connection,
-            "SELECT COUNT(*) FROM document_changes AS changes
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM protected_commits AS commits
-                 WHERE commits.document_id = changes.document_id
-                   AND commits.generation = changes.generation
-             )",
-            (),
-        )
-        .await?;
-        if orphan_changes != 0 {
-            return Err(VaultError::InvalidData(
-                "database contains changes outside the protected chain".to_owned(),
-            ));
-        }
         Ok(())
     }
 
@@ -202,7 +224,8 @@ impl StoreWorker {
         let mut rows = self
             .connection
             .query(
-                "SELECT document_id, document_kind, generation, key_epoch, current_commit_id
+                "SELECT vault_id, document_id, document_kind, generation, key_epoch,
+                        wrapped_dek, current_commit_id, next_eviction
                  FROM documents ORDER BY document_id",
                 (),
             )
@@ -211,66 +234,52 @@ impl StoreWorker {
         let mut documents = Vec::new();
         while let Some(row) = rows.next().await.map_err(database_error)? {
             documents.push(DocumentRow {
-                document_id: document_id_from_blob(&row_blob(&row, 0)?)?,
-                scope: DocumentKind::parse(&row_text(&row, 1)?)?,
-                generation: from_i64(row_integer(&row, 2)?, "document generation")?,
-                key_epoch: from_i64(row_integer(&row, 3)?, "document key epoch")?,
-                current_commit_id: array_from_blob(&row_blob(&row, 4)?, "document commit ID")?,
+                vault_id: VaultId::from_bytes(array_from_blob(&row_blob(&row, 0)?, "vault ID")?),
+                document_id: document_id_from_blob(&row_blob(&row, 1)?)?,
+                scope: DocumentKind::parse(&row_text(&row, 2)?)?,
+                generation: from_i64(row_integer(&row, 3)?, "document generation")?,
+                key_epoch: from_i64(row_integer(&row, 4)?, "document key epoch")?,
+                wrapped_key_digest: digest(&row_blob(&row, 5)?),
+                current_commit_id: array_from_blob(&row_blob(&row, 6)?, "document commit ID")?,
+                next_eviction: row_deadline(&row, 7)?,
             });
         }
         Ok(documents)
     }
 
-    async fn verify_document_heads(&self, visited: &HashSet<[u8; 32]>) -> VaultResult<()> {
-        for document in self.document_rows().await? {
-            if !visited.contains(&document.current_commit_id) {
-                return Err(VaultError::InvalidData(
-                    "document points outside the protected commit chain".to_owned(),
-                ));
-            }
-            let record = query_optional_blob(
-                &self.connection,
-                "SELECT record FROM protected_commits WHERE commit_id = ?1",
-                [document.current_commit_id.to_vec()],
-            )
-            .await?
-            .ok_or_else(|| VaultError::InvalidData("document commit is missing".to_owned()))?;
-            let record: ProtectedCommit = serde_json::from_slice(&record)
-                .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-            if record.document_id != document.document_id
-                || record.scope != document.scope
-                || record.generation != document.generation
-                || record.key_epoch != document.key_epoch
+    async fn verify_inventory(&self, verified: &VerifiedStoreState) -> VaultResult<()> {
+        if self.current_commit_head().await? != verified.head {
+            return Err(VaultError::Signature);
+        }
+        let rows = self.document_rows().await?;
+        if rows.len() != verified.documents.len() {
+            return Err(VaultError::InvalidData(
+                "protected document inventory changed".to_owned(),
+            ));
+        }
+        for row in rows {
+            if verified
+                .documents
+                .get(&row.document_id)
+                .is_none_or(|expected| expected.row != row)
             {
                 return Err(VaultError::InvalidData(
-                    "document metadata does not match its signed commit".to_owned(),
-                ));
-            }
-            // Agreeing with the commit it points at is not enough: that commit
-            // must also be the document's newest one. Without this a single
-            // document can be rewound to any earlier generation while the
-            // global head and every row-set count stay consistent.
-            let newer = query_count(
-                &self.connection,
-                "SELECT COUNT(*) FROM protected_commits
-                 WHERE document_id = ?1 AND generation > ?2",
-                params![
-                    document.document_id.as_bytes().to_vec(),
-                    to_i64(document.generation)?,
-                ],
-            )
-            .await?;
-            if newer != 0 {
-                return Err(VaultError::InvalidData(
-                    "document is behind its newest protected commit".to_owned(),
+                    "document is not at its newest protected commit or signed metadata changed"
+                        .to_owned(),
                 ));
             }
         }
         Ok(())
     }
 
+    pub(super) async fn verify_live_inventory(&self) -> VaultResult<()> {
+        self.verify_inventory(&self.verified).await
+    }
+
     pub(super) async fn compact_if_needed(&mut self) -> VaultResult<()> {
-        if self.chain_length <= MAX_RETAINED_COMMITS {
+        if self.verified.chain_length
+            <= MAX_RETAINED_COMMITS.max(self.verified.documents.len().saturating_mul(2))
+        {
             return Ok(());
         }
         self.compact().await
@@ -281,13 +290,34 @@ impl StoreWorker {
     ///
     /// The discarded generations were only ever read by chain verification, so
     /// re-signing preserves every invariant that verification checks: one
-    /// commit per document, one snapshot per commit, no change rows outside the
-    /// chain, and every document at its newest commit.
+    /// commit per document, one snapshot per commit, and every document at its
+    /// newest commit.
     async fn compact(&mut self) -> VaultResult<()> {
+        // Hold the writer transaction across verification, signing and
+        // replacement. Queries through this connection share that snapshot.
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .await
+                .map_err(database_error)?;
+        self.verify_live_inventory().await?;
+        // Do not erase evidence of tampered historical records either.
+        let verified = self.verify_chain_in_snapshot().await?;
+        if verified.chain_length != self.verified.chain_length {
+            return Err(VaultError::Signature);
+        }
         let documents = self.document_rows().await?;
         let commits = self.resign_current_state(&documents).await?;
-        self.replace_chain(&documents, &commits).await?;
-        self.chain_length = commits.len();
+        Self::replace_chain(&transaction, &documents, &commits).await?;
+        transaction.commit().await.map_err(database_error)?;
+        self.verified = VerifiedStoreState {
+            head: commits.last().map(|commit| commit.commit_id),
+            documents: commits
+                .iter()
+                .map(|commit| (commit.document_id, VerifiedDocument::from(commit)))
+                .collect(),
+            chain_length: commits.len(),
+        };
+        self.checkpoint().await?;
         Ok(())
     }
 
@@ -297,6 +327,9 @@ impl StoreWorker {
         &self,
         documents: &[DocumentRow],
     ) -> VaultResult<Vec<ProtectedCommit>> {
+        let signing_seed = self
+            .secrets
+            .signing_seed(self.device.installation_id(), self.device.device_vault_id())?;
         let mut previous_commit_id = None;
         let mut commits = Vec::with_capacity(documents.len());
         for document in documents {
@@ -313,21 +346,28 @@ impl StoreWorker {
             .ok_or_else(|| {
                 VaultError::InvalidData("document has no current snapshot".to_owned())
             })?;
-            let (envelopes, serialized) = self
-                .change_envelopes(document.document_id, document.generation)
-                .await?;
+            self.verify_snapshot_against_commit(
+                document.current_commit_id,
+                document.document_id,
+                document.generation,
+                document.key_epoch,
+                &snapshot,
+            )
+            .await?;
             let commit = ProtectedCommit::new(
                 CommitContents {
                     previous_commit_id,
+                    vault_id: document.vault_id,
                     document_id: document.document_id,
                     scope: document.scope,
                     generation: document.generation,
                     key_epoch: document.key_epoch,
+                    wrapped_key_digest: document.wrapped_key_digest,
                     snapshot_digest: digest(&snapshot),
-                    changes_digest: digest_change_envelopes(&envelopes, &serialized),
+                    next_eviction: document.next_eviction,
                     device_key_id: self.device.device_key_id(),
                 },
-                &self.signing_seed,
+                &signing_seed,
             )?;
             previous_commit_id = Some(commit.commit_id);
             commits.push(commit);
@@ -336,33 +376,23 @@ impl StoreWorker {
     }
 
     /// Swap the whole history for `commits` in one transaction, dropping every
-    /// superseded snapshot and change along with it.
+    /// superseded snapshot along with it.
     async fn replace_chain(
-        &mut self,
+        transaction: &Transaction<'_>,
         documents: &[DocumentRow],
         commits: &[ProtectedCommit],
     ) -> VaultResult<()> {
-        let transaction = self
-            .connection
-            .transaction()
-            .await
-            .map_err(database_error)?;
         for document in documents {
-            for statement in [
-                "DELETE FROM document_changes WHERE document_id = ?1 AND generation <> ?2",
-                "DELETE FROM document_snapshots WHERE document_id = ?1 AND generation <> ?2",
-            ] {
-                transaction
-                    .execute(
-                        statement,
-                        params![
-                            document.document_id.as_bytes().to_vec(),
-                            to_i64(document.generation)?,
-                        ],
-                    )
-                    .await
-                    .map_err(database_error)?;
-            }
+            transaction
+                .execute(
+                    "DELETE FROM document_snapshots WHERE document_id = ?1 AND generation <> ?2",
+                    params![
+                        document.document_id.as_bytes().to_vec(),
+                        to_i64(document.generation)?,
+                    ],
+                )
+                .await
+                .map_err(database_error)?;
         }
         transaction
             .execute("DELETE FROM protected_commits", ())
@@ -416,6 +446,30 @@ impl StoreWorker {
                 .await
                 .map_err(database_error)?,
         };
-        transaction.commit().await.map_err(database_error)
+        Ok(())
+    }
+
+    /// Best-effort retention reduction, not cryptographic erasure. Never run
+    /// this from Drop/shutdown: releasing the keys must not wait on cleanup.
+    pub(super) async fn checkpoint(&self) -> VaultResult<()> {
+        let mut rows = self
+            .connection
+            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            .await
+            .map_err(database_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| VaultError::Database("checkpoint returned no status".to_owned()))?;
+        if row_integer(&row, 0)? != 0 {
+            return Err(VaultError::Database(
+                "vault checkpoint is busy; cleanup incomplete".to_owned(),
+            ));
+        }
+        if rows.next().await.map_err(database_error)?.is_some() {
+            return Err(VaultError::Database("invalid checkpoint status".to_owned()));
+        }
+        Ok(())
     }
 }

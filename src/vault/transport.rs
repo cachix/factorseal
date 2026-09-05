@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 #[cfg(feature = "vault")]
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "vault")]
@@ -44,22 +45,35 @@ const IO_RETRY_INTERVAL: Duration = Duration::from_millis(2);
 /// Starting a fresh deadline inside each helper let one peer spend the bound
 /// once per partial transfer instead of once per frame.
 #[derive(Clone, Copy)]
-pub(crate) struct IoBudget {
+pub(crate) struct IoBudget<'a> {
     deadline: Instant,
+    cancelled: Option<&'a std::sync::atomic::AtomicBool>,
 }
 
-impl IoBudget {
+impl IoBudget<'_> {
     pub(crate) fn new(timeout: Duration) -> Self {
         Self {
             // An unrepresentable deadline fails closed rather than panicking.
             deadline: Instant::now()
                 .checked_add(timeout)
                 .unwrap_or_else(Instant::now),
+            cancelled: None,
         }
     }
 
     fn exhausted(self) -> bool {
         Instant::now() >= self.deadline
+            || self
+                .cancelled
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+    }
+
+    #[cfg(any(feature = "vault", test))]
+    pub(crate) fn capped(mut self, deadline: Option<Instant>) -> Self {
+        if let Some(deadline) = deadline {
+            self.deadline = self.deadline.min(deadline);
+        }
+        self
     }
 
     fn expired(operation: &'static str) -> io::Error {
@@ -67,6 +81,14 @@ impl IoBudget {
             io::ErrorKind::TimedOut,
             format!("local IPC {operation} deadline exceeded"),
         )
+    }
+}
+
+#[cfg(any(feature = "vault", test))]
+impl<'a> IoBudget<'a> {
+    pub(crate) fn cancelled_by(mut self, flag: Option<&'a std::sync::atomic::AtomicBool>) -> Self {
+        self.cancelled = flag;
+        self
     }
 }
 
@@ -363,9 +385,15 @@ pub(crate) mod unix_socket {
         let request = VaultRequest::decode(&bytes)?;
         let response = service.handle(&caller, request, unix_time()?);
         let bytes = response.encode()?;
-        // The response gets its own budget so a slow store operation cannot
-        // make the vault drop a reply it has already committed.
-        write_frame(stream, &bytes, IoBudget::new(IPC_FRAME_IO_TIMEOUT))
+        // Give delivery its own I/O budget, never beyond the authority that
+        // authorized this result. A committed write can outlive its reply.
+        write_frame(
+            stream,
+            &bytes,
+            IoBudget::new(IPC_FRAME_IO_TIMEOUT)
+                .capped(response.delivery_deadline)
+                .cancelled_by(response.delivery_cancelled.as_deref()),
+        )
     }
 
     /// Reject a configuration the transport cannot make private before it

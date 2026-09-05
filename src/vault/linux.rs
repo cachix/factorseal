@@ -98,6 +98,9 @@ pub fn serve_linux_vault_with_lifecycle(
     lifecycle_monitor: Option<&LinuxVaultLifecycle>,
 ) -> VaultResult<()> {
     validate_socket_options("Linux", &options.socket_path, options.poll_interval)?;
+    if options.install_lifecycle_monitor {
+        service.enable_emergency_exit();
+    }
     let (listener, _socket_guard) = bind_listener(&options.socket_path)?;
 
     let stopping = Arc::new(AtomicBool::new(false));
@@ -182,7 +185,7 @@ impl LinuxVaultLifecycle {
                 while !thread_stopping.load(Ordering::Acquire) {
                     if monitor.process(DEFAULT_POLL_INTERVAL).is_err() {
                         // Losing lifecycle monitoring is itself fail closed.
-                        thread_signal.trigger();
+                        thread_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
                         abort_if_unsealed(&thread_signal);
                         break;
                     }
@@ -270,6 +273,7 @@ impl LinuxLifecycleConnection {
         connection
             .add_match::<(bool,), _>(
                 MatchRule::new_signal("org.freedesktop.login1.Manager", "PrepareForSleep")
+                    .with_sender("org.freedesktop.login1")
                     .with_path("/org/freedesktop/login1"),
                 move |(starting,), _, _| {
                     // The false edge is a resume fallback if the pre-sleep
@@ -278,7 +282,7 @@ impl LinuxLifecycleConnection {
                     if starting {
                         start_logind_deadline(Arc::clone(&sleep_signal));
                     }
-                    sleep_signal.trigger();
+                    sleep_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
                     if !starting {
                         abort_if_unsealed(&sleep_signal);
                     }
@@ -291,11 +295,12 @@ impl LinuxLifecycleConnection {
         connection
             .add_match::<(bool,), _>(
                 MatchRule::new_signal("org.freedesktop.login1.Manager", "PrepareForShutdown")
+                    .with_sender("org.freedesktop.login1")
                     .with_path("/org/freedesktop/login1"),
                 move |(starting,), _, _| {
                     if starting {
                         start_logind_deadline(Arc::clone(&shutdown_signal));
-                        shutdown_signal.trigger();
+                        shutdown_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
                     }
                     true
                 },
@@ -306,13 +311,14 @@ impl LinuxLifecycleConnection {
         let lock_paths = Arc::clone(&session_paths);
         connection
             .add_match::<(), _>(
-                MatchRule::new_signal("org.freedesktop.login1.Session", "Lock"),
+                MatchRule::new_signal("org.freedesktop.login1.Session", "Lock")
+                    .with_sender("org.freedesktop.login1"),
                 move |(), _, message| {
                     if message_path_is_tracked(
                         message.path().map(|path| path.to_string()),
                         &lock_paths,
                     ) {
-                        lock_signal.trigger();
+                        lock_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
                         abort_if_unsealed(&lock_signal);
                     }
                     true
@@ -324,7 +330,8 @@ impl LinuxLifecycleConnection {
         let hint_paths = Arc::clone(&session_paths);
         connection
             .add_match::<(String, PropMap, Vec<String>), _>(
-                MatchRule::new_signal("org.freedesktop.DBus.Properties", "PropertiesChanged"),
+                MatchRule::new_signal("org.freedesktop.DBus.Properties", "PropertiesChanged")
+                    .with_sender("org.freedesktop.login1"),
                 move |(interface, changed, _invalidated), _, message| {
                     if interface == "org.freedesktop.login1.Session"
                         && locked_hint_is_true(&changed)
@@ -333,7 +340,7 @@ impl LinuxLifecycleConnection {
                             &hint_paths,
                         )
                     {
-                        hint_signal.trigger();
+                        hint_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
                         abort_if_unsealed(&hint_signal);
                     }
                     true
@@ -343,11 +350,19 @@ impl LinuxLifecycleConnection {
 
         for member in ["SessionNew", "SessionRemoved"] {
             let changed = Arc::clone(&sessions_changed);
+            let removed_paths = Arc::clone(&session_paths);
+            let removed_signal = Arc::clone(&signal);
             connection
                 .add_match::<(String, DbusPath<'static>), _>(
                     MatchRule::new_signal("org.freedesktop.login1.Manager", member)
+                        .with_sender("org.freedesktop.login1")
                         .with_path("/org/freedesktop/login1"),
-                    move |_, _, _| {
+                    move |(_, path), _, _| {
+                        if member == "SessionRemoved"
+                            && message_path_is_tracked(Some(path.to_string()), &removed_paths)
+                        {
+                            removed_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
+                        }
                         changed.store(true, Ordering::Release);
                         true
                     },
@@ -402,6 +417,17 @@ impl LinuxLifecycleConnection {
             paths.insert(session_path.to_string());
         }
 
+        let disappeared = {
+            let previous = self
+                .session_paths
+                .lock()
+                .map_err(|_| VaultError::WorkerUnavailable)?;
+            tracked_session_disappeared(&previous, &paths)
+        };
+        if disappeared {
+            self.signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
+        }
+
         for path in &paths {
             let session = self.connection.with_proxy(
                 "org.freedesktop.login1",
@@ -412,7 +438,7 @@ impl LinuxLifecycleConnection {
                 .get("org.freedesktop.login1.Session", "LockedHint")
                 .map_err(|error| lifecycle_error(&error))?;
             if locked {
-                self.signal.trigger();
+                self.signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
             }
         }
         *self
@@ -440,6 +466,10 @@ impl LinuxLifecycleConnection {
     }
 }
 
+fn tracked_session_disappeared(previous: &HashSet<String>, current: &HashSet<String>) -> bool {
+    !previous.is_subset(current)
+}
+
 fn message_path_is_tracked(path: Option<String>, paths: &Mutex<HashSet<String>>) -> bool {
     let Some(path) = path else {
         return false;
@@ -458,7 +488,7 @@ fn locked_hint_is_true(changed: &PropMap) -> bool {
 
 fn abort_if_unsealed(signal: &LifecycleSignal) {
     if signal.needs_emergency_exit() {
-        std::process::abort();
+        std::process::exit(1);
     }
 }
 
@@ -471,7 +501,7 @@ fn start_logind_deadline(signal: Arc<LifecycleSignal>) {
         })
         .is_err()
     {
-        std::process::abort();
+        std::process::exit(1);
     }
 }
 
@@ -683,15 +713,29 @@ mod tests {
 
     /// A child that blocks on its standard input until the test closes it.
     fn blocked_child(configure: impl FnOnce(&mut std::process::Command)) -> std::process::Child {
+        use std::io::{Read as _, Write as _};
+
         let mut command = std::process::Command::new("cat");
         command
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .env_remove("LD_PRELOAD")
             .env_remove("LD_AUDIT");
         configure(&mut command);
-        command.spawn().unwrap()
+        let mut child = command.spawn().unwrap();
+        // Wait for the child's userspace image before inspecting /proc. A
+        // spawn acknowledgement alone can race its startup/exec transition.
+        child.stdin.as_mut().unwrap().write_all(b"ready").unwrap();
+        let mut ready = [0; 5];
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut ready)
+            .unwrap();
+        assert_eq!(&ready, b"ready");
+        child
     }
 
     fn release(mut child: std::process::Child) {
@@ -705,19 +749,21 @@ mod tests {
             command.env("LD_PRELOAD", "");
         });
         let pid = i32::try_from(child.id()).unwrap();
-        assert!(matches!(
-            reject_untrusted_peer_image(pid),
-            Err(VaultError::AuthorizationRequired)
-        ));
+        let result = reject_untrusted_peer_image(pid);
         release(child);
+        assert!(
+            matches!(result, Err(VaultError::AuthorizationRequired)),
+            "unexpected peer authentication result: {result:?}"
+        );
     }
 
     #[test]
     fn an_untraced_peer_without_loader_injection_is_accepted() {
         let child = blocked_child(|_| {});
         let pid = i32::try_from(child.id()).unwrap();
-        reject_untrusted_peer_image(pid).unwrap();
+        let result = reject_untrusted_peer_image(pid);
         release(child);
+        result.unwrap();
     }
 
     #[test]
@@ -786,6 +832,24 @@ mod tests {
             &paths
         ));
         assert!(!message_path_is_tracked(None, &paths));
+    }
+
+    #[test]
+    fn losing_any_previously_tracked_session_seals_even_with_linger() {
+        let tracked = HashSet::from(["session-a".to_owned(), "session-b".to_owned()]);
+        assert!(tracked_session_disappeared(&tracked, &HashSet::new()));
+        assert!(tracked_session_disappeared(
+            &tracked,
+            &HashSet::from(["session-b".to_owned()])
+        ));
+        assert!(!tracked_session_disappeared(&tracked, &tracked));
+        assert!(!tracked_session_disappeared(&HashSet::new(), &tracked));
+        let with_unrelated = tracked
+            .iter()
+            .cloned()
+            .chain(["unrelated".to_owned()])
+            .collect();
+        assert!(!tracked_session_disappeared(&tracked, &with_unrelated));
     }
 
     #[test]

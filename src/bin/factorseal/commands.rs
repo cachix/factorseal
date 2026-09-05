@@ -11,11 +11,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
-    DocumentKind, GrantPermission, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
-    PermissionChange, PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind,
-    UnlockGroup, UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultClient,
-    VaultCryptoProfile, VaultError, VaultMetadata, VaultRequest, VaultResponseBody,
-    VaultResponseErrorCode, VaultService,
+    DocumentKind, GrantPermission, HistoryEntry, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
+    MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionState, SecretSpecAddress,
+    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealLeasePolicy,
+    UnsealedVault, Vault, VaultAction, VaultClient, VaultCryptoProfile, VaultError, VaultMetadata,
+    VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -30,7 +30,8 @@ use super::{CLI_CONTROL_NAMESPACE, CliError, MAX_PROJECT_VALUE_BYTES, PROJECT_PE
 #[derive(Serialize)]
 struct Status<'a> {
     path: String,
-    vault_id: String,
+    installation_id: String,
+    device_vault_id: String,
     device_key_id: String,
     public_signing_key: String,
     actor_id: String,
@@ -39,7 +40,6 @@ struct Status<'a> {
     cryptographic_profile: &'a str,
     unlock_policy: Vec<String>,
     preferred_unlock_group: String,
-    key_epoch: u64,
     created_at: u64,
     state: &'static str,
 }
@@ -61,6 +61,7 @@ pub(super) fn initialize(
     factor: FactorSource<'_>,
     fips: bool,
 ) -> Result<(), CliError> {
+    super::platform::harden_key_owner()?;
     #[cfg(feature = "secretspec-provider")]
     publish_secretspec_claim_for_default_root(root)?;
     let unlock_groups = init_unlock_groups(unlock_groups)?;
@@ -96,8 +97,9 @@ pub(super) fn initialize(
         };
     }
     println!(
-        "Initialized Factorseal vault {} at {} using {}",
-        device.vault_id(),
+        "Initialized Factorseal installation {} with device vault {} at {} using {}",
+        device.installation_id(),
+        device.device_vault_id(),
         root.display(),
         device.hardware_backend()
     );
@@ -169,7 +171,8 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
     let state = live_state(root, socket, &device);
     let status = Status {
         path: root.display().to_string(),
-        vault_id: device.vault_id().to_string(),
+        installation_id: device.installation_id().to_string(),
+        device_vault_id: device.device_vault_id().to_string(),
         device_key_id: device.device_key_id().to_string(),
         public_signing_key: hex::encode(device.public_signing_key()),
         actor_id: hex::encode(device.actor_id()),
@@ -183,7 +186,6 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
             .map(ToString::to_string)
             .collect(),
         preferred_unlock_group: device.preferred_unlock_group().to_string(),
-        key_epoch: device.key_epoch(),
         created_at: device.created_at(),
         state,
     };
@@ -251,10 +253,12 @@ fn live_state(root: &Path, socket: Option<&Path>, device: &VaultMetadata) -> &'s
     match client.request(&request) {
         Ok(response) => match response.result {
             Ok(VaultResponseBody::Status {
-                vault_id,
+                installation_id,
+                device_vault_id,
                 device_key_id,
                 ..
-            }) if vault_id == device.vault_id().to_string()
+            }) if installation_id == device.installation_id().to_string()
+                && device_vault_id == device.device_vault_id().to_string()
                 && device_key_id == device.device_key_id().to_string() =>
             {
                 "unsealed"
@@ -377,6 +381,80 @@ pub(super) fn list_project_addresses(
     let client = native_client(root, socket)?;
     let addresses = fetch_project_addresses(&client, project)?;
     write_metadata(&mut std::io::stdout().lock(), &addresses, json)
+}
+
+pub(super) fn list_project_history(
+    root: &Path,
+    socket: Option<&Path>,
+    project: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let client = native_client(root, socket)?;
+    let entries = fetch_project_history(&client, project)?;
+    write_metadata(&mut std::io::stdout().lock(), &entries, json)
+}
+
+/// Follow every history page for one project. Entries arrive newest first
+/// with strictly decreasing sequence numbers, and a cursor that fails to move
+/// below the last entry is a protocol error rather than an endless loop.
+pub(super) fn fetch_project_history(
+    client: &dyn VaultClient,
+    project: &str,
+) -> Result<Vec<HistoryEntry>, CliError> {
+    let mut entries: Vec<HistoryEntry> = Vec::new();
+    let mut cursor: Option<u64> = None;
+    loop {
+        let request = VaultRequest::new(VaultAction::ListProjectHistory {
+            project: project.to_owned(),
+            address: None,
+            cursor,
+            limit: MAX_HISTORY_PAGE_SIZE,
+        })?;
+        let response = client.request(&request)?;
+        let (page, next_cursor) = match response.result {
+            Ok(VaultResponseBody::History {
+                entries,
+                next_cursor,
+            }) => (entries, next_cursor),
+            Ok(_) => {
+                return Err(VaultError::Protocol(
+                    "vault returned an unexpected history response".to_owned(),
+                )
+                .into());
+            }
+            Err(error) => return Err(vault_request_error(error)),
+        };
+        if page.len() > usize::from(MAX_HISTORY_PAGE_SIZE) {
+            return Err(VaultError::Protocol("history page is too large".to_owned()).into());
+        }
+        let page_is_empty = page.is_empty();
+        for entry in page {
+            if !entry.is_supported()
+                || entries
+                    .last()
+                    .is_some_and(|previous| previous.seq <= entry.seq)
+                || cursor.is_some_and(|cursor| entry.seq >= cursor)
+            {
+                return Err(VaultError::Protocol(
+                    "history response is not strictly ordered".to_owned(),
+                )
+                .into());
+            }
+            entries.push(entry);
+        }
+        let Some(next) = next_cursor else {
+            return Ok(entries);
+        };
+        if page_is_empty
+            || entries.last().is_none_or(|last| next != last.seq)
+            || cursor.is_some_and(|cursor| next >= cursor)
+        {
+            return Err(
+                VaultError::Protocol("vault returned a stalled history cursor".to_owned()).into(),
+            );
+        }
+        cursor = Some(next);
+    }
 }
 
 pub(super) fn fetch_projects(client: &dyn VaultClient) -> Result<Vec<String>, CliError> {
@@ -587,13 +665,17 @@ pub(super) fn destroy_vault(
         _ => return Err(CliError::VaultStateUnknown),
     }
     let group = select_unlock_group(&device, requested_group)?;
+    super::platform::harden_key_owner()?;
     let password = read_password_for_groups(std::slice::from_ref(&group), factor, false)?;
     Vault::destroy_with_unlock_group(
         root,
         &group,
         credentials(password.as_ref().map(|value| value.as_slice())),
     )?;
-    println!("Destroyed Factorseal vault at {}", root.display());
+    println!(
+        "Removed local Factorseal vault at {}. Retained TPM envelopes or backups are not revoked.",
+        root.display()
+    );
     Ok(())
 }
 
@@ -647,6 +729,7 @@ pub(super) fn run_agent(
     policy: UnsealLeasePolicy,
     requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
+    super::platform::harden_key_owner()?;
     #[cfg(feature = "secretspec-provider")]
     if let Err(error) = publish_secretspec_claim_for_default_root(root) {
         eprintln!("factorseal: warning: {error}");
@@ -785,6 +868,7 @@ pub(super) fn grant_cli(
     factor: FactorSource<'_>,
     requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
+    super::platform::harden_key_owner()?;
     let now = unix_time()?;
     let device = Vault::inspect(root)?;
     let unsealed = unseal_selected(root, &device, requested_group, factor)?;
@@ -906,6 +990,82 @@ fn print_permissions(current: &[Permission], json: bool) -> Result<(), CliError>
     Ok(())
 }
 
+/// ASCII-only, quoted rendering: neither terminal escapes nor Unicode bidi
+/// controls from a caller may change what the user thinks they are approving.
+struct PromptText<'a>(&'a str);
+
+impl std::fmt::Display for PromptText<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "\"{}\"", self.0.escape_default())
+    }
+}
+
+struct PromptReason<'a>(&'a str);
+
+impl std::fmt::Display for PromptReason<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some((end, _)) = self.0.char_indices().nth(512) {
+            write!(formatter, "{} [truncated]", PromptText(&self.0[..end]))
+        } else {
+            PromptText(self.0).fmt(formatter)
+        }
+    }
+}
+
+#[test]
+fn permission_text_cannot_execute_terminal_or_unicode_controls() {
+    use factorseal::{
+        CallerIdentity, CallerPlatform, PermissionOperation, PermissionPrincipal,
+        VaultApplicationContext,
+    };
+    let caller = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "/tmp/program",
+        [7; 32],
+        None,
+    )
+    .unwrap();
+    let attack =
+        "\u{1b}[2J\u{1b}]8;;https://invalid\u{7}\r\n\t\u{8}\u{85}\u{202e}\u{2066}\u{2028}\\\"é";
+    let mut permission = Permission {
+        id: attack.to_owned(),
+        operation: PermissionOperation::Get,
+        principal: PermissionPrincipal::from(&caller),
+        application: VaultApplicationContext::new(
+            Some(attack.to_owned()),
+            Some(attack.to_owned()),
+            None,
+            Some(attack.to_owned()),
+        )
+        .unwrap(),
+        state: PermissionState::Pending {
+            created_at: 1,
+            expires_at: 99,
+            challenge: [0; 32],
+        },
+    };
+    permission.principal.application_id = attack.to_owned();
+    permission.principal.user_id = attack.to_owned();
+    permission.principal.signer_id = Some(attack.to_owned());
+    permission.application.base_dir = Some(attack.to_owned());
+    let mut output = Vec::new();
+    write_permission(&mut output, &permission).unwrap();
+    assert!(
+        output
+            .iter()
+            .all(|byte| byte.is_ascii() && (!byte.is_ascii_control() || *byte == b'\n'))
+    );
+    let rendered = String::from_utf8(output).unwrap();
+    assert_eq!(rendered.lines().count(), 5);
+    assert!(rendered.contains("\\u{1b}[2J"));
+    assert!(rendered.contains("\\u{202e}"));
+    assert!(rendered.contains("trusted:") && rendered.contains("declared:"));
+    let long = "é".repeat(600);
+    assert!(PromptReason(&long).to_string().ends_with("[truncated]"));
+    assert!(!PromptText(&long).to_string().contains("[truncated]"));
+}
+
 fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<(), CliError> {
     let project = approval.application.project.as_deref().unwrap_or("unknown");
     let profile = approval.application.profile.as_deref().unwrap_or("default");
@@ -924,6 +1084,13 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
         .signer_id
         .as_deref()
         .unwrap_or("unsigned");
+    let (project, profile, reason, base_dir, signer) = (
+        PromptText(project),
+        PromptText(profile),
+        PromptReason(reason),
+        PromptText(base_dir),
+        PromptText(signer),
+    );
     let state = match approval.state {
         PermissionState::Pending {
             created_at,
@@ -938,42 +1105,47 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
             expires_at.map_or_else(|| "never".to_owned(), |value| value.to_string())
         ),
     };
-    writeln!(output, "{}  {:?}  {state}", approval.id, approval.operation)
-        .and_then(|()| {
+    writeln!(
+        output,
+        "{}  {:?}  {state}",
+        PromptText(&approval.id),
+        approval.operation
+    )
+    .and_then(|()| {
+        writeln!(
+            output,
+            "  trusted: {:?} {}  user: {}  signer: {signer}",
+            approval.principal.platform,
+            PromptText(&approval.principal.application_id),
+            PromptText(&approval.principal.user_id),
+        )
+    })
+    .and_then(|()| {
+        writeln!(
+            output,
+            "  executable digest: {}",
+            hex::encode(approval.principal.executable_digest)
+        )
+    })
+    .and_then(|()| {
+        writeln!(
+            output,
+            "  declared: {project}/{profile}  base directory: {base_dir}"
+        )
+    })
+    .and_then(|()| writeln!(output, "  reason: {reason}"))
+    .and_then(|()| {
+        if let Some(duration) = approval.application.requested_permission_duration_seconds {
             writeln!(
                 output,
-                "  trusted: {:?} {}  user: {}  signer: {signer}",
-                approval.principal.platform,
-                approval.principal.application_id,
-                approval.principal.user_id,
+                "  requested permission duration: {}",
+                format_grant_duration(duration)
             )
-        })
-        .and_then(|()| {
-            writeln!(
-                output,
-                "  executable digest: {}",
-                hex::encode(approval.principal.executable_digest)
-            )
-        })
-        .and_then(|()| {
-            writeln!(
-                output,
-                "  declared: {project}/{profile}  base directory: {base_dir}"
-            )
-        })
-        .and_then(|()| writeln!(output, "  reason: {reason}"))
-        .and_then(|()| {
-            if let Some(duration) = approval.application.requested_permission_duration_seconds {
-                writeln!(
-                    output,
-                    "  requested permission duration: {}",
-                    format_grant_duration(duration)
-                )
-            } else {
-                Ok(())
-            }
-        })
-        .map_err(|error| CliError::ApprovalPrompt(error.to_string()))
+        } else {
+            Ok(())
+        }
+    })
+    .map_err(|error| CliError::ApprovalPrompt(error.to_string()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1265,14 +1437,46 @@ fn approve(
         .iter()
         .find(|approval| approval.id == id)
         .ok_or_else(|| VaultError::Protocol("permission is missing or expired".to_owned()))?;
-    let device = Vault::inspect(root)?;
-    let unsealed = unseal_selected(root, &device, requested_group, factor)?;
     let PermissionState::Pending { challenge, .. } = &approval.state else {
         return Err(VaultError::Protocol("permission is already granted".to_owned()).into());
     };
-    let signature =
-        unsealed.sign_permission_challenge(&approval.id, challenge, grant_duration_seconds)?;
-    drop(unsealed);
+    // The IPC client must remain inspectable by Linux /proc authentication.
+    // Only the separate non-dumpable helper acquires passwords and root keys.
+    let mut helper = std::process::Command::new(
+        std::env::current_exe().map_err(|error| CliError::CurrentExecutable(error.to_string()))?,
+    );
+    helper
+        .arg("--root")
+        .arg(root)
+        .arg("sign-permission")
+        .arg("--id")
+        .arg(&approval.id)
+        .arg("--challenge")
+        .arg(hex::encode(challenge))
+        .stdin(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    if let Some(duration) = grant_duration_seconds {
+        helper.arg("--duration-seconds").arg(duration.to_string());
+    }
+    if let Some(group) = requested_group {
+        helper.arg("--unlock").arg(group.to_string());
+    }
+    if let Some(path) = factor.password_file {
+        helper.arg("--password-file").arg(path);
+    }
+    if let Some(path) = factor.askpass {
+        helper.arg("--askpass").arg(path);
+    }
+    let output = helper
+        .output()
+        .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
+    if !output.status.success() {
+        return Err(CliError::ApprovalPrompt(
+            "approval signing helper failed".to_owned(),
+        ));
+    }
+    let signature = hex::decode(&output.stdout)
+        .map_err(|_| CliError::ApprovalPrompt("invalid signing helper response".to_owned()))?;
     change_permission(
         root,
         socket,
@@ -1283,6 +1487,29 @@ fn approve(
         },
         PermissionChange::Granted,
     )
+}
+
+pub(super) fn sign_permission(
+    root: &Path,
+    factor: FactorSource<'_>,
+    id: &str,
+    challenge: &str,
+    duration: Option<u64>,
+    group: Option<&UnlockGroup>,
+) -> Result<(), CliError> {
+    super::platform::harden_key_owner()?;
+    // Reject malformed public input before prompting for any credentials.
+    let challenge: [u8; 32] = hex::decode(challenge)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| VaultError::Protocol("invalid permission challenge".to_owned()))?;
+    let device = Vault::inspect(root)?;
+    let unsealed = unseal_selected(root, &device, group, factor)?;
+    let signature = unsealed.sign_permission_challenge(id, &challenge, duration)?;
+    drop(unsealed);
+    std::io::stdout()
+        .write_all(hex::encode(signature).as_bytes())
+        .map_err(|error| CliError::ApprovalPrompt(error.to_string()))
 }
 
 fn change_permission(

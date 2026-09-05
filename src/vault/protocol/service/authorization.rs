@@ -4,6 +4,8 @@ use std::time::Instant;
 
 use crate::vault::{DocumentKind, VaultResult};
 
+#[cfg(target_os = "linux")]
+use super::super::grant::store_exclusive_grant;
 use super::super::grant::{GrantTarget, store_grant};
 use super::super::{CallerIdentity, GrantPermission, WireSecretAddress};
 use super::VaultService;
@@ -130,26 +132,39 @@ impl VaultService {
         )
     }
 
-    /// Persist approval for the built-in Linux Secret Service adapter.
+    /// Make the current build of the built-in Linux Secret Service adapter the
+    /// sole holder of its namespace. A superseded build loses its grants in
+    /// the same generation, and an unchanged build writes nothing.
     #[cfg(target_os = "linux")]
     pub(crate) fn authorize_secret_service_namespace(
         &self,
         caller: &CallerIdentity,
         namespace: &[u8],
         permissions: impl IntoIterator<Item = GrantPermission>,
-        expires_at: Option<u64>,
         now: u64,
     ) -> VaultResult<()> {
-        self.authorize(
+        self.authorize_exclusive(
             caller,
-            AuthorizationTarget::Namespace {
+            GrantTarget::Namespace {
                 scope: DocumentKind::LinuxSecretService,
                 namespace,
             },
             permissions,
-            expires_at,
             now,
         )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn authorize_exclusive(
+        &self,
+        caller: &CallerIdentity,
+        target: GrantTarget<'_>,
+        permissions: impl IntoIterator<Item = GrantPermission>,
+        now: u64,
+    ) -> VaultResult<()> {
+        let mut state = self.state.lock_live(Instant::now())?;
+        store_exclusive_grant(state.store(), caller, target, permissions, now)?;
+        state.touch(now, Instant::now())
     }
 
     /// Persist approval for a disposable application-cache namespace.

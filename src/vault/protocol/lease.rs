@@ -84,7 +84,14 @@ impl UnsealLease {
         monotonic_now >= self.idle_expires_at || monotonic_now >= self.absolute_expires_at
     }
 
+    pub(super) fn expires_at(&self) -> Instant {
+        self.idle_expires_at.min(self.absolute_expires_at)
+    }
+
     pub(super) fn touch(&mut self, now: u64, monotonic_now: Instant) -> VaultResult<()> {
+        if self.is_expired(monotonic_now) {
+            return Err(VaultError::Sealed);
+        }
         self.idle_deadline = now
             .checked_add(self.idle_timeout.as_secs())
             .ok_or_else(|| VaultError::Protocol("unseal lease overflows time".to_owned()))?
@@ -163,9 +170,14 @@ mod tests {
         };
         let mut lease = UnsealLease::new_at(100, start, policy).unwrap();
 
-        lease.touch(107, start + Duration::from_secs(7)).unwrap();
+        lease.touch(104, start + Duration::from_secs(4)).unwrap();
+        lease.touch(108, start + Duration::from_secs(8)).unwrap();
         assert_eq!(lease.idle_deadline, 110);
         assert!(lease.is_expired(start + Duration::from_secs(10)));
+        assert!(matches!(
+            lease.touch(110, start + Duration::from_secs(10)),
+            Err(VaultError::Sealed)
+        ));
     }
 
     #[test]

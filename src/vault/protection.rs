@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 
 use super::VaultResult;
 
-/// Hardware-backed facility that protects a vault key payload.
+/// Hardware-backed facility that protects an installation key payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum HardwareBackend {
@@ -55,11 +55,15 @@ pub trait KeyProtector {
     /// Unwrap a password-protected Factorseal key payload.
     fn unwrap(&self, ciphertext: &[u8]) -> VaultResult<Zeroizing<Vec<u8>>>;
 
-    /// Permanently delete this native key.
+    /// Remove backend-owned local key state, if any.
+    ///
+    /// This does not promise revocation of saved envelopes. Stateless TPM
+    /// protectors have no per-label persistent key to delete. A retained
+    /// envelope can remain usable on the same TPM with valid factors.
     fn delete(&self) -> VaultResult<()>;
 }
 
-/// Creates and reopens the two native keys owned by one vault.
+/// Creates and reopens the native wrapping keys owned by one installation.
 ///
 /// `root` is provided for adapters that keep authenticated public metadata
 /// next to the vault. Mobile adapters may ignore it and use only `label`.

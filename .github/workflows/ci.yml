@@ -12,6 +12,17 @@ permissions:
   contents: read
 
 jobs:
+  dependency-security:
+    name: Dependency security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned advisory checker
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Check dependencies against RustSec
+        run: cargo audit
+
   linux:
     name: Linux
     runs-on: ubuntu-latest
@@ -33,12 +44,12 @@ jobs:
       - name: Check formatting
         run: devenv shell -- cargo fmt --all -- --check
       - name: Run Clippy
-        run: devenv shell -- cargo clippy --all-targets --all-features -- -D warnings
+        run: devenv shell -- cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run tests
         run: |
           devenv shell -- sh -c '
             dbus_config="$(dirname "$(command -v dbus-daemon)")/../share/dbus-1/session.conf"
-            dbus-run-session --config-file "$dbus_config" -- cargo test --all-targets --all-features
+            dbus-run-session --config-file "$dbus_config" -- cargo test --workspace --all-targets --all-features
           '
       - name: Check the feature combinations packagers and embedders build
         run: |
@@ -77,9 +88,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --all-targets --all-features
+        run: cargo test --workspace --all-targets --all-features
+      - name: Check lightweight client authentication build
+        run: cargo clippy --no-default-features --features vault-client -- -D warnings
       - name: Build and inspect locally signed macOS package
         run: |
           plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist packaging/macos/Factorseal.entitlements.in
@@ -121,9 +134,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --all-targets --all-features
+        run: cargo test --workspace --all-targets --all-features
+      - name: Check lightweight client authentication build
+        run: cargo clippy --no-default-features --features vault-client -- -D warnings
       - name: Parse Windows helpers and acceptance runner
         shell: pwsh
         run: |

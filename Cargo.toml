@@ -13,7 +13,7 @@ resolver = "2"
 
 [features]
 default = ["vault", "cli", "hardware", "secretspec-provider"]
-vault-client = ["dep:interprocess"]
+vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token", "dep:windows"]
 vault-store = [
     "dep:aes",
     "dep:aes-gcm",
@@ -27,8 +27,8 @@ vault-store = [
     "dep:tokio",
     "dep:turso",
 ]
-# The legacy full desktop vault feature remains the default and retains its
-# public API. Mobile embedders use `vault-store` + `key-protection` instead.
+# The full desktop vault feature remains the default. Mobile embedders use
+# `vault-store` + `key-protection` instead.
 vault = [
     "vault-client",
     "vault-store",
@@ -61,6 +61,7 @@ key-protection = [
     "dep:aes-gcm",
     "dep:argon2",
     "dep:ghash",
+    "dep:hmac",
     "dep:ml-dsa",
     "dep:nt-token",
     "dep:pbkdf2",
@@ -80,7 +81,7 @@ required-features = ["vault", "cli", "hardware"]
 # GHASH authentication key when a cipher instance is dropped.
 aes = { version = "0.8.4", features = ["zeroize"], optional = true }
 aes-gcm = { version = "0.10.3", features = ["zeroize"], optional = true }
-argon2 = { version = "0.5.3", optional = true }
+argon2 = { version = "0.5.3", features = ["zeroize"], optional = true }
 async-trait = { version = "0.1.89", optional = true }
 automerge = { version = "0.11.0", optional = true }
 base64 = "0.22.1"
@@ -115,11 +116,11 @@ tempfile = "3.20.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = { version = "0.9.12", optional = true }
 zbus = { version = "5.14.0", default-features = false, features = ["tokio"], optional = true }
-nix = { version = "0.31.3", features = ["socket", "user"], optional = true }
+nix = { version = "0.31.3", features = ["socket", "user", "process", "resource"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", optional = true }
-nix = { version = "0.31.3", features = ["socket", "user"], optional = true }
+nix = { version = "0.31.3", features = ["socket", "user", "process", "resource"], optional = true }
 objc2 = { version = "0.6.4", optional = true }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "block2"], optional = true }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDate", "NSNotification", "NSOperation", "NSRunLoop", "NSString", "block2"], optional = true }
@@ -138,6 +139,7 @@ windows = { version = "0.61.3", optional = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
     "Win32_System_Power",
+    "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
