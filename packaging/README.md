@@ -254,6 +254,21 @@ install the competing headless user unit or use systemd askpass; the Desktop
 process owns password/biometric prompting and, once unsealed, publishes the
 same native Factorseal endpoint and Linux Secret Service adapter.
 
+The application launcher, autostart entry, and D-Bus activation record all use
+a configured wrapper carrying the CLI executable identity and lease timeouts.
+This also works when the session bus has not inherited login-shell variables.
+`factorseal desktop` reads the module's timeout environment variables; explicit
+`--idle-seconds` and `--maximum-seconds` arguments override those defaults.
+
+Desktop requires Rust 1.97 or newer. On a stable NixOS release with an older
+toolchain, keep the Factorseal flake's own Nixpkgs input (do not make it follow
+the system's Nixpkgs) and select its packages explicitly:
+
+```nix
+services.factorseal.package = factorseal.packages.${pkgs.stdenv.hostPlatform.system}.factorseal;
+services.factorseal.desktopPackage = factorseal.packages.${pkgs.stdenv.hostPlatform.system}.factorseal-desktop;
+```
+
 The desktop adapter uses `hardwareseal` directly and rejects software fallback.
 Linux biometric policies fail closed; Windows biometric policies require a
 Windows Hello platform credential with PRF support; macOS biometric policies

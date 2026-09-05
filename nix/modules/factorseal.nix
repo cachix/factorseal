@@ -8,6 +8,26 @@
 let
   cfg = config.services.factorseal;
   tpmGroup = config.security.tpm2.tssGroup;
+  # D-Bus activation need not inherit environment.variables from a login shell.
+  # Keep the CLI identity and lease policy on every desktop launch path.
+  desktopPackage = pkgs.symlinkJoin {
+    name = "factorseal-desktop-configured";
+    paths = [ cfg.desktopPackage ];
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+    postBuild = ''
+      rm "$out/bin/factorseal-desktop"
+      makeWrapper ${cfg.desktopPackage}/bin/factorseal-desktop "$out/bin/factorseal-desktop" \
+        --set FACTORSEAL_CLI_EXECUTABLE ${cfg.package}/bin/factorseal \
+        --set FACTORSEAL_IDLE_SECONDS ${toString cfg.idleSeconds} \
+        --set FACTORSEAL_MAXIMUM_SECONDS ${toString cfg.maximumSeconds}
+      for entry in share/applications/dev.factorseal.Desktop.desktop share/dbus-1/services/org.freedesktop.secrets.service; do
+        rm "$out/$entry"
+        substitute "${cfg.desktopPackage}/$entry" "$out/$entry" \
+          --replace-fail "${cfg.desktopPackage}/bin/factorseal-desktop" "$out/bin/factorseal-desktop"
+      done
+    '';
+    meta = cfg.desktopPackage.meta;
+  };
 in
 {
   options.services.factorseal = {
@@ -53,7 +73,7 @@ in
       example = [ "alice" ];
       description = ''
         Existing local users allowed to access the TPM resource-manager device.
-        The systemd user unit is installed globally, but only listed users are
+        Startup integration is installed globally, but only listed users are
         added to the TPM access group by this module.
       '';
     };
@@ -102,12 +122,11 @@ in
 
     security.tpm2.enable = lib.mkDefault true;
     security.polkit.enable = lib.mkDefault true;
-    environment.systemPackages = [ cfg.package ]
-      ++ lib.optional (cfg.mode == "desktop") cfg.desktopPackage;
-    services.dbus.packages = lib.optional (cfg.mode == "desktop") cfg.desktopPackage;
+    environment.systemPackages = [ cfg.package ] ++ lib.optional (cfg.mode == "desktop") desktopPackage;
+    services.dbus.packages = lib.optional (cfg.mode == "desktop") desktopPackage;
 
     environment.variables = lib.mkIf (cfg.mode == "desktop") {
-      FACTORSEAL_DESKTOP_EXECUTABLE = "${cfg.desktopPackage}/bin/factorseal-desktop";
+      FACTORSEAL_DESKTOP_EXECUTABLE = "${desktopPackage}/bin/factorseal-desktop";
       FACTORSEAL_CLI_EXECUTABLE = "${cfg.package}/bin/factorseal";
       FACTORSEAL_IDLE_SECONDS = toString cfg.idleSeconds;
       FACTORSEAL_MAXIMUM_SECONDS = toString cfg.maximumSeconds;
@@ -165,8 +184,8 @@ in
             Type=Application
             Name=Factorseal Desktop
             Comment=Unlock and manage the Factorseal hardware-backed vault
-            Exec=${cfg.desktopPackage}/bin/factorseal-desktop --background --idle-seconds=${toString cfg.idleSeconds} --maximum-seconds=${toString cfg.maximumSeconds}
-            TryExec=${cfg.desktopPackage}/bin/factorseal-desktop
+            Exec=${desktopPackage}/bin/factorseal-desktop --background
+            TryExec=${desktopPackage}/bin/factorseal-desktop
             Icon=dev.factorseal.Desktop
             Terminal=false
             Categories=Utility;Security;

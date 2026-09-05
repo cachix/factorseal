@@ -107,11 +107,11 @@ pub(super) enum Command {
         background: bool,
 
         /// Idle seconds before hardware-unwrapped keys are discarded.
-        #[arg(long, default_value_t = 300)]
+        #[arg(long, env = "FACTORSEAL_IDLE_SECONDS", default_value_t = 300)]
         idle_seconds: u64,
 
         /// Absolute maximum seconds for one unseal lease.
-        #[arg(long, default_value_t = 28_800)]
+        #[arg(long, env = "FACTORSEAL_MAXIMUM_SECONDS", default_value_t = 28_800)]
         maximum_seconds: u64,
     },
 
