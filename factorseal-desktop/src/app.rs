@@ -1,3 +1,4 @@
+use crate::secret_input::SecretInputState;
 use std::sync::Arc;
 
 use gpui::{
@@ -193,19 +194,7 @@ fn error_banner(message: String, color: Hsla) -> Div {
 }
 
 fn password_strength_error(password: &str) -> Option<String> {
-    let estimate = zxcvbn::zxcvbn(password, &["FactorSeal", "vault"]);
-    if estimate.score() >= zxcvbn::Score::Three {
-        return None;
-    }
-
-    let guidance = estimate
-        .feedback()
-        .map(ToString::to_string)
-        .filter(|feedback| !feedback.is_empty())
-        .unwrap_or_else(|| {
-            "Use a few uncommon words that are easy for you to remember.".to_owned()
-        });
-    Some(format!("Choose a stronger password. {guidance}"))
+    factorseal::security::validate_new_password(password.as_bytes()).err()
 }
 
 fn hardware_backend_label(backend: &str) -> &str {
@@ -549,13 +538,13 @@ struct DesktopView {
     runtime: Arc<DesktopRuntime>,
     snapshot: Snapshot,
     selected_group: Option<factorseal::UnlockGroup>,
-    password: gpui::Entity<InputState>,
-    password_confirmation: gpui::Entity<InputState>,
+    password: gpui::Entity<SecretInputState>,
+    password_confirmation: gpui::Entity<SecretInputState>,
     vault_search: gpui::Entity<InputState>,
     personal_name: gpui::Entity<InputState>,
-    personal_value: gpui::Entity<InputState>,
-    archive_passphrase: gpui::Entity<InputState>,
-    archive_passphrase_confirmation: gpui::Entity<InputState>,
+    personal_value: gpui::Entity<SecretInputState>,
+    archive_passphrase: gpui::Entity<SecretInputState>,
+    archive_passphrase_confirmation: gpui::Entity<SecretInputState>,
     setup_method: SetupMethod,
     setup_error: Option<String>,
     selected_vault_item: Option<VaultSelection>,
@@ -602,18 +591,10 @@ impl DesktopView {
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
-        let password = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("FactorSeal password")
-                .masked(true)
-                .clean_on_escape()
-        });
-        let password_confirmation = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Confirm password")
-                .masked(true)
-                .clean_on_escape()
-        });
+        let password =
+            cx.new(|cx| SecretInputState::new(window, cx).placeholder("FactorSeal password"));
+        let password_confirmation =
+            cx.new(|cx| SecretInputState::new(window, cx).placeholder("Confirm password"));
         let vault_search = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Search secrets")
@@ -624,24 +605,12 @@ impl DesktopView {
                 .placeholder("Name")
                 .clean_on_escape()
         });
-        let personal_value = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Secret value")
-                .masked(true)
-                .clean_on_escape()
-        });
-        let archive_passphrase = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Archive passphrase")
-                .masked(true)
-                .clean_on_escape()
-        });
-        let archive_passphrase_confirmation = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Confirm archive passphrase")
-                .masked(true)
-                .clean_on_escape()
-        });
+        let personal_value =
+            cx.new(|cx| SecretInputState::new(window, cx).placeholder("Secret value"));
+        let archive_passphrase =
+            cx.new(|cx| SecretInputState::new(window, cx).placeholder("Archive passphrase"));
+        let archive_passphrase_confirmation = cx
+            .new(|cx| SecretInputState::new(window, cx).placeholder("Confirm archive passphrase"));
         let password_submit = cx.subscribe_in(
             &password,
             window,
@@ -701,6 +670,7 @@ impl DesktopView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_secret_inputs(cx);
         self.setup_method = method;
         self.setup_error = None;
         cx.notify();
@@ -710,8 +680,8 @@ impl DesktopView {
         if !matches!(self.snapshot, Snapshot::Uninitialized { .. }) {
             return;
         }
-        let password = self.password.read(cx).value().to_string();
-        let confirmation = self.password_confirmation.read(cx).value().to_string();
+        let mut password = self.password.read(cx).value();
+        let confirmation = self.password_confirmation.read(cx).value();
         if self.setup_method.needs_password() && password.is_empty() {
             self.setup_error = Some("Choose a non-empty password.".to_owned());
             cx.notify();
@@ -741,10 +711,10 @@ impl DesktopView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.password_confirmation
             .update(cx, |input, cx| input.set_value("", window, cx));
-        match self
-            .runtime
-            .initialize(policy, Zeroizing::new(password.into_bytes()))
-        {
+        match self.runtime.initialize(
+            policy,
+            Zeroizing::new(std::mem::take(&mut *password).into_bytes()),
+        ) {
             Ok(()) => {
                 self.setup_error = None;
                 self.snapshot = Snapshot::Initializing;
@@ -754,7 +724,22 @@ impl DesktopView {
         cx.notify();
     }
 
+    fn clear_secret_inputs(&mut self, cx: &mut Context<Self>) {
+        for input in [
+            &self.password,
+            &self.password_confirmation,
+            &self.personal_value,
+            &self.archive_passphrase,
+            &self.archive_passphrase_confirmation,
+        ] {
+            input.update(cx, SecretInputState::clear);
+        }
+    }
+
     fn apply_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        if !matches!(snapshot, Snapshot::Unsealed { .. }) {
+            self.clear_secret_inputs(cx);
+        }
         if self.selected_group.is_none() {
             self.selected_group = snapshot
                 .metadata()
@@ -768,6 +753,7 @@ impl DesktopView {
     }
 
     fn select_vault_item(&mut self, selection: VaultSelection, cx: &mut Context<Self>) {
+        self.clear_secret_inputs(cx);
         if matches!(selection, VaultSelection::Import | VaultSelection::Export) {
             self.transfer_notice = None;
         }
@@ -776,6 +762,7 @@ impl DesktopView {
     }
 
     fn show_vault_browser(&mut self, cx: &mut Context<Self>) {
+        self.clear_secret_inputs(cx);
         self.selected_vault_item = None;
         cx.notify();
     }
@@ -784,6 +771,7 @@ impl DesktopView {
         if self.transfer_busy {
             return;
         }
+        self.clear_secret_inputs(cx);
         self.transfer_format = format;
         self.transfer_plaintext_confirmed = false;
         self.transfer_notice = None;
@@ -808,12 +796,8 @@ impl DesktopView {
         let metadata = metadata.clone();
         let entries = contents.entries.clone();
         let format = self.transfer_format;
-        let passphrase = self.archive_passphrase.read(cx).value().to_string();
-        let confirmation = self
-            .archive_passphrase_confirmation
-            .read(cx)
-            .value()
-            .to_string();
+        let passphrase = self.archive_passphrase.read(cx).value();
+        let confirmation = self.archive_passphrase_confirmation.read(cx).value();
         if format.is_native() && passphrase.is_empty() {
             self.transfer_notice = Some(TransferNotice::Error(
                 "Enter the archive passphrase.".to_owned(),
@@ -844,7 +828,7 @@ impl DesktopView {
             return;
         }
 
-        let passphrase = Zeroizing::new(passphrase.into_bytes());
+        let passphrase = Zeroizing::new(passphrase.as_bytes().to_vec());
         for input in [
             &self.archive_passphrase,
             &self.archive_passphrase_confirmation,
@@ -963,6 +947,7 @@ impl DesktopView {
     }
 
     fn show_personal_panel(&mut self, panel: PersonalPanel, cx: &mut Context<Self>) {
+        self.clear_secret_inputs(cx);
         self.personal_panel = panel;
         self.personal_error = None;
         self.selected_vault_item = Some(VaultSelection::PersonalSecrets);
@@ -971,7 +956,7 @@ impl DesktopView {
 
     fn save_personal_secret(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.personal_name.read(cx).value().trim().to_owned();
-        let value = self.personal_value.read(cx).value().as_bytes().to_vec();
+        let value = Zeroizing::new(self.personal_value.read(cx).value().as_bytes().to_vec());
         if name.is_empty() {
             self.personal_error = Some("Give this secret a name.".to_owned());
             cx.notify();
@@ -996,7 +981,6 @@ impl DesktopView {
             cx.notify();
             return;
         }
-        let value = Zeroizing::new(value);
         match self.runtime.put_personal_secret(name, &value) {
             Ok(updated_contents) => {
                 if let Snapshot::Unsealed {
@@ -1008,9 +992,9 @@ impl DesktopView {
                     *contents = updated_contents;
                     *contents_error = None;
                 }
-                for input in [&self.personal_name, &self.personal_value] {
-                    input.update(cx, |input, cx| input.set_value("", window, cx));
-                }
+                self.personal_name
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.personal_value.update(cx, SecretInputState::clear);
                 self.personal_panel = PersonalPanel::Overview;
                 self.personal_error = None;
                 self.selected_vault_item = Some(VaultSelection::PersonalSecrets);
@@ -1034,6 +1018,7 @@ impl DesktopView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_secret_inputs(cx);
         self.selected_group = Some(group);
         cx.notify();
     }
@@ -1048,7 +1033,7 @@ impl DesktopView {
             .clone()
             .unwrap_or_else(|| metadata.preferred_unlock_group().clone());
         let password = if group.requires(factorseal::UnlockFactorKind::Password) {
-            let value = self.password.read(cx).value().to_string();
+            let value = self.password.read(cx).value();
             if value.is_empty() {
                 self.snapshot = Snapshot::Sealed {
                     metadata,
@@ -1057,7 +1042,7 @@ impl DesktopView {
                 cx.notify();
                 return;
             }
-            Zeroizing::new(value.into_bytes())
+            Zeroizing::new(value.as_bytes().to_vec())
         } else {
             Zeroizing::new(Vec::new())
         };
@@ -1188,13 +1173,7 @@ impl DesktopView {
                     .child(choices)
             })
             .when(needs_password, |element| {
-                element.child(field_label(
-                    "Password",
-                    Input::new(&self.password)
-                        .bg(theming::input_background(cx))
-                        .mask_toggle()
-                        .large(),
-                ))
+                element.child(field_label("Password", self.password.clone()))
             })
             .when_some(error.map(str::to_owned), |element, error| {
                 element.child(error_banner(error, theme.danger))
@@ -1950,12 +1929,7 @@ impl DesktopView {
                 "Name",
                 Input::new(&self.personal_name).bg(theming::input_background(cx)),
             ))
-            .child(field_label(
-                "Secret value",
-                Input::new(&self.personal_value)
-                    .bg(theming::input_background(cx))
-                    .mask_toggle(),
-            ))
+            .child(field_label("Secret value", self.personal_value.clone()))
             .when_some(self.personal_error.clone(), |panel, error| {
                 panel.child(error_banner(error, theme.danger))
             })
@@ -2060,10 +2034,10 @@ impl DesktopView {
                                 "Includes durable vault items, but not provider caches, application authorizations, history, or device keys. Choose a separate passphrase for this portable backup."
                             }),
                     )
-                    .child(field_label("Archive passphrase", Input::new(&self.archive_passphrase).bg(theming::input_background(cx)).mask_toggle()))
+                    .child(field_label("Archive passphrase", self.archive_passphrase.clone()))
                     .when(!is_import, |panel| {
                         panel.child(
-                            field_label("Confirm archive passphrase", Input::new(&self.archive_passphrase_confirmation).bg(theming::input_background(cx)).mask_toggle()),
+                            field_label("Confirm archive passphrase", self.archive_passphrase_confirmation.clone()),
                         )
                     }),
             );
@@ -2561,8 +2535,8 @@ impl DesktopView {
             })
             .when(self.setup_method.needs_password(), |element| {
                 element
-                    .child(field_label("Password", Input::new(&self.password).bg(theming::input_background(cx)).mask_toggle().large()))
-                    .child(field_label("Confirm password", Input::new(&self.password_confirmation).bg(theming::input_background(cx)).mask_toggle().large()))
+                    .child(field_label("Password", self.password.clone()))
+                    .child(field_label("Confirm password", self.password_confirmation.clone()))
             })
             .when_some(self.setup_error.clone(), |element, error| {
                 element.child(error_banner(error, theme.danger))
@@ -2955,6 +2929,7 @@ fn install_tray(cx: &mut App) {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn refresh_tray_icon(cx: &mut App) {
     let tray = cx.try_global::<DesktopTray>().map(|tray| tray.0.clone());
     let Some(tray) = tray else {

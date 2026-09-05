@@ -7,6 +7,8 @@ use factorseal::{GrantPermission, UnsealLeasePolicy, VaultError, VaultResponseEr
 mod cli;
 #[path = "factorseal/commands.rs"]
 mod commands;
+#[path = "factorseal/desktop_worker.rs"]
+mod desktop_worker;
 #[path = "factorseal/factor.rs"]
 mod factor;
 #[path = "factorseal/platform.rs"]
@@ -149,6 +151,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         askpass: cli.askpass.as_deref(),
     };
     match cli.command {
+        Command::DesktopWorker => desktop_worker::run(&root, socket),
         Command::SignPermission {
             id,
             challenge,

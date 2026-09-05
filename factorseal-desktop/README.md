@@ -2,10 +2,11 @@
 
 The GPUI-based graphical vault host. It can initialize a vault, unlock it with
 one configured factor group, host FactorSeal's authenticated native service,
-and seal it from the window or tray. Password input and native biometric
-ceremonies remain inside the Desktop process; secrets are still served through
-the same caller-authenticated socket, pipe, and platform keyring adapters as
-the headless agent.
+and seal it from the window or tray. Password input uses zeroizing masked fields. A dedicated CLI worker receives
+factors over private inherited pipes, performs native biometric ceremonies,
+and owns the keys and database. Desktop requests go through the same
+authenticated native IPC as other clients. The worker drops the unlock password
+before serving and exits when Desktop closes its lifeline or dies.
 
 Desktop and `factorseal agent` are two front ends for the same vault host. Run
 one at a time. If an agent already owns the endpoint, Desktop reports its live
@@ -41,8 +42,12 @@ with the generated tray icons.
 From the repository root:
 
 ```console
+devenv shell cargo build -p factorseal --features cli,vault,hardware
 devenv shell cargo run -p factorseal-desktop
 ```
+
+Install both binaries together, or set `FACTORSEAL_CLI_EXECUTABLE` to the absolute
+CLI path. The Nix Desktop package supplies this dependency automatically.
 
 The installed CLI launches the separately packaged application with:
 
@@ -75,7 +80,9 @@ The global Import and Export views support four formats:
 Imports keep existing entries by default; the user can explicitly choose to
 replace matching names or addresses. Password-manager exports require an
 explicit plaintext warning acknowledgement and are written with user-only file
-permissions on Unix systems.
+permissions before writing on Unix and Windows. New vault passwords and archive
+passphrases share the library strength policy; legacy unlock/decrypt remains
+compatible. Secret fields are always masked and do not support copying or undo.
 
 Automatic selection uses the detected desktop environment. It prefers Qt on a
 Qt desktop and GTK otherwise. The choice can be overridden for development:

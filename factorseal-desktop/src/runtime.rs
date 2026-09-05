@@ -5,51 +5,32 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use factorseal::{
-    DocumentKind, GrantPermission, MAX_LIST_PAGE_SIZE, NativeVaultClient, SecretAddress,
-    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealLeasePolicy, Vault,
-    VaultAction, VaultArchive, VaultArchiveEntry, VaultClient, VaultCryptoProfile,
-    VaultEntryImportStatus, VaultEntryMetadata, VaultMetadata, VaultRequest, VaultResponseBody,
-    VaultService, WireSecret, WireSecretAddress, decrypt_vault_archive, encrypt_vault_archive,
+    DocumentKind, MAX_LIST_PAGE_SIZE, NativeVaultClient, SecretAddress, UnlockGroup, UnlockPolicy,
+    Vault, VaultAction, VaultArchive, VaultArchiveEntry, VaultClient, VaultEntryImportStatus,
+    VaultEntryMetadata, VaultMetadata, VaultRequest, VaultResponseBody, WireSecret,
+    WireSecretAddress, decrypt_vault_archive, encrypt_vault_archive,
 };
 use zeroize::Zeroizing;
 
 use factorseal::transfer::{PersonalSecret, TransferFormat, export_manager, import_manager};
 
-#[cfg(target_os = "linux")]
-use factorseal::{
-    LinuxVaultLifecycle as NativeLifecycle, LinuxVaultOptions,
-    linux_caller_identity_for_executable, serve_linux_vault_with_lifecycle,
-};
-#[cfg(target_os = "macos")]
-use factorseal::{
-    MacosVaultLifecycle as NativeLifecycle, MacosVaultOptions,
-    macos_caller_identity_for_executable, serve_macos_vault_with_lifecycle,
-};
-#[cfg(target_os = "windows")]
-use factorseal::{
-    WindowsVaultLifecycle as NativeLifecycle, WindowsVaultOptions, default_windows_pipe_name,
-    serve_windows_vault_with_lifecycle, windows_caller_identity_for_executable,
-};
-
 const METADATA_FILE: &str = "factorseal.json";
-const DESKTOP_CONTROL_NAMESPACE: &[u8] = b"factorseal/desktop-control/v1";
 pub(crate) const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";
-const CLI_CONTROL_NAMESPACE: &[u8] = b"factorseal/cli-control/v1";
 const CLI_EXECUTABLE_ENV: &str = "FACTORSEAL_CLI_EXECUTABLE";
-const DESKTOP_PROJECT_PERMISSIONS: [GrantPermission; 4] = [
-    GrantPermission::List,
-    GrantPermission::Get,
-    GrantPermission::Put,
-    GrantPermission::Delete,
-];
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const DEFAULT_SOCKET: &str = "factorseal.sock";
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LeasePolicy {
+    pub(crate) idle_timeout: Duration,
+    pub(crate) maximum_lifetime: Duration,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeConfig {
     pub(crate) root: PathBuf,
     pub(crate) socket: Option<PathBuf>,
-    pub(crate) lease: UnsealLeasePolicy,
+    pub(crate) lease: LeasePolicy,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,7 +105,7 @@ impl Snapshot {
 pub(crate) struct DesktopRuntime {
     config: RuntimeConfig,
     events: smol::channel::Sender<Snapshot>,
-    service: Mutex<Option<Arc<VaultService>>>,
+    lifeline: Mutex<Option<std::process::ChildStdin>>,
     unlock_in_progress: AtomicBool,
 }
 
@@ -135,7 +116,7 @@ impl DesktopRuntime {
             Arc::new(Self {
                 config,
                 events,
-                service: Mutex::new(None),
+                lifeline: Mutex::new(None),
                 unlock_in_progress: AtomicBool::new(false),
             }),
             receiver,
@@ -162,7 +143,7 @@ impl DesktopRuntime {
                     metadata,
                     idle_deadline,
                     absolute_deadline,
-                    owned: false,
+                    owned: self.lifeline.lock().is_ok_and(|pipe| pipe.is_some()),
                     contents,
                     contents_error,
                     error: None,
@@ -201,7 +182,7 @@ impl DesktopRuntime {
             .name("factorseal-desktop-agent".to_owned())
             .spawn(move || {
                 crate::timing::mark_unlock("worker_started", "ok");
-                runtime.run_unsealed(metadata, &group, &password);
+                runtime.run_unsealed(metadata, group, password);
             })
             .is_err()
         {
@@ -228,7 +209,7 @@ impl DesktopRuntime {
         let _ = self.events.try_send(Snapshot::Initializing);
         if std::thread::Builder::new()
             .name("factorseal-desktop-initialize".to_owned())
-            .spawn(move || runtime.run_initialization(&policy, &password))
+            .spawn(move || runtime.run_initialization(policy, password))
             .is_err()
         {
             self.unlock_in_progress.store(false, Ordering::Release);
@@ -238,15 +219,16 @@ impl DesktopRuntime {
     }
 
     pub(crate) fn seal(&self) -> Result<(), String> {
-        let service = self
-            .service
+        let pipe = self
+            .lifeline
             .lock()
-            .map_err(|_| "the desktop runtime lock is unavailable".to_owned())?
-            .clone();
-        let Some(service) = service else {
+            .map_err(|_| "desktop worker lock unavailable".to_owned())?
+            .take();
+        if pipe.is_none() {
             return Err("this Desktop instance does not own the running agent".to_owned());
-        };
-        service.seal().map_err(|error| error.to_string())
+        }
+        drop(pipe);
+        Ok(())
     }
 
     pub(crate) fn put_personal_secret(
@@ -257,8 +239,9 @@ impl DesktopRuntime {
         let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
         let secret = PersonalSecret::generic(
             name.clone(),
-            String::from_utf8(value.to_vec())
-                .map_err(|_| "personal secret value is not valid UTF-8".to_owned())?,
+            std::str::from_utf8(value)
+                .map_err(|_| "personal secret value is not valid UTF-8".to_owned())?
+                .to_owned(),
         );
         let encoded = secret.encode().map_err(|error| error.to_string())?;
         let request = VaultRequest::new(VaultAction::Put {
@@ -268,7 +251,7 @@ impl DesktopRuntime {
             evict_at: None,
         })
         .map_err(|error| error.to_string())?;
-        match self.request_live(&metadata, request)? {
+        match self.request_live(&metadata, &request)? {
             VaultResponseBody::Stored => self.load_live_contents(&metadata),
             _ => Err("vault returned an unexpected personal-secret response".to_owned()),
         }
@@ -287,7 +270,7 @@ impl DesktopRuntime {
             })
             .map_err(|error| error.to_string())?;
             let VaultResponseBody::VaultEntrySecret { value, evict_at } =
-                self.request_live(metadata, request)?
+                self.request_live(metadata, &request)?
             else {
                 return Err("vault returned an unexpected archive response".to_owned());
             };
@@ -328,7 +311,7 @@ impl DesktopRuntime {
             })
             .map_err(|error| error.to_string())?;
             let VaultResponseBody::VaultEntryImported { status } =
-                self.request_live(metadata, request)?
+                self.request_live(metadata, &request)?
             else {
                 return Err("vault returned an unexpected archive-import response".to_owned());
             };
@@ -392,7 +375,7 @@ impl DesktopRuntime {
             })
             .map_err(|error| error.to_string())?;
             let VaultResponseBody::VaultEntryImported { status } =
-                self.request_live(metadata, request)?
+                self.request_live(metadata, &request)?
             else {
                 return Err("vault returned an unexpected password-import response".to_owned());
             };
@@ -420,7 +403,7 @@ impl DesktopRuntime {
                 })
                 .map_err(|error| error.to_string())?;
                 let VaultResponseBody::VaultEntrySecret { value, .. } =
-                    self.request_live(metadata, request)?
+                    self.request_live(metadata, &request)?
                 else {
                     return Err("vault returned an unexpected personal-secret response".to_owned());
                 };
@@ -430,76 +413,35 @@ impl DesktopRuntime {
     }
 
     fn load_live_contents(&self, metadata: &VaultMetadata) -> Result<VaultContents, String> {
-        let service = self
-            .service
-            .lock()
-            .map_err(|_| "the desktop runtime lock is unavailable".to_owned())?
-            .clone();
-        service.map_or_else(
-            || load_vault_contents_from_client(&native_client(&self.config, metadata)),
-            |service| load_vault_contents_from_service(&service),
-        )
+        load_vault_contents_from_client(&native_client(&self.config, metadata))
     }
 
     fn request_live(
         &self,
         metadata: &VaultMetadata,
-        request: VaultRequest,
+        request: &VaultRequest,
     ) -> Result<VaultResponseBody, String> {
-        let service = self
-            .service
-            .lock()
-            .map_err(|_| "the desktop runtime lock is unavailable".to_owned())?
-            .clone();
-        if let Some(service) = service {
-            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-            let caller = current_executable_identity(&executable)?;
-            return service
-                .handle(&caller, request, unix_time()?)
-                .result
-                .map_err(|error| error.message);
-        }
         native_client(&self.config, metadata)
-            .request(&request)
+            .request(request)
             .map_err(|error| error.to_string())?
             .result
             .map_err(|error| error.message)
     }
 
-    pub(crate) fn start_seal(self: &Arc<Self>, metadata: VaultMetadata) -> Result<(), String> {
-        let service = self
-            .service
-            .lock()
-            .map_err(|_| "the desktop runtime lock is unavailable".to_owned())?
-            .clone();
-        let Some(service) = service else {
-            return Err("this Desktop instance does not own the running agent".to_owned());
-        };
-        let runtime = Arc::clone(self);
-        std::thread::Builder::new()
-            .name("factorseal-desktop-seal".to_owned())
-            .spawn(move || {
-                let error = service.seal().err().map(|error| error.to_string());
-                let _ = runtime
-                    .events
-                    .send_blocking(Snapshot::Sealed { metadata, error });
-            })
-            .map(drop)
-            .map_err(|error| format!("could not start the sealing worker: {error}"))
+    pub(crate) fn start_seal(self: &Arc<Self>, _metadata: VaultMetadata) -> Result<(), String> {
+        // The supervisor publishes Sealed only after the worker has exited.
+        self.seal()
     }
 
     fn run_unsealed(
         self: Arc<Self>,
         metadata: VaultMetadata,
-        group: &UnlockGroup,
-        password: &[u8],
+        group: UnlockGroup,
+        password: Zeroizing<Vec<u8>>,
     ) {
-        let result = self.open_and_serve(&metadata, group, password);
-        if result.is_err() {
-            crate::timing::finish_unlock("failed", "error");
-        }
-        if let Ok(mut service) = self.service.lock() {
-            *service = None;
+        let result = self.supervise_worker(&metadata, group, password);
+        if let Ok(mut pipe) = self.lifeline.lock() {
+            pipe.take();
         }
         self.unlock_in_progress.store(false, Ordering::Release);
         let _ = self.events.try_send(Snapshot::Sealed {
@@ -508,8 +450,16 @@ impl DesktopRuntime {
         });
     }
 
-    fn run_initialization(self: Arc<Self>, policy: &UnlockPolicy, password: &[u8]) {
-        let result = self.initialize_inner(policy, password);
+    fn run_initialization(self: Arc<Self>, policy: UnlockPolicy, password: Zeroizing<Vec<u8>>) {
+        let result = (|| {
+            let mut worker = self.spawn_worker(
+                factorseal::desktop_worker::Operation::Initialize { policy },
+                password,
+            )?;
+            worker.read_ready()?;
+            worker.wait()?;
+            Vault::inspect(&self.config.root).map_err(|error| error.to_string())
+        })();
         self.unlock_in_progress.store(false, Ordering::Release);
         let snapshot = match result {
             Ok(metadata) => Snapshot::Sealed {
@@ -521,133 +471,115 @@ impl DesktopRuntime {
         let _ = self.events.try_send(snapshot);
     }
 
-    fn initialize_inner(
+    fn spawn_worker(
         &self,
-        policy: &UnlockPolicy,
-        password: &[u8],
-    ) -> Result<VaultMetadata, String> {
-        let lifecycle = new_lifecycle().map_err(|error| error.to_string())?;
-        lifecycle.arm().map_err(|error| error.to_string())?;
-        let credentials = if policy
-            .groups()
-            .iter()
-            .any(|group| group.requires(UnlockFactorKind::Password))
-        {
-            UnlockCredentials::with_password(password)
-        } else {
-            UnlockCredentials::none()
-        };
-        let unsealed = match Vault::prepare_with_unlock_policy_and_profile(
-            &self.config.root,
-            policy,
-            credentials,
-            VaultCryptoProfile::Default,
-        ) {
-            Ok(unsealed) => unsealed,
-            Err(error) => {
-                lifecycle.disarm();
-                return Err(error.to_string());
-            }
-        };
-        let result = (|| {
-            let metadata = unsealed.public().clone();
-            let now = unix_time()?;
-            let service = VaultService::open(
-                &self.config.root,
-                unsealed,
-                now,
-                UnsealLeasePolicy::default(),
-            )
-            .map_err(|error| error.to_string())?;
-            authorize_desktop(&service, now)?;
-            service.seal().map_err(|error| error.to_string())?;
-            Vault::complete_initialization(&self.config.root).map_err(|error| error.to_string())?;
-            Ok(metadata)
-        })();
-        lifecycle.disarm();
-        match result {
-            Ok(metadata) => Ok(metadata),
-            Err(initialization_error) => match Vault::discard_initialization(&self.config.root) {
-                Ok(()) => Err(initialization_error),
-                Err(cleanup_error) => Err(format!(
-                    "{initialization_error}; initialization rollback failed: {cleanup_error}"
-                )),
-            },
+        operation: factorseal::desktop_worker::Operation,
+        password: Zeroizing<Vec<u8>>,
+    ) -> Result<Worker, String> {
+        use std::process::{Command, Stdio};
+        let desktop = std::env::current_exe().map_err(|e| e.to_string())?;
+        let cli = cli_executable(&desktop)?.ok_or_else(|| "Factorseal CLI must be installed beside Desktop; set FACTORSEAL_CLI_EXECUTABLE to its absolute path".to_owned())?;
+        let mut command = Command::new(cli);
+        command.arg("--root").arg(&self.config.root);
+        if let Some(socket) = &self.config.socket {
+            command.arg("--socket").arg(socket);
         }
+        command
+            .arg("desktop-worker")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let child = command
+            .spawn()
+            .map_err(|e| format!("could not start vault worker: {e}"))?;
+        let mut worker = Worker(child);
+        let bootstrap = factorseal::desktop_worker::Bootstrap {
+            desktop_executable: desktop,
+            operation,
+            password: WireSecret::new(password.to_vec()),
+        };
+        drop(password);
+        factorseal::desktop_worker::send(
+            worker.0.stdin.as_mut().ok_or("worker input unavailable")?,
+            &bootstrap,
+        )
+        .map_err(|e| e.to_string())?;
+        drop(bootstrap);
+        Ok(worker)
     }
 
-    fn open_and_serve(
+    fn supervise_worker(
         &self,
         metadata: &VaultMetadata,
-        group: &UnlockGroup,
-        password: &[u8],
+        group: UnlockGroup,
+        password: Zeroizing<Vec<u8>>,
     ) -> Result<(), String> {
-        let lifecycle = crate::timing::result("desktop_runtime", "create_lifecycle", || {
-            new_lifecycle().map_err(|error| error.to_string())
-        })?;
-        crate::timing::result("desktop_runtime", "arm_lifecycle", || {
-            lifecycle.arm().map_err(|error| error.to_string())
-        })?;
-        let result = (|| {
-            let credentials = if group.requires(UnlockFactorKind::Password) {
-                UnlockCredentials::with_password(password)
-            } else {
-                UnlockCredentials::none()
-            };
-            let unsealed = crate::timing::result("desktop_runtime", "unseal_vault_keys", || {
-                Vault::unseal_with_unlock_group(&self.config.root, group, credentials)
-                    .map_err(|error| error.to_string())
-            })?;
-            crate::timing::mark_unlock("keys_unsealed", "ok");
-            let now = crate::timing::result("desktop_runtime", "read_clock", unix_time)?;
-            let service = Arc::new(crate::timing::result(
-                "desktop_runtime",
-                "open_vault_service",
-                || {
-                    VaultService::open(&self.config.root, unsealed, now, self.config.lease)
-                        .map_err(|error| error.to_string())
-                },
-            )?);
-            crate::timing::mark_unlock("service_open", "ok");
-            // Native caller identities include the executable digest, so a
-            // Desktop upgrade must refresh its first-party grants after the
-            // user has successfully unsealed the vault.
-            crate::timing::result("desktop_runtime", "authorize_first_party_clients", || {
-                authorize_desktop(&service, now)
-            })?;
-            crate::timing::result("desktop_runtime", "publish_service", || {
-                self.service
-                    .lock()
-                    .map_err(|_| "the desktop runtime lock is unavailable".to_owned())?
-                    .replace(Arc::clone(&service));
-                Ok::<_, String>(())
-            })?;
-            let idle_deadline = now.saturating_add(self.config.lease.idle_timeout.as_secs());
-            let absolute_deadline =
-                now.saturating_add(self.config.lease.maximum_lifetime.as_secs());
-            let inventory = crate::timing::result("desktop_runtime", "load_inventory", || {
-                load_vault_contents_from_service(&service)
-            });
-            let inventory_outcome = if inventory.is_ok() { "ok" } else { "error" };
-            let (contents, contents_error) = match inventory {
-                Ok(contents) => (contents, None),
-                Err(error) => (VaultContents::default(), Some(error)),
-            };
-            crate::timing::mark_unlock("inventory_loaded", inventory_outcome);
-            let _ = self.events.try_send(Snapshot::Unsealed {
-                metadata: metadata.clone(),
-                idle_deadline,
-                absolute_deadline,
-                owned: true,
-                contents,
-                contents_error,
-                error: None,
-            });
-            crate::timing::mark_unlock("snapshot_queued", "ok");
-            serve(&self.config, metadata, &service, &lifecycle).map_err(|error| error.to_string())
-        })();
-        lifecycle.disarm();
-        result
+        let mut worker = self.spawn_worker(
+            factorseal::desktop_worker::Operation::Unlock {
+                group,
+                idle_seconds: self.config.lease.idle_timeout.as_secs(),
+                maximum_seconds: self.config.lease.maximum_lifetime.as_secs(),
+            },
+            password,
+        )?;
+        worker.read_ready()?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let (idle_deadline, absolute_deadline) = loop {
+            if let Some(status) = worker.0.try_wait().map_err(|e| e.to_string())? {
+                return Err(format!("vault worker exited before serving: {status}"));
+            }
+            if let Some(deadlines) = live_status(&self.config, metadata)? {
+                break deadlines;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("vault worker did not become ready".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        self.lifeline
+            .lock()
+            .map_err(|_| "desktop worker lock unavailable".to_owned())?
+            .replace(worker.0.stdin.take().ok_or("worker input unavailable")?);
+        let (contents, contents_error) = match self.load_live_contents(metadata) {
+            Ok(contents) => (contents, None),
+            Err(error) => (VaultContents::default(), Some(error)),
+        };
+        let _ = self.events.try_send(Snapshot::Unsealed {
+            metadata: metadata.clone(),
+            idle_deadline,
+            absolute_deadline,
+            owned: true,
+            contents,
+            contents_error,
+            error: None,
+        });
+        crate::timing::mark_unlock("snapshot_queued", "ok");
+        worker.wait()
+    }
+}
+
+/// On every error, terminate and reap the child rather than leaving an orphan.
+struct Worker(std::process::Child);
+impl Worker {
+    fn read_ready(&mut self) -> Result<(), String> {
+        factorseal::desktop_worker::receive::<Result<(), String>>(
+            self.0.stdout.as_mut().ok_or("worker output unavailable")?,
+        )
+        .map_err(|e| format!("vault worker startup failed: {e}"))?
+    }
+    fn wait(&mut self) -> Result<(), String> {
+        let status = self.0.wait().map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("vault worker exited: {status}"))
+        }
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -672,22 +604,6 @@ fn unique_personal_name(title: &str, occupied: &[String]) -> String {
         }
         suffix = suffix.saturating_add(1);
     }
-}
-
-fn load_vault_contents_from_service(service: &VaultService) -> Result<VaultContents, String> {
-    let executable = crate::timing::result("desktop_inventory", "resolve_executable", || {
-        std::env::current_exe().map_err(|error| error.to_string())
-    })?;
-    let caller = crate::timing::result("desktop_inventory", "identify_executable", || {
-        current_executable_identity(&executable)
-    })?;
-    load_vault_contents(|action| {
-        let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
-        service
-            .handle(&caller, request, unix_time()?)
-            .result
-            .map_err(|error| error.message)
-    })
 }
 
 fn load_vault_contents_from_client(client: &impl VaultClient) -> Result<VaultContents, String> {
@@ -810,77 +726,6 @@ const fn secret_service_error() -> Option<String> {
     None
 }
 
-fn authorize_desktop(service: &VaultService, now: u64) -> Result<(), String> {
-    let executable = crate::timing::result("desktop_authorization", "resolve_desktop", || {
-        std::env::current_exe().map_err(|error| error.to_string())
-    })?;
-    crate::timing::result("desktop_authorization", "authorize_desktop", || {
-        authorize_first_party(service, &executable, DESKTOP_CONTROL_NAMESPACE, now)
-    })?;
-    if let Some(cli) = crate::timing::result("desktop_authorization", "resolve_cli", || {
-        cli_executable(&executable)
-    })? {
-        crate::timing::result("desktop_authorization", "authorize_cli", || {
-            authorize_first_party(service, &cli, CLI_CONTROL_NAMESPACE, now)
-        })?;
-    }
-    Ok(())
-}
-
-fn authorize_first_party(
-    service: &VaultService,
-    executable: &Path,
-    control_namespace: &[u8],
-    now: u64,
-) -> Result<(), String> {
-    let caller = crate::timing::result("first_party_grants", "identify_executable", || {
-        current_executable_identity(executable)
-    })?;
-    crate::timing::result("first_party_grants", "authorize_projects", || {
-        service
-            .authorize_document_kind(
-                &caller,
-                DocumentKind::SecretSpecProject,
-                DESKTOP_PROJECT_PERMISSIONS,
-                None,
-                now,
-            )
-            .map_err(|error| error.to_string())
-    })?;
-    crate::timing::result("first_party_grants", "authorize_control", || {
-        service
-            .authorize_namespace(
-                &caller,
-                control_namespace,
-                [GrantPermission::Seal],
-                None,
-                now,
-            )
-            .map_err(|error| error.to_string())
-    })?;
-    crate::timing::result("first_party_grants", "authorize_personal_secrets", || {
-        service
-            .authorize_namespace(
-                &caller,
-                PERSONAL_SECRET_NAMESPACE,
-                [
-                    GrantPermission::List,
-                    GrantPermission::Get,
-                    GrantPermission::Put,
-                    GrantPermission::Delete,
-                ],
-                None,
-                now,
-            )
-            .map_err(|error| error.to_string())
-    })?;
-    crate::timing::result("first_party_grants", "authorize_permission_manager", || {
-        service
-            .authorize_permission_manager(&caller, now)
-            .map_err(|error| error.to_string())
-    })
-}
-
 fn cli_executable(desktop: &Path) -> Result<Option<PathBuf>, String> {
     if let Some(path) = std::env::var_os(CLI_EXECUTABLE_ENV) {
         let path = PathBuf::from(path);
@@ -906,27 +751,10 @@ fn cli_executable(desktop: &Path) -> Result<Option<PathBuf>, String> {
         .filter(|path| path.is_file()))
 }
 
-#[cfg(target_os = "linux")]
-fn current_executable_identity(executable: &Path) -> Result<factorseal::CallerIdentity, String> {
-    linux_caller_identity_for_executable(executable).map_err(|error| error.to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn current_executable_identity(executable: &Path) -> Result<factorseal::CallerIdentity, String> {
-    macos_caller_identity_for_executable(executable).map_err(|error| error.to_string())
-}
-
-#[cfg(target_os = "windows")]
-fn current_executable_identity(executable: &Path) -> Result<factorseal::CallerIdentity, String> {
-    windows_caller_identity_for_executable(executable).map_err(|error| error.to_string())
-}
-
 impl Drop for DesktopRuntime {
     fn drop(&mut self) {
-        if let Ok(service) = self.service.get_mut()
-            && let Some(service) = service
-        {
-            let _ = service.seal();
+        if let Ok(pipe) = self.lifeline.get_mut() {
+            pipe.take();
         }
     }
 }
@@ -975,71 +803,6 @@ fn native_client(config: &RuntimeConfig, metadata: &VaultMetadata) -> NativeVaul
     )
 }
 
-#[cfg(target_os = "linux")]
-fn new_lifecycle() -> factorseal::VaultResult<NativeLifecycle> {
-    NativeLifecycle::new()
-}
-
-#[cfg(target_os = "macos")]
-fn new_lifecycle() -> factorseal::VaultResult<NativeLifecycle> {
-    Ok(NativeLifecycle::new())
-}
-
-#[cfg(target_os = "windows")]
-fn new_lifecycle() -> factorseal::VaultResult<NativeLifecycle> {
-    NativeLifecycle::new()
-}
-
-#[cfg(target_os = "linux")]
-fn serve(
-    config: &RuntimeConfig,
-    _metadata: &VaultMetadata,
-    service: &Arc<VaultService>,
-    lifecycle: &NativeLifecycle,
-) -> factorseal::VaultResult<()> {
-    let mut options = LinuxVaultOptions::new(
-        config
-            .socket
-            .clone()
-            .unwrap_or_else(|| config.root.join(DEFAULT_SOCKET)),
-    );
-    options.install_signal_handler = false;
-    serve_linux_vault_with_lifecycle(service, &options, Some(lifecycle))
-}
-
-#[cfg(target_os = "macos")]
-fn serve(
-    config: &RuntimeConfig,
-    _metadata: &VaultMetadata,
-    service: &Arc<VaultService>,
-    lifecycle: &NativeLifecycle,
-) -> factorseal::VaultResult<()> {
-    let mut options = MacosVaultOptions::new(
-        config
-            .socket
-            .clone()
-            .unwrap_or_else(|| config.root.join(DEFAULT_SOCKET)),
-    );
-    options.install_signal_handler = false;
-    serve_macos_vault_with_lifecycle(service, &options, Some(lifecycle))
-}
-
-#[cfg(target_os = "windows")]
-fn serve(
-    config: &RuntimeConfig,
-    metadata: &VaultMetadata,
-    service: &Arc<VaultService>,
-    lifecycle: &NativeLifecycle,
-) -> factorseal::VaultResult<()> {
-    let pipe = config.socket.as_ref().map_or_else(
-        || default_windows_pipe_name(metadata.installation_id()),
-        |path| path.to_string_lossy().into_owned(),
-    );
-    let mut options = WindowsVaultOptions::new(pipe);
-    options.install_signal_handler = false;
-    serve_windows_vault_with_lifecycle(service, &options, Some(lifecycle))
-}
-
 fn unix_time() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1053,17 +816,14 @@ pub(crate) fn default_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "could not determine the platform user-data directory".to_owned())
 }
 
-pub(crate) fn lease_policy(
-    idle_seconds: u64,
-    maximum_seconds: u64,
-) -> Result<UnsealLeasePolicy, String> {
+pub(crate) fn lease_policy(idle_seconds: u64, maximum_seconds: u64) -> Result<LeasePolicy, String> {
     if idle_seconds == 0 || maximum_seconds == 0 || idle_seconds > maximum_seconds {
         return Err(
             "idle and maximum lease durations must be positive, and idle must not exceed maximum"
                 .to_owned(),
         );
     }
-    Ok(UnsealLeasePolicy {
+    Ok(LeasePolicy {
         idle_timeout: Duration::from_secs(idle_seconds),
         maximum_lifetime: Duration::from_secs(maximum_seconds),
     })

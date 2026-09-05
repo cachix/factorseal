@@ -1,9 +1,12 @@
 # Security remediation release gates
 
-The current unreleased formats are metadata v8, database schema v5, snapshot
-envelope v7, protected commit v6, document v3, record v2, and native protocol v9.
-Older vaults are rejected, not migrated or automatically deleted. Do not destroy
-the only copy of needed data to test an upgrade.
+Compatibility is defined by the source constants and decoder/migration tests:
+[metadata](../src/vault/seal/metadata.rs), [database schema](../src/vault/store/migration.rs),
+[protocol](../src/vault/protocol/wire.rs), and the encrypted-document codecs.
+Metadata v7 remains readable alongside v8; database schema v3 migrates to v5. Unsupported formats fail closed and are
+not automatically deleted. Do not destroy the only copy of needed data to test
+an upgrade. Portable encrypted archives are the supported cross-device restore
+mechanism; they must be exported before losing access to the source vault.
 
 ## Implemented checks
 
@@ -37,15 +40,24 @@ subprocess, Linux dump settings in a subprocess, terminal controls, native error
 propagation and same-account transport checks. These do not replace native
 hardware acceptance or independent review.
 
-Local verification on Linux: 234 workspace/all-feature/all-target tests passed;
-workspace Clippy with warnings denied, documentation with warnings denied,
-formatting, the nine CI feature combinations and `git diff --check` passed.
-RustSec scan: no reported vulnerabilities or yanked dependencies. Windows
-MSVC full-workspace/all-target and client-only cross-Clippy passed. These are
-local checks, not evidence of native Windows/macOS execution or physical TPM,
-Secure Enclave, Android or two-account pipe acceptance.
+Current automated verification is recorded by [CI](../.github/workflows/ci.yml)
+and the [daily dependency check](../.github/workflows/dependency-security.yml).
+The dependency checker reports six explicitly tracked maintenance exceptions;
+these are not vulnerability fixes. Automated tests and cross-compilation are
+not evidence of native GUI/Windows/macOS execution or physical TPM, Secure
+Enclave, Android or two-account acceptance.
 
 ## Required native evidence before release
+
+- Desktop: exercise initialization/unlock success, wrong factor, biometric
+  cancellation, helper startup failure, sealing, lease expiry, GUI crash and
+  parent loss during a native prompt. Confirm the worker exits, endpoints stop
+  serving, and a second unlock uses a fresh worker. Check Unicode/IME, paste,
+  selection and clearing of all secret fields; verify plaintext never enters
+  the renderer's text cache. Linux CLI-owner dumpability must remain disabled.
+- Windows private files: run ACL creation/replacement tests in shared parent
+  directories and verify a second account cannot read intermediate or final
+  export files. Test reparse-point/password inputs and permission-query failure.
 
 - Windows: run tests on Windows, including the connected-pipe owner test;
   additionally squat a permissive pipe from a different account and capture

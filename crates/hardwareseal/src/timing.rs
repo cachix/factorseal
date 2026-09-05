@@ -15,6 +15,7 @@ pub(crate) fn record(scope: &str, phase: &str, started: Instant, outcome: &str) 
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn result<T, E>(
     scope: &str,
     phase: &str,

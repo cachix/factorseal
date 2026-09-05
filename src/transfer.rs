@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
@@ -279,42 +278,13 @@ pub fn export_manager(
 }
 
 pub fn read_transfer_file(path: &Path) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-    let metadata =
-        std::fs::metadata(path).with_context(|| format!("could not inspect {}", path.display()))?;
-    if !metadata.is_file() {
-        bail!("{} is not a regular file", path.display());
-    }
-    if metadata.len() > MAX_TRANSFER_FILE_BYTES {
-        bail!("transfer file is larger than 256 MiB");
-    }
-    std::fs::read(path)
-        .map(Zeroizing::new)
+    crate::security::read_regular_file(path, MAX_TRANSFER_FILE_BYTES)
         .with_context(|| format!("could not read {}", path.display()))
 }
 
 pub fn write_private_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut file = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("could not create a private file beside {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("could not restrict {}", path.display()))?;
-    }
-    file.write_all(bytes)
-        .with_context(|| format!("could not write {}", path.display()))?;
-    file.as_file()
-        .sync_all()
-        .with_context(|| format!("could not finish {}", path.display()))?;
-    file.persist(path)
-        .map(drop)
-        .map_err(|error| error.error)
-        .with_context(|| format!("could not replace {}", path.display()))
+    crate::security::write_private_file(path, bytes)
+        .with_context(|| format!("could not write private file {}", path.display()))
 }
 
 fn import_bitwarden(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {

@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::vault::{VaultError, VaultResult};
 
 #[cfg(all(feature = "key-protection", windows))]
-mod dacl;
+use crate::security::windows as dacl;
 
 #[cfg(feature = "key-protection")]
 pub(super) fn prepare_root(root: &Path) -> VaultResult<()> {
@@ -110,6 +110,7 @@ pub(super) fn validate_private_permissions(
     _metadata: &fs::Metadata,
 ) -> VaultResult<()> {
     dacl::validate_owner_only_directory(path)
+        .map_err(|error| VaultError::Protection(error.to_string()))
 }
 
 #[cfg(not(any(unix, all(feature = "key-protection", windows))))]

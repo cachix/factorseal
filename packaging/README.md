@@ -285,3 +285,13 @@ screen lock and suspend independently, with a recovery unseal between them.
 The supplied service definitions also cover logout and orderly stop. Until real
 installed artifacts prove the remaining shutdown and logout paths, the packages
 remain development artifacts.
+
+## Desktop key-owner packaging
+
+Ship the CLI alongside Desktop, or set `FACTORSEAL_CLI_EXECUTABLE` to its absolute
+path. Desktop launches a fresh hardened CLI worker for each initialization or
+unlock. Keep both binaries from the same build: the private bootstrap and native
+IPC versions must agree. The Nix Desktop wrapper supplies its CLI dependency.
+Signing/entitlements and lifecycle acceptance must cover the key-owning CLI
+worker as well as the GUI. Closing the GUI lifeline must stop the worker even
+while a native factor prompt is active.

@@ -138,6 +138,46 @@ fn persisted_vault_artifacts_use_the_factorseal_basename() {
 }
 
 #[test]
+fn weak_new_password_is_rejected_before_files_or_hardware_are_created() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("vault");
+    let factory = RecordingProtectorFactory::default();
+    let policy =
+        UnlockPolicy::new([UnlockGroup::new([UnlockFactorKind::Password]).unwrap()]).unwrap();
+    assert!(
+        Vault::create_with_key_protector_policy(
+            &root,
+            VaultPlatform::Android,
+            &policy,
+            UnlockCredentials::with_password(b"weak"),
+            &factory
+        )
+        .is_err()
+    );
+    assert!(!root.exists());
+    assert!(factory.biometric_policies.lock().unwrap().is_empty());
+}
+
+#[test]
+fn existing_weak_password_vault_stays_readable() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("vault");
+    let original = Vault::create_for_test_with_password(&root, b"weak").unwrap();
+    let stored = read_vault(&root).unwrap();
+    let restored = unseal_with_protectors(
+        &stored,
+        &stored.unlock_slots[0],
+        &TestProtector::new([0x35; KEY_BYTES]),
+        UnlockCredentials::with_password(b"weak"),
+    )
+    .unwrap();
+    assert_eq!(
+        original.public().installation_id(),
+        restored.public().installation_id()
+    );
+}
+
+#[test]
 fn injected_mobile_protector_creates_unseals_and_discards() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("factorseal");

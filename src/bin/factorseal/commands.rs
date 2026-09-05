@@ -89,6 +89,7 @@ pub(super) fn initialize(
         credentials(password.as_ref().map(|value| value.as_slice())),
         cryptographic_profile,
     )?;
+    drop(password);
     let device = unsealed.public().clone();
     let initialized = (|| -> Result<(), CliError> {
         let now = unix_time()?;
@@ -1103,7 +1104,7 @@ fn desktop_executable() -> Result<PathBuf, CliError> {
 }
 
 #[cfg(feature = "secretspec-provider")]
-fn publish_secretspec_claim_for_default_root(root: &Path) -> Result<(), CliError> {
+pub(super) fn publish_secretspec_claim_for_default_root(root: &Path) -> Result<(), CliError> {
     let default_root = ProjectDirs::from("dev", "Factorseal", "Factorseal")
         .ok_or(CliError::NoDefaultRoot)?
         .data_local_dir()
@@ -1234,7 +1235,7 @@ pub(super) fn grant_cli(
     Ok(())
 }
 
-fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
+pub(super) fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
     let executable =
         std::env::current_exe().map_err(|error| CliError::CurrentExecutable(error.to_string()))?;
     let caller = caller_identity_for_executable(&executable)?;
@@ -1966,7 +1967,7 @@ pub(super) fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError>
     Ok(directories.data_local_dir().to_owned())
 }
 
-fn unix_time() -> Result<u64, VaultError> {
+pub(super) fn unix_time() -> Result<u64, VaultError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())

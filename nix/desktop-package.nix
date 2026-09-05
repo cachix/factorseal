@@ -1,5 +1,6 @@
 {
   lib,
+  callPackage,
   rustPlatform,
   stdenv,
   pkg-config,
@@ -11,6 +12,9 @@
   vulkan-loader,
 }:
 
+let
+  cliPackage = callPackage ./package.nix { };
+in
 rustPlatform.buildRustPackage {
   pname = "factorseal-desktop";
   version = "0.1.0";
@@ -74,6 +78,10 @@ rustPlatform.buildRustPackage {
       --replace-fail "@DESKTOP_EXECUTABLE@" "$out/bin/factorseal-desktop"
 
     runHook postInstall
+  '';
+
+  preFixup = ''
+    gappsWrapperArgs+=(--set-default FACTORSEAL_CLI_EXECUTABLE "${cliPackage}/bin/factorseal")
   '';
 
   meta = {

@@ -1,0 +1,57 @@
+# Temporary compatibility exceptions, NOT ignored vulnerabilities. The checker
+# permits only this exact package/version and informational advisory, until expiry.
+# The dedicated CLI worker does not link these Desktop dependencies.
+
+[[exception]]
+id = "RUSTSEC-2025-0141"
+package = "bincode"
+version = "1.3.3"
+owner = "Factorseal maintainers"
+expires = 2026-10-05
+reason = "GPUI Base enables syntect's embedded syntax assets, serialized with bincode; changing formats requires rebuilding the parent assets."
+migration = "DEP-1: feature-gate unused highlighting in gpui-base, or migrate syntect and its assets together."
+
+[[exception]]
+id = "RUSTSEC-2024-0384"
+package = "instant"
+version = "0.1.13"
+owner = "Factorseal maintainers"
+expires = 2026-10-05
+reason = "Pinned gpui-base/component and their notify 7 dependency still require instant. Factorseal's direct notify dependency has been upgraded to 8."
+migration = "DEP-2: move the GPUI component workspace to web-time and notify 8, preserving its native and WASM builds."
+
+[[exception]]
+id = "RUSTSEC-2024-0436"
+package = "paste"
+version = "1.0.15"
+owner = "Factorseal maintainers"
+expires = 2026-10-05
+reason = "Compile-time macro dependency of gpui-component, Metal, and image processing; all parents must migrate to remove it across platforms."
+migration = "DEP-3: update component, metal, and pulp parents to maintained macro support such as pastey."
+
+[[exception]]
+id = "RUSTSEC-2025-0134"
+package = "rustls-pemfile"
+version = "2.2.0"
+owner = "Factorseal maintainers"
+expires = 2026-10-05
+reason = "Pinned gpui-component-assets uses zed-reqwest's legacy PEM wrapper."
+migration = "DEP-4: update the component HTTP parent to rustls-pki-types PemObject APIs and test asset packaging."
+
+[[exception]]
+id = "RUSTSEC-2026-0206"
+package = "rustybuzz"
+version = "0.20.1"
+owner = "Factorseal maintainers"
+expires = 2026-10-05
+reason = "Both GPUI and component SVG renderers require rustybuzz; even usvg 0.47 still depends on this version."
+migration = "DEP-5: migrate both SVG rendering parents to harfrust, checking text shaping and vector rendering on native targets."
+
+[[exception]]
+id = "RUSTSEC-2026-0192"
+package = "ttf-parser"
+version = "0.25.1"
+owner = "Factorseal maintainers"
+expires = 2026-10-05
+reason = "GPUI, SVG renderers, fontdb, and the WGPU text backend use this parser. A direct Cargo version override cannot replace their APIs."
+migration = "DEP-6: migrate the font consumers to skrifa and validate font fallback, accessibility, and every enabled renderer."

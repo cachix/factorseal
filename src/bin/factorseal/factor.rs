@@ -1,7 +1,4 @@
-use std::fs;
 use std::io::IsTerminal as _;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process;
 
@@ -153,33 +150,8 @@ fn read_password_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, CliError> {
 }
 
 fn read_private_secret_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_FACTOR_BYTES {
-        return Err(format!(
-            "{} must be a regular file no larger than 64 KiB",
-            path.display()
-        ));
-    }
-    #[cfg(unix)]
-    {
-        let mode = metadata.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(format!(
-                "{} is accessible by group or other users (mode {mode:o})",
-                path.display()
-            ));
-        }
-    }
-    let file = fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut bytes = read_bounded(file, MAX_FACTOR_BYTES)
+    let mut bytes = factorseal::security::read_private_file(path, MAX_FACTOR_BYTES)
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    if bytes.len() as u64 > MAX_FACTOR_BYTES {
-        return Err(format!(
-            "{} must be a regular file no larger than 64 KiB",
-            path.display()
-        ));
-    }
     strip_one_line_ending(&mut bytes);
     Ok(bytes)
 }

@@ -112,8 +112,11 @@ Or use the separately packaged graphical host:
 $ factorseal desktop
 ```
 
-Desktop initializes and unseals the same vault in-process, then hosts the same
-authenticated endpoint and Linux `org.freedesktop.secrets` adapter. It is an
+Desktop initializes and unseals the same vault through a dedicated CLI worker,
+which hosts the authenticated endpoint and Linux `org.freedesktop.secrets`
+adapter. The GUI uses authenticated IPC and releases its unlock password after
+handoff; the worker wipes that factor before serving. Install the CLI alongside
+Desktop or set `FACTORSEAL_CLI_EXECUTABLE` to its absolute path. It is an
 alternative to `factorseal agent`, not a client of it, so do not configure both
 to autostart. Repeated Desktop launches activate the existing per-vault
 instance. On Linux, the Desktop package registers D-Bus activation for
@@ -575,8 +578,9 @@ non-exportable native signing primitive. The retained installation root can
 unwrap any local document during an active lease, so this hierarchy reduces
 passive key retention rather than defeating code execution in the unsealed
 process. Hardware binding also cannot stop an authorized or compromised client
-from exfiltrating a secret returned to it. Recovery is not implemented, so
-losing the hardware keys loses the vault. Zeroization is best-effort; locked
+from exfiltrating a secret returned to it. Encrypted `.factorseal` archives support portable backup and restore using a
+separate archive passphrase. Hardware loss still loses data that was not exported
+beforehand; a native vault-directory copy cannot replace a portable backup. Zeroization is best-effort; locked
 memory and complete process-dump protection are not yet implemented.
 
 See [Security](SECURITY.md) for the complete threat model and vulnerability

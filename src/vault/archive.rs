@@ -112,7 +112,11 @@ pub fn encrypt_vault_archive(
     passphrase: &[u8],
 ) -> VaultResult<Zeroizing<Vec<u8>>> {
     archive.validate()?;
-    validate_passphrase(passphrase)?;
+    crate::security::validate_new_password(passphrase).map_err(VaultError::Protection)?;
+    encrypt_archive(archive, passphrase)
+}
+
+fn encrypt_archive(archive: &VaultArchive, passphrase: &[u8]) -> VaultResult<Zeroizing<Vec<u8>>> {
     let mut salt = [0_u8; SALT_BYTES];
     getrandom::fill(&mut salt)?;
     let header = ArchiveHeader {
@@ -240,9 +244,10 @@ fn derive_key(passphrase: &[u8], kdf: &ArchiveKdf) -> VaultResult<Zeroizing<[u8;
     let salt = decode_array::<SALT_BYTES>("archive salt", &kdf.salt)?;
     let params = Params::new(kdf.memory_kib, kdf.iterations, kdf.parallelism, Some(32))
         .map_err(|error| VaultError::Protection(format!("invalid archive KDF: {error}")))?;
+    let mut memory = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
     let mut key = Zeroizing::new([0_u8; 32]);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(passphrase, &salt, &mut *key)
+        .hash_password_into_with_memory(passphrase, &salt, &mut *key, &mut memory)
         .map_err(|error| VaultError::Protection(format!("archive KDF failed: {error}")))?;
     Ok(key)
 }
@@ -288,19 +293,32 @@ mod tests {
 
     #[test]
     fn wrong_passphrase_and_tampering_are_rejected() {
-        let mut encrypted = encrypt_vault_archive(&example(), b"right").unwrap();
+        let mut encrypted =
+            encrypt_vault_archive(&example(), b"opal nebula lantern saffron velocity").unwrap();
         assert!(decrypt_vault_archive(&encrypted, b"wrong").is_err());
         let index = encrypted.len() - 4;
         encrypted[index] ^= 1;
-        assert!(decrypt_vault_archive(&encrypted, b"right").is_err());
+        assert!(
+            decrypt_vault_archive(&encrypted, b"opal nebula lantern saffron velocity").is_err()
+        );
     }
 
     #[test]
     fn unknown_versions_are_rejected_before_key_derivation() {
-        let encrypted = encrypt_vault_archive(&example(), b"right").unwrap();
+        let encrypted =
+            encrypt_vault_archive(&example(), b"opal nebula lantern saffron velocity").unwrap();
         let mut envelope: serde_json::Value = serde_json::from_slice(&encrypted).unwrap();
         envelope["header"]["version"] = 2.into();
         let changed = serde_json::to_vec(&envelope).unwrap();
         assert!(decrypt_vault_archive(&changed, b"right").is_err());
+    }
+
+    #[test]
+    fn existing_weak_passphrase_archive_stays_readable() {
+        assert!(encrypt_vault_archive(&example(), b"weak").is_err());
+        // Model an archive produced before the creation policy was introduced.
+        let old = encrypt_archive(&example(), b"weak").unwrap();
+        let restored = decrypt_vault_archive(&old, b"weak").unwrap();
+        assert_eq!(restored.entries[0].value.expose(), b"needle-secret");
     }
 }

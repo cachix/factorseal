@@ -10,8 +10,11 @@
 mod algorithm;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod crypto;
+#[cfg(all(feature = "vault-client", feature = "key-protection"))]
+pub mod desktop_worker;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod error;
+pub mod security;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod timing;
 

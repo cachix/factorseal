@@ -273,6 +273,7 @@ impl HistoryLog {
 
     /// Convert the value-free history embedded by document format 2 into the
     /// independently encrypted log used by current snapshots.
+    #[cfg(feature = "vault-store")]
     pub(crate) fn from_legacy_document(
         kind: DocumentKind,
         partition: &[u8],

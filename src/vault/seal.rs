@@ -32,7 +32,7 @@ use protectors::{
 
 const KEY_BYTES: usize = 32;
 #[cfg(all(test, feature = "key-protection"))]
-const TEST_PASSWORD: &[u8] = b"factorseal-test-password";
+const TEST_PASSWORD: &[u8] = b"opal nebula lantern saffron velocity";
 
 mod factor;
 mod policy;
@@ -425,11 +425,13 @@ impl Vault {
         pending: bool,
     ) -> VaultResult<UnsealedVault> {
         let root = root.as_ref();
-        prepare_root(root)?;
         policy.validate()?;
         for group in policy.groups() {
-            let _ = credentials.password_for(group)?;
+            if let Some(password) = credentials.password_for(group)? {
+                crate::security::validate_new_password(password).map_err(VaultError::Protection)?;
+            }
         }
+        prepare_root(root)?;
         let mut protectors: Vec<Box<dyn KeyProtector>> = Vec::with_capacity(policy.groups().len());
         let result = (|| {
             let (installation_id, device_vault_id) = random_installation_and_device_vault_ids()?;
@@ -626,6 +628,14 @@ impl Vault {
 
     #[cfg(all(test, feature = "key-protection"))]
     pub(crate) fn create_for_test(root: &Path) -> VaultResult<UnsealedVault> {
+        Self::create_for_test_with_password(root, TEST_PASSWORD)
+    }
+
+    #[cfg(all(test, feature = "key-protection"))]
+    pub(crate) fn create_for_test_with_password(
+        root: &Path,
+        password: &[u8],
+    ) -> VaultResult<UnsealedVault> {
         use super::protection::TestProtector;
 
         prepare_root(root)?;
@@ -650,7 +660,7 @@ impl Vault {
                     key: &wrapping,
                 },
             }],
-            UnlockCredentials::with_password(TEST_PASSWORD),
+            UnlockCredentials::with_password(password),
             false,
         )
     }

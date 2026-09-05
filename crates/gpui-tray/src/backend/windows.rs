@@ -32,6 +32,8 @@ use crate::{
 const CALLBACK_MESSAGE: u32 = WM_APP + 0x471;
 const ICON_ID: u32 = 1;
 
+type MenuActions = HashMap<u32, (u64, MenuItemId)>;
+
 pub(crate) struct WindowsTray {
     state: Box<WindowState>,
     closed: bool,
@@ -41,7 +43,7 @@ struct WindowState {
     hwnd: HWND,
     icon: Option<HICON>,
     menu: Option<NativeMenu>,
-    mappings: HashMap<u32, (u64, MenuItemId)>,
+    mappings: MenuActions,
     events: async_channel::Sender<BackendEvent>,
     snapshot: TraySnapshot,
 }
@@ -265,9 +267,7 @@ impl Drop for NativeMenu {
     }
 }
 
-fn build_menu(
-    snapshot: Option<&MenuSnapshot>,
-) -> Result<(Option<NativeMenu>, HashMap<u32, (u64, MenuItemId)>)> {
+fn build_menu(snapshot: Option<&MenuSnapshot>) -> Result<(Option<NativeMenu>, MenuActions)> {
     let Some(snapshot) = snapshot else {
         return Ok((None, HashMap::new()));
     };
@@ -289,7 +289,7 @@ fn append_items(
     items: &[NativeMenuItem],
     generation: u64,
     next_command: &mut u32,
-    mappings: &mut HashMap<u32, (u64, MenuItemId)>,
+    mappings: &mut MenuActions,
 ) -> Result<()> {
     for item in items {
         match item {

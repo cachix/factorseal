@@ -59,6 +59,9 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
+    /// Internal desktop bootstrap over inherited private pipes.
+    #[command(hide = true)]
+    DesktopWorker,
     /// Internal, short-lived key owner; never connects to the agent.
     #[command(hide = true)]
     SignPermission {

@@ -33,6 +33,22 @@ is one authorized way to retrieve and update credentials:
   cleanup, native suspend/shutdown/session notifications, and live expiration
   all converge on the same store shutdown path.
 
+Desktop launches the CLI's dedicated `desktop-worker` as the key owner. The
+worker hardens its process before reading a bounded bootstrap over inherited
+pipes. The password is wiped after create/unseal, before database ownership or
+service startup. Desktop uses authenticated native IPC for subsequent requests;
+it does not retain the installation root or an unlock password during the lease.
+Closing its lifeline (including Desktop exit/crash) seals and terminates the
+worker, with a four-second emergency exit if teardown blocks. Native lifecycle
+and lease monitors also run in that worker. The CLI must be installed alongside
+Desktop or selected through `FACTORSEAL_CLI_EXECUTABLE`.
+
+Desktop secret-entry fields use bounded zeroizing buffers, omit undo/copy
+history, and send only masked text to the renderer. Submitting, leaving a secret
+view, or sealing clears the inputs. Clipboard, native input methods, crypto
+libraries, and operating-system internals can still hold copies; this is not a
+claim of comprehensive memory erasure.
+
 Every unlock group is hardware-bound. Factors inside a group are AND
 requirements and independently wrapped groups are OR alternatives. Password
 groups use memory-hard Argon2id by default. The opt-in FIPS profile instead
@@ -44,6 +60,17 @@ Biometric groups gate their hardware keys with the platform biometric policy;
 biometric-only groups do not contain a password layer. Password files are
 accepted only as private
 bounded regular files and are intended for short-lived session launch handoff.
+The same open handle is checked and read. Unix requires current-user ownership,
+no group/other access, and no final symlink; Windows rejects final reparse points
+and requires a current-user-owned file without ACL grants to another account.
+Export files are created privately before any bytes are written, then atomically
+replace the destination: mode 0600 on Unix and a protected current-user-only
+DACL on Windows, even in a shared destination directory.
+
+All public vault-creation and archive-encryption entry points require UTF-8
+passwords of at most 64 KiB with a zxcvbn score of at least three. The desktop and
+CLI share that policy. Existing vault unlock and archive decrypt deliberately
+continue accepting their original factors, including weaker legacy passwords.
 Software keyring and DPAPI-only fallbacks are rejected.
 
 Each biometric HardwareSeal unseal performs a native authorization ceremony.
@@ -97,6 +124,31 @@ from a descriptor opened once, so the path, size, and bytes always describe the
 same image, and the peer's process start time is compared before and after
 resolution, so a reused process ID cannot inherit another process's grant.
 
+## Broad administrative and compatibility authority
+
+A permission manager can inspect and change grants and use portable vault
+export/import operations. Granting that capability therefore grants broad access
+to durable entries; it is not a metadata-only role. First-party CLI/Desktop
+executables receive this authority when initialized or reauthorized.
+
+The Linux Secret Service collection is shared with applications on the user's
+session bus. It does not provide separate per-application vault grants for each
+keyring item. Its standard `plain` and legacy DH session algorithms are
+compatibility transports, not FIPS or post-quantum protocol claims. Only use this
+adapter where that session-wide trust is appropriate.
+
+## Dependency maintenance
+
+Pull requests and a daily scheduled workflow run the RustSec checker. Reported
+vulnerabilities, yanked crates, new warnings, expired exceptions and obsolete
+exceptions fail CI. Six transitive unmaintained-crate advisories currently have
+exact package/version exceptions, with an owner, expiry and migration task in
+[the dependency policy](security/dependency-exceptions.toml). These are accepted
+maintenance risks, not resolved advisories; no vulnerability can use that
+exception path. Desktop's direct notify dependency was upgraded, but compatible
+GUI dependency parents still retain the six flagged crates. GUI libraries are
+outside the separately built CLI key owner's dependency graph.
+
 ## Honest limitations
 
 - An OR policy is bounded by its weakest unlock group. Biometric-only access
@@ -148,14 +200,14 @@ resolution, so a reused process ID cannot inherit another process's grant.
   `LD_PRELOAD` paths, but a same-user process can inject code and scrub those
   signals before it connects. The boundary the vault does enforce is the Unix
   user or Windows SID.
-- The CLI disables Unix core files before acquiring secrets. Linux key-owning
+- Both CLI and Desktop disable Unix core files before acquiring secrets. Linux key-owning
   agent, initialization, destruction, reauthorization and isolated approval
   helpers additionally disable process dumpability (including piped core
   collectors). IPC-only clients stay inspectable for executable authentication.
   Native emergency termination exits without deliberately creating a core dump.
   These measures cannot stop privileged memory inspection. Locked memory,
   comprehensive wiping of library/OS-internal copies, Windows dump policy,
-  physical hardware matrices, code signing/notarization, recovery and independent
+  physical hardware matrices, code signing/notarization and independent
   audit remain release limitations.
 - `destroy` removes local state, not every possible hardware authority. Linux
   and non-biometric Windows TPM envelopes have no per-label persistent key to
@@ -185,8 +237,12 @@ resolution, so a reused process ID cannot inherit another process's grant.
   execution in the unsealed process remains outside this protection.
 - Hardware binding cannot prevent an already authorized or compromised client
   from exfiltrating a secret returned to it.
-- Losing the platform keys loses the protected data. Recovery is not
-  implemented.
+- Encrypted `.factorseal` archives provide portable backup and restore into a
+  newly initialized hardware-bound vault. They require a separately retained
+  archive passphrase and exclude device keys, application grants, history and
+  disposable provider caches. Hardware loss still loses any data that was not
+  exported beforehand; copying the native vault directory is not portable
+  recovery. Archives are not automatically created or revoked by `destroy`.
 - The bounded request-ID window is an idempotency guard against a client
   resubmitting a request, not a replay defense: the local transport is a
   peer-credentialed, owner-only socket or pipe with no intermediary to replay

@@ -21,7 +21,9 @@ jobs:
       - name: Install pinned advisory checker
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Check dependencies against RustSec
-        run: cargo audit
+        run: python3 scripts/check-dependencies.py
+      - name: Test dependency exception policy
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
   linux:
     name: Linux

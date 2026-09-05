@@ -68,7 +68,7 @@ impl IoBudget<'_> {
                 .is_some_and(|flag| flag.load(Ordering::Acquire))
     }
 
-    #[cfg(any(feature = "vault", test))]
+    #[cfg(feature = "vault")]
     pub(crate) fn capped(mut self, deadline: Option<Instant>) -> Self {
         if let Some(deadline) = deadline {
             self.deadline = self.deadline.min(deadline);
@@ -84,7 +84,7 @@ impl IoBudget<'_> {
     }
 }
 
-#[cfg(any(feature = "vault", test))]
+#[cfg(feature = "vault")]
 impl<'a> IoBudget<'a> {
     pub(crate) fn cancelled_by(mut self, flag: Option<&'a std::sync::atomic::AtomicBool>) -> Self {
         self.cancelled = flag;
@@ -469,8 +469,10 @@ pub(crate) mod unix_socket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "vault-client", feature = "vault"))]
+    use crate::vault::MAX_PERMISSION_WAIT_MS;
     #[cfg(feature = "vault-client")]
-    use crate::vault::{MAX_PERMISSION_WAIT_MS, VaultAction, VaultResponseBody};
+    use crate::vault::{VaultAction, VaultResponseBody};
     #[cfg(feature = "vault-client")]
     use std::io::Cursor;
 

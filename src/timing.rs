@@ -31,6 +31,7 @@ pub(crate) fn result<T, E>(
     result
 }
 
+#[cfg(feature = "vault-store")]
 pub(crate) fn record_result<T, E>(
     scope: &str,
     phase: &str,

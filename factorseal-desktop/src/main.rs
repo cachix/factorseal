@@ -2,6 +2,7 @@ mod app;
 mod branding;
 mod instance;
 mod runtime;
+mod secret_input;
 mod theming;
 mod timing;
 
@@ -84,6 +85,10 @@ struct Args {
 }
 
 fn main() {
+    if let Err(error) = factorseal::security::disable_core_dumps() {
+        eprintln!("factorseal-desktop: could not disable core dumps: {error}");
+        std::process::exit(1);
+    }
     #[cfg(target_os = "linux")]
     if let Some(argument) = std::env::args().nth(1) {
         match argument.as_str() {

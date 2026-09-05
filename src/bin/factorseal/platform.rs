@@ -23,31 +23,17 @@ use factorseal::{
 };
 
 use super::CliError;
-#[cfg(unix)]
-use factorseal::VaultError;
 
-#[cfg_attr(
-    target_os = "windows",
-    expect(clippy::unnecessary_wraps, reason = "Unix core limits are fallible")
-)]
 pub(super) fn disable_core_dumps() -> Result<(), CliError> {
-    #[cfg(unix)]
-    nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0).map_err(
-        |error| VaultError::Protection(format!("could not disable core dumps: {error}")),
-    )?;
-    Ok(())
+    factorseal::security::disable_core_dumps().map_err(|error| {
+        factorseal::VaultError::Protection(format!("could not disable core dumps: {error}")).into()
+    })
 }
 
-/// The key-owning process needs stronger Linux dump suppression, including
-/// piped core collectors. Do not apply this to IPC clients: authenticating
-/// their executable currently requires ptrace-gated /proc access.
 pub(super) fn harden_key_owner() -> Result<(), CliError> {
-    disable_core_dumps()?;
-    #[cfg(target_os = "linux")]
-    nix::sys::prctl::set_dumpable(false).map_err(|error| {
-        VaultError::Protection(format!("could not disable process dumps: {error}"))
-    })?;
-    Ok(())
+    factorseal::security::harden_key_owner().map_err(|error| {
+        factorseal::VaultError::Protection(format!("could not harden key owner: {error}")).into()
+    })
 }
 
 #[cfg(target_os = "linux")]
