@@ -1,0 +1,103 @@
+[[themes]]
+id = "factorseal"
+label = "FactorSeal"
+
+[[themes]]
+id = "system"
+label = "System"
+
+[[themes]]
+id = "gruvbox-light"
+label = "Gruvbox Light"
+preset = "gruvbox"
+mode = "light"
+
+[[themes]]
+id = "gruvbox-dark"
+label = "Gruvbox Dark"
+preset = "gruvbox"
+mode = "dark"
+
+[[themes]]
+id = "one-light"
+label = "One Light"
+preset = "one-dark"
+mode = "light"
+
+[[themes]]
+id = "one-dark"
+label = "One Dark"
+preset = "one-dark"
+mode = "dark"
+
+[[themes]]
+id = "dracula-light"
+label = "Dracula Light"
+preset = "dracula"
+mode = "light"
+
+[[themes]]
+id = "dracula"
+label = "Dracula"
+preset = "dracula"
+mode = "dark"
+
+[[themes]]
+id = "solarized-light"
+label = "Solarized Light"
+preset = "solarized"
+mode = "light"
+
+[[themes]]
+id = "solarized-dark"
+label = "Solarized Dark"
+preset = "solarized"
+mode = "dark"
+
+[[themes]]
+id = "nord-light"
+label = "Nord Light"
+preset = "nord"
+mode = "light"
+
+[[themes]]
+id = "nord"
+label = "Nord"
+preset = "nord"
+mode = "dark"
+
+[[themes]]
+id = "tokyo-night-day"
+label = "Tokyo Night Day"
+preset = "tokyo-night"
+mode = "light"
+
+[[themes]]
+id = "tokyo-night"
+label = "Tokyo Night"
+preset = "tokyo-night"
+mode = "dark"
+
+[[themes]]
+id = "catppuccin-latte"
+label = "Catppuccin Latte"
+preset = "catppuccin-latte"
+mode = "light"
+
+[[themes]]
+id = "catppuccin-frappe"
+label = "Catppuccin Frappé"
+preset = "catppuccin-frappe"
+mode = "dark"
+
+[[themes]]
+id = "catppuccin-macchiato"
+label = "Catppuccin Macchiato"
+preset = "catppuccin-macchiato"
+mode = "dark"
+
+[[themes]]
+id = "catppuccin-mocha"
+label = "Catppuccin Mocha"
+preset = "catppuccin-mocha"
+mode = "dark"

@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use gpui::{Hsla, px, rgb};
 use gpui_component::{scroll::ScrollbarMode, theme::Theme};
 
@@ -7,7 +9,8 @@ pub(crate) const SEARCH_ASSET: &str = "factorseal-search.svg";
 pub(crate) const CLOSE_ASSET: &str = "factorseal-close.svg";
 pub(crate) const TAGLINE: &str = "Your secrets stay here.";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Palette {
     canvas: u32,
     surface: u32,
@@ -20,35 +23,32 @@ struct Palette {
     selection: u32,
     success: u32,
     danger: u32,
+    primary_hover: u32,
+    primary_active: u32,
 }
 
-const DARK: Palette = Palette {
-    canvas: 0x0015_1515,
-    surface: 0x001d_1d1b,
-    raised: 0x0024_2421,
-    ink: 0x00f7_f3ea,
-    quiet: 0x00b9_b5ac,
-    border: 0x003b_3934,
-    secondary: 0x0029_2825,
-    secondary_hover: 0x0034_322e,
-    selection: 0x003c_3933,
-    success: 0x0081_c995,
-    danger: 0x00f2_8b82,
-};
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Definition {
+    dark: Palette,
+    light: Palette,
+    warning: u32,
+    overlay: u32,
+    overlay_opacity: f32,
+    scrollbar_opacity: f32,
+    scrollbar_thumb_opacity: f32,
+    scrollbar_thumb_hover_opacity: f32,
+    radius: f32,
+    radius_lg: f32,
+    tile_radius: f32,
+    shadow: bool,
+    tile_shadow: bool,
+}
 
-const LIGHT: Palette = Palette {
-    canvas: 0x00f7_f3ea,
-    surface: 0x00ff_fcf6,
-    raised: 0x00ef_eae1,
-    ink: 0x0015_1515,
-    quiet: 0x0068_635b,
-    border: 0x00d9_d2c7,
-    secondary: 0x00e9_e3d9,
-    secondary_hover: 0x00dd_d6ca,
-    selection: 0x00d7_d0c5,
-    success: 0x002f_6b4f,
-    danger: 0x00a3_3d32,
-};
+static DEFINITION: LazyLock<Definition> = LazyLock::new(|| {
+    toml::from_str(include_str!("../themes/factorseal.toml"))
+        .expect("invalid embedded FactorSeal theme")
+});
 
 fn color(hex: u32) -> Hsla {
     rgb(hex).into()
@@ -60,8 +60,12 @@ fn color(hex: u32) -> Hsla {
 /// visual tokens so the application remains recognizably `FactorSeal` on every
 /// desktop environment.
 pub(crate) fn apply(theme: &mut Theme) {
-    let dark = theme.is_dark();
-    let palette = if dark { DARK } else { LIGHT };
+    let definition = &*DEFINITION;
+    let palette = if theme.is_dark() {
+        definition.dark
+    } else {
+        definition.light
+    };
     let Palette {
         canvas,
         surface,
@@ -74,6 +78,8 @@ pub(crate) fn apply(theme: &mut Theme) {
         selection,
         success,
         danger,
+        primary_hover,
+        primary_active,
     } = palette;
 
     theme.background = color(canvas);
@@ -93,16 +99,8 @@ pub(crate) fn apply(theme: &mut Theme) {
 
     theme.primary = color(ink);
     theme.primary_foreground = color(canvas);
-    theme.primary_hover = if dark {
-        color(0x00e8_e3da)
-    } else {
-        color(0x002b_2b29)
-    };
-    theme.primary_active = if dark {
-        color(0x00d8_d2c8)
-    } else {
-        color(0x0000_0000)
-    };
+    theme.primary_hover = color(primary_hover);
+    theme.primary_active = color(primary_active);
 
     theme.accent = color(secondary_hover);
     theme.accent_foreground = color(ink);
@@ -122,9 +120,9 @@ pub(crate) fn apply(theme: &mut Theme) {
     theme.sidebar_border = color(border);
     theme.sidebar_primary = color(ink);
     theme.scrollbar_mode = ScrollbarMode::Always;
-    theme.scrollbar = color(canvas).opacity(0.0);
-    theme.scrollbar_thumb = color(quiet).opacity(0.32);
-    theme.scrollbar_thumb_hover = color(quiet).opacity(0.56);
+    theme.scrollbar = color(canvas).opacity(definition.scrollbar_opacity);
+    theme.scrollbar_thumb = color(quiet).opacity(definition.scrollbar_thumb_opacity);
+    theme.scrollbar_thumb_hover = color(quiet).opacity(definition.scrollbar_thumb_hover_opacity);
     theme.sidebar_primary_foreground = color(canvas);
 
     theme.link = color(ink);
@@ -138,7 +136,7 @@ pub(crate) fn apply(theme: &mut Theme) {
     theme.danger_foreground = color(canvas);
     theme.danger_hover = color(danger);
     theme.danger_active = color(danger);
-    theme.warning = color(0x00a1_5c22);
+    theme.warning = color(definition.warning);
     theme.warning_foreground = color(canvas);
     theme.info = color(ink);
     theme.info_foreground = color(canvas);
@@ -147,11 +145,39 @@ pub(crate) fn apply(theme: &mut Theme) {
     theme.title_bar = color(canvas);
     theme.title_bar_border = color(border);
     theme.window_border = color(border);
-    theme.overlay = color(0x0015_1515).opacity(0.56);
+    theme.overlay = color(definition.overlay).opacity(definition.overlay_opacity);
 
-    theme.radius = px(7.);
-    theme.radius_lg = px(12.);
-    theme.shadow = false;
-    theme.tile_shadow = false;
-    theme.tile_radius = px(12.);
+    theme.radius = px(definition.radius);
+    theme.radius_lg = px(definition.radius_lg);
+    theme.shadow = definition.shadow;
+    theme.tile_shadow = definition.tile_shadow;
+    theme.tile_radius = px(definition.tile_radius);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_component::theme::ThemeMode;
+
+    #[test]
+    fn embedded_palette_preserves_brand_colors_and_system_typography() {
+        for (mode, background, foreground, hover) in [
+            (ThemeMode::Light, 0x00f7_f3ea, 0x0015_1515, 0x002b_2b29),
+            (ThemeMode::Dark, 0x0015_1515, 0x00f7_f3ea, 0x00e8_e3da),
+        ] {
+            let mut theme = Theme {
+                mode,
+                font_family: "Test font".into(),
+                font_size: px(19.),
+                ..Theme::default()
+            };
+            apply(&mut theme);
+            assert_eq!(theme.mode, mode);
+            assert_eq!(theme.background, color(background));
+            assert_eq!(theme.foreground, color(foreground));
+            assert_eq!(theme.primary_hover, color(hover));
+            assert_eq!(theme.font_family.as_ref(), "Test font");
+            assert_eq!(theme.font_size, px(19.));
+        }
+    }
 }

@@ -1,0 +1,41 @@
+warning = 0xa15c22
+overlay = 0x151515
+overlay_opacity = 0.56
+scrollbar_opacity = 0.0
+scrollbar_thumb_opacity = 0.32
+scrollbar_thumb_hover_opacity = 0.56
+radius = 7.0
+radius_lg = 12.0
+tile_radius = 12.0
+shadow = false
+tile_shadow = false
+
+[dark]
+canvas = 0x151515
+surface = 0x1d1d1b
+raised = 0x242421
+ink = 0xf7f3ea
+quiet = 0xb9b5ac
+border = 0x3b3934
+secondary = 0x292825
+secondary_hover = 0x34322e
+selection = 0x3c3933
+success = 0x81c995
+danger = 0xf28b82
+primary_hover = 0xe8e3da
+primary_active = 0xd8d2c8
+
+[light]
+canvas = 0xf7f3ea
+surface = 0xfffcf6
+raised = 0xefeae1
+ink = 0x151515
+quiet = 0x68635b
+border = 0xd9d2c7
+secondary = 0xe9e3d9
+secondary_hover = 0xddd6ca
+selection = 0xd7d0c5
+success = 0x2f6b4f
+danger = 0xa33d32
+primary_hover = 0x2b2b29
+primary_active = 0x000000
