@@ -713,15 +713,29 @@ mod tests {
 
     /// A child that blocks on its standard input until the test closes it.
     fn blocked_child(configure: impl FnOnce(&mut std::process::Command)) -> std::process::Child {
+        use std::io::{Read as _, Write as _};
+
         let mut command = std::process::Command::new("cat");
         command
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .env_remove("LD_PRELOAD")
             .env_remove("LD_AUDIT");
         configure(&mut command);
-        command.spawn().unwrap()
+        let mut child = command.spawn().unwrap();
+        // Wait for the child's userspace image before inspecting /proc. A
+        // spawn acknowledgement alone can race its startup/exec transition.
+        child.stdin.as_mut().unwrap().write_all(b"ready").unwrap();
+        let mut ready = [0; 5];
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut ready)
+            .unwrap();
+        assert_eq!(&ready, b"ready");
+        child
     }
 
     fn release(mut child: std::process::Child) {
@@ -735,19 +749,21 @@ mod tests {
             command.env("LD_PRELOAD", "");
         });
         let pid = i32::try_from(child.id()).unwrap();
-        assert!(matches!(
-            reject_untrusted_peer_image(pid),
-            Err(VaultError::AuthorizationRequired)
-        ));
+        let result = reject_untrusted_peer_image(pid);
         release(child);
+        assert!(
+            matches!(result, Err(VaultError::AuthorizationRequired)),
+            "unexpected peer authentication result: {result:?}"
+        );
     }
 
     #[test]
     fn an_untraced_peer_without_loader_injection_is_accepted() {
         let child = blocked_child(|_| {});
         let pid = i32::try_from(child.id()).unwrap();
-        reject_untrusted_peer_image(pid).unwrap();
+        let result = reject_untrusted_peer_image(pid);
         release(child);
+        result.unwrap();
     }
 
     #[test]
