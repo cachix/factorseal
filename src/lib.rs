@@ -85,6 +85,8 @@ pub use vault::{
     LinuxVaultLifecycle, LinuxVaultOptions, linux_caller_identity_for_executable,
     serve_linux_vault, serve_linux_vault_with_lifecycle,
 };
+#[cfg(all(feature = "secret-service-host", target_os = "linux"))]
+pub use vault::{SECRET_SERVICE_NAMESPACE, SecretServiceHost, SecretServicePrompter};
 
 #[cfg(all(feature = "vault-client", target_os = "macos"))]
 pub use vault::MacosVaultClient;
