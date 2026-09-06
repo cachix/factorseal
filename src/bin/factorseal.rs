@@ -7,6 +7,8 @@ use factorseal::{GrantPermission, UnsealLeasePolicy, VaultError, VaultResponseEr
 mod cli;
 #[path = "factorseal/commands.rs"]
 mod commands;
+#[path = "factorseal/completion.rs"]
+mod completion;
 #[path = "factorseal/desktop_worker.rs"]
 mod desktop_worker;
 #[path = "factorseal/factor.rs"]
@@ -63,6 +65,9 @@ enum CliError {
 
     #[error("project metadata output failed: {0}")]
     ProjectOutput(String),
+
+    #[error("completion script output failed: {0}")]
+    CompletionOutput(String),
 
     #[error("vault transfer failed: {0}")]
     Transfer(String),
@@ -134,6 +139,7 @@ enum CliError {
 }
 
 fn main() {
+    completion::complete();
     if let Err(error) = run(Cli::parse()) {
         eprintln!("factorseal: {error}");
         std::process::exit(1);
@@ -250,6 +256,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::GrantCli { unlock } => grant_cli(&root, factor, unlock.as_ref()),
         Command::HardwareSelfTest { biometric } => hardware_self_test(biometric),
         Command::Permissions { action } => manage_permissions(&root, socket, factor, &action),
+        Command::Completions { shell } => {
+            completion::generate(shell, &mut std::io::stdout().lock())
+                .map_err(|error| CliError::CompletionOutput(error.to_string()))
+        }
         #[cfg(feature = "secretspec-provider")]
         Command::Provider => provider::serve(&root, socket),
     }
