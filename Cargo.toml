@@ -56,8 +56,10 @@ cli = [
     "dep:clap_complete_nushell",
     "dep:directories",
     "dep:rpassword",
+    "diagnostics",
     "transfer",
 ]
+diagnostics = ["dep:directories", "transfer"]
 transfer = ["dep:anyhow", "dep:csv", "dep:tempfile", "dep:uuid", "dep:windows", "dep:nt-token"]
 secretspec-provider = [
     "dep:async-trait",
@@ -179,6 +181,9 @@ missing_errors_doc = "allow"
 
 [profile.test]
 debug = 0
+
+[profile.release]
+debug = "line-tables-only"
 
 # Password stretching intentionally uses production-strength Argon2 settings
 # in the desktop app. Optimize only its implementation in development builds

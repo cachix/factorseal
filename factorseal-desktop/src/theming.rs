@@ -686,10 +686,15 @@ fn emit_probe(backend: Backend) -> Result<()> {
 /// Emit a toolkit snapshot for the parent process, then terminate.
 #[cfg(target_os = "linux")]
 pub(crate) fn exit_after_probe(backend: Backend) -> ! {
+    factorseal::diagnostics::event("desktop", "theme_probe", "start");
     match emit_probe(backend) {
-        Ok(()) => std::process::exit(0),
+        Ok(()) => {
+            factorseal::diagnostics::finish(true);
+            std::process::exit(0);
+        }
         Err(error) => {
             eprintln!("{error:#}");
+            factorseal::diagnostics::finish(false);
             std::process::exit(1);
         }
     }
@@ -698,13 +703,16 @@ pub(crate) fn exit_after_probe(backend: Backend) -> ! {
 /// Resolve and print the automatically selected theme without opening GPUI.
 #[cfg(target_os = "linux")]
 pub(crate) fn exit_after_probe_only() -> ! {
+    factorseal::diagnostics::event("desktop", "automatic_theme_probe", "start");
     match load_automatic() {
         Ok(loaded) => {
             println!("{}: {}", loaded.backend, loaded.summary);
+            factorseal::diagnostics::finish(true);
             std::process::exit(0);
         }
         Err(error) => {
             eprintln!("{error:#}");
+            factorseal::diagnostics::finish(false);
             std::process::exit(1);
         }
     }

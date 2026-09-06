@@ -2,7 +2,7 @@ use gpui::{
     App, Context, Div, Entity, Render, SharedString, Subscription, Window, div, prelude::*, rems,
 };
 use gpui_component::{
-    ActiveTheme as _, IndexPath, Selectable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, Sizable as _, StyledExt as _,
     button::Button,
     h_flex,
     select::{Select, SelectEvent, SelectItem, SelectState},
@@ -88,12 +88,15 @@ type Control = Entity<SelectState<Vec<Item>>>;
 enum Section {
     Appearance,
     Security,
+    Diagnostics,
 }
 
 pub(crate) struct SettingsView {
     section: Section,
     controls: Vec<Control>,
     error: Option<&'static str>,
+    export_busy: bool,
+    export_complete: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -188,6 +191,8 @@ impl SettingsView {
             section: Section::Appearance,
             controls,
             error: None,
+            export_busy: false,
+            export_complete: false,
             _subscriptions: subscriptions,
         }
     }
@@ -196,6 +201,7 @@ impl SettingsView {
         self.error = if settings.idle_seconds > settings.maximum_seconds {
             Some("Idle lock timeout must not exceed maximum unlock duration.")
         } else if let Err(error) = appearance::update(settings, cx) {
+            factorseal::diagnostics::event("desktop", "save_settings", "error");
             eprintln!("could not save desktop settings: {error:#}");
             Some("Could not save settings.")
         } else {
@@ -274,15 +280,76 @@ impl SettingsView {
                     .child("Applies the next time you unlock the vault."),
             )
     }
+
+    fn diagnostics(&self, cx: &mut Context<Self>) -> Div {
+        v_flex()
+            .gap_4()
+            .child(div().font_medium().child("Crash reports and logs"))
+            .child("Crash reports include recent operations, timings, and backtraces. Secret values and panic messages are excluded. Local reports remain available for export.")
+            .child(if crate::crash_reporting::configured() {
+                "Sentry is configured. Automatic submission sends Desktop and vault-worker crash reports in the background, including pending reports after a restart."
+            } else {
+                "Automatic submission is unavailable in this session. Reports stay local."
+            })
+            .child("The bug button in the footer opens a form for describing an issue. Send report submits your description and recent diagnostic logs, even when automatic crash reporting is off.")
+            .child(
+                h_flex().justify_between().gap_3()
+                    .child("Automatically send crash reports")
+                    .child(Switch::new("automatic-crash-reports")
+                        .accessibility_label("Automatically send crash reports")
+                        .checked(appearance::current(cx).automatic_crash_reports)
+                        .on_click(cx.listener(|view, checked: &bool, window, cx| {
+                            let mut settings = appearance::current(cx).clone();
+                            settings.automatic_crash_reports = *checked;
+                            view.save(settings, window, cx);
+                        }))),
+            )
+            .child(
+                Button::new("export-diagnostics")
+                    .label(if self.export_busy { "Exporting…" } else { "Export diagnostics…" })
+                    .disabled(self.export_busy)
+                    .on_click(cx.listener(|view, _, _, cx| view.export_diagnostics(cx))),
+            )
+            .when(self.export_complete, |view| view.child("Diagnostics exported. Review the file before sharing it."))
+    }
+
+    fn export_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.export_busy = true;
+        self.export_complete = false;
+        self.error = None;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let chosen = rfd::AsyncFileDialog::new()
+                .add_filter("Diagnostic report", &["json"])
+                .set_file_name("factorseal-diagnostics.json")
+                .save_file()
+                .await;
+            let result = if let Some(chosen) = chosen {
+                let path = chosen.path().to_owned();
+                Some(smol::unblock(move || factorseal::diagnostics::export(&path)).await)
+            } else {
+                None
+            };
+            let _ = view.update(cx, |view, cx| {
+                view.export_busy = false;
+                match result {
+                    Some(Ok(())) => view.export_complete = true,
+                    Some(Err(_)) => view.error = Some("Could not export diagnostics. Choose a writable location and try again."),
+                    None => {}
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
 }
 
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let section = self.section;
-        let content = if section == Section::Appearance {
-            self.appearance(cx)
-        } else {
-            self.security(cx)
+        let content = match section {
+            Section::Appearance => self.appearance(cx),
+            Section::Security => self.security(cx),
+            Section::Diagnostics => self.diagnostics(cx),
         };
         let theme = cx.theme();
         v_flex()
@@ -318,6 +385,7 @@ impl Render for SettingsView {
                             [
                                 (Section::Appearance, "Appearance"),
                                 (Section::Security, "Security"),
+                                (Section::Diagnostics, "Diagnostics"),
                             ]
                             .into_iter()
                             .map(|(section, label)| {

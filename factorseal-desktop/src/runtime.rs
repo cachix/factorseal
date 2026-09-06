@@ -477,6 +477,11 @@ impl DesktopRuntime {
         password: Zeroizing<Vec<u8>>,
     ) {
         let result = self.supervise_worker(&metadata, group, password);
+        factorseal::diagnostics::event(
+            "desktop",
+            "supervise_worker",
+            if result.is_ok() { "ok" } else { "error" },
+        );
         if let Ok(mut pipe) = self.lifeline.lock() {
             pipe.take();
         }
@@ -488,6 +493,7 @@ impl DesktopRuntime {
     }
 
     fn run_initialization(self: Arc<Self>, policy: UnlockPolicy, password: Zeroizing<Vec<u8>>) {
+        factorseal::diagnostics::event("desktop", "initialize_vault", "start");
         let result = (|| {
             let mut worker = self.spawn_worker(
                 factorseal::desktop_worker::Operation::Initialize { policy },
@@ -498,6 +504,11 @@ impl DesktopRuntime {
             Vault::inspect(&self.config.root).map_err(|error| error.to_string())
         })();
         self.unlock_in_progress.store(false, Ordering::Release);
+        factorseal::diagnostics::event(
+            "desktop",
+            "initialize_vault",
+            if result.is_ok() { "ok" } else { "error" },
+        );
         let snapshot = match result {
             Ok(metadata) => Snapshot::Sealed {
                 metadata,
@@ -529,7 +540,11 @@ impl DesktopRuntime {
         let child = command
             .spawn()
             .map_err(|e| format!("could not start vault worker: {e}"))?;
-        let mut worker = Worker(child);
+        factorseal::diagnostics::event("desktop", "spawn_worker", "ok");
+        let mut worker = Worker {
+            child,
+            exit_reported: false,
+        };
         let bootstrap = factorseal::desktop_worker::Bootstrap {
             desktop_executable: desktop,
             operation,
@@ -537,7 +552,11 @@ impl DesktopRuntime {
         };
         drop(password);
         factorseal::desktop_worker::send(
-            worker.0.stdin.as_mut().ok_or("worker input unavailable")?,
+            worker
+                .child
+                .stdin
+                .as_mut()
+                .ok_or("worker input unavailable")?,
             &bootstrap,
         )
         .map_err(|e| e.to_string())?;
@@ -576,7 +595,8 @@ impl DesktopRuntime {
             crate::timing::result("desktop_startup", "wait_service_ready", || {
                 let deadline = std::time::Instant::now() + Duration::from_secs(10);
                 loop {
-                    if let Some(status) = worker.0.try_wait().map_err(|e| e.to_string())? {
+                    if let Some(status) = worker.child.try_wait().map_err(|e| e.to_string())? {
+                        worker.record_exit(status);
                         return Err(format!("vault worker exited before serving: {status}"));
                     }
                     if let Some(deadlines) =
@@ -595,7 +615,13 @@ impl DesktopRuntime {
         self.lifeline
             .lock()
             .map_err(|_| "desktop worker lock unavailable".to_owned())?
-            .replace(worker.0.stdin.take().ok_or("worker input unavailable")?);
+            .replace(
+                worker
+                    .child
+                    .stdin
+                    .take()
+                    .ok_or("worker input unavailable")?,
+            );
         // Publish the inventory before requesting permissions. The UI starts
         // that request once it has applied this first unlocked snapshot.
         let client = native_client(&self.config, metadata);
@@ -625,16 +651,30 @@ impl DesktopRuntime {
 }
 
 /// On every error, terminate and reap the child rather than leaving an orphan.
-struct Worker(std::process::Child);
+struct Worker {
+    child: std::process::Child,
+    exit_reported: bool,
+}
 impl Worker {
+    fn record_exit(&mut self, status: std::process::ExitStatus) {
+        if !self.exit_reported {
+            factorseal::diagnostics::child_exit(self.child.id(), status);
+            self.exit_reported = true;
+        }
+    }
+
     fn read_ready(&mut self) -> Result<(), String> {
         factorseal::desktop_worker::receive::<Result<(), String>>(
-            self.0.stdout.as_mut().ok_or("worker output unavailable")?,
+            self.child
+                .stdout
+                .as_mut()
+                .ok_or("worker output unavailable")?,
         )
         .map_err(|e| format!("vault worker startup failed: {e}"))?
     }
     fn wait(&mut self) -> Result<(), String> {
-        let status = self.0.wait().map_err(|e| e.to_string())?;
+        let status = self.child.wait().map_err(|e| e.to_string())?;
+        self.record_exit(status);
         if status.success() {
             Ok(())
         } else {
@@ -644,8 +684,16 @@ impl Worker {
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if let Ok(Some(status)) = self.child.try_wait() {
+            self.record_exit(status);
+            return;
+        }
+        let _ = self.child.kill();
+        if let Ok(status) = self.child.wait() {
+            // Reap the key owner before any diagnostic disk I/O.
+            factorseal::diagnostics::event("worker", "supervisor_cleanup", "terminate");
+            self.record_exit(status);
+        }
     }
 }
 

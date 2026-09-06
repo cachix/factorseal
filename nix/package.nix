@@ -37,6 +37,8 @@ rustPlatform.buildRustPackage {
 
   doCheck = false;
   strictDeps = true;
+  # Keep release line tables available for local panic backtraces.
+  dontStrip = true;
 
   installPhase = ''
     runHook preInstall

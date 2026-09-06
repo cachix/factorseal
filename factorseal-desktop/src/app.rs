@@ -1,5 +1,5 @@
 use crate::secret_input::SecretInputState;
-use std::sync::Arc;
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Div, Global, Hsla, MenuItem, Render, Subscription, Task,
@@ -7,11 +7,12 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Root, Selectable as _, Sizable as _, Size,
-    StyledExt as _,
+    StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
+    dialog::{Cancel as CancelDialog, Confirm as ConfirmDialog, DialogFooter},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     link::Link,
     scroll::ScrollableElement as _,
     spinner::Spinner,
@@ -543,6 +544,10 @@ fn selection_for_search(selection: Option<&VaultSelection>) -> Option<VaultSelec
 #[allow(clippy::struct_excessive_bools)]
 struct DesktopView {
     settings_open: bool,
+    issue_report_busy: bool,
+    issue_report_notice: Option<&'static str>,
+    issue_description: Option<gpui::Entity<TextareaState>>,
+    issue_report_error: Rc<Cell<Option<&'static str>>>,
     settings: gpui::Entity<crate::settings_view::SettingsView>,
     runtime: Arc<DesktopRuntime>,
     snapshot: Snapshot,
@@ -569,6 +574,165 @@ struct DesktopView {
 }
 
 impl DesktopView {
+    fn report_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.issue_report_busy {
+            return;
+        }
+        let description = self.issue_description.get_or_insert_with(|| {
+            cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .rows(5)
+                    .placeholder("What were you doing? What happened, and what did you expect? Include steps to reproduce if you can.")
+            })
+        }).clone();
+        self.issue_report_error.set(None);
+        let error = Rc::clone(&self.issue_report_error);
+        let view = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let send_view = view.clone();
+            let cancel_view = view.clone();
+            dialog
+                .title("Report an issue")
+                .width(px(520.))
+                .overlay_closable(false)
+                .child("Describe what went wrong")
+                .child(Textarea::new(&description).h(rems(140. / 16.)))
+                .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                    .child("Your description and recent diagnostic logs will be sent to Sentry. Don’t include passwords or secret values. Up to 4,000 characters."))
+                .when_some(error.get(), |dialog, error| dialog.child(error_banner(error.to_owned(), cx.theme().danger)))
+                .footer(
+                    DialogFooter::new()
+                        .child(Button::new("cancel-issue-report").label("Cancel")
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(CancelDialog), cx)))
+                        .child(Button::new("send-issue-report").primary().label("Send report")
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(ConfirmDialog { secondary: false }), cx))),
+                )
+                .on_ok(move |_, window, cx| {
+                    send_view.update(cx, |view, cx| view.submit_issue(window, cx)).unwrap_or(true)
+                })
+                .on_cancel(move |_, _, cx| {
+                    let _ = cancel_view.update(cx, |view, _| view.issue_description = None);
+                    true
+                })
+        });
+        if let Some(description) = &self.issue_description {
+            description.update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn submit_issue(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.issue_report_busy {
+            return false;
+        }
+        let Some(input) = &self.issue_description else {
+            return false;
+        };
+        let description = input.read(cx).value().to_string();
+        if let Err(error) = factorseal::diagnostics::validate_issue_description(&description) {
+            self.issue_report_error.set(Some(error));
+            cx.notify();
+            return false;
+        }
+        if !crate::crash_reporting::configured() {
+            self.issue_report_error.set(Some(
+                "Issue submission is unavailable. You can export diagnostics from Settings.",
+            ));
+            cx.notify();
+            return false;
+        }
+        self.issue_report_busy = true;
+        self.issue_report_notice = Some("Sending issue report…");
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result =
+                smol::unblock(move || crate::crash_reporting::submit_issue(&description)).await;
+            let queued = result.is_ok();
+            let notice = if let Ok(id) = result {
+                let mut sent = false;
+                for _ in 0..20 {
+                    let id = id.clone();
+                    sent = smol::unblock(move || crate::crash_reporting::issue_sent(&id))
+                        .await
+                        .unwrap_or(false);
+                    if sent {
+                        break;
+                    }
+                    smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                }
+                if sent {
+                    "Issue report sent to Sentry with recent diagnostic logs."
+                } else {
+                    "Issue report queued for Sentry. Desktop will retry automatically."
+                }
+            } else {
+                "Could not queue the issue report. Try again or export diagnostics from Settings."
+            };
+            let _ = view.update(cx, |view, cx| {
+                view.issue_report_busy = false;
+                view.issue_report_notice = Some(notice);
+                if queued {
+                    view.issue_description = None;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
+    fn render_footer(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let security_label = self.security_label();
+        v_flex()
+            .w_full()
+            .flex_none()
+            .when_some(self.issue_report_notice, |view, notice| {
+                view.child(
+                    div()
+                        .py_2()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(notice),
+                )
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_none()
+                    .h(rems(48. / 16.))
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Button::new("report-issue")
+                                    .icon(gpui_component::Icon::default().path(branding::BUG_ASSET))
+                                    .ghost()
+                                    .small()
+                                    .disabled(self.issue_report_busy)
+                                    .tooltip("Report an issue")
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.report_issue(window, cx);
+                                    })),
+                            )
+                            .child(branding::TAGLINE),
+                    )
+                    .child(
+                        Link::new("footer-security-link")
+                            .href("https://factorseal.dev/security")
+                            .child(security_label),
+                    ),
+            )
+    }
+
     fn security_label(&self) -> String {
         let backend = self.snapshot.metadata().map_or_else(
             || {
@@ -657,6 +821,10 @@ impl DesktopView {
         );
         Self {
             settings_open: false,
+            issue_report_busy: false,
+            issue_report_notice: None,
+            issue_description: None,
+            issue_report_error: Rc::new(Cell::new(None)),
             settings,
             runtime,
             snapshot,
@@ -2729,10 +2897,10 @@ fn vault_browser_height(window: &Window, compact: bool, cx: &App) -> gpui::Pixel
 
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dialog_layer = Root::render_dialog_layer(window, cx);
         window.set_rem_size(crate::appearance::rem_size(cx));
         let theme = cx.theme().clone();
         let header_status = self.render_header_status(cx);
-        let security_label = self.security_label();
         let unsealed = !self.settings_open && matches!(self.snapshot, Snapshot::Unsealed { .. });
         let compact = window.viewport_size().width < px(800.) * crate::appearance::scale(cx);
         let body_max_width = if self.settings_open {
@@ -2810,25 +2978,8 @@ impl Render for DesktopView {
                     )
                     .overflow_y_scrollbar(),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .flex_none()
-                    .h(rems(48. / 16.))
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(branding::TAGLINE)
-                    .child(
-                        Link::new("footer-security-link")
-                            .href("https://factorseal.dev/security")
-                            .child(security_label),
-                    ),
-            )
+            .child(self.render_footer(cx))
+            .children(dialog_layer)
     }
 }
 
@@ -2962,6 +3113,7 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
                 desktop.visible = true;
             }
             Err(error) => {
+                factorseal::diagnostics::event("desktop", "open_window", "error");
                 eprintln!("failed to open FactorSeal Desktop: {error}");
                 return;
             }
@@ -2982,6 +3134,7 @@ fn close_desktop(_: &CloseDesktop, cx: &mut App) {
         if let Err(error) = handle.update(cx, |_, window, _| window.set_visible(false)) {
             forget_desktop_window(handle, cx);
             refresh_tray(cx);
+            factorseal::diagnostics::event("desktop", "hide_window", "error");
             eprintln!("failed to hide FactorSeal Desktop window: {error}");
         }
     });
@@ -2999,6 +3152,7 @@ fn seal_vault(_: &SealVault, cx: &mut App) {
     if let Some(runtime) = cx.try_global::<RuntimeGlobal>()
         && let Err(error) = runtime.0.seal()
     {
+        factorseal::diagnostics::event("desktop", "seal_vault", "error");
         eprintln!("failed to seal FactorSeal vault: {error}");
     }
 }
@@ -3012,8 +3166,10 @@ fn quit(_: &Quit, cx: &mut App) {
     if let Some(tray) = tray
         && let Err(error) = tray.close(cx)
     {
+        factorseal::diagnostics::event("desktop", "close_tray", "error");
         eprintln!("failed to close FactorSeal tray: {error}");
     }
+    factorseal::diagnostics::finish(true);
     cx.quit();
 }
 
@@ -3045,6 +3201,7 @@ fn refresh_tray(cx: &mut App) {
     if let Some(tray) = tray
         && let Err(error) = tray.refresh_menu(cx)
     {
+        factorseal::diagnostics::event("desktop", "refresh_tray_menu", "error");
         eprintln!("failed to refresh FactorSeal tray menu: {error}");
     }
 }
@@ -3073,7 +3230,10 @@ fn install_tray(cx: &mut App) {
     });
     match tray {
         Ok(tray) => cx.set_global(DesktopTray(tray)),
-        Err(error) => eprintln!("FactorSeal tray unavailable: {error}"),
+        Err(error) => {
+            factorseal::diagnostics::event("desktop", "install_tray", "error");
+            eprintln!("FactorSeal tray unavailable: {error}");
+        }
     }
 }
 
@@ -3087,6 +3247,7 @@ pub(crate) fn refresh_tray_icon(cx: &mut App) {
     match factorseal_icon(dark_background, cx) {
         Ok(icon) => {
             if let Err(error) = tray.set_icon(Some(icon), cx) {
+                factorseal::diagnostics::event("desktop", "refresh_tray_icon", "error");
                 eprintln!("failed to refresh FactorSeal tray bitmap: {error}");
             }
         }

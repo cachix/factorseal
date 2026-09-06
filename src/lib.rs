@@ -12,6 +12,8 @@ mod algorithm;
 mod crypto;
 #[cfg(all(feature = "vault-client", feature = "key-protection"))]
 pub mod desktop_worker;
+#[cfg(feature = "diagnostics")]
+pub mod diagnostics;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod error;
 pub mod security;

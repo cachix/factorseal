@@ -652,3 +652,13 @@ builds or its unit tests pass.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## Diagnostics
+
+FactorSeal keeps local crash reports and bounded operation logs for Desktop,
+the CLI, and vault workers. Export them from Desktop's Settings → Diagnostics,
+or run `factorseal diagnostics --output factorseal-diagnostics.json` without
+unlocking the vault. Desktop can automatically submit crash reports when a Sentry
+DSN is configured; its Diagnostics settings control submission. See the
+[diagnostics guide](factorseal-desktop/README.md#crash-reports-and-logs) for
+storage, privacy, retention, and crash-capture limits.

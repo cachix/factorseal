@@ -19,6 +19,7 @@ pub(super) fn run(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
         "harden_key_owner",
         super::platform::harden_key_owner,
     )?;
+    factorseal::diagnostics::event("worker", "bootstrap", "start");
     let mut reported = false;
     let result = run_inner(root, socket, &mut reported);
     // This pipe carries only status, never keys or secret values.
@@ -107,6 +108,7 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
             service.seal()?;
             Vault::complete_initialization(root)?;
         } else {
+            factorseal::diagnostics::event("worker", "serve_vault", "start");
             super::platform::serve_vault(&device, &service, root, socket, &lifecycle, || {
                 timing::result("desktop_worker", "send_ready", || {
                     send(&mut std::io::stdout(), &Ok::<(), String>(()))
@@ -229,6 +231,7 @@ fn watch_parent(owner: Arc<Mutex<Weak<VaultService>>>) -> Result<(), CliError> {
             {
                 let _ = service.seal();
             }
+            factorseal::diagnostics::finish(true);
             // Also bounds a native prompt or initialization before service ownership.
             std::process::exit(0);
         })

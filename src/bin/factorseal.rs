@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use clap::Parser;
+use factorseal::diagnostics;
 use factorseal::{GrantPermission, UnsealLeasePolicy, VaultError, VaultResponseErrorCode};
 
 #[path = "factorseal/cli.rs"]
@@ -132,6 +133,9 @@ enum CliError {
     #[error("{0}")]
     HardwareSelfTest(String),
 
+    #[error("diagnostics failed: {0}")]
+    Diagnostics(std::io::Error),
+
     #[cfg(feature = "secretspec-provider")]
     #[error("SecretSpec provider protocol failed: {0}")]
     ProviderProtocol(String),
@@ -143,10 +147,22 @@ enum CliError {
 
 fn main() {
     completion::complete();
-    if let Err(error) = run(Cli::parse()) {
+    let cli = Cli::parse();
+    let component = match &cli.command {
+        Command::DesktopWorker => "desktop-worker",
+        Command::Agent { .. } => "agent",
+        _ => "cli",
+    };
+    if let Err(error) = factorseal::diagnostics::initialize(component) {
+        eprintln!("factorseal: diagnostics unavailable: {error}");
+    }
+    factorseal::diagnostics::event("cli", cli.command.diagnostic_name(), "start");
+    if let Err(error) = run(cli) {
+        factorseal::diagnostics::finish(false);
         eprintln!("factorseal: {error}");
         std::process::exit(1);
     }
+    factorseal::diagnostics::finish(true);
 }
 
 #[expect(
@@ -155,6 +171,19 @@ fn main() {
 )]
 fn run(cli: Cli) -> Result<(), CliError> {
     platform::disable_core_dumps()?;
+    if let Command::Diagnostics { output } = &cli.command {
+        if let Some(output) = output {
+            factorseal::diagnostics::export(output).map_err(CliError::Diagnostics)?;
+        } else {
+            println!(
+                "{}",
+                factorseal::diagnostics::directory()
+                    .map_err(CliError::Diagnostics)?
+                    .display()
+            );
+        }
+        return Ok(());
+    }
     let root = resolve_root(cli.root.as_deref())?;
     let socket = cli.socket.as_deref();
     let factor = FactorSource {
@@ -162,6 +191,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         askpass: cli.askpass.as_deref(),
     };
     match cli.command {
+        Command::Diagnostics { .. } => unreachable!("diagnostics handled before vault access"),
         Command::DesktopWorker => desktop_worker::run(&root, socket),
         Command::SignPermission {
             id,

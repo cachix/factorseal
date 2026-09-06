@@ -16,6 +16,7 @@ pub(crate) struct DesktopSettings {
     pub(crate) text_size: Option<u16>,
     pub(crate) font: Option<String>,
     pub(crate) reduced_motion: bool,
+    pub(crate) automatic_crash_reports: bool,
     pub(crate) idle_seconds: u64,
     pub(crate) maximum_seconds: u64,
 }
@@ -28,6 +29,7 @@ impl Default for DesktopSettings {
             text_size: None,
             font: None,
             reduced_motion: false,
+            automatic_crash_reports: true,
             idle_seconds: 300,
             maximum_seconds: 28_800,
         }
@@ -133,6 +135,7 @@ mod tests {
             text_size: Some(20),
             font: Some("Ubuntu Sans".to_owned()),
             reduced_motion: true,
+            automatic_crash_reports: false,
             idle_seconds: 60,
             maximum_seconds: 3600,
         };

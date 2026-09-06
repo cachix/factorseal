@@ -7,6 +7,7 @@ pub(crate) const MARK_ASSET: &str = "factorseal-mark.svg";
 pub(crate) const MICRO_MARK_ASSET: &str = "factorseal-mark-micro.svg";
 pub(crate) const SEARCH_ASSET: &str = "factorseal-search.svg";
 pub(crate) const CLOSE_ASSET: &str = "factorseal-close.svg";
+pub(crate) const BUG_ASSET: &str = "factorseal-bug.svg";
 pub(crate) const TAGLINE: &str = "Your secrets stay here.";
 
 #[derive(Clone, Copy, serde::Deserialize)]
