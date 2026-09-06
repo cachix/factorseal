@@ -140,6 +140,11 @@ fn main() {
             && let Err(error) = wait_for_secret_service(ACTIVATION_WAIT)
         {
             eprintln!("factorseal-desktop: {error}");
+            // D-Bus activation launched this process to make the Secret Service
+            // name appear. dbus-broker keeps every caller queued until the name is
+            // owned or the activated unit fails, so exiting cleanly here would
+            // leave those callers hanging indefinitely.
+            std::process::exit(1);
         }
         return;
     }
