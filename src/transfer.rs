@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
@@ -265,16 +265,78 @@ pub fn import_manager(format: TransferFormat, bytes: &[u8]) -> anyhow::Result<Ve
     Ok(secrets)
 }
 
+/// Assign stable, unique addresses within an import, reserving original titles
+/// before allocating suffixes. Destination conflicts are handled by the vault.
+#[must_use]
+pub fn personal_import_names(secrets: &[PersonalSecret]) -> Vec<String> {
+    let mut reserved: HashSet<String> = secrets.iter().map(|secret| secret.title.clone()).collect();
+    let mut seen = HashMap::<&str, u64>::new();
+    secrets
+        .iter()
+        .map(|secret| {
+            let suffix = seen.entry(&secret.title).or_insert(1);
+            if *suffix == 1 {
+                *suffix = 2;
+                return secret.title.clone();
+            }
+            loop {
+                let name = format!("{} ({suffix})", secret.title);
+                *suffix += 1;
+                if reserved.insert(name.clone()) {
+                    return name;
+                }
+            }
+        })
+        .collect()
+}
+
 pub fn export_manager(
     format: TransferFormat,
     secrets: &[PersonalSecret],
 ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    validate_manager_export(format, secrets)?;
     match format {
         TransferFormat::BitwardenJson => export_bitwarden(secrets),
         TransferFormat::OnePasswordCsv => export_one_password(secrets),
         TransferFormat::KeePassCsv => export_keepass(secrets),
         TransferFormat::FactorSeal => bail!("native archives use the encrypted archive writer"),
     }
+}
+
+fn validate_manager_export(
+    format: TransferFormat,
+    secrets: &[PersonalSecret],
+) -> anyhow::Result<()> {
+    for secret in secrets {
+        let lossy = match format {
+            TransferFormat::FactorSeal => false,
+            TransferFormat::BitwardenJson => secret.archived || !secret.tags.is_empty(),
+            TransferFormat::OnePasswordCsv | TransferFormat::KeePassCsv => {
+                !matches!(
+                    secret.kind,
+                    PersonalSecretKind::Login | PersonalSecretKind::Generic
+                ) || !secret.custom_fields.is_empty()
+                    || secret.urls.len() > 1
+                    || secret.folder.is_some()
+                    || (format == TransferFormat::KeePassCsv
+                        && (secret.totp.is_some()
+                            || secret.favorite
+                            || secret.archived
+                            || !secret.tags.is_empty()))
+                    || secret
+                        .tags
+                        .iter()
+                        .any(|tag| tag.contains(',') || tag.trim() != tag || tag.is_empty())
+            }
+        };
+        if lossy {
+            bail!(
+                "{} cannot preserve all item types, secret fields or metadata in this vault; use an encrypted FactorSeal archive for a lossless export",
+                format.label()
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn read_transfer_file(path: &Path) -> anyhow::Result<Zeroizing<Vec<u8>>> {
@@ -754,5 +816,38 @@ mod tests {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+    #[test]
+    fn duplicate_import_names_reserve_original_titles_and_are_repeatable() {
+        let secrets = ["A", "A", "A (2)", "A", "A (3)", "A (2)"]
+            .into_iter()
+            .map(|title| PersonalSecret::generic(title.into(), "value".into()))
+            .collect::<Vec<_>>();
+        let expected = vec!["A", "A (4)", "A (2)", "A (5)", "A (3)", "A (2) (2)"];
+        assert_eq!(personal_import_names(&secrets), expected);
+        assert_eq!(personal_import_names(&secrets), expected);
+    }
+
+    #[test]
+    fn csv_exports_reject_lossy_items_before_writing() {
+        let source = br#"{"items":[{"name":"Card","type":3,"card":{"number":"4111111111111111","code":"123"}}]}"#;
+        let cards = import_manager(TransferFormat::BitwardenJson, source).unwrap();
+        for format in [TransferFormat::OnePasswordCsv, TransferFormat::KeePassCsv] {
+            assert!(
+                export_manager(format, &cards)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("lossless")
+            );
+            let mut login = PersonalSecret::generic("Login".into(), "value".into());
+            login.urls = vec!["https://one.test".into(), "https://two.test".into()];
+            assert!(export_manager(format, &[login]).is_err());
+        }
+        let mut login = PersonalSecret::generic("Login".into(), "value".into());
+        login.totp = Some("OTP-SEED".into());
+        assert!(export_manager(TransferFormat::KeePassCsv, &[login]).is_err());
+        let encoded = export_manager(TransferFormat::BitwardenJson, &cards).unwrap();
+        let restored = import_manager(TransferFormat::BitwardenJson, &encoded).unwrap();
+        assert_eq!(restored[0].custom_fields.len(), 2);
     }
 }

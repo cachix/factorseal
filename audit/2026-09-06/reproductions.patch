@@ -1,0 +1,160 @@
+--- a/src/vault/protocol/service/tests.rs
++++ b/src/vault/protocol/service/tests.rs
+@@ -2127,3 +2127,45 @@
+     service.seal().unwrap();
+     assert!(service.state.is_sealed());
+ }
++
++#[test]
++fn audit_export_must_obey_record_delivery_expiry() {
++    let (_directory, service) = service(100, UnsealLeasePolicy::default());
++    let manager = caller();
++    service.authorize_permission_manager(&manager, 100).unwrap();
++    let entry = VaultEntryMetadata {
++        document_kind: DocumentKind::LocalKeyring,
++        partition: b"audit".to_vec(),
++        address: SecretAddress::new("token", None).unwrap(),
++    };
++    let imported = service.handle(&manager, VaultRequest::new(VaultAction::ImportVaultEntry {
++        entry: entry.clone(), value: WireSecret::new(b"secret".to_vec()),
++        evict_at: Some(150), replace_existing: false,
++    }).unwrap(), 100);
++    assert!(imported.result.is_ok());
++    let started = Instant::now();
++    let response = service.handle(&manager, VaultRequest::new(VaultAction::ExportVaultEntry { entry }).unwrap(), 100);
++    assert!(response.result.is_ok());
++    assert!(response.delivery_deadline.unwrap() <= started + Duration::from_secs(50),
++        "export delivery deadline exceeds the record expiry");
++}
++
++#[test]
++fn audit_pending_permissions_must_fit_transport() {
++    let (_directory, service) = service(100, UnsealLeasePolicy::default());
++    let manager = caller();
++    service.authorize_permission_manager(&manager, 100).unwrap();
++    for i in 0..33 {
++        let project = format!("audit-{i}");
++        let context = VaultApplicationContext::new(Some(project.clone()), None,
++            Some(format!("/{}", "a".repeat(32767))), None).unwrap();
++        let request = VaultRequest::new_with_application(VaultAction::GetCache {
++            project: project.clone(), address: SecretSpecAddress::convention(&project, "default", "TOKEN").unwrap()
++        }, context).unwrap();
++        let response = service.handle(&manager, request, 100);
++        assert_eq!(response.result.unwrap_err().code, VaultResponseErrorCode::AuthorizationRequired);
++    }
++    let response = service.handle(&manager, VaultRequest::new(VaultAction::ListPermissions).unwrap(), 100);
++    assert!(response.result.is_ok());
++    assert!(response.encode().is_ok(), "valid pending approvals made the permission list undeliverable");
++}
+--- a/src/vault/secret_service.rs
++++ b/src/vault/secret_service.rs
+@@ -714,4 +714,58 @@
+             assert!(session_proxy.call::<_, _, ()>("Close", &()).await.is_err());
+         });
+     }
+-}
++    #[test]
++    fn audit_imported_index_must_survive_next_secret_service_write() {
++        let (_source_dir, source) = agent();
++        let (saved, _) = source.create_or_replace("Restored".into(), HashMap::new(),
++            &Zeroizing::new(b"backup".to_vec()), "text/plain".into(), false).unwrap();
++        let (_target_dir, target) = agent();
++        target.store.service.authorize_permission_manager(&target.store.caller, 100).unwrap();
++        for name in [INDEX_ITEM.to_owned(), secret_item(&saved.id)] {
++            let value = source.store.get(&name).unwrap().unwrap();
++            target.store.service.handle(&target.store.caller, crate::VaultRequest::new(crate::VaultAction::ImportVaultEntry {
++                entry: crate::VaultEntryMetadata {
++                    document_kind: crate::DocumentKind::LinuxSecretService,
++                    partition: NAMESPACE.to_vec(),
++                    address: crate::SecretAddress::new(name, None).unwrap(),
++                },
++                value: crate::WireSecret::new(value.to_vec()), evict_at: None, replace_existing: false,
++            }).unwrap(), unix_time()).result.unwrap();
++        }
++        target.create_or_replace("New".into(), HashMap::from([("new".into(), "yes".into())]),
++            &Zeroizing::new(b"new".to_vec()), "text/plain".into(), false).unwrap();
++        let reloaded = Agent::load(target.store.clone()).unwrap();
++        assert!(reloaded.item(&saved.id).is_ok(), "successful restore lost its index entry on the next write");
++    }
++
++    #[test]
++    fn audit_create_without_replace_allows_duplicate_attributes() {
++        let (_directory, agent) = agent();
++        for label in ["one", "two"] {
++            agent.create_or_replace(label.into(), HashMap::new(),
++                &Zeroizing::new(b"value".to_vec()), "text/plain".into(), false).unwrap();
++        }
++        assert_eq!(agent.all_items().unwrap().len(), 2);
++    }
++
++    #[test]
++    fn audit_disconnected_clients_must_release_sessions() {
++        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
++        runtime.block_on(async {
++            let (_directory, agent) = agent();
++            let agent = Arc::new(agent);
++            let server = Connection::session().await.unwrap();
++            server.object_server().at(SERVICE_PATH, Service { agent: Arc::clone(&agent) }).await.unwrap();
++            let client = Connection::session().await.unwrap();
++            let proxy = Proxy::new(&client, server.unique_name().unwrap().as_str(), SERVICE_PATH,
++                "org.freedesktop.Secret.Service").await.unwrap();
++            let input = OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
++            let _: (OwnedValue, OwnedObjectPath) = proxy.call("OpenSession", &("plain", input)).await.unwrap();
++            drop(proxy);
++            client.close().await.unwrap();
++            tokio::time::sleep(Duration::from_millis(200)).await;
++            assert!(agent.sessions.lock().unwrap().is_empty(), "disconnected client's session remained allocated");
++        });
++    }
++
++}
+--- a/src/bin/factorseal/commands.rs
++++ b/src/bin/factorseal/commands.rs
+@@ -1884,3 +1884,29 @@
+         .map(|duration| duration.as_secs())
+         .map_err(|error| VaultError::Protocol(error.to_string()))
+ }
++
++#[cfg(test)]
++mod audit_tests {
++    use super::*;
++    struct ImportClient(std::sync::Mutex<std::collections::HashSet<String>>);
++    impl VaultClient for ImportClient {
++        fn request(&self, request: &VaultRequest) -> factorseal::VaultResult<factorseal::VaultResponse> {
++            let body = match &request.action {
++                VaultAction::ListVaultEntries { .. } => VaultResponseBody::VaultEntries { entries: vec![], next_cursor: None },
++                VaultAction::ImportVaultEntry { entry, .. } => {
++                    let added = self.0.lock().unwrap().insert(entry.address.as_local().unwrap().0.to_owned());
++                    VaultResponseBody::VaultEntryImported { status: if added { factorseal::VaultEntryImportStatus::Added } else { factorseal::VaultEntryImportStatus::KeptExisting } }
++                }
++                _ => panic!("unexpected action"),
++            };
++            Ok(factorseal::VaultResponse::success(request.request_id(), body))
++        }
++    }
++    #[test]
++    fn audit_import_must_preserve_distinct_source_items() {
++        let client = ImportClient(std::sync::Mutex::new(std::collections::HashSet::new()));
++        let source = br#"{"items":[{"name":"A"},{"name":"A"},{"name":"A (2)"}]}"#;
++        import_personal_secrets(&client, TransferFormat::BitwardenJson, source, false).unwrap();
++        assert_eq!(client.0.lock().unwrap().len(), 3, "three source items collided into two addresses");
++    }
++}
+--- a/src/transfer.rs
++++ b/src/transfer.rs
+@@ -755,4 +755,14 @@
+             0o600
+         );
+     }
+-}
++    #[test]
++    fn audit_card_export_must_not_silently_discard_card_fields() {
++        let source = br#"{"items":[{"name":"Card","type":3,"card":{"number":"4111111111111111","code":"123"}}]}"#;
++        let items = import_manager(TransferFormat::BitwardenJson, source).unwrap();
++        let csv = export_manager(TransferFormat::OnePasswordCsv, &items).unwrap();
++        let restored = import_manager(TransferFormat::OnePasswordCsv, &csv).unwrap();
++        assert_eq!(restored[0].custom_fields.len(), items[0].custom_fields.len(),
++            "successful CSV export silently discarded all card fields");
++    }
++
++}

@@ -241,6 +241,9 @@ fn watch_shutdown(watched: &std::sync::Weak<WorkerStatus>) {
 }
 
 pub(super) enum Command {
+    ExportRevision {
+        response: mpsc::Sender<VaultResult<Option<[u8; 32]>>>,
+    },
     Get {
         scope: DocumentKind,
         partition: Vec<u8>,
@@ -577,6 +580,12 @@ fn execute_command(
             response,
         } => {
             let result = runtime.block_on(worker.list_vault_entries(cursor.as_deref(), limit, now));
+            send_result(response, result, status);
+        }
+        Command::ExportRevision { response } => {
+            let result = runtime
+                .block_on(worker.verify_live_inventory())
+                .map(|()| worker.verified.head);
             send_result(response, result, status);
         }
         Command::Shutdown => return false,
@@ -965,6 +974,12 @@ impl StoreWorker {
             }
             let partition = document.partition().to_vec();
             for (storage_key, address) in document.addresses()? {
+                if document_kind == DocumentKind::LinuxSecretService
+                    && address.as_local()
+                        == Some((crate::vault::secret_service_data::INDEX_ITEM, None))
+                {
+                    continue;
+                }
                 entries.push((
                     self.vault_entry_cursor(document_kind, document_id, &storage_key),
                     VaultEntryMetadata {

@@ -77,6 +77,12 @@ pub(crate) struct HistoryPage {
 }
 
 impl VaultStore {
+    pub(crate) fn export_revision(&self) -> VaultResult<Option<[u8; 32]>> {
+        request(&self.control.sender, |response| Command::ExportRevision {
+            response,
+        })
+    }
+
     pub(crate) fn seal_signal(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.control.seal_signal()
     }

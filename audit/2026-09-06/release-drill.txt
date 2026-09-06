@@ -1,0 +1,2 @@
+PASS: native TPM CLI, exact-byte storage, duplicate/repeat imports, v2 backup restore, v1 import keep/replace into empty/populated vaults, next writes, permission listing, explicit seal
+Evidence directory: /tmp/factorseal-release-drill.ad7ijz53

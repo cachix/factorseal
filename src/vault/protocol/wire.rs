@@ -13,8 +13,8 @@ use crate::vault::{
     DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
 };
 
-// Version 11 adds permission-manager-only portable vault entry transfer.
-pub(super) const PROTOCOL_VERSION: u8 = 11;
+// Version 12 adds revision-bound permission pages and logical keyring transfers.
+pub(super) const PROTOCOL_VERSION: u8 = 12;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -593,7 +593,13 @@ pub enum VaultAction {
     SealCache {
         project: String,
     },
+    ExportRevision,
     ListPermissions,
+    /// Continue the same permission revision after the last returned ID.
+    ListPermissionsPage {
+        revision: u64,
+        cursor: String,
+    },
     /// Wait until the permission revision changes or the bounded timeout elapses.
     WaitPermissions {
         after_revision: u64,
@@ -625,7 +631,8 @@ impl VaultAction {
     #[allow(clippy::too_many_lines)]
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
-            Self::Status | Self::ListPermissions => Ok(()),
+            Self::Status | Self::ListPermissions | Self::ExportRevision => Ok(()),
+            Self::ListPermissionsPage { cursor, .. } => validate_permission_id(cursor),
             Self::ListVaultEntries { cursor, limit } => {
                 validate_list_limit(*limit)?;
                 if let Some(cursor) = cursor {
@@ -758,6 +765,11 @@ impl VaultAction {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VaultMutation {
+    /// Require the value at the start of the batch to match before applying any changes.
+    Check {
+        address: WireSecretAddress,
+        expected: Option<WireSecret>,
+    },
     Put {
         address: WireSecretAddress,
         value: WireSecret,
@@ -772,7 +784,9 @@ pub enum VaultMutation {
 impl VaultMutation {
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
-            Self::Put { address, .. } | Self::Delete { address } => address.resolve().map(|_| ()),
+            Self::Check { address, .. } | Self::Put { address, .. } | Self::Delete { address } => {
+                address.resolve().map(|_| ())
+            }
         }
     }
 }
@@ -926,9 +940,13 @@ pub enum VaultResponseBody {
         next_cursor: Option<u64>,
     },
     Sealed,
+    ExportRevision {
+        revision: Option<[u8; 32]>,
+    },
     Permissions {
         revision: u64,
         permissions: Vec<Permission>,
+        next_cursor: Option<String>,
     },
     PermissionChanged {
         status: PermissionChange,
@@ -1177,4 +1195,61 @@ fn validate_permission_id(id: &str) -> VaultResult<()> {
 pub(super) fn append_digest_bytes(digest: &mut Sha256, bytes: &[u8]) {
     digest.update((bytes.len() as u64).to_be_bytes());
     digest.update(bytes);
+}
+
+/// Read a complete permission revision. A concurrent change fails explicitly
+/// rather than combining pages from different authorization states.
+pub fn read_permission_pages(
+    mut request: impl FnMut(VaultAction) -> VaultResult<VaultResponseBody>,
+    after_revision: Option<u64>,
+) -> VaultResult<(u64, Vec<Permission>)> {
+    let mut action = after_revision.map_or(VaultAction::ListPermissions, |after_revision| {
+        VaultAction::WaitPermissions {
+            after_revision,
+            timeout_ms: MAX_PERMISSION_WAIT_MS,
+        }
+    });
+    let mut expected_revision = None;
+    let mut cursor: Option<String> = None;
+    let mut all = Vec::new();
+    loop {
+        let VaultResponseBody::Permissions {
+            revision,
+            permissions,
+            next_cursor,
+        } = request(action)?
+        else {
+            return Err(VaultError::Protocol(
+                "unexpected permission-list response".to_owned(),
+            ));
+        };
+        if expected_revision.is_some_and(|expected| expected != revision) {
+            return Err(VaultError::Conflict);
+        }
+        expected_revision = Some(revision);
+        if permissions
+            .iter()
+            .any(|p| cursor.as_ref().is_some_and(|old| &p.id <= old))
+            || permissions.windows(2).any(|p| p[0].id >= p[1].id)
+        {
+            return Err(VaultError::Protocol(
+                "permission page did not advance".to_owned(),
+            ));
+        }
+        if next_cursor
+            .as_ref()
+            .is_some_and(|next| permissions.last().is_none_or(|p| &p.id != next))
+        {
+            return Err(VaultError::Protocol("invalid permission cursor".to_owned()));
+        }
+        all.extend(permissions);
+        let Some(next) = next_cursor else {
+            return Ok((revision, all));
+        };
+        action = VaultAction::ListPermissionsPage {
+            revision,
+            cursor: next.clone(),
+        };
+        cursor = Some(next);
+    }
 }

@@ -8,11 +8,22 @@ All notable changes to FactorSeal will be documented in this file.
   `IsLocked` immediately and require manual Desktop unlock before lookup.
 
 The current formats are metadata v8, database schema v5, snapshot envelope v7,
-protected commit v6, document v3, record v2, and native protocol v9. Database
+protected commit v6, document v3, record v2, and native protocol v12. Database
 schema v3 is authenticated and migrated transactionally after unseal: current
 document heads are projected into the new record/history envelope, document
 keys are rotated, and a compact current-format commit chain is signed before
 the schema version advances. Unknown formats are rejected and never deleted.
+
+- Fix keyring backup/restore with atomic metadata/value imports and v1 archive
+  conversion; new archives use v2. Export from live inventory and reject a
+  concurrently changed vault. Preserve source items with colliding titles and
+  reject password-manager exports that would discard fields or metadata.
+- Paginate permission listings within the IPC message budget and bind pages to
+  one revision. Honor record expiry during export delivery. Native protocol v12
+  requires updating the service, CLI, and Desktop together.
+- Release Secret Service sessions when clients disconnect and honor
+  `CreateItem(replace=false)` for duplicate attributes. Add regression coverage
+  for all eight audit findings.
 
 - Split the installation root from per-document keys: a permanent
   `InstallationId`, a distinct non-replicating Device `VaultId`, a

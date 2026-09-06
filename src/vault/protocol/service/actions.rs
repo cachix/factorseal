@@ -123,7 +123,9 @@ pub(super) fn execute_action(
         VaultAction::ListVaultEntries { .. }
         | VaultAction::ExportVaultEntry { .. }
         | VaultAction::ImportVaultEntry { .. }
+        | VaultAction::ExportRevision
         | VaultAction::ListPermissions
+        | VaultAction::ListPermissionsPage { .. }
         | VaultAction::WaitPermissions { .. }
         | VaultAction::WaitPermission { .. }
         | VaultAction::ApprovePermission { .. }
@@ -466,6 +468,24 @@ impl ActionContext<'_> {
         let mut operations = Vec::with_capacity(mutations.len());
         for mutation in mutations {
             match mutation {
+                VaultMutation::Check { address, expected } => {
+                    let address = address.resolve()?;
+                    self.require(namespace, Some(&address), GrantPermission::Get)?;
+                    let current = self.store.get_with_deadline(
+                        self.scope,
+                        namespace,
+                        &address,
+                        self.clock.wall(),
+                    )?;
+                    if let Some(current) = &current {
+                        self.accept_deadline(current.expires_at)?;
+                    }
+                    if current.as_ref().map(|value| value.value.as_slice())
+                        != expected.as_ref().map(WireSecret::expose)
+                    {
+                        return Err(VaultError::Conflict);
+                    }
+                }
                 VaultMutation::Put {
                     address,
                     value,

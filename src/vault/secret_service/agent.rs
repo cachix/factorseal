@@ -1,22 +1,20 @@
 //! Item index and vault access for the Secret Service adapter.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use zbus::fdo;
 use zeroize::Zeroizing;
 
-use super::{failed, no_item, poisoned, random_id, secret_item, unix_time};
+use super::{failed, no_item, random_id, secret_item, unix_time};
 use crate::vault::{
     VaultAction, VaultClient, VaultError, VaultMutation, VaultRequest, VaultResponse,
     VaultResponseBody, VaultResult, WireSecret, WireSecretAddress,
 };
 
+pub(super) use crate::vault::secret_service_data::{INDEX_ITEM, Index, IndexItem};
 /// Vault namespace holding Secret Service items and their index.
-pub const NAMESPACE: &[u8] = b"factorseal/secret-service/v1";
-pub(super) const INDEX_ITEM: &str = "secret-service-index";
-const INDEX_VERSION: u8 = 1;
+pub const NAMESPACE: &[u8] = crate::vault::secret_service_data::NAMESPACE;
 
 /// Where the adapter's vault requests go: the in-process service of the
 /// headless agent, or the native socket of the Desktop's vault worker.
@@ -47,24 +45,35 @@ impl Backend for Remote {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Store {
-    backend: Box<dyn Backend>,
+    backend: Arc<dyn Backend>,
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(super) fn backend_request(&self, request: VaultRequest) -> VaultResult<VaultResponse> {
+        self.backend.request(request)
+    }
+
+    fn index(&self) -> VaultResult<Index> {
+        let bytes = self.get(INDEX_ITEM)?;
+        Index::decode(bytes.as_ref().map(|b| b.as_slice()))
+    }
+
     #[cfg(feature = "vault")]
     pub(super) fn in_process(
         service: std::sync::Arc<crate::vault::VaultService>,
         caller: crate::vault::CallerIdentity,
     ) -> Self {
         Self {
-            backend: Box::new(InProcess { service, caller }),
+            backend: Arc::new(InProcess { service, caller }),
         }
     }
 
     pub(super) fn remote(client: Box<dyn VaultClient>) -> Self {
         Self {
-            backend: Box::new(Remote { client }),
+            backend: Arc::new(Remote { client }),
         }
     }
 
@@ -72,9 +81,13 @@ impl Store {
         let request = VaultRequest::new(action)?;
         let response = self.backend.request(request)?;
         response.check_delivery()?;
-        response
-            .result
-            .map_err(|error| VaultError::Protocol(error.message))
+        response.result.map_err(|error| {
+            if error.code == crate::vault::VaultResponseErrorCode::Conflict {
+                VaultError::Conflict
+            } else {
+                VaultError::Protocol(error.message)
+            }
+        })
     }
 
     pub(super) fn get(&self, item: impl Into<String>) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
@@ -117,73 +130,31 @@ impl Store {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(super) struct Index {
-    version: u8,
-    pub(super) items: Vec<IndexItem>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(super) struct IndexItem {
-    pub(super) id: String,
-    pub(super) label: String,
-    pub(super) attributes: HashMap<String, String>,
-    pub(super) content_type: String,
-    pub(super) created: u64,
-    pub(super) modified: u64,
-}
-
 pub(super) struct Agent {
     pub(super) store: Store,
-    index: Mutex<Index>,
 }
 
 impl Agent {
     pub(super) fn load(store: Store) -> VaultResult<Self> {
-        let index = match store.get(INDEX_ITEM)? {
-            Some(bytes) => serde_json::from_slice::<Index>(&bytes).map_err(|error| {
-                VaultError::InvalidData(format!("invalid Secret Service index: {error}"))
-            })?,
-            None => Index {
-                version: INDEX_VERSION,
-                items: Vec::new(),
-            },
-        };
-        if index.version != INDEX_VERSION {
-            return Err(VaultError::InvalidData(
-                "unsupported Secret Service index version".to_owned(),
-            ));
-        }
-        Ok(Self {
-            store,
-            index: Mutex::new(index),
-        })
+        store.index()?;
+        Ok(Self { store })
     }
 
     pub(super) fn item_ids(&self) -> VaultResult<Vec<String>> {
-        Ok(self
-            .index
-            .lock()
-            .map_err(|_| VaultError::WorkerUnavailable)?
-            .items
-            .iter()
-            .map(|item| item.id.clone())
-            .collect())
+        self.all_items()
+            .map(|items| items.into_iter().map(|item| item.id).collect())
+            .map_err(|error| VaultError::Protocol(error.to_string()))
     }
 
     pub(super) fn item(&self, id: &str) -> fdo::Result<IndexItem> {
-        self.index
-            .lock()
-            .map_err(poisoned)?
-            .items
-            .iter()
+        self.all_items()?
+            .into_iter()
             .find(|item| item.id == id)
-            .cloned()
             .ok_or_else(|| no_item(id))
     }
 
     pub(super) fn all_items(&self) -> fdo::Result<Vec<IndexItem>> {
-        Ok(self.index.lock().map_err(poisoned)?.items.clone())
+        Ok(self.store.index().map_err(failed)?.items)
     }
 
     pub(super) fn create_or_replace(
@@ -194,39 +165,43 @@ impl Agent {
         content_type: String,
         replace: bool,
     ) -> fdo::Result<(IndexItem, bool)> {
-        let mut index = self.index.lock().map_err(poisoned)?;
-        let existing = index
-            .items
-            .iter()
-            .position(|item| item.attributes == attributes);
-        let id = match (existing, replace) {
-            (Some(position), true) => index.items[position].id.clone(),
-            (Some(_), false) => {
-                return Err(fdo::Error::Failed(
-                    "an item with these attributes already exists".to_owned(),
-                ));
+        for _ in 0..16 {
+            let expected = self.store.get(INDEX_ITEM).map_err(failed)?;
+            let index = Index::decode(expected.as_deref().map(|b| b.as_slice())).map_err(failed)?;
+            let existing = replace
+                .then(|| {
+                    index
+                        .items
+                        .iter()
+                        .position(|item| item.attributes == attributes)
+                })
+                .flatten();
+            let id = match existing {
+                Some(position) => index.items[position].id.clone(),
+                None => random_id().map_err(failed)?,
+            };
+            let now = unix_time();
+            let item = IndexItem {
+                id: id.clone(),
+                label: label.clone(),
+                attributes: attributes.clone(),
+                content_type: content_type.clone(),
+                created: existing.map_or(now, |position| index.items[position].created),
+                modified: now,
+            };
+            let created = existing.is_none();
+            let mut next = index.clone();
+            if let Some(position) = existing {
+                next.items[position] = item.clone();
+            } else {
+                next.items.push(item.clone());
             }
-            (None, _) => random_id().map_err(failed)?,
-        };
-        let now = unix_time();
-        let item = IndexItem {
-            id: id.clone(),
-            label,
-            attributes,
-            content_type,
-            created: existing.map_or(now, |position| index.items[position].created),
-            modified: now,
-        };
-        let created = existing.is_none();
-        let mut next = index.clone();
-        if let Some(position) = existing {
-            next.items[position] = item.clone();
-        } else {
-            next.items.push(item.clone());
-        }
-        let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
-        self.store
-            .mutate(vec![
+            let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
+            let result = self.store.mutate(vec![
+                VaultMutation::Check {
+                    address: WireSecretAddress::new(INDEX_ITEM, None),
+                    expected: expected.map(|bytes| WireSecret::new(bytes.to_vec())),
+                },
                 VaultMutation::Put {
                     address: WireSecretAddress::new(secret_item(&id), None),
                     value: WireSecret::new(value.to_vec()),
@@ -237,10 +212,16 @@ impl Agent {
                     value: WireSecret::new(index_bytes),
                     evict_at: None,
                 },
-            ])
-            .map_err(failed)?;
-        *index = next;
-        Ok((item, created))
+            ]);
+            if matches!(result, Err(VaultError::Conflict)) {
+                continue;
+            }
+            result.map_err(failed)?;
+            return Ok((item, created));
+        }
+        Err(failed(
+            "Secret Service index changed repeatedly; retry the operation",
+        ))
     }
 
     pub(super) fn set_secret(
@@ -249,18 +230,23 @@ impl Agent {
         value: &Zeroizing<Vec<u8>>,
         content_type: String,
     ) -> fdo::Result<()> {
-        let mut index = self.index.lock().map_err(poisoned)?;
-        let mut next = index.clone();
-        let item = next
-            .items
-            .iter_mut()
-            .find(|item| item.id == id)
-            .ok_or_else(|| no_item(id))?;
-        item.content_type = content_type;
-        item.modified = unix_time();
-        let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
-        self.store
-            .mutate(vec![
+        for _ in 0..16 {
+            let expected = self.store.get(INDEX_ITEM).map_err(failed)?;
+            let index = Index::decode(expected.as_deref().map(|b| b.as_slice())).map_err(failed)?;
+            let mut next = index.clone();
+            let item = next
+                .items
+                .iter_mut()
+                .find(|item| item.id == id)
+                .ok_or_else(|| no_item(id))?;
+            item.content_type.clone_from(&content_type);
+            item.modified = unix_time();
+            let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
+            let result = self.store.mutate(vec![
+                VaultMutation::Check {
+                    address: WireSecretAddress::new(INDEX_ITEM, None),
+                    expected: expected.map(|bytes| WireSecret::new(bytes.to_vec())),
+                },
                 VaultMutation::Put {
                     address: WireSecretAddress::new(secret_item(id), None),
                     value: WireSecret::new(value.to_vec()),
@@ -271,22 +257,33 @@ impl Agent {
                     value: WireSecret::new(index_bytes),
                     evict_at: None,
                 },
-            ])
-            .map_err(failed)?;
-        *index = next;
-        Ok(())
+            ]);
+            if matches!(result, Err(VaultError::Conflict)) {
+                continue;
+            }
+            result.map_err(failed)?;
+            return Ok(());
+        }
+        Err(failed(
+            "Secret Service index changed repeatedly; retry the operation",
+        ))
     }
 
     pub(super) fn delete_item(&self, id: &str) -> fdo::Result<()> {
-        let mut index = self.index.lock().map_err(poisoned)?;
-        let mut next = index.clone();
-        let Some(position) = next.items.iter().position(|item| item.id == id) else {
-            return Err(no_item(id));
-        };
-        next.items.remove(position);
-        let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
-        self.store
-            .mutate(vec![
+        for _ in 0..16 {
+            let expected = self.store.get(INDEX_ITEM).map_err(failed)?;
+            let index = Index::decode(expected.as_deref().map(|b| b.as_slice())).map_err(failed)?;
+            let mut next = index.clone();
+            let Some(position) = next.items.iter().position(|item| item.id == id) else {
+                return Err(no_item(id));
+            };
+            next.items.remove(position);
+            let index_bytes = serde_json::to_vec(&next).map_err(failed)?;
+            let result = self.store.mutate(vec![
+                VaultMutation::Check {
+                    address: WireSecretAddress::new(INDEX_ITEM, None),
+                    expected: expected.map(|bytes| WireSecret::new(bytes.to_vec())),
+                },
                 VaultMutation::Delete {
                     address: WireSecretAddress::new(secret_item(id), None),
                 },
@@ -295,9 +292,15 @@ impl Agent {
                     value: WireSecret::new(index_bytes),
                     evict_at: None,
                 },
-            ])
-            .map_err(failed)?;
-        *index = next;
-        Ok(())
+            ]);
+            if matches!(result, Err(VaultError::Conflict)) {
+                continue;
+            }
+            result.map_err(failed)?;
+            return Ok(());
+        }
+        Err(failed(
+            "Secret Service index changed repeatedly; retry the operation",
+        ))
     }
 }

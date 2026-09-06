@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 use super::{VaultEntryMetadata, VaultError, VaultResult, WireSecret};
 
 const FORMAT: &str = "factorseal-vault-archive";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const SALT_BYTES: usize = 16;
 const MAX_ARCHIVE_FILE_BYTES: usize = 256 * 1024 * 1024;
 // Base64 and the JSON envelope add roughly one third. Keeping the decrypted
@@ -73,6 +73,19 @@ impl VaultArchive {
         }
         for entry in &self.entries {
             entry.metadata.validate_transfer()?;
+            if entry.metadata.document_kind == super::DocumentKind::LinuxSecretService {
+                if entry.metadata.partition != super::secret_service_data::NAMESPACE
+                    || entry.evict_at.is_some()
+                {
+                    return Err(VaultError::InvalidData(
+                        "unsupported portable keyring partition or expiry".to_owned(),
+                    ));
+                }
+                super::secret_service_data::PortableItem::decode(
+                    entry.value.expose(),
+                    &entry.metadata.address,
+                )?;
+            }
         }
         Ok(())
     }
@@ -134,7 +147,7 @@ fn encrypt_archive(archive: &VaultArchive, passphrase: &[u8]) -> VaultResult<Zer
     getrandom::fill(&mut salt)?;
     let header = ArchiveHeader {
         format: FORMAT.to_owned(),
-        version: VERSION,
+        version: archive.version,
         kdf: ArchiveKdf {
             algorithm: "argon2id".to_owned(),
             version: 19,
@@ -202,8 +215,11 @@ pub fn decrypt_vault_archive(bytes: &[u8], passphrase: &[u8]) -> VaultResult<Vau
         &ciphertext,
     )
     .map_err(|_| VaultError::Protection("incorrect passphrase or damaged archive".to_owned()))?;
-    let archive: VaultArchive = serde_json::from_slice(&plaintext)
+    let mut archive: VaultArchive = serde_json::from_slice(&plaintext)
         .map_err(|error| VaultError::InvalidData(format!("invalid archive contents: {error}")))?;
+    if archive.version == 1 {
+        archive.upgrade_legacy_keyring()?;
+    }
     archive.validate()?;
     Ok(archive)
 }
@@ -218,7 +234,7 @@ fn validate_passphrase(passphrase: &[u8]) -> VaultResult<()> {
 }
 
 fn validate_header(header: &ArchiveHeader) -> VaultResult<()> {
-    if header.format != FORMAT || header.version != VERSION {
+    if header.format != FORMAT || ![1, VERSION].contains(&header.version) {
         return Err(VaultError::InvalidData(
             "unsupported FactorSeal archive format or version".to_owned(),
         ));
@@ -274,6 +290,134 @@ fn decode_array<const N: usize>(label: &str, encoded: &str) -> VaultResult<[u8; 
         .map_err(|_| VaultError::InvalidData(format!("invalid {label} length")))
 }
 
+/// Export a freshly enumerated, consistent set of portable entries. Never
+/// return a partial backup after an inventory error or concurrent mutation.
+pub fn read_vault_export(
+    client: &(impl super::VaultClient + ?Sized),
+    include: impl Fn(&VaultEntryMetadata) -> bool,
+) -> VaultResult<Vec<VaultArchiveEntry>> {
+    use super::{DocumentKind, MAX_LIST_PAGE_SIZE, VaultAction, VaultRequest, VaultResponseBody};
+    let request = |action| {
+        client
+            .request(&VaultRequest::new(action)?)?
+            .result
+            .map_err(|error| VaultError::Protocol(error.message))
+    };
+    let revision = || match request(VaultAction::ExportRevision)? {
+        VaultResponseBody::ExportRevision { revision } => Ok(revision),
+        _ => Err(VaultError::Protocol(
+            "unexpected export revision response".to_owned(),
+        )),
+    };
+    let expected = revision()?;
+    let mut cursor = None;
+    let mut archived = Vec::new();
+    loop {
+        let VaultResponseBody::VaultEntries {
+            entries,
+            next_cursor,
+        } = request(VaultAction::ListVaultEntries {
+            cursor: cursor.clone(),
+            limit: MAX_LIST_PAGE_SIZE,
+        })?
+        else {
+            return Err(VaultError::Protocol(
+                "unexpected export inventory response".to_owned(),
+            ));
+        };
+        for entry in entries.into_iter().filter(|entry| {
+            !matches!(
+                entry.document_kind,
+                DocumentKind::Authorization | DocumentKind::SecretSpecProviderCache
+            ) && include(entry)
+        }) {
+            let VaultResponseBody::VaultEntrySecret { value, evict_at } =
+                request(VaultAction::ExportVaultEntry {
+                    entry: entry.clone(),
+                })?
+            else {
+                return Err(VaultError::Protocol(
+                    "unexpected export entry response".to_owned(),
+                ));
+            };
+            archived.push(VaultArchiveEntry {
+                metadata: entry,
+                value,
+                evict_at,
+            });
+        }
+        let Some(next) = next_cursor else { break };
+        if cursor.as_ref().is_some_and(|old| old >= &next) {
+            return Err(VaultError::Protocol(
+                "export inventory cursor did not advance".to_owned(),
+            ));
+        }
+        cursor = Some(next);
+    }
+    if revision()? != expected {
+        return Err(VaultError::Protocol(
+            "vault changed during export; retry the export".to_owned(),
+        ));
+    }
+    Ok(archived)
+}
+
+impl VaultArchive {
+    // Version 1 stored the adapter's singleton index as an independent entry.
+    // Join it to its values before issuing any import requests.
+    fn upgrade_legacy_keyring(&mut self) -> VaultResult<()> {
+        use super::{
+            DocumentKind,
+            secret_service_data::{INDEX_ITEM, Index, NAMESPACE, PortableItem},
+        };
+        let mut index = None;
+        let mut ordinary = Vec::new();
+        let mut keyring = Vec::new();
+        for entry in std::mem::take(&mut self.entries) {
+            if entry.metadata.document_kind != DocumentKind::LinuxSecretService {
+                ordinary.push(entry);
+                continue;
+            }
+            if entry.metadata.partition != NAMESPACE || entry.evict_at.is_some() {
+                return Err(VaultError::InvalidData(
+                    "invalid legacy keyring entry".to_owned(),
+                ));
+            }
+            if entry.metadata.address.as_local() == Some((INDEX_ITEM, None)) {
+                if index.is_some() {
+                    return Err(VaultError::InvalidData(
+                        "duplicate legacy keyring index".to_owned(),
+                    ));
+                }
+                index = Some(Index::decode(Some(entry.value.expose()))?);
+            } else {
+                keyring.push(entry);
+            }
+        }
+        let mut items = index
+            .unwrap_or_default()
+            .items
+            .into_iter()
+            .map(|item| Ok((item.address()?, item)))
+            .collect::<VaultResult<std::collections::HashMap<_, _>>>()?;
+        for mut entry in keyring {
+            let item = items.remove(&entry.metadata.address).ok_or_else(|| {
+                VaultError::InvalidData("legacy keyring value has no unique index entry".to_owned())
+            })?;
+            entry.value = PortableItem::new(item, entry.value).encode()?;
+            ordinary.push(entry);
+        }
+        if !items.is_empty() {
+            return Err(VaultError::InvalidData(
+                "legacy keyring index has missing values".to_owned(),
+            ));
+        }
+        self.entries = ordinary;
+        self.version = VERSION;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,7 +465,7 @@ mod tests {
         let encrypted =
             encrypt_vault_archive(&example(), b"opal nebula lantern saffron velocity").unwrap();
         let mut envelope: serde_json::Value = serde_json::from_slice(&encrypted).unwrap();
-        envelope["header"]["version"] = 2.into();
+        envelope["header"]["version"] = (VERSION + 1).into();
         let changed = serde_json::to_vec(&envelope).unwrap();
         assert!(decrypt_vault_archive(&changed, b"right").is_err());
     }
@@ -333,5 +477,137 @@ mod tests {
         let old = encrypt_archive(&example(), b"weak").unwrap();
         let restored = decrypt_vault_archive(&old, b"weak").unwrap();
         assert_eq!(restored.entries[0].value.expose(), b"needle-secret");
+    }
+    #[test]
+    fn legacy_archives_join_keyring_metadata_and_values() {
+        use crate::vault::secret_service_data::{
+            INDEX_ITEM, Index, IndexItem, NAMESPACE, PortableItem,
+        };
+        let item = IndexItem {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            label: "Legacy login".into(),
+            attributes: [("service".into(), "example".into())].into(),
+            content_type: "text/plain".into(),
+            created: 1,
+            modified: 2,
+        };
+        let mut index = Index::default();
+        index.items.push(item.clone());
+        let metadata = |address| VaultEntryMetadata {
+            document_kind: DocumentKind::LinuxSecretService,
+            partition: NAMESPACE.to_vec(),
+            address,
+        };
+        let mut legacy = VaultArchive::new(
+            42,
+            vec![
+                VaultArchiveEntry {
+                    metadata: metadata(SecretAddress::new(INDEX_ITEM, None).unwrap()),
+                    value: WireSecret::new(serde_json::to_vec(&index).unwrap()),
+                    evict_at: None,
+                },
+                VaultArchiveEntry {
+                    metadata: metadata(item.address().unwrap()),
+                    value: WireSecret::new(b"legacy secret".to_vec()),
+                    evict_at: None,
+                },
+            ],
+        );
+        legacy.version = 1;
+        let encrypted = encrypt_archive(&legacy, b"legacy").unwrap();
+        let restored = decrypt_vault_archive(&encrypted, b"legacy").unwrap();
+        assert_eq!(restored.version, VERSION);
+        assert_eq!(restored.entries.len(), 1);
+        let entry = &restored.entries[0];
+        let portable = PortableItem::decode(entry.value.expose(), &entry.metadata.address).unwrap();
+        assert_eq!(portable.item, item);
+        assert_eq!(portable.value.expose(), b"legacy secret");
+        let encrypted = encrypt_archive(&restored, b"legacy").unwrap();
+        assert_eq!(
+            decrypt_vault_archive(&encrypted, b"legacy")
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        // Incomplete old archives must fail before any restore writes occur.
+        legacy.entries.pop();
+        let encrypted = encrypt_archive(&legacy, b"legacy").unwrap();
+        assert!(decrypt_vault_archive(&encrypted, b"legacy").is_err());
+    }
+
+    struct ExportClient {
+        responses:
+            std::sync::Mutex<std::collections::VecDeque<VaultResult<crate::VaultResponseBody>>>,
+        actions: std::sync::Mutex<Vec<crate::VaultAction>>,
+    }
+
+    impl crate::VaultClient for ExportClient {
+        fn request(&self, request: &crate::VaultRequest) -> VaultResult<crate::VaultResponse> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push(crate::VaultRequest::decode(&request.encode()?)?.action);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected request")
+                .map(|body| crate::VaultResponse::success(request.request_id(), body))
+        }
+    }
+
+    fn export_client(changed: bool, fail_inventory: bool) -> ExportClient {
+        use crate::VaultResponseBody as Body;
+        let entry = example().entries.remove(0);
+        let mut responses = std::collections::VecDeque::from([
+            Ok(Body::ExportRevision {
+                revision: Some([1; 32]),
+            }),
+            Ok(Body::VaultEntries {
+                entries: vec![entry.metadata],
+                next_cursor: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()),
+            }),
+            Ok(Body::VaultEntrySecret {
+                value: entry.value,
+                evict_at: None,
+            }),
+        ]);
+        responses.push_back(if fail_inventory {
+            Err(VaultError::Protocol("inventory unavailable".into()))
+        } else {
+            Ok(Body::VaultEntries {
+                entries: Vec::new(),
+                next_cursor: None,
+            })
+        });
+        if !fail_inventory {
+            responses.push_back(Ok(Body::ExportRevision {
+                revision: Some([if changed { 2 } else { 1 }; 32]),
+            }));
+        }
+        ExportClient {
+            responses: std::sync::Mutex::new(responses),
+            actions: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn export_reads_live_inventory_and_all_pages() {
+        let client = export_client(false, false);
+        let entries = read_vault_export(&client, |_| true).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value.expose(), b"needle-secret");
+        assert!(client.responses.lock().unwrap().is_empty());
+        assert!(
+            matches!(&client.actions.lock().unwrap()[3], crate::VaultAction::ListVaultEntries { cursor: Some(cursor), .. } if cursor == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        );
+    }
+
+    #[test]
+    fn export_rejects_partial_inventory_and_changed_snapshots() {
+        for (changed, failed) in [(true, false), (false, true)] {
+            assert!(read_vault_export(&export_client(changed, failed), |_| true).is_err());
+        }
     }
 }

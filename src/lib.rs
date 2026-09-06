@@ -66,11 +66,14 @@ pub use vault::{
     PermissionWaitStatus, VaultAction, VaultApplicationContext, VaultClient,
     VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference, VaultMutation,
     VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
-    WireSecret, WireSecretAddress,
+    WireSecret, WireSecretAddress, read_permission_pages,
 };
 
 #[cfg(all(feature = "key-protection", feature = "vault-client"))]
-pub use vault::{VaultArchive, VaultArchiveEntry, decrypt_vault_archive, encrypt_vault_archive};
+pub use vault::{
+    VaultArchive, VaultArchiveEntry, decrypt_vault_archive, encrypt_vault_archive,
+    read_vault_export,
+};
 
 #[cfg(feature = "vault-store")]
 pub use vault::{

@@ -20,6 +20,12 @@ mod keys;
 mod protection;
 mod protocol;
 mod seal;
+#[cfg(any(
+    feature = "vault-store",
+    feature = "secret-service-host",
+    all(feature = "key-protection", feature = "vault-client")
+))]
+mod secret_service_data;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod signature;
 #[cfg(feature = "vault-store")]
@@ -80,7 +86,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[cfg(all(feature = "key-protection", feature = "vault-client"))]
-pub use archive::{VaultArchive, VaultArchiveEntry, decrypt_vault_archive, encrypt_vault_archive};
+pub use archive::{
+    VaultArchive, VaultArchiveEntry, decrypt_vault_archive, encrypt_vault_archive,
+    read_vault_export,
+};
 #[cfg(feature = "vault-store")]
 pub(crate) use document::{
     DocumentMutation, DocumentOperation, MutationContext, SecretDocument, SecretRead,
@@ -102,7 +111,7 @@ pub use protocol::{
     PermissionState, PermissionWaitStatus, RequestId, VaultAction, VaultApplicationContext,
     VaultClient, VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference,
     VaultMutation, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
-    VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    VaultResponseErrorCode, WireSecret, WireSecretAddress, read_permission_pages,
 };
 #[cfg(feature = "vault-store")]
 pub use protocol::{

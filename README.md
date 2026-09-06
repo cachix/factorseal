@@ -207,7 +207,10 @@ Native archives include every portable vault document and are encrypted with
 AES-256-GCM using a separate Argon2id-stretched passphrase. For unattended
 jobs, use `--passphrase-file` with a private regular file (mode `0600` on
 Unix). Imports preserve existing entries unless `--replace-existing` is
-explicitly passed.
+explicitly passed. Exports read the live vault and fail if its contents change
+during collection; retry the export in that case. Linux keyring metadata and
+values restore together, preserving unrelated destination items. Archive v2
+readers also convert v1 archives during import.
 
 Password-manager formats operate on Personal Secrets only:
 
@@ -219,7 +222,10 @@ $ factorseal export keepass.csv --format keepass-csv
 
 Bitwarden JSON, 1Password CSV, and KeePass CSV are plaintext formats. FactorSeal
 prints a warning and writes exports through a private temporary file before
-atomically replacing the destination.
+atomically replacing the destination. Exports reject items whose fields or
+metadata the selected format cannot preserve; use an encrypted FactorSeal
+archive for a lossless backup. Duplicate imported titles receive stable,
+collision-free suffixes.
 
 ## How it works
 

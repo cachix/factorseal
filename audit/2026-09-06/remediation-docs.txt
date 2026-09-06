@@ -1,0 +1,7 @@
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+ Documenting factorseal v0.1.0 (/home/domen/dev/factorseal)
+ Documenting secret-service-protocol v0.1.0 (/home/domen/dev/factorseal/crates/secret-service-protocol)
+ Documenting hardwareseal v0.1.0 (/home/domen/dev/factorseal/crates/hardwareseal)
+ Documenting factorseal-desktop v0.1.0 (/home/domen/dev/factorseal/factorseal-desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.02s
+   Generated /home/domen/dev/factorseal/target/doc/factorseal/index.html and 3 other files

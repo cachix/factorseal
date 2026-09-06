@@ -1,0 +1,72 @@
+Targeted negative tests against c9ca725f19ba40aceab495a041a101108c9fc1c6.
+These seven failures reproduce audit findings; this patch is not a fix.
+
+   Compiling factorseal v0.1.0 (/tmp/factorseal-audit.qGAgP7)
+    Finished `test` profile [unoptimized] target(s) in 6.38s
+     Running unittests src/lib.rs (/home/domen/.cargo/build/a8/6a31b26860210a/debug/deps/factorseal-49a33395424932bc)
+
+running 6 tests
+
+thread 'transfer::tests::audit_card_export_must_not_silently_discard_card_fields' (2060913) panicked at src/transfer.rs:764:9:
+assertion `left == right` failed: successful CSV export silently discarded all card fields
+  left: 0
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test transfer::tests::audit_card_export_must_not_silently_discard_card_fields ... FAILED
+
+thread 'vault::protocol::service::tests::audit_export_must_obey_record_delivery_expiry' (2060914) panicked at src/vault/protocol/service/tests.rs:2149:5:
+export delivery deadline exceeds the record expiry
+test vault::protocol::service::tests::audit_export_must_obey_record_delivery_expiry ... FAILED
+
+thread 'vault::secret_service::tests::audit_create_without_replace_allows_duplicate_attributes' (2060916) panicked at src/vault/secret_service.rs:746:81:
+called `Result::unwrap()` on an `Err` value: Failed("an item with these attributes already exists")
+test vault::secret_service::tests::audit_create_without_replace_allows_duplicate_attributes ... FAILED
+
+thread 'vault::secret_service::tests::audit_disconnected_clients_must_release_sessions' (2060917) panicked at src/vault/secret_service.rs:767:13:
+disconnected client's session remained allocated
+test vault::secret_service::tests::audit_disconnected_clients_must_release_sessions ... FAILED
+
+thread 'vault::protocol::service::tests::audit_pending_permissions_must_fit_transport' (2060915) panicked at src/vault/protocol/service/tests.rs:2170:5:
+valid pending approvals made the permission list undeliverable
+test vault::protocol::service::tests::audit_pending_permissions_must_fit_transport ... FAILED
+
+thread 'vault::secret_service::tests::audit_imported_index_must_survive_next_secret_service_write' (2060918) panicked at src/vault/secret_service.rs:738:9:
+successful restore lost its index entry on the next write
+test vault::secret_service::tests::audit_imported_index_must_survive_next_secret_service_write ... FAILED
+
+failures:
+
+failures:
+    transfer::tests::audit_card_export_must_not_silently_discard_card_fields
+    vault::protocol::service::tests::audit_export_must_obey_record_delivery_expiry
+    vault::protocol::service::tests::audit_pending_permissions_must_fit_transport
+    vault::secret_service::tests::audit_create_without_replace_allows_duplicate_attributes
+    vault::secret_service::tests::audit_disconnected_clients_must_release_sessions
+    vault::secret_service::tests::audit_imported_index_must_survive_next_secret_service_write
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 191 filtered out; finished in 0.64s
+
+error: test failed, to rerun pass `-p factorseal --lib`
+
+    Blocking waiting for file lock on build directory
+   Compiling factorseal v0.1.0 (/tmp/factorseal-audit.qGAgP7)
+    Finished `test` profile [unoptimized] target(s) in 11.27s
+     Running unittests src/bin/factorseal.rs (/home/domen/.cargo/build/a8/6a31b26860210a/debug/deps/factorseal-3a1c86ff5a990a9d)
+
+running 1 test
+
+thread 'commands::audit_tests::audit_import_must_preserve_distinct_source_items' (2061850) panicked at src/bin/factorseal/commands.rs:1910:9:
+assertion `left == right` failed: three source items collided into two addresses
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test commands::audit_tests::audit_import_must_preserve_distinct_source_items ... FAILED
+
+failures:
+
+failures:
+    commands::audit_tests::audit_import_must_preserve_distinct_source_items
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p factorseal --bin factorseal`

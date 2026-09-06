@@ -1112,7 +1112,7 @@ mod tests {
             wait.join().unwrap().result,
             Ok(VaultResponseBody::Permissions {
                 revision,
-                permissions
+                permissions, ..
             }) if revision > 0 && permissions.len() == 1
         ));
     }

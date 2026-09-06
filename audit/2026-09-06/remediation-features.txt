@@ -1,0 +1,204 @@
+FEATURES: vault-client
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.01s
+FEATURES: key-protection
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.83s
+FEATURES: vault-store
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+warning: constant `EXCLUSIVE_HOLDER_VERSION` is never used
+  --> src/vault/protocol/grant.rs:23:7
+   |
+23 | const EXCLUSIVE_HOLDER_VERSION: u8 = 1;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `ExclusiveHolder` is never constructed
+  --> src/vault/protocol/grant.rs:53:8
+   |
+53 | struct ExclusiveHolder {
+   |        ^^^^^^^^^^^^^^^
+
+warning: function `store_exclusive_grant` is never used
+   --> src/vault/protocol/grant.rs:231:15
+    |
+231 | pub(super) fn store_exclusive_grant(
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `exclusive_holder_address` is never used
+   --> src/vault/protocol/grant.rs:341:4
+    |
+341 | fn exclusive_holder_address(target_digest: [u8; 32]) -> VaultResult<SecretAddress> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `is_seal_complete` and `enable_emergency_exit` are never used
+   --> src/vault/protocol/service.rs:190:19
+    |
+ 67 | impl VaultService {
+    | ----------------- methods in this implementation
+...
+190 |     pub(crate) fn is_seal_complete(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^
+...
+196 |     pub(crate) fn enable_emergency_exit(&self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `authorize_secret_service_namespace` and `authorize_exclusive` are never used
+   --> src/vault/protocol/service/authorization.rs:165:19
+    |
+ 44 | impl VaultService {
+    | ----------------- methods in this implementation
+...
+165 |     pub(crate) fn authorize_secret_service_namespace(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     fn authorize_exclusive(
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `is_seal_complete` and `enable_emergency_exit` are never used
+  --> src/vault/protocol/service/state.rs:74:19
+   |
+43 | impl ServiceState {
+   | ----------------- methods in this implementation
+...
+74 |     pub(super) fn is_seal_complete(&self) -> bool {
+   |                   ^^^^^^^^^^^^^^^^
+...
+88 |     pub(super) fn enable_emergency_exit(&self) {
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `enable_emergency_exit` and `is_shutdown_complete` are never used
+  --> src/vault/store.rs:86:19
+   |
+38 | impl VaultStore {
+   | --------------- methods in this implementation
+...
+86 |     pub(crate) fn enable_emergency_exit(&self) {
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+96 |     pub(crate) fn is_shutdown_complete(&self) -> bool {
+   |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `enable_emergency_exit` and `is_shutdown_complete` are never used
+   --> src/vault/store/worker.rs:204:19
+    |
+ 92 | impl WorkerControl {
+    | ------------------ methods in this implementation
+...
+204 |     pub(super) fn enable_emergency_exit(&self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+212 |     pub(super) fn is_shutdown_complete(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `factorseal` (lib) generated 9 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.19s
+FEATURES: vault-store,key-protection
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+warning: constant `EXCLUSIVE_HOLDER_VERSION` is never used
+  --> src/vault/protocol/grant.rs:23:7
+   |
+23 | const EXCLUSIVE_HOLDER_VERSION: u8 = 1;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `ExclusiveHolder` is never constructed
+  --> src/vault/protocol/grant.rs:53:8
+   |
+53 | struct ExclusiveHolder {
+   |        ^^^^^^^^^^^^^^^
+
+warning: function `store_exclusive_grant` is never used
+   --> src/vault/protocol/grant.rs:231:15
+    |
+231 | pub(super) fn store_exclusive_grant(
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `exclusive_holder_address` is never used
+   --> src/vault/protocol/grant.rs:341:4
+    |
+341 | fn exclusive_holder_address(target_digest: [u8; 32]) -> VaultResult<SecretAddress> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `is_seal_complete` and `enable_emergency_exit` are never used
+   --> src/vault/protocol/service.rs:190:19
+    |
+ 67 | impl VaultService {
+    | ----------------- methods in this implementation
+...
+190 |     pub(crate) fn is_seal_complete(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^
+...
+196 |     pub(crate) fn enable_emergency_exit(&self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `authorize_secret_service_namespace` and `authorize_exclusive` are never used
+   --> src/vault/protocol/service/authorization.rs:165:19
+    |
+ 44 | impl VaultService {
+    | ----------------- methods in this implementation
+...
+165 |     pub(crate) fn authorize_secret_service_namespace(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     fn authorize_exclusive(
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `is_seal_complete` and `enable_emergency_exit` are never used
+  --> src/vault/protocol/service/state.rs:74:19
+   |
+43 | impl ServiceState {
+   | ----------------- methods in this implementation
+...
+74 |     pub(super) fn is_seal_complete(&self) -> bool {
+   |                   ^^^^^^^^^^^^^^^^
+...
+88 |     pub(super) fn enable_emergency_exit(&self) {
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `enable_emergency_exit` and `is_shutdown_complete` are never used
+  --> src/vault/store.rs:86:19
+   |
+38 | impl VaultStore {
+   | --------------- methods in this implementation
+...
+86 |     pub(crate) fn enable_emergency_exit(&self) {
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+96 |     pub(crate) fn is_shutdown_complete(&self) -> bool {
+   |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `enable_emergency_exit` and `is_shutdown_complete` are never used
+   --> src/vault/store/worker.rs:204:19
+    |
+ 92 | impl WorkerControl {
+    | ------------------ methods in this implementation
+...
+204 |     pub(super) fn enable_emergency_exit(&self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+212 |     pub(super) fn is_shutdown_complete(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `factorseal` (lib) generated 9 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.19s
+FEATURES: vault-client,hardware
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.05s
+FEATURES: hardware
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.67s
+FEATURES: cli
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.60s
+FEATURES: vault
+    Checking futures-lite v2.6.1
+    Checking zbus v5.19.0
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.05s
+FEATURES: vault,cli,hardware
+    Checking zbus v5.19.0
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.72s

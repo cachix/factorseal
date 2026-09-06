@@ -1,0 +1,2 @@
+empty: PASS native TPM re-unseal, exact bytes recovered, restored keyring exported again
+populated: PASS native TPM re-unseal, exact bytes recovered, restored keyring exported again

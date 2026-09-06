@@ -1121,21 +1121,31 @@ mod tests {
 
     #[test]
     fn sealed_search_requires_manual_unlock() {
-        let (sender, mut requested) = mpsc::unbounded_channel();
-        let shared = Arc::new(Shared::new(Arc::new(ChannelPrompter(sender))));
-        let service = Service {
-            shared: Arc::clone(&shared),
-        };
-        let collection = Collection { shared };
-        assert!(matches!(
-            service.search_items(HashMap::new()),
-            Err(SecretServiceError::IsLocked(_))
-        ));
-        assert!(matches!(
-            collection.search_items(HashMap::new()),
-            Err(SecretServiceError::IsLocked(_))
-        ));
-        assert!(requested.try_recv().is_err());
+        runtime().block_on(async {
+            if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+                return;
+            }
+            let connection = Connection::session().await.unwrap();
+            let (sender, mut requested) = mpsc::unbounded_channel();
+            let shared = Arc::new(Shared::new(Arc::new(ChannelPrompter(sender))));
+            let service = Service {
+                shared: Arc::clone(&shared),
+            };
+            let collection = Collection { shared };
+            assert!(matches!(
+                service
+                    .search_items(HashMap::new(), connection.object_server())
+                    .await,
+                Err(SecretServiceError::IsLocked(_))
+            ));
+            assert!(matches!(
+                collection
+                    .search_items(HashMap::new(), connection.object_server())
+                    .await,
+                Err(SecretServiceError::IsLocked(_))
+            ));
+            assert!(requested.try_recv().is_err());
+        });
     }
 
     async fn wait_for_no_sessions(host: &SecretServiceHost) {
@@ -1553,5 +1563,406 @@ mod tests {
             );
             drop(host);
         });
+    }
+    #[test]
+    fn create_without_replace_allows_duplicate_attributes() {
+        let (_directory, agent) = agent();
+        for label in ["one", "two"] {
+            agent
+                .create_or_replace(
+                    label.into(),
+                    HashMap::new(),
+                    &Zeroizing::new(b"value".to_vec()),
+                    "text/plain".into(),
+                    false,
+                )
+                .unwrap();
+        }
+        assert_eq!(agent.all_items().unwrap().len(), 2);
+    }
+
+    struct ArchiveAgent {
+        agent: Arc<Agent>,
+        service: Arc<crate::vault::VaultService>,
+        caller: crate::vault::CallerIdentity,
+    }
+
+    impl std::ops::Deref for ArchiveAgent {
+        type Target = Agent;
+        fn deref(&self) -> &Agent {
+            &self.agent
+        }
+    }
+
+    fn archive_agent() -> (tempfile::TempDir, ArchiveAgent) {
+        let (directory, service, caller) = test_service();
+        // Exercise the same serialized request path used by the desktop backend.
+        let backend = Store::in_process(Arc::clone(&service), caller.clone());
+        let agent = Arc::new(Agent::load(Store::remote(Box::new(backend))).unwrap());
+        (
+            directory,
+            ArchiveAgent {
+                agent,
+                service,
+                caller,
+            },
+        )
+    }
+    impl crate::VaultClient for Store {
+        fn request(&self, request: &crate::VaultRequest) -> VaultResult<crate::VaultResponse> {
+            let decoded = crate::VaultRequest::decode(&request.encode()?)?;
+            let response = self.backend_request(decoded)?;
+            crate::VaultResponse::decode(&response.encode()?)
+        }
+    }
+
+    fn import_item(
+        target: &ArchiveAgent,
+        entry: &crate::VaultArchiveEntry,
+        replace_existing: bool,
+    ) -> crate::VaultEntryImportStatus {
+        use crate::{VaultAction, VaultRequest, VaultResponseBody, WireSecret};
+        let response = target.service.handle(
+            &target.caller,
+            VaultRequest::new(VaultAction::ImportVaultEntry {
+                entry: entry.metadata.clone(),
+                value: WireSecret::new(entry.value.expose().to_vec()),
+                evict_at: entry.evict_at,
+                replace_existing,
+            })
+            .unwrap(),
+            unix_time(),
+        );
+        let VaultResponseBody::VaultEntryImported { status } = response.result.unwrap() else {
+            panic!("unexpected import response")
+        };
+        status
+    }
+
+    fn exported_item(source: &ArchiveAgent) -> crate::VaultArchiveEntry {
+        source
+            .service
+            .authorize_permission_manager(&source.caller, unix_time())
+            .unwrap();
+        let entries = crate::read_vault_export(&source.store, |_| true).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the singleton index is not a portable item"
+        );
+        let encrypted = crate::encrypt_vault_archive(
+            &crate::VaultArchive::new(unix_time(), entries),
+            b"opal nebula lantern saffron velocity",
+        )
+        .unwrap();
+        crate::decrypt_vault_archive(&encrypted, b"opal nebula lantern saffron velocity")
+            .unwrap()
+            .entries
+            .pop()
+            .unwrap()
+    }
+
+    #[test]
+    fn keyring_restore_merges_live_metadata_and_values_and_survives_next_write() {
+        use crate::VaultEntryImportStatus::{Added, KeptExisting, Replaced};
+        let (_source_dir, source) = archive_agent();
+        let (saved, _) = source
+            .create_or_replace(
+                "Restored".into(),
+                HashMap::new(),
+                &Zeroizing::new(b"backup".to_vec()),
+                "text/plain".into(),
+                false,
+            )
+            .unwrap();
+        let entry = exported_item(&source);
+        let (_target_dir, target) = archive_agent();
+        target
+            .service
+            .authorize_permission_manager(&target.caller, unix_time())
+            .unwrap();
+        let (unrelated, _) = target
+            .create_or_replace(
+                "Unrelated".into(),
+                HashMap::new(),
+                &Zeroizing::new(b"unrelated".to_vec()),
+                "text/plain".into(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(import_item(&target, &entry, false), Added);
+        assert_eq!(target.item(&saved.id).unwrap().label, "Restored");
+        target
+            .set_secret(
+                &saved.id,
+                &Zeroizing::new(b"changed".to_vec()),
+                "application/test".into(),
+            )
+            .unwrap();
+        assert_eq!(import_item(&target, &entry, false), KeptExisting);
+        assert_eq!(
+            &**target.store.get(secret_item(&saved.id)).unwrap().unwrap(),
+            b"changed"
+        );
+        assert_eq!(
+            target.item(&saved.id).unwrap().content_type,
+            "application/test"
+        );
+        assert_eq!(import_item(&target, &entry, true), Replaced);
+        assert_eq!(
+            &**target.store.get(secret_item(&saved.id)).unwrap().unwrap(),
+            b"backup"
+        );
+        assert_eq!(target.item(&saved.id).unwrap().content_type, "text/plain");
+        target
+            .set_secret(
+                &unrelated.id,
+                &Zeroizing::new(b"next write".to_vec()),
+                "text/plain".into(),
+            )
+            .unwrap();
+        let reloaded = Agent::load(target.store.clone()).unwrap();
+        assert_eq!(reloaded.all_items().unwrap().len(), 2);
+        assert_eq!(reloaded.item(&saved.id).unwrap().label, "Restored");
+        assert_eq!(
+            &**reloaded
+                .store
+                .get(secret_item(&unrelated.id))
+                .unwrap()
+                .unwrap(),
+            b"next write"
+        );
+    }
+
+    #[test]
+    fn malformed_keyring_import_does_not_change_index_or_values() {
+        use crate::{VaultAction, VaultRequest, WireSecret};
+        let (_source_dir, source) = archive_agent();
+        source
+            .create_or_replace(
+                "Source".into(),
+                HashMap::new(),
+                &Zeroizing::new(b"secret".to_vec()),
+                "text/plain".into(),
+                false,
+            )
+            .unwrap();
+        let entry = exported_item(&source);
+        let (_target_dir, target) = archive_agent();
+        target
+            .service
+            .authorize_permission_manager(&target.caller, unix_time())
+            .unwrap();
+        let response = target.service.handle(
+            &target.caller,
+            VaultRequest::new(VaultAction::ImportVaultEntry {
+                entry: entry.metadata.clone(),
+                value: WireSecret::new(b"malformed".to_vec()),
+                evict_at: None,
+                replace_existing: true,
+            })
+            .unwrap(),
+            unix_time(),
+        );
+        assert!(response.result.is_err());
+        assert!(target.all_items().unwrap().is_empty());
+        assert!(
+            target
+                .store
+                .get(entry.metadata.address.as_local().unwrap().0)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn imported_keyring_items_are_discoverable_and_readable_on_dbus() {
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (_source_dir, source) = archive_agent();
+            source
+                .create_or_replace(
+                    "Restored".into(),
+                    HashMap::new(),
+                    &Zeroizing::new(b"backup".to_vec()),
+                    "text/plain".into(),
+                    false,
+                )
+                .unwrap();
+            let entry = exported_item(&source);
+            let (_target_dir, target) = archive_agent();
+            let target = Arc::new(target);
+            target
+                .service
+                .authorize_permission_manager(&target.caller, unix_time())
+                .unwrap();
+            let server = Connection::session().await.unwrap();
+            let (sender, _) = mpsc::unbounded_channel();
+            let shared = Arc::new(Shared::new(Arc::new(ChannelPrompter(sender))));
+            shared.set_agent(Some(Arc::clone(&target.agent))).unwrap();
+            server
+                .object_server()
+                .at(
+                    SERVICE_PATH,
+                    Service {
+                        shared: Arc::clone(&shared),
+                    },
+                )
+                .await
+                .unwrap();
+            let client = Connection::session().await.unwrap();
+            let proxy = Proxy::new(
+                &client,
+                server.unique_name().unwrap().to_owned(),
+                SERVICE_PATH,
+                "org.freedesktop.Secret.Service",
+            )
+            .await
+            .unwrap();
+            // The adapter and its D-Bus service existed before the import.
+            import_item(&target, &entry, false);
+            let (paths, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = proxy
+                .call("SearchItems", &(HashMap::<String, String>::new(),))
+                .await
+                .unwrap();
+            assert_eq!(paths.len(), 1);
+            assert!(locked.is_empty());
+            let input = OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
+            let (_, session): (OwnedValue, OwnedObjectPath) =
+                proxy.call("OpenSession", &("plain", input)).await.unwrap();
+            let item = Proxy::new(
+                &client,
+                server.unique_name().unwrap().to_owned(),
+                paths[0].clone(),
+                "org.freedesktop.Secret.Item",
+            )
+            .await
+            .unwrap();
+            let secret: Secret = item.call("GetSecret", &(session,)).await.unwrap();
+            assert_eq!(secret.2, b"backup");
+        });
+    }
+    #[test]
+    fn concurrent_keyring_import_and_create_preserve_both_items() {
+        let (_source_dir, source) = archive_agent();
+        source
+            .create_or_replace(
+                "Imported".into(),
+                HashMap::new(),
+                &Zeroizing::new(b"backup".to_vec()),
+                "text/plain".into(),
+                false,
+            )
+            .unwrap();
+        let entry = exported_item(&source);
+        let (_target_dir, target) = archive_agent();
+        target
+            .service
+            .authorize_permission_manager(&target.caller, unix_time())
+            .unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                import_item(&target, &entry, false);
+            });
+            barrier.wait();
+            target
+                .create_or_replace(
+                    "Created".into(),
+                    HashMap::new(),
+                    &Zeroizing::new(b"new".to_vec()),
+                    "text/plain".into(),
+                    false,
+                )
+                .unwrap();
+        });
+        let items = target.all_items().unwrap();
+        assert_eq!(items.len(), 2);
+        for item in items {
+            let expected = if item.label == "Imported" {
+                b"backup".as_slice()
+            } else {
+                b"new".as_slice()
+            };
+            assert_eq!(
+                &**target.store.get(secret_item(&item.id)).unwrap().unwrap(),
+                expected
+            );
+        }
+    }
+    #[test]
+    fn pre_fix_v1_backup_restores_into_empty_and_populated_keyrings() {
+        let archive = crate::decrypt_vault_archive(
+            include_bytes!("../../tests/fixtures/keyring-v1.factorseal"),
+            b"synthetic archive orchard violet lantern 2026",
+        )
+        .unwrap();
+        assert_eq!(archive.entries.len(), 1);
+        for populated in [false, true] {
+            let (_dir, target) = archive_agent();
+            target
+                .service
+                .authorize_permission_manager(&target.caller, unix_time())
+                .unwrap();
+            if populated {
+                target
+                    .create_or_replace(
+                        "Unrelated".into(),
+                        HashMap::new(),
+                        &Zeroizing::new(b"unrelated".to_vec()),
+                        "text/plain".into(),
+                        false,
+                    )
+                    .unwrap();
+            }
+            let entry = &archive.entries[0];
+            assert_eq!(
+                import_item(&target, entry, false),
+                crate::VaultEntryImportStatus::Added
+            );
+            assert_eq!(
+                import_item(&target, entry, false),
+                crate::VaultEntryImportStatus::KeptExisting
+            );
+            assert_eq!(
+                import_item(&target, entry, true),
+                crate::VaultEntryImportStatus::Replaced
+            );
+            target
+                .create_or_replace(
+                    "Next write".into(),
+                    HashMap::new(),
+                    &Zeroizing::new(b"new".to_vec()),
+                    "text/plain".into(),
+                    false,
+                )
+                .unwrap();
+            let reloaded = Agent::load(target.store.clone()).unwrap();
+            let restored = reloaded.item("0123456789abcdef0123456789abcdef").unwrap();
+            assert_eq!(restored.label, "Legacy fixture");
+            assert_eq!(
+                restored.attributes.get("service").unwrap(),
+                "factorseal-release-drill"
+            );
+            assert_eq!(
+                &**reloaded
+                    .store
+                    .get(secret_item(&restored.id))
+                    .unwrap()
+                    .unwrap(),
+                b"synthetic legacy secret"
+            );
+            assert_eq!(
+                reloaded.all_items().unwrap().len(),
+                if populated { 3 } else { 2 }
+            );
+        }
     }
 }

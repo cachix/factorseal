@@ -983,10 +983,7 @@ impl DesktopView {
         if self.transfer_busy {
             return;
         }
-        let Snapshot::Unsealed {
-            metadata, contents, ..
-        } = &self.snapshot
-        else {
+        let Snapshot::Unsealed { metadata, .. } = &self.snapshot else {
             self.transfer_notice = Some(TransferNotice::Error(
                 "Unseal the vault before transferring secrets.".to_owned(),
             ));
@@ -994,7 +991,6 @@ impl DesktopView {
             return;
         };
         let metadata = metadata.clone();
-        let entries = contents.entries.clone();
         let format = self.transfer_format;
         let passphrase = self.archive_passphrase.read(cx).value();
         let confirmation = self.archive_passphrase_confirmation.read(cx).value();
@@ -1085,9 +1081,9 @@ impl DesktopView {
                     })
                 } else {
                     let output = if format.is_native() {
-                        runtime.export_native_archive(&metadata, &entries, &passphrase)?
+                        runtime.export_native_archive(&metadata, &passphrase)?
                     } else {
-                        runtime.export_password_manager(&metadata, &entries, format)?
+                        runtime.export_password_manager(&metadata, format)?
                     };
                     write_private_file(&operation_path, &output)
                         .map_err(|error| error.to_string())?;

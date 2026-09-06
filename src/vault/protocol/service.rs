@@ -220,6 +220,13 @@ impl VaultService {
         let now = clock.wall();
         state.consume(request.request_id())?;
         let result = match request.action {
+            VaultAction::ExportRevision => {
+                require_live_manager(&state, caller, clock, valid_until)?;
+                state.store().purge_expired_at(now)?;
+                return Ok(VaultResponseBody::ExportRevision {
+                    revision: state.store().export_revision()?,
+                });
+            }
             VaultAction::ListVaultEntries { cursor, limit } => {
                 return inventory(
                     &mut state,
@@ -238,11 +245,29 @@ impl VaultService {
                     .ok_or_else(|| {
                         VaultError::InvalidData("vault entry disappeared during export".to_owned())
                     })?;
+                tighten(valid_until, secret.expires_at);
                 let (now, monotonic_now) = clock.sample();
                 clock.check(valid_until.get())?;
                 state.touch(now, monotonic_now)?;
+                let value = if entry.document_kind == DocumentKind::LinuxSecretService {
+                    let index = secret_service_index(state.store(), now)?;
+                    let item = index
+                        .items
+                        .into_iter()
+                        .find(|item| item.address().is_ok_and(|address| address == entry.address))
+                        .ok_or_else(|| {
+                            VaultError::InvalidData("keyring value has no index entry".to_owned())
+                        })?;
+                    crate::vault::secret_service_data::PortableItem::new(
+                        item,
+                        super::WireSecret::new(secret.value.to_vec()),
+                    )
+                    .encode()?
+                } else {
+                    super::WireSecret::new(secret.value.to_vec())
+                };
                 return Ok(VaultResponseBody::VaultEntrySecret {
-                    value: super::WireSecret::new(secret.value.to_vec()),
+                    value,
                     evict_at: secret.expires_at,
                 });
             }
@@ -254,6 +279,21 @@ impl VaultService {
             } => {
                 require_live_manager(&state, caller, clock, valid_until)?;
                 validate_evict_at(evict_at, now)?;
+                if entry.document_kind == DocumentKind::LinuxSecretService {
+                    let status = import_secret_service_item(
+                        state.store(),
+                        &entry,
+                        &value,
+                        evict_at,
+                        replace_existing,
+                        &provenance,
+                        now,
+                    )?;
+                    let (now, monotonic_now) = clock.sample();
+                    clock.check(valid_until.get())?;
+                    state.touch(now, monotonic_now)?;
+                    return Ok(VaultResponseBody::VaultEntryImported { status });
+                }
                 let existing = state.store().get_at(
                     entry.document_kind,
                     &entry.partition,
@@ -283,13 +323,22 @@ impl VaultService {
                 state.touch(now, monotonic_now)?;
                 return Ok(VaultResponseBody::VaultEntryImported { status });
             }
-            VaultAction::ListPermissions => {
+            VaultAction::ListPermissions | VaultAction::ListPermissionsPage { .. } => {
                 require_live_manager(&state, caller, clock, valid_until)?;
                 let (revision, permissions) = state.list_permissions(now)?;
-                return Ok(VaultResponseBody::Permissions {
-                    revision,
-                    permissions,
-                });
+                let cursor = if let VaultAction::ListPermissionsPage {
+                    revision: expected,
+                    ref cursor,
+                } = request.action
+                {
+                    if revision != expected {
+                        return Err(VaultError::Conflict.into());
+                    }
+                    Some(cursor.as_str())
+                } else {
+                    None
+                };
+                return permission_page(revision, permissions, cursor).map_err(Into::into);
             }
             VaultAction::WaitPermissions {
                 after_revision,
@@ -302,10 +351,7 @@ impl VaultService {
                     Duration::from_millis(timeout_ms),
                     clock,
                 )?;
-                return Ok(VaultResponseBody::Permissions {
-                    revision,
-                    permissions,
-                });
+                return permission_page(revision, permissions, None).map_err(Into::into);
             }
             VaultAction::WaitPermission { id, timeout_ms } => {
                 let status = state.wait_for_permission(
@@ -492,3 +538,137 @@ fn response_error_with_interaction(
 }
 #[cfg(all(test, feature = "vault-store", feature = "hardware"))]
 mod tests;
+
+// Reserve ample framing, revision and cursor overhead. Count escaped JSON
+// bytes, not source string lengths, before returning a transport-sized page.
+fn permission_page(
+    revision: u64,
+    permissions: Vec<super::Permission>,
+    cursor: Option<&str>,
+) -> VaultResult<VaultResponseBody> {
+    let mut remaining = super::wire::MAX_MESSAGE_BYTES - 4096;
+    let mut page = Vec::new();
+    let mut next_cursor = None;
+    for permission in permissions
+        .into_iter()
+        .filter(|p| cursor.is_none_or(|cursor| p.id.as_str() > cursor))
+    {
+        let bytes = serde_json::to_vec(&permission)
+            .map_err(|e| VaultError::Protocol(e.to_string()))?
+            .len()
+            + 1;
+        if bytes > remaining {
+            if page.is_empty() {
+                return Err(VaultError::Protocol(
+                    "permission exceeds page budget".to_owned(),
+                ));
+            }
+            next_cursor = page.last().map(|p: &super::Permission| p.id.clone());
+            break;
+        }
+        remaining -= bytes;
+        page.push(permission);
+    }
+    Ok(VaultResponseBody::Permissions {
+        revision,
+        permissions: page,
+        next_cursor,
+    })
+}
+
+fn secret_service_index(
+    store: &VaultStore,
+    now: u64,
+) -> VaultResult<crate::vault::secret_service_data::Index> {
+    use crate::vault::secret_service_data::{INDEX_ITEM, Index, NAMESPACE};
+    let bytes = store.get_at(
+        DocumentKind::LinuxSecretService,
+        NAMESPACE,
+        &crate::vault::SecretAddress::new(INDEX_ITEM, None)?,
+        now,
+    )?;
+    Index::decode(bytes.as_ref().map(|b| b.as_slice()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_secret_service_item(
+    store: &VaultStore,
+    entry: &super::VaultEntryMetadata,
+    value: &super::WireSecret,
+    evict_at: Option<u64>,
+    replace_existing: bool,
+    provenance: &Provenance,
+    now: u64,
+) -> VaultResult<super::VaultEntryImportStatus> {
+    use crate::vault::secret_service_data::{INDEX_ITEM, NAMESPACE, PortableItem};
+    use crate::vault::{DocumentOperation, SecretAddress};
+    if entry.partition != NAMESPACE || evict_at.is_some() {
+        return Err(VaultError::Protocol(
+            "unsupported portable keyring partition or expiry".to_owned(),
+        ));
+    }
+    let portable = PortableItem::decode(value.expose(), &entry.address)?;
+    let mut index = secret_service_index(store, now)?;
+    let existing = index
+        .items
+        .iter()
+        .position(|item| item.id == portable.item.id);
+    if existing.is_some() && !replace_existing {
+        return Ok(super::VaultEntryImportStatus::KeptExisting);
+    }
+    if let Some(position) = existing {
+        index.items[position] = portable.item;
+    } else {
+        index.items.push(portable.item);
+    }
+    let index_bytes =
+        serde_json::to_vec(&index).map_err(|e| VaultError::InvalidData(e.to_string()))?;
+    // An imported index must remain writable through the bounded native
+    // adapter's normal mutation path.
+    VaultRequest::new(VaultAction::Mutate {
+        namespace: NAMESPACE.to_vec(),
+        mutations: vec![
+            super::VaultMutation::Put {
+                address: super::WireSecretAddress::new(
+                    entry
+                        .address
+                        .as_local()
+                        .ok_or_else(|| VaultError::Protocol("invalid keyring address".to_owned()))?
+                        .0,
+                    None,
+                ),
+                value: super::WireSecret::new(portable.value.expose().to_vec()),
+                evict_at: None,
+            },
+            super::VaultMutation::Put {
+                address: super::WireSecretAddress::new(INDEX_ITEM, None),
+                value: super::WireSecret::new(index_bytes.clone()),
+                evict_at: None,
+            },
+        ],
+    })?
+    .validate()?;
+    store.mutate(
+        DocumentKind::LinuxSecretService,
+        NAMESPACE,
+        vec![
+            DocumentOperation::Put {
+                address: entry.address.clone(),
+                value: zeroize::Zeroizing::new(portable.value.expose().to_vec()),
+                evict_at: None,
+            },
+            DocumentOperation::Put {
+                address: SecretAddress::new(INDEX_ITEM, None)?,
+                value: zeroize::Zeroizing::new(index_bytes),
+                evict_at: None,
+            },
+        ],
+        provenance,
+        now,
+    )?;
+    Ok(if existing.is_some() {
+        super::VaultEntryImportStatus::Replaced
+    } else {
+        super::VaultEntryImportStatus::Added
+    })
+}

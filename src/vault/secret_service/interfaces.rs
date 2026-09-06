@@ -46,12 +46,33 @@ pub(super) struct Session {
     path: String,
 }
 
-fn matching_items(
-    agent: &Agent,
+async fn registered_items(
+    shared: &Arc<Shared>,
+    server: &ObjectServer,
+) -> Result<Vec<super::agent::IndexItem>, SecretServiceError> {
+    let items = shared.agent()?.all_items()?;
+    for item in &items {
+        server
+            .at(
+                item_path(&item.id)?,
+                Item {
+                    shared: Arc::clone(shared),
+                    id: item.id.clone(),
+                },
+            )
+            .await
+            .map_err(failed)?;
+    }
+    Ok(items)
+}
+
+async fn matching_items(
+    shared: &Arc<Shared>,
+    server: &ObjectServer,
     attributes: &HashMap<String, String>,
-) -> fdo::Result<Vec<OwnedObjectPath>> {
-    agent
-        .all_items()?
+) -> Result<Vec<OwnedObjectPath>, SecretServiceError> {
+    Ok(registered_items(shared, server)
+        .await?
         .into_iter()
         .filter(|item| {
             attributes
@@ -59,7 +80,7 @@ fn matching_items(
                 .all(|(key, value)| item.attributes.get(key) == Some(value))
         })
         .map(|item| item_path(&item.id))
-        .collect()
+        .collect::<fdo::Result<Vec<_>>>()?)
 }
 
 fn sealed() -> fdo::Error {
@@ -121,12 +142,15 @@ impl Service {
     /// The search index is encrypted. Report IsLocked immediately rather than
     /// inventing a missing credential or waiting for UI within a method call.
     #[zbus(out_args("unlocked", "locked"))]
-    pub(super) fn search_items(
+    pub(super) async fn search_items(
         &self,
         attributes: HashMap<String, String>,
+        #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>), SecretServiceError> {
-        let agent = self.shared.agent()?;
-        Ok((matching_items(&agent, &attributes)?, Vec::new()))
+        Ok((
+            matching_items(&self.shared, server, &attributes).await?,
+            Vec::new(),
+        ))
     }
 
     /// Unsealed objects are already unlocked. Sealed ones need the host to
@@ -229,12 +253,12 @@ impl Service {
 #[interface(name = "org.freedesktop.Secret.Collection")]
 impl Collection {
     #[zbus(out_args("results",))]
-    pub(super) fn search_items(
+    pub(super) async fn search_items(
         &self,
         attributes: HashMap<String, String>,
+        #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<Vec<OwnedObjectPath>, SecretServiceError> {
-        let agent = self.shared.agent()?;
-        Ok(matching_items(&agent, &attributes)?)
+        matching_items(&self.shared, server, &attributes).await
     }
 
     #[zbus(out_args("item", "prompt"))]
@@ -269,10 +293,14 @@ impl Collection {
     }
 
     #[zbus(property)]
-    fn items(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
+    async fn items(
+        &self,
+        #[zbus(object_server)] server: &ObjectServer,
+    ) -> fdo::Result<Vec<OwnedObjectPath>> {
         match self.shared.agent() {
-            Ok(agent) => agent
-                .all_items()?
+            Ok(_) => registered_items(&self.shared, server)
+                .await
+                .map_err(failed)?
                 .into_iter()
                 .map(|item| item_path(&item.id))
                 .collect(),

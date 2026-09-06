@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -6,9 +5,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use factorseal::{
     DocumentKind, MAX_LIST_PAGE_SIZE, NativeVaultClient, SecretAddress, UnlockGroup, UnlockPolicy,
-    Vault, VaultAction, VaultArchive, VaultArchiveEntry, VaultClient, VaultEntryImportStatus,
-    VaultEntryMetadata, VaultMetadata, VaultRequest, VaultResponseBody, WireSecret,
-    WireSecretAddress, decrypt_vault_archive, encrypt_vault_archive,
+    Vault, VaultAction, VaultArchive, VaultClient, VaultEntryImportStatus, VaultEntryMetadata,
+    VaultMetadata, VaultRequest, VaultResponseBody, WireSecret, WireSecretAddress,
+    decrypt_vault_archive, encrypt_vault_archive,
 };
 use zeroize::Zeroizing;
 
@@ -302,26 +301,11 @@ impl DesktopRuntime {
     pub(crate) fn export_native_archive(
         &self,
         metadata: &VaultMetadata,
-        entries: &[VaultEntryMetadata],
         passphrase: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, String> {
-        let mut archived = Vec::new();
-        for entry in entries.iter().filter(|entry| portable_entry(entry)) {
-            let request = VaultRequest::new(VaultAction::ExportVaultEntry {
-                entry: entry.clone(),
-            })
-            .map_err(|error| error.to_string())?;
-            let VaultResponseBody::VaultEntrySecret { value, evict_at } =
-                self.request_live(metadata, &request)?
-            else {
-                return Err("vault returned an unexpected archive response".to_owned());
-            };
-            archived.push(VaultArchiveEntry {
-                metadata: entry.clone(),
-                value,
-                evict_at,
-            });
-        }
+        let archived =
+            factorseal::read_vault_export(&native_client(&self.config, metadata), |_| true)
+                .map_err(|error| error.to_string())?;
         let archive = VaultArchive::new(unix_time()?, archived);
         encrypt_vault_archive(&archive, passphrase).map_err(|error| error.to_string())
     }
@@ -365,10 +349,9 @@ impl DesktopRuntime {
     pub(crate) fn export_password_manager(
         &self,
         metadata: &VaultMetadata,
-        entries: &[VaultEntryMetadata],
         format: TransferFormat,
     ) -> Result<Zeroizing<Vec<u8>>, String> {
-        let secrets = self.read_personal_secrets(metadata, entries)?;
+        let secrets = self.read_personal_secrets(metadata)?;
         export_manager(format, &secrets).map_err(|error| error.to_string())
     }
 
@@ -380,24 +363,9 @@ impl DesktopRuntime {
         replace_existing: bool,
     ) -> Result<(TransferSummary, VaultContents), String> {
         let secrets = import_manager(format, bytes).map_err(|error| error.to_string())?;
-        let contents = self.load_live_contents(metadata)?;
-        let mut occupied = contents
-            .entries
-            .iter()
-            .filter(|entry| is_personal_entry(entry))
-            .filter_map(|entry| entry.address.as_local().map(|(item, _)| item.to_owned()))
-            .collect::<Vec<_>>();
-        let mut source_names = HashMap::<String, usize>::new();
+        let names = factorseal::transfer::personal_import_names(&secrets);
         let mut prepared = Vec::with_capacity(secrets.len());
-        for secret in secrets {
-            let occurrence = source_names.entry(secret.title.clone()).or_default();
-            *occurrence += 1;
-            let address_name = if *occurrence == 1 {
-                secret.title.clone()
-            } else {
-                unique_personal_name(&secret.title, &occupied)
-            };
-            occupied.push(address_name.clone());
+        for (secret, address_name) in secrets.into_iter().zip(names) {
             let value = secret.encode().map_err(|error| error.to_string())?;
             let entry = VaultEntryMetadata {
                 document_kind: DocumentKind::LocalKeyring,
@@ -429,26 +397,18 @@ impl DesktopRuntime {
     fn read_personal_secrets(
         &self,
         metadata: &VaultMetadata,
-        entries: &[VaultEntryMetadata],
     ) -> Result<Vec<PersonalSecret>, String> {
-        entries
-            .iter()
-            .filter(|entry| is_personal_entry(entry))
+        factorseal::read_vault_export(&native_client(&self.config, metadata), is_personal_entry)
+            .map_err(|error| error.to_string())?
+            .into_iter()
             .map(|entry| {
                 let title = entry
+                    .metadata
                     .address
                     .as_local()
-                    .map(|(item, _)| item)
-                    .ok_or_else(|| "personal secret has an invalid address".to_owned())?;
-                let request = VaultRequest::new(VaultAction::ExportVaultEntry {
-                    entry: entry.clone(),
-                })
-                .map_err(|error| error.to_string())?;
-                let VaultResponseBody::VaultEntrySecret { value, .. } =
-                    self.request_live(metadata, &request)?
-                else {
-                    return Err("vault returned an unexpected personal-secret response".to_owned());
-                };
+                    .ok_or("invalid personal-secret address")?
+                    .0;
+                let value = entry.value;
                 PersonalSecret::decode(title, value.expose()).map_err(|error| error.to_string())
             })
             .collect()
@@ -713,27 +673,9 @@ impl Drop for Worker {
     }
 }
 
-fn portable_entry(entry: &VaultEntryMetadata) -> bool {
-    !matches!(
-        entry.document_kind,
-        DocumentKind::Authorization | DocumentKind::SecretSpecProviderCache
-    )
-}
-
 fn is_personal_entry(entry: &VaultEntryMetadata) -> bool {
     entry.document_kind == DocumentKind::LocalKeyring
         && entry.partition == PERSONAL_SECRET_NAMESPACE
-}
-
-fn unique_personal_name(title: &str, occupied: &[String]) -> String {
-    let mut suffix = 2_u64;
-    loop {
-        let candidate = format!("{title} ({suffix})");
-        if !occupied.contains(&candidate) {
-            return candidate;
-        }
-        suffix = suffix.saturating_add(1);
-    }
 }
 
 fn load_vault_contents_from_client(client: &impl VaultClient) -> Result<VaultContents, String> {
@@ -805,14 +747,12 @@ fn load_vault_entries(
 fn load_permissions(
     mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
 ) -> Result<Vec<factorseal::Permission>, String> {
-    let VaultResponseBody::Permissions { permissions, .. } =
-        crate::timing::result("desktop_inventory", "list_permissions", || {
-            request(VaultAction::ListPermissions)
-        })?
-    else {
-        return Err("vault returned an unexpected permission-list response".to_owned());
-    };
-    Ok(permissions)
+    factorseal::read_permission_pages(
+        |action| request(action).map_err(factorseal::VaultError::Protocol),
+        None,
+    )
+    .map(|(_, permissions)| permissions)
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -1061,6 +1001,7 @@ mod tests {
             VaultResponseBody::Permissions {
                 revision: 0,
                 permissions: Vec::new(),
+                next_cursor: None,
             },
         ]);
 

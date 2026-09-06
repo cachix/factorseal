@@ -1,0 +1,7 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking factorseal v0.1.0 (/home/domen/dev/factorseal)
+    Checking factorseal-desktop v0.1.0 (/home/domen/dev/factorseal/factorseal-desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.50s

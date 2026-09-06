@@ -1,6 +1,6 @@
 //! Command implementations for vault lifecycle, project secrets, and grants.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,9 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use directories::ProjectDirs;
 use factorseal::{
     CallerIdentity, DocumentKind, GrantAuthorization, GrantAuthorizationTarget, GrantPermission,
-    HistoryEntry, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
-    PermissionChange, PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind,
-    UnlockGroup, UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultArchive,
+    HistoryEntry, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, Permission, PermissionChange,
+    PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind, UnlockGroup,
+    UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultArchive,
     VaultArchiveEntry, VaultClient, VaultCryptoProfile, VaultEntryImportStatus, VaultEntryMetadata,
     VaultError, VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode,
     VaultService, WireSecret, decrypt_vault_archive, encrypt_vault_archive,
@@ -265,30 +265,13 @@ pub(super) fn export_vault(
 ) -> Result<(), CliError> {
     validate_transfer_options(format, passphrase_file)?;
     let client = native_client(root, socket)?;
-    let entries = list_vault_entries(&client)?;
     let output = if format.is_native() {
         let passphrase = read_archive_passphrase(passphrase_file, true)?;
-        let mut archived = Vec::new();
-        for entry in entries.iter().filter(|entry| portable_entry(entry)) {
-            let body = request_body(
-                &client,
-                VaultAction::ExportVaultEntry {
-                    entry: entry.clone(),
-                },
-            )?;
-            let VaultResponseBody::VaultEntrySecret { value, evict_at } = body else {
-                return Err(unexpected_transfer_response("archive export"));
-            };
-            archived.push(VaultArchiveEntry {
-                metadata: entry.clone(),
-                value,
-                evict_at,
-            });
-        }
+        let archived = factorseal::read_vault_export(&client, |_| true)?;
         encrypt_vault_archive(&VaultArchive::new(unix_time()?, archived), &passphrase)?
     } else {
         eprintln!("factorseal: warning: password-manager exports are plaintext");
-        let secrets = read_personal_secrets(&client, &entries)?;
+        let secrets = read_personal_secrets(&client)?;
         export_manager(format, &secrets).map_err(transfer_error)?
     };
     write_private_file(file, &output).map_err(transfer_error)?;
@@ -338,61 +321,17 @@ fn validate_transfer_options(
     Ok(())
 }
 
-fn list_vault_entries(client: &dyn VaultClient) -> Result<Vec<VaultEntryMetadata>, CliError> {
-    let mut entries = Vec::new();
-    let mut cursor = None;
-    loop {
-        let body = request_body(
-            client,
-            VaultAction::ListVaultEntries {
-                cursor: cursor.clone(),
-                limit: MAX_LIST_PAGE_SIZE,
-            },
-        )?;
-        let VaultResponseBody::VaultEntries {
-            entries: page,
-            next_cursor,
-        } = body
-        else {
-            return Err(unexpected_transfer_response("vault inventory"));
-        };
-        entries.extend(page);
-        if next_cursor.is_none() {
-            break;
-        }
-        if next_cursor == cursor {
-            return Err(CliError::Transfer(
-                "vault returned a repeated inventory cursor".to_owned(),
-            ));
-        }
-        cursor = next_cursor;
-    }
-    Ok(entries)
-}
-
-fn read_personal_secrets(
-    client: &dyn VaultClient,
-    entries: &[VaultEntryMetadata],
-) -> Result<Vec<PersonalSecret>, CliError> {
-    entries
-        .iter()
-        .filter(|entry| is_personal_entry(entry))
+fn read_personal_secrets(client: &dyn VaultClient) -> Result<Vec<PersonalSecret>, CliError> {
+    factorseal::read_vault_export(client, is_personal_entry)?
+        .into_iter()
         .map(|entry| {
             let title = entry
+                .metadata
                 .address
                 .as_local()
-                .map(|(item, _)| item)
-                .ok_or_else(|| CliError::Transfer("invalid personal-secret address".to_owned()))?;
-            let body = request_body(
-                client,
-                VaultAction::ExportVaultEntry {
-                    entry: entry.clone(),
-                },
-            )?;
-            let VaultResponseBody::VaultEntrySecret { value, .. } = body else {
-                return Err(unexpected_transfer_response("personal-secret export"));
-            };
-            PersonalSecret::decode(title, value.expose()).map_err(transfer_error)
+                .ok_or_else(|| CliError::Transfer("invalid personal-secret address".to_owned()))?
+                .0;
+            PersonalSecret::decode(title, entry.value.expose()).map_err(transfer_error)
         })
         .collect()
 }
@@ -404,23 +343,9 @@ fn import_personal_secrets(
     replace_existing: bool,
 ) -> Result<TransferSummary, CliError> {
     let secrets = import_manager(format, bytes).map_err(transfer_error)?;
-    let entries = list_vault_entries(client)?;
-    let mut occupied = entries
-        .iter()
-        .filter(|entry| is_personal_entry(entry))
-        .filter_map(|entry| entry.address.as_local().map(|(item, _)| item.to_owned()))
-        .collect::<Vec<_>>();
-    let mut source_names = HashMap::<String, usize>::new();
+    let names = factorseal::transfer::personal_import_names(&secrets);
     let mut prepared = Vec::with_capacity(secrets.len());
-    for secret in secrets {
-        let occurrence = source_names.entry(secret.title.clone()).or_default();
-        *occurrence += 1;
-        let name = if *occurrence == 1 {
-            secret.title.clone()
-        } else {
-            unique_personal_name(&secret.title, &occupied)
-        };
-        occupied.push(name.clone());
+    for (secret, name) in secrets.into_iter().zip(names) {
         prepared.push(VaultArchiveEntry {
             metadata: VaultEntryMetadata {
                 document_kind: DocumentKind::LocalKeyring,
@@ -480,27 +405,9 @@ fn request_body(
     response.result.map_err(vault_request_error)
 }
 
-fn portable_entry(entry: &VaultEntryMetadata) -> bool {
-    !matches!(
-        entry.document_kind,
-        DocumentKind::Authorization | DocumentKind::SecretSpecProviderCache
-    )
-}
-
 fn is_personal_entry(entry: &VaultEntryMetadata) -> bool {
     entry.document_kind == DocumentKind::LocalKeyring
         && entry.partition == PERSONAL_SECRET_NAMESPACE
-}
-
-fn unique_personal_name(title: &str, occupied: &[String]) -> String {
-    let mut suffix = 2_u64;
-    loop {
-        let candidate = format!("{title} ({suffix})");
-        if !occupied.contains(&candidate) {
-            return candidate;
-        }
-        suffix = suffix.saturating_add(1);
-    }
 }
 
 fn transfer_error(error: impl std::fmt::Display) -> CliError {
@@ -1198,28 +1105,17 @@ fn permissions(
     client: &dyn VaultClient,
     after_revision: Option<u64>,
 ) -> Result<(u64, Vec<Permission>), CliError> {
-    let action = after_revision.map_or(VaultAction::ListPermissions, |after_revision| {
-        VaultAction::WaitPermissions {
-            after_revision,
-            timeout_ms: MAX_PERMISSION_WAIT_MS,
-        }
-    });
-    let request = VaultRequest::new(action)?;
-    let response = client.request(&request)?;
-    match response.result {
-        Ok(VaultResponseBody::Permissions {
-            revision,
-            permissions,
-        }) => Ok((revision, permissions)),
-        Ok(_) => Err(VaultError::Protocol(
-            "vault returned an unexpected permissions response".to_owned(),
-        )
-        .into()),
-        Err(error) => Err(CliError::VaultRequest {
-            code: error.code,
-            message: error.message,
-        }),
-    }
+    factorseal::read_permission_pages(
+        |action| {
+            let response = client.request(&VaultRequest::new(action)?)?;
+            response.result.map_err(|error| match error.code {
+                factorseal::VaultResponseErrorCode::Conflict => VaultError::Conflict,
+                _ => VaultError::Protocol(error.message),
+            })
+        },
+        after_revision,
+    )
+    .map_err(Into::into)
 }
 
 fn list_permissions(
@@ -1883,4 +1779,59 @@ pub(super) fn unix_time() -> Result<u64, VaultError> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|error| VaultError::Protocol(error.to_string()))
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    struct ImportClient(std::sync::Mutex<std::collections::HashSet<String>>);
+    impl VaultClient for ImportClient {
+        fn request(
+            &self,
+            request: &VaultRequest,
+        ) -> factorseal::VaultResult<factorseal::VaultResponse> {
+            let body = match &request.action {
+                VaultAction::ListVaultEntries { .. } => VaultResponseBody::VaultEntries {
+                    entries: vec![],
+                    next_cursor: None,
+                },
+                VaultAction::ImportVaultEntry { entry, .. } => {
+                    let added = self
+                        .0
+                        .lock()
+                        .unwrap()
+                        .insert(entry.address.as_local().unwrap().0.to_owned());
+                    VaultResponseBody::VaultEntryImported {
+                        status: if added {
+                            factorseal::VaultEntryImportStatus::Added
+                        } else {
+                            factorseal::VaultEntryImportStatus::KeptExisting
+                        },
+                    }
+                }
+                _ => panic!("unexpected action"),
+            };
+            Ok(factorseal::VaultResponse::success(
+                request.request_id(),
+                body,
+            ))
+        }
+    }
+    #[test]
+    fn import_preserves_distinct_source_items() {
+        let client = ImportClient(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let source = br#"{"items":[{"name":"A"},{"name":"A"},{"name":"A (2)"}]}"#;
+        import_personal_secrets(&client, TransferFormat::BitwardenJson, source, false).unwrap();
+        assert_eq!(
+            client.0.lock().unwrap().len(),
+            3,
+            "three source items collided into two addresses"
+        );
+        import_personal_secrets(&client, TransferFormat::BitwardenJson, source, false).unwrap();
+        assert_eq!(
+            client.0.lock().unwrap().len(),
+            3,
+            "repeat import must address the same items"
+        );
+    }
 }

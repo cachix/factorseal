@@ -1,0 +1,390 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling factorseal v0.1.0 (/home/domen/dev/factorseal)
+   Compiling factorseal-desktop v0.1.0 (/home/domen/dev/factorseal/factorseal-desktop)
+    Finished `test` profile [unoptimized] target(s) in 6.80s
+     Running unittests src/lib.rs (/home/domen/.cargo/build/1f/0c4b1474b4d57e/debug/deps/factorseal-f4f7f8aa3a3b56dc)
+
+running 204 tests
+test hardware::tests::native_authorization_outcomes_remain_structured ... ok
+test crypto::tests::encrypted_payload_round_trips_and_authenticates_aad ... ok
+test crypto::tests::aes256_gcm_matches_nist_known_answer ... ok
+test hardware::tests::native_linux_vault_rejects_a_biometric_policy_without_creating_a_root ... ok
+test crypto::tests::pbkdf2_hmac_sha256_matches_known_answer ... ok
+test transfer::tests::duplicate_import_names_reserve_original_titles_and_are_repeatable ... ok
+test keyring::tests::vault_clients_implement_the_keyring_interface ... ok
+test transfer::tests::csv_exports_reject_lossy_items_before_writing ... ok
+test transfer::tests::bitwarden_card_fields_remain_card_fields ... ok
+test desktop_worker::tests::frames_are_bounded_and_leave_the_lifeline_unread ... ok
+test hardware::tests::hardware_availability_and_policy_remain_structured ... ok
+test hardware::tests::non_biometric_linux_policy_passes_the_platform_guard ... ok
+test crypto::tests::encryption_uses_a_fresh_nonce ... ok
+test transfer::tests::bitwarden_json_preserves_login_fields ... ok
+test transfer::tests::keepass_csv_uses_official_columns ... ok
+test transfer::tests::structured_personal_secret_round_trips_and_legacy_is_supported ... ok
+test transfer::tests::one_password_csv_uses_official_columns ... ok
+test hardware::tests::biometric_protection_fails_before_creating_linux_state ... ok
+test vault::archive::tests::export_reads_live_inventory_and_all_pages ... ok
+test vault::archive::tests::export_rejects_partial_inventory_and_changed_snapshots ... ok
+test transfer::tests::transfer_files_are_user_only ... ok
+test security::files::tests::private_reads_reject_links_permissions_and_oversize_inputs ... ok
+test vault::document::tests::document_round_trips_secret_and_expiry ... ok
+test vault::document::tests::purge_removes_entries_at_deadline ... ok
+test vault::document::tests::delete_is_idempotent ... ok
+test vault::envelope::tests::envelopes_declare_their_algorithm ... ok
+test vault::history::tests::declared_context_is_truncated_on_a_character_boundary ... ok
+test vault::envelope::tests::an_unknown_or_missing_encryption_algorithm_is_refused ... ok
+test vault::envelope::tests::snapshot_is_encrypted_and_bound_to_its_header ... ok
+test vault::history::tests::unknown_history_versions_are_detected ... ok
+test vault::document::tests::address_listing_collapses_concurrent_values_without_exposing_them ... ok
+test vault::history::tests::log_round_trips_and_continues_its_sequence ... ok
+test vault::document::tests::project_document_preserves_the_complete_secretspec_address ... ok
+test vault::keys::tests::document_keys_are_independent_and_context_bound ... ok
+test vault::keys::tests::operational_keys_are_identity_bound ... ok
+test vault::document::tests::clear_reports_and_removes_every_entry_but_keeps_history ... ok
+test vault::linux::tests::loader_injection_matches_exact_variable_names_only ... ok
+test vault::linux::tests::losing_any_previously_tracked_session_seals_even_with_linger ... ok
+test vault::document::tests::unchanged_cache_writes_are_not_recorded ... ok
+test vault::linux::tests::a_peer_started_with_loader_injection_is_rejected ... ok
+test vault::linux::tests::production_options_require_lifecycle_monitoring ... ok
+test vault::linux::tests::an_untraced_peer_without_loader_injection_is_accepted ... ok
+test vault::linux::tests::session_lock_events_are_filtered_to_tracked_user_sessions ... ok
+test vault::document::tests::superseded_values_do_not_survive_a_persisted_snapshot ... ok
+test vault::linux::tests::tracer_pid_is_parsed_from_process_status ... ok
+test vault::linux::tests::socket_parent_must_be_private ... ok
+test vault::protocol::lease::tests::lease_rejects_invalid_policies_and_clock_overflow ... ok
+test vault::protocol::lease::tests::lease_touch_never_extends_past_the_absolute_deadline ... ok
+test vault::protocol::redaction_tests::debug_output_never_carries_secret_bytes ... ok
+test vault::protocol::service::tests::application_context_is_bounded_and_requires_an_absolute_base_directory ... ok
+test vault::protocol::lease::tests::replay_window_rejects_duplicates_but_evicts_the_oldest_ids ... ok
+test vault::document::tests::unresolved_conflicts_block_unrelated_writes_until_resolved ... ok
+test vault::document::tests::history_records_operations_versions_and_provenance_without_values ... ok
+test vault::history::tests::log_is_bounded_per_kind_and_keeps_its_sequence_after_trimming ... ok
+test vault::linux::tests::peer_identity_comes_from_socket_credentials ... ok
+test security::password::tests::new_password_policy_rejects_guessable_and_accepts_strong_secrets ... ok
+test vault::linux::tests::offline_identity_matches_the_running_executable ... ok
+test vault::archive::tests::unknown_versions_are_rejected_before_key_derivation ... ok
+test vault::linux::tests::a_failing_event_loop_still_seals_the_vault ... ok
+test vault::archive::tests::wrong_passphrase_and_tampering_are_rejected ... ok
+test vault::protocol::service::tests::eviction_deadline_may_be_immediate_but_not_in_the_past ... ok
+test vault::archive::tests::archive_round_trips_without_exposing_plaintext ... ok
+test vault::archive::tests::existing_weak_passphrase_archive_stays_readable ... ok
+test vault::protocol::service::tests::authorization_batch_validation_is_atomic ... ok
+test vault::linux::tests::readiness_failure_seals_and_removes_the_bound_socket ... ok
+test vault::protocol::service::tests::approval_wait_wakes_on_revision_change_and_times_out_unchanged ... ok
+test vault::protocol::service::tests::caller_identity_is_part_of_grant_authority ... ok
+test vault::protocol::service::tests::authorization_batch_writes_once_and_unchanged_restarts_write_nothing ... ok
+test vault::protocol::service::tests::authorization_batch_preserves_expiry_and_last_request_wins ... ok
+test vault::protocol::service::tests::cache_grants_cannot_authorize_durable_keyring_operations ... ok
+test vault::protocol::service::tests::direct_service_requests_obey_the_wire_size_bound ... ok
+test vault::protocol::service::tests::idle_deadline_seals_without_a_request ... ok
+test vault::protocol::service::tests::list_requests_are_bounded_and_maximum_pages_fit_the_wire_limit ... ok
+test vault::protocol::service::tests::lifecycle_seal_survives_a_poisoned_request_mutex ... ok
+test vault::protocol::service::tests::explicit_seal_invalidates_the_service ... ok
+test vault::protocol::service::tests::request_round_trip_is_versioned_and_bounded ... ok
+test vault::protocol::service::tests::durable_project_documents_are_partitioned_and_kind_authorized ... ok
+test vault::protocol::service::tests::batch_mutations_are_pre_authorized_and_commit_together ... ok
+test vault::protocol::service::tests::export_obeys_record_delivery_expiry ... ok
+test vault::protocol::service::tests::kind_wide_listing_accepts_only_a_kind_wide_grant ... ok
+test vault::protocol::service::tests::helper_process_grants_are_exclusive_and_free_when_unchanged ... ok
+test vault::protocol::service::tests::typed_actions_select_semantic_document_kinds ... ok
+test vault::protocol::service::tests::approval_is_project_scoped_and_requires_a_vault_signature ... ok
+test vault::protocol::service::tests::exact_grant_is_required_and_replay_is_rejected ... ok
+test vault::protocol::service::tests::wire_errors_never_echo_internal_or_secret_details ... ok
+test vault::protocol::service::time::tests::independent_authorities_only_tighten_a_delivery_deadline ... ok
+test vault::protocol::service::time::tests::queued_time_advances_and_wall_rollback_does_not_extend_authority ... ok
+test vault::seal::factor::memory::tests::block_view_handles_each_word_offset ... ok
+test vault::seal::factor::memory::tests::scratch_memory_is_aligned_zeroed_and_fully_wiped ... ok
+test vault::protocol::service::tests::sealing_invalidates_a_response_that_has_not_been_sent ... ok
+test vault::seal::factor::tests::empty_factors_and_unsafe_parameters_are_rejected ... ok
+test vault::seal::factor::memory::tests::scratch_memory_matches_standard_argon2_derivation ... ok
+test vault::archive::tests::legacy_archives_join_keyring_metadata_and_values ... ok
+test vault::seal::policy::tests::empty_and_repeated_policy_terms_are_rejected ... ok
+test vault::seal::policy::tests::groups_are_and_and_repeated_groups_are_or ... ok
+test vault::protocol::service::tests::status_requests_do_not_refresh_the_idle_deadline ... ok
+test vault::seal::factor::tests::profiles_select_their_recorded_password_kdf ... ok
+test vault::protocol::service::tests::storage_eviction_sweeps_at_most_once_a_second ... ok
+test vault::protocol::service::tests::wall_clock_rollback_does_not_extend_the_unseal_lease ... ok
+test vault::seal::factor::tests::protected_keys_require_the_original_factor_and_installation ... ok
+test vault::seal::tests::a_discarded_initialization_can_be_retried ... ok
+test vault::seal::tests::initialization_refuses_a_preexisting_root_without_mutating_it ... ok
+test vault::seal::tests::device_vault_identity_is_bound_to_the_installation_root ... ok
+test vault::seal::tests::destroy_requires_the_factor_and_removes_a_completed_vault ... ok
+test vault::seal::tests::hardware_wraps_only_the_installation_root ... ok
+test vault::seal::tests::installation_and_device_vault_ids_must_be_distinct ... ok
+test vault::protocol::service::tests::local_keyring_operations_are_separate_from_disposable_cache_entries ... ok
+test vault::seal::tests::existing_weak_password_vault_stays_readable ... ok
+test vault::seal::tests::mobile_vault_rejects_a_backend_from_another_platform ... ok
+test vault::seal::tests::persisted_vault_artifacts_use_the_factorseal_basename ... ok
+test vault::seal::tests::metadata_without_a_preferred_group_uses_the_first_policy_group ... ok
+test vault::seal::tests::injected_mobile_protector_creates_unseals_and_discards ... ok
+test vault::seal::tests::installation_identity_and_actor_survive_unseal ... ok
+test vault::seal::tests::metadata_version_seven_remains_compatible_with_schema_migration ... ok
+test vault::seal::tests::profile_and_password_kdf_must_agree ... ok
+test vault::protocol::service::tests::portable_entry_transfer_is_manager_only_and_honors_conflict_policy ... ok
+test vault::seal::tests::weak_new_password_is_rejected_before_files_or_hardware_are_created ... ok
+test vault::seal::tests::older_metadata_versions_are_rejected_cleanly ... ok
+test vault::secret_service::tests::an_owned_secret_service_name_is_a_nonfatal_integration_conflict ... ok
+test vault::seal::tests::preferred_group_must_belong_to_the_unlock_policy ... ok
+test vault::seal::tests::prepared_vault_metadata_is_published_atomically_on_completion ... ok
+test vault::seal::tests::tampered_public_identity_is_rejected_before_unseal ... ok
+test vault::linux::tests::native_transport_round_trips_and_seals ... ok
+test vault::seal::tests::unlock_groups_are_independent_or_slots_with_and_factors ... ok
+test vault::protocol::service::tests::revoking_an_expired_permission_cleans_the_registry ... ok
+test vault::secret_service::tests::secret_service_name_is_taken_over_once_the_previous_owner_releases_it ... ok
+test vault::protocol::service::tests::result_delivery_is_bounded_by_both_grant_and_record_expiry ... ok
+test vault::protocol::service::tests::project_metadata_listing_is_paginated_value_free_and_separately_authorized ... ok
+test vault::secret_service::tests::disconnected_clients_release_sessions ... ok
+test vault::signature::tests::mldsa65_matches_nist_acvp_key_generation_vector ... ok
+test vault::protocol::service::tests::queued_request_is_rejected_after_absolute_expiry ... ok
+test vault::signature::tests::malformed_mldsa_inputs_are_rejected ... ok
+test vault::protocol::service::tests::vault_inventory_is_value_free_paginated_and_permission_manager_only ... ok
+test vault::store::chain::tests::an_unknown_or_missing_signature_algorithm_is_refused ... ok
+test vault::secret_service::tests::sessions_are_owner_bound_and_bounded ... ok
+test vault::signature::tests::mldsa_signatures_round_trip_and_reject_tampering ... ok
+test vault::seal::tests::every_platform_requires_a_nested_factor_and_hardware ... ok
+test vault::store::worker::tests::a_result_finishing_after_the_worker_deadline_is_discarded ... ok
+test vault::secret_service::tests::create_without_replace_allows_duplicate_attributes ... ok
+test vault::signature::tests::mldsa_signatures_are_randomized ... ok
+test vault::protocol::service::tests::project_history_is_paginated_value_free_and_separately_authorized ... ok
+test vault::seal::tests::public_vault_boundary_preserves_all_native_failure_kinds ... ok
+test vault::store::migration::tests::migration_rejects_tampered_legacy_state_without_advancing_the_schema ... ok
+test vault::secret_service::tests::session_bus_crud_uses_the_exported_secret_service_interfaces ... ok
+test vault::store::migration::tests::schema_three_is_authenticated_and_migrated_without_losing_secrets_or_history ... ok
+test vault::store::worker::tests::batch_mutation_commits_related_records_in_one_generation ... ok
+test vault::secret_service::tests::item_metadata_and_secret_remain_in_sync_through_updates_and_delete ... ok
+test vault::protocol::service::tests::pending_permissions_fit_transport ... ok
+test vault::store::worker::tests::byte_compaction_rejects_tampered_historical_snapshots ... ok
+test vault::store::worker::tests::documents_belong_to_one_device_vault_and_have_distinct_wrapped_keys ... ok
+test vault::store::worker::tests::encrypted_snapshots_cannot_be_swapped_between_documents ... ok
+test vault::store::chain::tests::commit_binds_every_field_under_its_signature ... ok
+test vault::store::worker::tests::expiration_is_purged_without_read_and_stays_gone ... ok
+test vault::secret_service::tests::malformed_keyring_import_does_not_change_index_or_values ... ok
+test vault::store::worker::tests::byte_compaction_preserves_current_documents_and_reopen_accounting ... ok
+test vault::store::worker::tests::every_generation_rotates_the_document_key ... ok
+test vault::secret_service::tests::concurrent_keyring_import_and_create_preserve_both_items ... ok
+test vault::store::worker::tests::installation_files_contain_no_secret_or_predictable_name ... ok
+test vault::secret_service::tests::imported_keyring_items_are_discoverable_and_readable_on_dbus ... ok
+test vault::store::worker::tests::installation_rejects_an_unexpected_extra_vault ... ok
+test vault::store::worker::tests::failed_persistence_rolls_back_the_entire_document_generation ... ok
+test vault::store::worker::tests::get_many_reads_one_document_without_writing ... ok
+test vault::store::worker::tests::one_worker_owns_the_database ... ok
+test vault::store::worker::tests::expired_records_are_swept_from_every_document_kind ... ok
+test vault::store::worker::tests::history_survives_reopen_with_provenance_and_pages_newest_first ... ok
+test vault::store::worker::tests::project_listing_purges_expired_entries_and_hides_empty_projects ... ok
+test vault::store::worker::tests::missing_live_document_is_corruption_not_an_empty_result ... ok
+test vault::store::worker::tests::live_partial_rollback_is_rejected_without_compaction_blessing_it ... ok
+test vault::store::worker::tests::protected_chain_authenticates_the_wrapped_document_key ... ok
+test vault::store::worker::tests::protected_chain_detects_a_missing_document_row ... ok
+test vault::store::worker::tests::shutdown_intent_does_not_wait_for_a_full_command_queue ... ok
+test vault::store::worker::tests::protected_chain_detects_a_rolled_back_document ... ok
+test vault::store::worker::tests::protected_chain_detects_document_kind_tamper ... ok
+
+running 1 test
+test vault::store::worker::tests::protected_chain_detects_commit_record_tamper ... ok
+test vault::store::worker::tests::reopening_rejects_a_missing_database ... ok
+test vault::tests::address_storage_key_binds_field_without_revealing_names ... ok
+test vault::tests::an_already_locked_session_refuses_to_arm ... ok
+test vault::tests::document_ids_are_kind_vault_and_installation_specific ... ok
+test vault::tests::lifecycle_events_latch_before_a_service_is_attached ... ok
+test vault::transport::tests::a_client_deadline_outlasts_first_use_caller_authentication ... ok
+test vault::transport::tests::a_closed_reader_is_end_of_file_rather_than_a_stall ... ok
+test vault::transport::tests::an_exhausted_budget_never_blocks ... ok
+test vault::transport::tests::framing_round_trips_and_rejects_lengths_outside_the_range ... ok
+test vault::transport::tests::shared_exchange_preserves_the_request_response_binding ... ok
+test vault::store::worker::tests::protected_chain_detects_document_vault_tamper ... ok
+test vault::store::worker::tests::reopening_rejects_a_recreated_empty_database ... ok
+test vault::unix_client::tests::a_stale_socket_file_reports_that_no_agent_is_listening ... ok
+test vault::unix_client::tests::an_absent_socket_reports_that_no_agent_is_listening ... ok
+test vault::transport::unix_socket::readiness_tests::idle_listener_returns_for_lifecycle_checks ... ok
+test vault::unix_client::tests::server_uid_is_checked_before_any_request_bytes ... ok
+test vault::transport::unix_socket::readiness_tests::incoming_connection_wakes_an_idle_listener ... ok
+test vault::store::worker::tests::protected_chain_detects_snapshot_tamper ... ok
+test vault::store::worker::tests::sealing_one_store_handle_invalidates_every_clone ... ok
+test vault::secret_service::tests::keyring_restore_merges_live_metadata_and_values_and_survives_next_write ... ok
+test vault::store::worker::tests::protected_chain_detects_rolled_back_head ... ok
+test vault::store::worker::tests::protected_chain_detects_missing_history ... ok
+test vault::store::worker::tests::wrapped_document_keys_cannot_be_swapped_between_documents ... ok
+test vault::store::worker::tests::turso_round_trip_restart_and_idempotent_delete ... ok
+test vault::store::worker::tests::signed_eviction_metadata_cannot_be_changed_live_or_offline ... ok
+test vault::store::worker::tests::watchdog_terminates_a_wedged_native_owner_without_aborting ... ok
+test vault::store::worker::tests::empty_snapshots_expose_no_plaintext_content_hashes ... ok
+test vault::store::worker::tests::batched_verification_checks_history_beyond_the_first_batch ... ok
+test vault::store::worker::tests::compaction_bounds_the_chain_and_keeps_every_document_readable ... ok
+test vault::store::worker::tests::a_compacted_chain_still_detects_snapshot_tamper ... ok
+
+test result: ok. 204 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.50s
+
+     Running unittests src/bin/factorseal.rs (/home/domen/.cargo/build/1f/0c4b1474b4d57e/debug/deps/factorseal-58fc90e07c1c10f7)
+
+running 51 tests
+test provider::tests::provider_maps_an_unavailable_agent_to_required_interaction ... ok
+test desktop_worker::tests::failed_unlock_still_joins_executable_identification ... ok
+test desktop_worker::tests::executable_identification_overlaps_unlock_on_the_calling_thread ... ok
+test provider::tests::provider_maps_pending_approval_to_structured_interaction ... ok
+test commands::permission_text_cannot_execute_terminal_or_unicode_controls ... ok
+test desktop_worker::tests::failed_identification_drops_the_unsealed_result ... ok
+test provider::tests::convention_addresses_are_versioned_and_unambiguous ... ok
+test commands::import_tests::import_preserves_distinct_source_items ... ok
+test tests::agent_uses_the_preferred_group_unless_unlock_is_explicit ... ok
+test tests::agent_policy_and_root_are_explicitly_configurable ... ok
+test tests::an_explicit_file_takes_precedence_over_the_helper ... ok
+test tests::approval_grant_duration_uses_app_default_and_accepts_overrides ... ok
+test completion::tests::suggestions_describe_commands_and_hide_the_internal_ones ... ok
+test tests::approval_prompt_requires_a_terminal_and_explicit_decision ... ok
+test tests::archive_passphrase_can_be_read_from_a_private_file ... ok
+test tests::askpass_is_configurable_through_the_environment ... ok
+
+running 1 test
+test provider::tests::provider_uses_cache_actions_for_crud_and_expiry ... ok
+test tests::a_cancelled_askpass_helper_does_not_yield_a_factor ... ok
+test tests::biometric_only_groups_do_not_read_a_password_source ... ok
+test tests::bounded_reads_retain_one_byte_to_detect_overflow ... ok
+test platform::key_owner_disables_dumpability_and_core_limits_in_a_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.00s
+
+test completion::tests::every_shell_generates_a_script_that_asks_this_executable ... ok
+test completion::tests::nushell_module_answers_the_same_engine_over_json ... ok
+test platform::key_owner_disables_dumpability_and_core_limits_in_a_child ... ok
+test tests::desktop_launch_options_are_explicitly_configurable ... ok
+test tests::history_command_consumes_every_page_newest_first_and_rejects_stalls ... ok
+test tests::init_prompt_explains_and_maps_unlock_choices ... ok
+test tests::cli_command_definition_is_valid ... ok
+test tests::hardware_self_test_is_a_first_class_cli_command ... ok
+test tests::init_prompt_retries_an_invalid_choice ... ok
+test tests::live_endpoint_uses_the_factorseal_basename ... ok
+test tests::metadata_commands_consume_every_page_and_emit_unambiguous_json ... ok
+test tests::metadata_list_commands_are_explicit_and_project_aware ... ok
+test tests::project_commands_accept_project_item_field_and_service_override ... ok
+test tests::completions_accept_every_supported_shell ... ok
+test tests::project_value_files_preserve_exact_binary_bytes ... ok
+test tests::an_empty_factor_is_rejected ... ok
+test tests::seal_is_a_first_class_cli_command_and_permission ... ok
+test tests::permissions_use_explicit_subcommands ... ok
+test tests::transfer_commands_parse_native_and_password_manager_options ... ok
+test tests::unlock_cli_uses_and_inside_groups_and_or_between_repetitions ... ok
+test tests::askpass_output_is_the_factor_without_its_line_ending ... ok
+test desktop_worker::tests::parent_loss_terminates_worker_before_service_creation ... ok
+test tests::askpass_receives_the_prompt_and_rejects_a_mismatched_confirmation ... ok
+test tests::agent_waits_for_initialization_metadata ... ok
+test tests::oversized_askpass_output_is_rejected_instead_of_truncated ... ok
+test secretspec_discovery::tests::secretspec_claim_is_unchanged_on_repeat_publication ... ok
+test secretspec_discovery::tests::secretspec_claim_contains_only_the_canonical_executable ... ok
+test secretspec_discovery::tests::secretspec_claim_repairs_permissions_even_when_content_matches ... ok
+test secretspec_discovery::tests::secretspec_claim_replaces_a_matching_symlink_without_changing_its_target ... ok
+test secretspec_discovery::tests::secretspec_claim_updates_a_changed_executable_and_repairs_corrupt_content ... ok
+test provider::tests::secretspec_request_waits_for_approval_and_completes ... ok
+
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/acceptance.rs (/home/domen/.cargo/build/1f/0c4b1474b4d57e/debug/deps/acceptance-df9982907d911d02)
+
+running 8 tests
+test guided_lifecycle_runs_cover_screen_lock_and_suspend_independently ... ok
+test windows_store_acceptance_requires_the_installed_store_signature ... ok
+test windows_background_agents_preserve_arguments_containing_spaces ... ok
+test windows_release_acceptance_requires_a_signed_artifact ... ok
+test guided_runs_choose_isolated_defaults_and_clean_up_after_success ... ok
+test physical_runners_invoke_the_hardware_self_test ... ok
+test physical_runners_reject_virtual_hosts_and_require_native_hardware ... ok
+test every_physical_runner_emits_the_same_core_evidence_contract ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mobile_core.rs (/home/domen/.cargo/build/1f/0c4b1474b4d57e/debug/deps/mobile_core-9fc55948c6291d5f)
+
+running 1 test
+test public_mobile_adapter_api_round_trips_a_vault ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests/packaging.rs (/home/domen/.cargo/build/1f/0c4b1474b4d57e/debug/deps/packaging-2bed151087cbf8c7)
+
+running 16 tests
+test both_desktop_launchers_start_the_agent_at_login ... ok
+test desktop_secret_service_activation_targets_the_graphical_host ... ok
+test every_background_launcher_uses_the_agent_command ... ok
+test the_linux_starter_hands_an_overridden_socket_to_the_unit ... ok
+test the_linux_starter_hands_its_logind_session_to_the_unit ... ok
+test every_release_archive_ships_a_one_command_acceptance_runner ... ok
+test the_windows_builder_can_sign_and_verify_a_release_binary ... ok
+test macos_builds_support_local_and_team_signing ... ok
+test the_linux_unit_uses_askpass_without_a_password_file ... ok
+test the_linux_unit_and_packager_agree_on_the_install_directory ... ok
+test the_windows_launcher_and_packager_agree_on_the_askpass_helper ... ok
+test the_windows_package_ships_a_reproducible_login_task_installer ... ok
+test the_macos_launcher_and_packager_agree_on_the_askpass_helper ... ok
+test the_windows_wrapper_invokes_its_own_powershell_companion ... ok
+test tagged_releases_build_and_attest_the_store_msix_in_windows_ci ... ok
+test the_store_msix_has_partner_center_identity_and_a_cli_alias ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/home/domen/.cargo/build/1f/0c4b1474b4d57e/debug/deps/factorseal_desktop-a8555ebaa2ab42e9)
+
+running 29 tests
+test app::tests::formats_hardware_backend_names_for_people ... ok
+test app::tests::provides_usage_guidance_for_empty_vault_categories ... ok
+test app::tests::formats_project_entries_without_secret_values ... ok
+test runtime::tests::deferred_permissions_do_not_replace_already_refreshed_contents ... ok
+test runtime::tests::recognizes_factorseal_as_the_secret_service_provider ... ok
+test secret_input::tests::bounded_utf8_edits_preserve_only_current_text ... ok
+test appearance::tests::embedded_catalog_preserves_theme_ids_and_valid_sources ... ok
+test theming::tests::change_sources_merge_for_debounced_refreshes ... ok
+test runtime::tests::lease_changes_preserve_the_captured_unlock_policy ... ok
+test theming::tests::explicit_backend_wins ... ok
+test theming::tests::kde_and_lxqt_prefer_qt ... ok
+test theming::tests::other_desktops_prefer_gtk ... ok
+test tests::tray_free_mode_requires_a_visible_launch ... ok
+test theming::tests::portal_filter_accepts_theme_settings_only ... ok
+test tests::keyring_activation_is_a_hidden_foreground_launch ... ok
+test theming::tests::theme_paths_cover_toolkit_and_desktop_locations ... ok
+test theming::tests::file_watcher_reports_theme_directory_changes ... ok
+test runtime::tests::vault_contents_follow_every_inventory_page ... ok
+test runtime::tests::initial_inventory_does_not_wait_for_permissions ... ok
+test branding::tests::embedded_palette_preserves_brand_colors_and_system_typography ... ok
+test settings::tests::migrates_theme_and_round_trips_all_settings ... ok
+test tests::component_and_brand_icons_are_available ... ok
+test settings::tests::all_existing_theme_ids_remain_compatible ... ok
+test theming::tests::native_palette_and_typography_survive_repeated_theme_changes ... ok
+test appearance::tests::additional_bundled_variants_have_distinct_palettes ... ok
+test appearance::tests::every_theme_resolves_and_system_colors_are_restored ... ok
+test app::tests::rejects_guessable_passwords ... ok
+test app::tests::accepts_strong_passphrases ... ok
+test instance::tests::second_instance_requests_activation ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running unittests src/lib.rs (/home/domen/.cargo/build/1f/0c4b1474b4d57e/debug/deps/hardwareseal-fc5a4b76115dc4f9)
+
+running 17 tests
+test android::tests::envelope_binds_policy_and_label ... ok
+test android::tests::keystore_exceptions_have_stable_authorization_categories ... ok
+test envelope::tests::envelope_rejects_oversized_blob_lengths ... ok
+test envelope::tests::envelope_rejects_unknown_policy_identifiers ... ok
+test envelope::tests::envelope_rejects_trailing_data ... ok
+test linux::tests::biometric_policy_fails_closed ... ok
+test envelope::tests::envelope_roundtrip ... ok
+test tests::labels_are_restricted ... ok
+test tests::real_tpm_generations_are_independent_when_requested ... ok
+test tests::real_tpm_roundtrip_when_requested ... ok
+test tpm2::tests::raw_tpm_roundtrip_when_requested ... ok
+test tpm2::tests::sized_values_roundtrip ... ok
+test windows::tests::authenticator_data_requires_rp_presence_and_verification ... ok
+test windows::tests::hello_envelope_binds_label_and_lengths ... ok
+test windows::tests::hello_aad_binds_credential_and_prf_input ... ok
+test tpm2::tests::responses_reject_length_mismatch ... ok
+test windows::tests::webauthn_statuses_have_stable_authorization_categories ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/domen/.cargo/build/1f/0c4b1474b4d57e/debug/deps/secret_service_protocol-db3aefcf9f1b4589)
+
+running 2 tests
+test tests::dh_session_rejects_empty_and_oversized_public_keys ... ok
+test tests::dh_session_round_trips_and_interoperates_with_client_derivation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

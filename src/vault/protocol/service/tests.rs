@@ -1678,7 +1678,7 @@ fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
         timed_out.result,
         Ok(VaultResponseBody::Permissions {
             revision: 0,
-            permissions
+            permissions, ..
         }) if permissions.is_empty()
     ));
 
@@ -1722,7 +1722,7 @@ fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
         changed.result,
         Ok(VaultResponseBody::Permissions {
             revision,
-            permissions
+            permissions, ..
         }) if revision > 0 && permissions.len() == 1
     ));
 }
@@ -2172,4 +2172,138 @@ fn lifecycle_seal_survives_a_poisoned_request_mutex() {
 
     service.seal().unwrap();
     assert!(service.state.is_sealed());
+}
+
+#[test]
+fn export_obeys_record_delivery_expiry() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let manager = caller();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    let revision = || {
+        let response = service.handle(
+            &manager,
+            VaultRequest::new(VaultAction::ExportRevision).unwrap(),
+            100,
+        );
+        let VaultResponseBody::ExportRevision { revision } = response.result.unwrap() else {
+            panic!("unexpected revision response")
+        };
+        revision
+    };
+    let before = revision();
+    let entry = VaultEntryMetadata {
+        document_kind: DocumentKind::LocalKeyring,
+        partition: b"audit".to_vec(),
+        address: SecretAddress::new("token", None).unwrap(),
+    };
+    let imported = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ImportVaultEntry {
+            entry: entry.clone(),
+            value: WireSecret::new(b"secret".to_vec()),
+            evict_at: Some(150),
+            replace_existing: false,
+        })
+        .unwrap(),
+        100,
+    );
+    assert!(imported.result.is_ok());
+    let after = revision();
+    assert_ne!(before, after);
+    assert_eq!(revision(), after);
+    let started = Instant::now();
+    let response = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ExportVaultEntry { entry }).unwrap(),
+        100,
+    );
+    assert!(response.result.is_ok());
+    assert!(
+        response.delivery_deadline.unwrap() <= started + Duration::from_secs(50),
+        "export delivery deadline exceeds the record expiry"
+    );
+}
+
+#[test]
+fn pending_permissions_fit_transport() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let manager = caller();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    for i in 0..33 {
+        let project = format!("audit-{i}");
+        let context = VaultApplicationContext::new(
+            Some(project.clone()),
+            None,
+            Some(format!("/{}", "\t".repeat(32767))),
+            None,
+        )
+        .unwrap();
+        let request = VaultRequest::new_with_application(
+            VaultAction::GetCache {
+                project: project.clone(),
+                address: SecretSpecAddress::convention(&project, "default", "TOKEN").unwrap(),
+            },
+            context,
+        )
+        .unwrap();
+        let response = service.handle(&manager, request, 100);
+        assert_eq!(
+            response.result.unwrap_err().code,
+            VaultResponseErrorCode::AuthorizationRequired
+        );
+    }
+    let response = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+        100,
+    );
+    assert!(response.result.is_ok());
+    assert!(
+        response.encode().is_ok(),
+        "valid pending approvals made the permission list undeliverable"
+    );
+    let (revision, all) = crate::read_permission_pages(
+        |action| {
+            let response = service.handle(&manager, VaultRequest::new(action)?, 100);
+            // Exercise the wire bound on every page, not just the first one.
+            VaultResponse::decode(&response.encode()?)?
+                .result
+                .map_err(|_| VaultError::Conflict)
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(all.len(), 33);
+    let page = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::WaitPermissions {
+            after_revision: 0,
+            timeout_ms: 1,
+        })
+        .unwrap(),
+        100,
+    );
+    assert!(page.encode().is_ok());
+    let id = all[0].id.clone();
+    service
+        .handle(
+            &manager,
+            VaultRequest::new(VaultAction::DenyPermission { id: id.clone() }).unwrap(),
+            100,
+        )
+        .result
+        .unwrap();
+    let stale = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListPermissionsPage {
+            revision,
+            cursor: id,
+        })
+        .unwrap(),
+        100,
+    );
+    assert_eq!(
+        stale.result.unwrap_err().code,
+        VaultResponseErrorCode::Conflict
+    );
 }

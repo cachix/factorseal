@@ -18,7 +18,7 @@ pub use wire::{
     PermissionState, PermissionWaitStatus, RequestId, VaultAction, VaultApplicationContext,
     VaultClient, VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference,
     VaultMutation, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
-    VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    VaultResponseErrorCode, WireSecret, WireSecretAddress, read_permission_pages,
 };
 
 #[cfg(test)]

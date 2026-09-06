@@ -1,0 +1,17 @@
+{
+  "header": {
+    "format": "factorseal-vault-archive",
+    "version": 1,
+    "kdf": {
+      "algorithm": "argon2id",
+      "version": 19,
+      "memory_kib": 131072,
+      "iterations": 3,
+      "parallelism": 1,
+      "salt": "u2MdZ88f8TrS5dadCf8u+A=="
+    },
+    "cipher": "aes-256-gcm"
+  },
+  "nonce": "rc1MQec0yn/yoJZC",
+  "ciphertext": "RVYFGB837xCTB2yFnVjZp6pEiazgd5blMRwPfpnerJavx/keD1vuMcBX+LFZOJ1noml7ARWJauOWnzu20q5Wyw7jfshDLScz9Eec/wal9V0AnOQaj7ePSmfPY0l6dOOM16xC0OsMj0tWEKhYC5yBNmz/nCFr1/ESsehOQrrWHEImMWZlU9ilP9QBLViS/C5JWGcvgGBazwAJPEE0n1WIJbq1jjpTbkHkO7XEnZb/24drzvHyehyn8bm4lvMVYhDHYYze6f6/kYfWw1ZF2iAPSbiDJ/AKjama69i9XoJ+8waP9+fDFNUVaC01xvybZPG+heUd8o6VI7QGCo1imrkifvEIEiI/VCDrC/XT5Al0tXFFrWk3QZVn8al5+RMPCVF200CpGLF3mcTZmQ0XilFqajaGG3c70s18/vibQi8E4r92/drYsHGHrkwvmDGS7piaJBrXSxhQGjgZsJyDVEW48wdVb96Il6MXaGZykibb26uNPddfBnCmzcvNt2nQVCbtQPpHXtGZgtalpw0eGI2VWjmIqc1oR5bvdvtXtJGBQ3jcAm7oy0WywldMjrHMqL2kMO1vBXkbNM2xE6uRiwex79Uu59DRWQ0JJp9/kF/aAIdpZbX3s74vvtu+yFHY0iw1tkmpqPybb0eRGkUPa15Jmw9LoBDy61vqoDyGYZpN4edYEmz7hAuwTad14sqc+0eVg5ikms0DI5aDihMghv2Mmy8dA8KrAn/+5DElk0S/HGvdRIWZafUW1YpTklyecEP/ZhQahUYEbwQnii3juBQPmO6ibQCPXyll8Zpjw+XG18ADJ23mNcL2r/nAebOwHK5k8MPWwUZmq4diij9Qdw6AvAwLOXAuvgWG7uq/cwrOfWTJ8ZavyHfjTV9w4HofOKsOtvRm18VyKnj1DRPseM2V9wtXJxm8CAZhw3Ol3LdZ1H6mSxzAUhP7naJovX3TTzN9LClE7VgI79Uuog9WeHrRQ8NUEmdctMzRCKWZotO9yNh3Stwx7kJS"
+}
