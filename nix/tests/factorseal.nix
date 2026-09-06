@@ -67,7 +67,9 @@ pkgs.testers.runNixOSTest {
     socket = f"{root}/factorseal.sock"
 
     def as_user(node, command):
-        return node.succeed(f"{alice_prefix} sh -c {shlex.quote(command)}")
+        status, output = node.execute(f"{alice_prefix} sh -c {shlex.quote(command)} 2>&1")
+        assert status == 0, f"command failed ({status}): {command}\n{output}"
+        return output
 
     def with_password(node, command, confirm=False):
         answers = "factorseal-nixos-test\n" * (2 if confirm else 1)
@@ -220,6 +222,9 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"test -S {socket}")
 
     with subtest("initialize a real device through the virtual TPM"):
+        # The waiting agent initializes diagnostics before a vault exists.
+        # Logging must not pre-create the root that `init` securely creates.
+        as_alice(f"test ! -e {root}")
         initialize_on(machine)
         as_alice(f"${package}/bin/factorseal --root={root} status | jq -e '.state == \"sealed\"'")
         as_alice(

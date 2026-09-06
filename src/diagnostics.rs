@@ -113,8 +113,16 @@ pub fn directory() -> io::Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     directories::ProjectDirs::from("dev", "Factorseal", "Factorseal")
-        .map(|dirs| dirs.data_local_dir().join("diagnostics"))
+        .map(|dirs| default_directory(&dirs))
         .ok_or_else(|| io::Error::other("could not determine the diagnostics directory"))
+}
+
+fn default_directory(dirs: &directories::ProjectDirs) -> PathBuf {
+    // data_local_dir is the vault root. Logging before `init` must not create
+    // that directory: initialization deliberately requires a new private root.
+    dirs.state_dir()
+        .unwrap_or_else(|| dirs.cache_dir())
+        .join("diagnostics")
 }
 
 /// Install once, before accepting secrets. Failure leaves normal application
@@ -451,6 +459,12 @@ fn export_from(directory: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_diagnostics_do_not_create_the_vault_root() {
+        let dirs = directories::ProjectDirs::from("dev", "Factorseal", "Factorseal").unwrap();
+        assert!(!default_directory(&dirs).starts_with(dirs.data_local_dir()));
+    }
 
     #[test]
     fn logs_and_retention_are_bounded_and_exports_are_private() {

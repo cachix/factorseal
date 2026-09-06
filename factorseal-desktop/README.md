@@ -128,8 +128,9 @@ factorseal diagnostics
 factorseal diagnostics --output factorseal-diagnostics.json
 ```
 
-The first command prints the storage directory. Reports live in the platform's
-local Factorseal application-data directory under `diagnostics`; set
+The first command prints the storage directory. Reports live under `diagnostics`
+in Factorseal's state directory on Linux, or its cache directory on macOS and
+Windows, outside the vault root. Set
 `FACTORSEAL_DIAGNOSTICS_DIR` to use another location. Automatic submission requires
 a configured Sentry DSN, as described below. The bug button immediately before
 “Your secrets stay here” opens a form for describing what happened, what was
