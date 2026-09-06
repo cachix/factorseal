@@ -240,6 +240,74 @@ mod tests {
 
     #[cfg(feature = "vault")]
     #[test]
+    #[ignore = "second-account fixture for acceptance/windows-security.ps1"]
+    fn serve_foreign_pipe_fixture() {
+        use interprocess::os::windows::named_pipe::{PipeListenerOptions, pipe_mode};
+        use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, Instant};
+        let directory = PathBuf::from(std::env::var_os("FACTORSEAL_FOREIGN_FIXTURE").unwrap());
+        let sid = OwnedToken::from_current_process(TOKEN_QUERY)
+            .unwrap()
+            .user()
+            .unwrap();
+        // Deliberately permissive. Client authentication, not the pipe DACL,
+        // must reject this server before disclosing any request bytes.
+        let sddl = widestring::U16CString::from_str(format!("O:{sid}D:P(A;;GA;;;WD)")).unwrap();
+        let descriptor = SecurityDescriptor::deserialize(&sddl).unwrap();
+        let name = format!("{PIPE_PREFIX}foreign-test-{}", std::process::id());
+        let listener = PipeListenerOptions::new()
+            .path(Path::new(&name))
+            .nonblocking(true)
+            .accept_remote(false)
+            .security_descriptor(Some(descriptor))
+            .create_duplex::<pipe_mode::Bytes>()
+            .unwrap();
+        std::fs::write(directory.join("foreign-pipe"), &name).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok(stream) => break stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("foreign pipe accept failed: {error}"),
+            }
+            assert!(Instant::now() < deadline, "foreign pipe was not contacted");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        loop {
+            match stream.read(&mut [0; 1]) {
+                Ok(0) => break,
+                Ok(_) => panic!("client disclosed request bytes to a foreign account"),
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("foreign pipe read failed: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "client did not close foreign pipe"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(feature = "vault")]
+    #[test]
+    #[ignore = "second-account fixture for acceptance/windows-security.ps1"]
+    fn reject_foreign_pipe_fixture() {
+        let name = std::env::var("FACTORSEAL_FOREIGN_PIPE").unwrap();
+        let client = WindowsVaultClient::new(name);
+        let request = VaultRequest::new(super::super::VaultAction::Seal {
+            namespace: b"synthetic-acceptance".to_vec(),
+        })
+        .unwrap();
+        assert!(matches!(
+            client.request(&request),
+            Err(VaultError::AuthorizationRequired)
+        ));
+    }
+
+    #[cfg(feature = "vault")]
+    #[test]
     fn connected_server_owner_is_checked_without_sending_request_bytes() {
         use interprocess::os::windows::named_pipe::{PipeListenerOptions, pipe_mode};
         use interprocess::os::windows::security_descriptor::SecurityDescriptor;

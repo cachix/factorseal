@@ -217,6 +217,19 @@ const fn command_name(command_code: u32) -> &'static str {
     }
 }
 
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_response(bytes: &[u8]) {
+    let _ = validate_response(bytes);
+    let _ = response_handle(bytes);
+    for handles in 0..=1 {
+        if let Ok(parameters) = response_parameters(bytes, handles) {
+            let mut reader = Reader::new(parameters);
+            let _ = reader.sized();
+            let _ = reader.sized();
+        }
+    }
+}
+
 fn validate_response(response: &[u8]) -> Result<(), Error> {
     if response.len() < RESPONSE_HEADER_BYTES || response.len() > MAX_RESPONSE_BYTES {
         return Err(Error::Hardware("invalid TPM response length".to_owned()));

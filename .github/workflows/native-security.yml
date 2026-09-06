@@ -1,0 +1,29 @@
+name: Native security acceptance
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    name: Security (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    env:
+      RUST_TEST_THREADS: 1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify native memory, process and private-file protections
+        run: cargo test -p factorseal --lib --all-features security::
+      - name: Verify Windows accounts and both pipe authentication directions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./acceptance/windows-security.ps1

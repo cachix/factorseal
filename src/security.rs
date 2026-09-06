@@ -1,5 +1,9 @@
 //! Process, password, and file protections shared by product entry points.
 
+pub mod events;
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
+pub(crate) mod memory;
+
 #[cfg(any(
     feature = "transfer",
     feature = "key-protection",
@@ -21,8 +25,8 @@ pub use files::{read_private_file, read_regular_file, write_private_file};
 #[cfg(all(windows, any(feature = "transfer", feature = "key-protection")))]
 pub(crate) mod windows;
 
-/// Disable Unix core files before accepting secrets. Windows requires a
-/// deployment-specific dump policy; this does not claim to configure one.
+/// Disable Unix core files and WER heap collection before accepting secrets.
+/// Administrator-configured or third-party dumps need deployment controls.
 pub fn disable_core_dumps() -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -34,6 +38,23 @@ pub fn disable_core_dumps() -> std::io::Result<()> {
         #[allow(unsafe_code)]
         if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raw const limit) } != 0 {
             return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(windows)]
+    {
+        // WER is process-local. This excludes heap collection by WER, not
+        // administrator-configured full dumps or third-party dump tools.
+        #[allow(unsafe_code)]
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn WerSetFlags(flags: u32) -> i32;
+        }
+        #[allow(unsafe_code)]
+        let status = unsafe { WerSetFlags(1) }; // WER_FAULT_REPORTING_FLAG_NOHEAP
+        if status < 0 {
+            return Err(std::io::Error::other(
+                "could not disable WER heap collection",
+            ));
         }
     }
     Ok(())

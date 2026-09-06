@@ -15,19 +15,55 @@ mod apple;
 // `windows` is compiled under `test` on every platform so its envelope and
 // authorization tests run everywhere, which means the modules it depends on
 // have to follow the same gate.
-#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+#[cfg(any(test, feature = "fuzzing", target_os = "linux", target_os = "windows"))]
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod envelope;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+#[cfg(any(test, feature = "fuzzing", target_os = "linux", target_os = "windows"))]
 mod timing;
-#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+#[cfg(any(test, feature = "fuzzing", target_os = "linux", target_os = "windows"))]
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod tpm2;
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(test, feature = "fuzzing", target_os = "windows"))]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod windows;
+
+/// Exercise codecs with synthetic bytes, without opening hardware or OS APIs.
+///
+/// # Panics
+/// Panics if an accepted envelope fails its canonical round trip.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_parsers(bytes: &[u8]) {
+    if let Ok(parsed) = envelope::parse(bytes) {
+        let encoded = envelope::encode(
+            parsed.policy,
+            parsed.label_hash,
+            parsed.public_blob,
+            parsed.private_blob,
+        )
+        .unwrap();
+        assert_eq!(encoded, bytes);
+    }
+    tpm2::fuzz_response(bytes);
+    windows::fuzz_envelope(bytes);
+}
+
+/// Valid synthetic hardware envelopes and a TPM response for mutation.
+///
+/// # Panics
+/// Panics if a synthetic fixture cannot be encoded.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_seeds() -> Vec<Vec<u8>> {
+    vec![
+        envelope::encode(AccessPolicy::None, [0; LABEL_HASH_BYTES], &[0], &[0]).unwrap(),
+        windows::fuzz_seed(),
+        vec![0x80, 1, 0, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+}
 
 const LABEL_HASH_BYTES: usize = 32;
 const MAX_PAYLOAD_BYTES: usize = 64;

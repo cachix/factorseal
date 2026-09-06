@@ -218,13 +218,22 @@ pub(super) fn read_pending_vault(root: &Path) -> VaultResult<VaultFile> {
 
 fn read_vault_file(path: &Path) -> VaultResult<VaultFile> {
     let bytes = read_bounded_vault_file(path)?;
-    let parsed: Result<VaultFile, _> = serde_json::from_slice(&bytes);
+    decode_vault_file(&bytes)
+}
+
+pub(super) fn decode_vault_file(bytes: &[u8]) -> VaultResult<VaultFile> {
+    if bytes.len() as u64 > MAX_VAULT_FILE_BYTES {
+        return Err(VaultError::Protection(
+            "metadata exceeds size limit".to_owned(),
+        ));
+    }
+    let parsed: Result<VaultFile, _> = serde_json::from_slice(bytes);
     let stored = match parsed {
         Ok(stored) => stored,
-        Err(error) => return Err(unsupported_version_error(&bytes, error.to_string())),
+        Err(error) => return Err(unsupported_version_error(bytes, error.to_string())),
     };
     if let Err(error) = stored.validate() {
-        return Err(unsupported_version_error(&bytes, error.to_string()));
+        return Err(unsupported_version_error(bytes, error.to_string()));
     }
     Ok(stored)
 }

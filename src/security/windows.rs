@@ -26,12 +26,12 @@ use std::{
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree, WIN32_ERROR};
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, GetExplicitEntriesFromAclW, SDDL_REVISION_1, SE_FILE_OBJECT,
-    SET_ACCESS, TRUSTEE_IS_SID,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, IsValidAcl,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
 };
 #[cfg(feature = "key-protection")]
 use windows::Win32::{
@@ -324,43 +324,32 @@ fn validate_directory_descriptor(
     Ok(())
 }
 
-/// String SIDs of every trustee that `dacl` grants access to. Deny and audit
-/// entries never widen access, so they are skipped.
+/// String SIDs of all allow entries, including inherited entries. Reject
+/// unfamiliar ACE types rather than assuming they cannot widen access.
 fn granted_trustees(dacl: *const ACL) -> io::Result<Vec<String>> {
-    let mut count = 0_u32;
-    let mut entries: *mut EXPLICIT_ACCESS_W = ptr::null_mut();
-    // SAFETY: `dacl` is valid for the caller's descriptor lifetime and both
-    // out-pointers reference live locals; `entries` receives a `LocalAlloc`
-    // buffer owned by the guard below.
-    let status = unsafe { GetExplicitEntriesFromAclW(dacl, &raw mut count, &raw mut entries) };
-    if status != ERROR_SUCCESS {
-        return Err(io::Error::other(format!(
-            "could not enumerate the vault root access control entries: {}",
-            status_io_error(status)
-        )));
+    // SAFETY: callers supply an OS-owned ACL that lives throughout this call.
+    if dacl.is_null() || !unsafe { IsValidAcl(dacl) }.as_bool() {
+        return Err(io::Error::other("invalid vault access control list"));
     }
-    let _entries = LocalMemory(entries.cast());
-    let count = usize::try_from(count).map_err(|_| {
-        io::Error::other("vault root access control entry count is invalid".to_owned())
-    })?;
-    let entries: &[EXPLICIT_ACCESS_W] = if entries.is_null() || count == 0 {
-        &[]
-    } else {
-        // SAFETY: the call reported `count` initialized entries at `entries`,
-        // which stay allocated until the guard drops.
-        unsafe { std::slice::from_raw_parts(entries.cast_const(), count) }
-    };
-    let mut trustees = Vec::with_capacity(entries.len());
-    for entry in entries {
-        if entry.grfAccessMode != GRANT_ACCESS && entry.grfAccessMode != SET_ACCESS {
-            continue;
+    let count = unsafe { (*dacl).AceCount };
+    let mut trustees = Vec::with_capacity(usize::from(count));
+    for index in 0..u32::from(count) {
+        let mut entry = ptr::null_mut();
+        // SAFETY: GetAce checks the index and returns storage in the live ACL.
+        unsafe { GetAce(dacl, index, &raw mut entry) }.map_err(io::Error::other)?;
+        let header = unsafe { &*entry.cast::<ACE_HEADER>() };
+        match header.AceType {
+            // ACCESS_ALLOWED_ACE_TYPE; SidStart is the first DWORD of the
+            // variable-length SID in this OS-validated, DWORD-aligned ACE.
+            0 => {
+                let allow = entry.cast::<ACCESS_ALLOWED_ACE>();
+                let sid = unsafe { &raw mut (*allow).SidStart };
+                trustees.push(string_sid(PSID(sid.cast()))?);
+            }
+            // ACCESS_DENIED_ACE_TYPE cannot widen access.
+            1 => {}
+            _ => return Err(io::Error::other("unsupported vault access control entry")),
         }
-        if entry.Trustee.TrusteeForm != TRUSTEE_IS_SID {
-            return Err(io::Error::other(
-                "vault root grants access to a trustee that is not a SID".to_owned(),
-            ));
-        }
-        trustees.push(string_sid(PSID(entry.Trustee.ptstrName.0.cast()))?);
     }
     Ok(trustees)
 }
@@ -402,6 +391,31 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    #[ignore = "invoked by acceptance/windows-security.ps1 with an isolated fixture"]
+    #[cfg(all(feature = "key-protection", feature = "transfer"))]
+    fn create_two_account_fixture() {
+        let parent =
+            std::path::PathBuf::from(std::env::var_os("FACTORSEAL_SECURITY_FIXTURE").unwrap());
+        let root = parent.join("vault");
+        create_owner_only_directory(&root).unwrap();
+        validate_owner_only_directory(&root).unwrap();
+        for name in [
+            "factorseal.json",
+            "vault.db",
+            "vault.db-wal",
+            "vault.db-shm",
+            "vault.lock",
+        ] {
+            fs::write(root.join(name), b"synthetic acceptance marker").unwrap();
+        }
+        crate::security::write_private_file(
+            &parent.join("export.factorseal"),
+            b"synthetic acceptance marker",
+        )
+        .unwrap();
+    }
 
     #[test]
     #[cfg(feature = "key-protection")]

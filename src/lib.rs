@@ -17,6 +17,10 @@ pub mod diagnostics;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod error;
 pub mod security;
+
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use vault::fuzzing;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod timing;
 

@@ -83,6 +83,8 @@ jobs:
   macos:
     name: macOS
     runs-on: macos-latest
+    env:
+      RUST_TEST_THREADS: 1
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -129,6 +131,8 @@ jobs:
   windows:
     name: Windows
     runs-on: windows-latest
+    env:
+      RUST_TEST_THREADS: 1
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -145,7 +149,7 @@ jobs:
       - name: Parse Windows helpers and acceptance runner
         shell: pwsh
         run: |
-          foreach ($path in 'packaging/build-windows.ps1', 'packaging/build-windows-msix.ps1', 'packaging/windows/factorseal-askpass.ps1', 'packaging/windows/install-factorseal-task.ps1', 'acceptance/windows.ps1') {
+          foreach ($path in 'packaging/build-windows.ps1', 'packaging/build-windows-msix.ps1', 'packaging/windows/factorseal-askpass.ps1', 'packaging/windows/install-factorseal-task.ps1', 'acceptance/windows.ps1', 'acceptance/windows-security.ps1') {
             $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$null, [ref]$errors)
             if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output $_.ToString() }; throw "$path does not parse" }

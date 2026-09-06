@@ -76,6 +76,7 @@ impl ServiceState {
     }
 
     pub(super) fn seal(&self) {
+        crate::security::events::record(crate::security::events::Kind::VaultSealed);
         self.seal_handle.request_seal();
         self.approval_changed.notify_all();
         self.seal_handle.seal();

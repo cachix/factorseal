@@ -10,6 +10,47 @@ use super::{
 
 mod bootstrap;
 mod chain;
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_commit(bytes: &[u8]) {
+    use std::sync::OnceLock;
+    static KEY: OnceLock<(super::DeviceKeyId, super::signature::PreparedVerifyingKey)> =
+        OnceLock::new();
+    let (id, key) = KEY.get_or_init(|| {
+        let bytes = super::signature::public_key_for_seed(&[0; 32]);
+        (
+            super::DeviceKeyId::for_public_key(&bytes),
+            super::signature::PreparedVerifyingKey::new(&bytes).unwrap(),
+        )
+    });
+    if let Ok(commit) = serde_json::from_slice::<chain::ProtectedCommit>(bytes) {
+        let _ = commit.verify(commit.commit_id, *id, key);
+    }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_commit_seed() -> Vec<u8> {
+    let key = super::signature::public_key_for_seed(&[0; 32]);
+    serde_json::to_vec(
+        &chain::ProtectedCommit::new(
+            chain::CommitContents {
+                previous_commit_id: None,
+                vault_id: super::VaultId::from_bytes([0; 16]),
+                document_id: super::DocumentId::from_bytes([0; 32]),
+                scope: super::DocumentKind::LocalKeyring,
+                generation: 0,
+                key_epoch: 0,
+                wrapped_key_digest: [0; 32],
+                snapshot_digest: [0; 32],
+                next_eviction: None,
+                device_key_id: super::DeviceKeyId::for_public_key(&key),
+            },
+            &[0; 32],
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
 mod database;
 mod migration;
 mod worker;

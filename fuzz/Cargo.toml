@@ -1,0 +1,92 @@
+[package]
+name = "factorseal-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+factorseal = { path = "..", default-features = false, features = ["fuzzing"] }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "seed-corpus"
+path = "src/seed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata"
+path = "fuzz_targets/metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol"
+path = "fuzz_targets/protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document"
+path = "fuzz_targets/document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "history"
+path = "fuzz_targets/history.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "commit_chain"
+path = "fuzz_targets/commit_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secret_service"
+path = "fuzz_targets/secret_service.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive"
+path = "fuzz_targets/archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer"
+path = "fuzz_targets/transfer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bootstrap"
+path = "fuzz_targets/bootstrap.rs"
+test = false
+doc = false
+bench = false

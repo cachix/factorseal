@@ -106,6 +106,19 @@ struct EncryptedArchive {
     ciphertext: String,
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_archive(bytes: &[u8]) {
+    if let Ok(archive) = serde_json::from_slice::<VaultArchive>(bytes) {
+        let _ = archive.validate();
+    }
+    if let Ok(archive) = serde_json::from_slice::<EncryptedArchive>(bytes) {
+        let _ = validate_header(&archive.header);
+        let _ = STANDARD.decode(&archive.header.kdf.salt);
+        let _ = STANDARD.decode(&archive.nonce);
+        let _ = STANDARD.decode(&archive.ciphertext);
+    }
+}
+
 /// Encrypt an archive with a separate portable-backup passphrase.
 pub fn encrypt_vault_archive(
     archive: &VaultArchive,

@@ -5,9 +5,12 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "key-protection")]
 use sha2::Sha256;
+#[cfg(feature = "key-protection")]
 use zeroize::Zeroizing;
 
 use crate::EncryptionAlgorithm;
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
+use crate::security::memory::LockedBytes;
 
 #[cfg(feature = "vault-store")]
 use super::{DocumentId, DocumentKind};
@@ -26,13 +29,14 @@ const DOCUMENT_KEY_DOMAIN: &[u8] = b"factorseal/document-key/v1\0";
 /// Root and index capabilities retained only for one unseal lease.
 ///
 /// Document keys and the exportable signing seed are deliberately absent.
-/// They are unwrapped into a `Zeroizing` allocation for the operation that
+/// They are unwrapped into a guarded, locked allocation for the operation that
 /// needs them. The index key is derived from the root rather than stored, so
-/// the metadata file holds one root-wrapped secret: the signing seed.
+/// the metadata file holds one root-wrapped secret: the signing seed. The root
+/// and index share one locked page; temporary bootstrap sources still zeroize.
 #[allow(dead_code)]
 pub(crate) struct InstallationSecrets {
-    root_key: Zeroizing<[u8; KEY_BYTES]>,
-    index_key: Zeroizing<[u8; KEY_BYTES]>,
+    #[cfg(any(feature = "key-protection", feature = "vault-store"))]
+    retained_keys: LockedBytes<64>,
     wrapped_signing_seed: WrappedKey,
 }
 
@@ -65,6 +69,10 @@ pub(crate) struct WrappedKey {
 
 impl InstallationSecrets {
     #[cfg(feature = "key-protection")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "consume and wipe the bootstrap root after moving it into locked memory"
+    )]
     pub(crate) fn generate(
         installation_id: InstallationId,
         device_vault_id: VaultId,
@@ -80,8 +88,7 @@ impl InstallationSecrets {
         };
         Ok((
             Self {
-                index_key: derive_index_key(&root_key, installation_id, device_vault_id),
-                root_key,
+                retained_keys: retain_keys(&root_key, installation_id, device_vault_id)?,
                 wrapped_signing_seed: wrapped.signing_seed.clone(),
             },
             wrapped,
@@ -91,6 +98,10 @@ impl InstallationSecrets {
     /// Reopen the operational secrets. The wrapped signing seed is
     /// authenticated here so tampered metadata fails before the store opens.
     #[cfg(feature = "key-protection")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "consume and wipe the bootstrap root after moving it into locked memory"
+    )]
     pub(crate) fn open(
         installation_id: InstallationId,
         device_vault_id: VaultId,
@@ -105,15 +116,23 @@ impl InstallationSecrets {
             "operational signing seed",
         )?);
         Ok(Self {
-            index_key: derive_index_key(&root_key, installation_id, device_vault_id),
-            root_key,
+            retained_keys: retain_keys(&root_key, installation_id, device_vault_id)?,
             wrapped_signing_seed: wrapped.signing_seed.clone(),
         })
     }
 
     #[cfg(feature = "vault-store")]
     pub(crate) fn index_key(&self) -> &[u8; KEY_BYTES] {
-        &self.index_key
+        self.retained_keys[KEY_BYTES..]
+            .try_into()
+            .expect("index key length")
+    }
+
+    #[cfg(any(feature = "key-protection", feature = "vault-store"))]
+    fn root_key(&self) -> &[u8; KEY_BYTES] {
+        self.retained_keys[..KEY_BYTES]
+            .try_into()
+            .expect("root key length")
     }
 
     #[cfg(any(feature = "key-protection", feature = "vault-store"))]
@@ -121,9 +140,9 @@ impl InstallationSecrets {
         &self,
         installation_id: InstallationId,
         device_vault_id: VaultId,
-    ) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
+    ) -> VaultResult<LockedBytes<KEY_BYTES>> {
         unwrap_key(
-            &self.root_key,
+            self.root_key(),
             &installation_key_aad(installation_id, device_vault_id, b"signing-seed"),
             &self.wrapped_signing_seed,
             "operational signing seed",
@@ -138,11 +157,11 @@ impl InstallationSecrets {
         document_id: DocumentId,
         kind: DocumentKind,
         epoch: u64,
-    ) -> VaultResult<(Zeroizing<[u8; KEY_BYTES]>, WrappedKey)> {
-        let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
+    ) -> VaultResult<(LockedBytes<KEY_BYTES>, WrappedKey)> {
+        let mut key = LockedBytes::zeroed().map_err(memory_error)?;
         getrandom::fill(&mut *key)?;
         let wrapped = wrap_key(
-            &self.root_key,
+            self.root_key(),
             &document_key_aad(installation_id, vault_id, document_id, kind, epoch),
             &key,
         )?;
@@ -158,14 +177,32 @@ impl InstallationSecrets {
         kind: DocumentKind,
         epoch: u64,
         wrapped: &WrappedKey,
-    ) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
+    ) -> VaultResult<LockedBytes<KEY_BYTES>> {
         unwrap_key(
-            &self.root_key,
+            self.root_key(),
             &document_key_aad(installation_id, vault_id, document_id, kind, epoch),
             wrapped,
             "document data-encryption key",
         )
     }
+}
+
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
+#[allow(clippy::needless_pass_by_value)]
+fn memory_error(error: std::io::Error) -> VaultError {
+    VaultError::Protection(format!("cannot protect key memory: {error}"))
+}
+
+#[cfg(feature = "key-protection")]
+fn retain_keys(
+    root: &[u8; KEY_BYTES],
+    installation: InstallationId,
+    vault: VaultId,
+) -> VaultResult<LockedBytes<64>> {
+    let mut keys = LockedBytes::zeroed().map_err(memory_error)?;
+    keys[..KEY_BYTES].copy_from_slice(root);
+    keys[KEY_BYTES..].copy_from_slice(&*derive_index_key(root, installation, vault));
+    Ok(keys)
 }
 
 impl WrappedInstallationSecrets {
@@ -227,9 +264,9 @@ fn unwrap_key(
     aad: &[u8],
     wrapped: &WrappedKey,
     label: &str,
-) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
+) -> VaultResult<LockedBytes<KEY_BYTES>> {
     wrapped.validate()?;
-    let plaintext = crate::crypto::decrypt(
+    let plaintext = crate::crypto::decrypt_key(
         wrapped.encryption_algorithm,
         root_key,
         &wrapped.nonce,
@@ -240,9 +277,7 @@ fn unwrap_key(
     if plaintext.len() != KEY_BYTES {
         return Err(VaultError::Protection(format!("invalid {label} length")));
     }
-    let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
-    key.copy_from_slice(&plaintext);
-    Ok(key)
+    Ok(plaintext)
 }
 
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]

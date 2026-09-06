@@ -23,12 +23,32 @@ pub(crate) fn open_regular(path: &Path, options: &mut OpenOptions) -> io::Result
     if !metadata.is_file() {
         return Err(io::Error::other("input must be a regular file"));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() != 1 {
+            return Err(io::Error::other("hard-linked inputs are not accepted"));
+        }
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle},
+        };
         // Win32 FILE_ATTRIBUTE_REPARSE_POINT, including non-symlink reparse tags.
         if metadata.file_attributes() & 0x0400 != 0 {
             return Err(io::Error::other("reparse-point inputs are not accepted"));
+        }
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the borrowed handle and output buffer remain live.
+        #[allow(unsafe_code)]
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &raw mut information) }
+            .map_err(io::Error::other)?;
+        if information.nNumberOfLinks != 1 {
+            return Err(io::Error::other("hard-linked inputs are not accepted"));
         }
     }
     Ok(file)

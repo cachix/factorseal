@@ -262,6 +262,7 @@ impl PendingApprovals {
         });
         self.recent_creations
             .push_back((monotonic_now, fingerprint));
+        crate::security::events::record(crate::security::events::Kind::ApprovalCreated);
         self.revision = self.revision.wrapping_add(1);
         Ok(VaultInteractionReference { id, expires_at })
     }
@@ -285,6 +286,7 @@ impl PendingApprovals {
             .position(|record| record.summary.id == id)
             .ok_or_else(|| VaultError::Protocol("permission is missing or expired".to_owned()))?;
         let record = self.records.remove(index).expect("located above");
+        crate::security::events::record(crate::security::events::Kind::ApprovalDenied);
         let expires_at = match record.summary.state {
             PermissionState::Pending { expires_at, .. } => expires_at,
             PermissionState::Granted { .. } => unreachable!("queue stores only pending records"),
@@ -373,6 +375,7 @@ impl PendingApprovals {
         )?;
         let caller_fingerprint = record.caller.fingerprint();
         self.records.remove(index);
+        crate::security::events::record(crate::security::events::Kind::ApprovalGranted);
         self.push_resolved(
             id.to_owned(),
             caller_fingerprint,

@@ -134,14 +134,7 @@ pub fn serve_windows_vault_with_ready(
     if options.install_lifecycle_monitor {
         service.enable_emergency_exit();
     }
-    let security_descriptor = same_user_security_descriptor()?;
-    let listener = PipeListenerOptions::new()
-        .path(Path::new(&options.pipe_name))
-        .nonblocking(true)
-        .accept_remote(false)
-        .security_descriptor(Some(security_descriptor))
-        .create_duplex::<pipe_mode::Bytes>()
-        .map_err(|error| io_error("create named pipe", &error))?;
+    let listener = private_listener(Path::new(&options.pipe_name))?;
 
     let stopping = lifecycle_monitor.map_or_else(
         || Arc::new(AtomicBool::new(false)),
@@ -216,6 +209,16 @@ fn accept_until_sealed(
         service.seal()?;
         Ok(())
     })
+}
+
+fn private_listener(path: &Path) -> VaultResult<ByteListener> {
+    PipeListenerOptions::new()
+        .path(path)
+        .nonblocking(true)
+        .accept_remote(false)
+        .security_descriptor(Some(same_user_security_descriptor()?))
+        .create_duplex::<pipe_mode::Bytes>()
+        .map_err(|error| io_error("create named pipe", &error))
 }
 
 struct ActiveConnection<'a>(&'a AtomicUsize);
@@ -740,6 +743,30 @@ mod tests {
         assert!(validate_pipe_name(r"\\server\pipe\factorseal-device-id").is_err());
         assert!(validate_pipe_name(r"\\.\pipe\other-device-id").is_err());
         assert!(validate_pipe_name(r"\\.\pipe\factorseal-nested\name").is_err());
+    }
+
+    #[test]
+    #[ignore = "invoked by acceptance/windows-security.ps1 with an isolated fixture"]
+    fn serve_two_account_pipe_fixture() {
+        let parent = PathBuf::from(std::env::var_os("FACTORSEAL_SECURITY_FIXTURE").unwrap());
+        let mut random = [0; 16];
+        getrandom::fill(&mut random).unwrap();
+        let pipe = format!(r"\\.\pipe\factorseal-acceptance-{}", hex::encode(random));
+        let listener = private_listener(Path::new(&pipe)).unwrap();
+        std::fs::write(parent.join("pipe-name"), &pipe).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        while !parent.join("done").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "two-account pipe test timed out"
+            );
+            match listener.accept() {
+                Ok(stream) => drop(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("pipe fixture failed: {error}"),
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

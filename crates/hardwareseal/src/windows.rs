@@ -616,6 +616,26 @@ struct ParsedHelloEnvelope<'a> {
     ciphertext: &'a [u8],
 }
 
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_envelope(bytes: &[u8]) {
+    if let Ok(parsed) = parse_hello_envelope(bytes, [0; LABEL_HASH_BYTES]) {
+        let encoded = encode_hello_envelope(
+            [0; LABEL_HASH_BYTES],
+            parsed.credential_id,
+            *parsed.prf_input,
+            *parsed.nonce,
+            parsed.ciphertext,
+        )
+        .unwrap();
+        assert_eq!(encoded, bytes);
+    }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_seed() -> Vec<u8> {
+    encode_hello_envelope([0; LABEL_HASH_BYTES], &[1], [0; 32], [0; 12], &[0; 16]).unwrap()
+}
+
 fn parse_hello_envelope(
     input: &[u8],
     expected_label_hash: [u8; LABEL_HASH_BYTES],

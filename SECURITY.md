@@ -139,11 +139,25 @@ the approval UI. These are lease-local abuse controls, not isolation from a
 same-user process that can run different executables or restart the vault.
 
 Metadata and lock files reject final symlinks/reparse points and non-regular
-files through the opened handle; Unix FIFO opens are nonblocking. Ancestor
-path replacement, hard links, and database sidecar handling still require
+files through the opened handle; Unix FIFO opens are nonblocking. Password,
+metadata and lock inputs also reject hard links. Ancestor
+path replacement and database sidecar handling still require
 separate review. Windows root validation checks current-user ownership as well
 as its protected DACL; child-file ACL inheritance also has a native regression
 test, but two-account acceptance remains required.
+
+Security events use fixed, saturating counters for authorization denial,
+approval creation/decisions/limits, duplicate requests, malformed requests,
+integrity failures, seal requests and failed memory protection. They contain
+no names, fields, values, caller IDs or timestamps. Recording performs no
+allocation or disk I/O; existing diagnostics snapshots include the aggregate
+counters. These process-local events are operational evidence, not a durable
+or tamper-proof audit log.
+
+Every externally controlled parser family has an opt-in
+[fuzz harness](fuzz/README.md). CI runs it on changes and daily, using synthetic
+corpora, address sanitization and resource limits. This complements the native
+and regression tests; it does not establish exhaustive malformed-input safety.
 
 ## Broad administrative and compatibility authority
 
@@ -196,7 +210,8 @@ outside the separately built CLI key owner's dependency graph.
   audit log. It cannot detect rollback of the complete vault directory.
   Detecting that needs a checkpoint held
   outside the directory; the offline MVP does not claim whole-directory
-  rollback detection.
+  rollback detection. The [offline integrity profile](security/offline-integrity-profile.md)
+  precisely defines this exclusion and the requirements for a future witness.
 - The implemented `factorseal provider` endpoint uses SecretSpec's typed IPC
   protocol over private standard-I/O pipes and translates requests into the
   disposable, project-partitioned `secretspec-provider-cache` document kind
@@ -226,10 +241,15 @@ outside the separately built CLI key owner's dependency graph.
   helpers additionally disable process dumpability (including piped core
   collectors). IPC-only clients stay inspectable for executable authentication.
   Native emergency termination exits without deliberately creating a core dump.
-  These measures cannot stop privileged memory inspection. Locked memory,
-  comprehensive wiping of library/OS-internal copies, Windows dump policy,
-  physical hardware matrices, code signing/notarization and independent
-  audit remain release limitations.
+  Retained root/index keys, live DEKs and unwrapped signing seeds now use
+  guarded, locked allocations with zeroization before release. Linux excludes
+  them from dumps and wipes forked copies; Windows excludes them from WER and
+  disables WER heap collection. Lock/exclusion failures reject the operation.
+  These measures cannot stop privileged memory inspection. Passwords,
+  decrypted documents, Argon2 workspace and library/OS-internal copies are not
+  all locked. Administrator/third-party dumps, physical hardware matrices,
+  code signing/notarization and independent audit remain release limitations.
+  See the [process and memory profile](security/process-memory-profile.md).
 - `destroy` removes local state, not every possible hardware authority. Linux
   and non-biometric Windows TPM envelopes have no per-label persistent key to
   revoke. Retained copies can remain usable on the original TPM with valid

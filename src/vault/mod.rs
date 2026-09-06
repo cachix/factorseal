@@ -11,6 +11,9 @@ mod document;
 mod encoding;
 #[cfg(feature = "vault-store")]
 mod envelope;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod history;
 mod keys;
 #[cfg(feature = "key-protection")]

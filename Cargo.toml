@@ -14,11 +14,14 @@ members = [
     "factorseal-desktop",
 ]
 resolver = "2"
+exclude = ["fuzz"]
 
 [features]
+fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "dep:secret-service-protocol", "hardwareseal/fuzzing"]
 default = ["vault", "cli", "hardware", "secretspec-provider"]
 vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token", "dep:windows"]
 vault-store = [
+    "dep:windows",
     "dep:aes",
     "dep:aes-gcm",
     "dep:automerge",
@@ -170,6 +173,9 @@ windows = { version = "0.61.3", optional = true, features = [
     "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_ErrorReporting",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

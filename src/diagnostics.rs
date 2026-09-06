@@ -57,6 +57,8 @@ pub struct Report {
     pub recorded_ms: u64,
     pub state: String,
     pub events: VecDeque<Event>,
+    #[serde(default)]
+    pub security_events: Vec<crate::security::events::SecurityEvent>,
     pub panic_location: Option<String>,
     pub backtrace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,6 +78,7 @@ impl Report {
             recorded_ms: timestamp_ms(),
             state: "running".to_owned(),
             events: VecDeque::new(),
+            security_events: Vec::new(),
             panic_location: None,
             backtrace: None,
             issue_description: None,
@@ -292,6 +295,7 @@ impl Reporter {
 
     fn save(&self, kind: &str, report: &Report) -> io::Result<String> {
         let mut snapshot = report.clone();
+        snapshot.security_events = crate::security::events::snapshot();
         snapshot.recorded_ms = timestamp_ms();
         let bytes = serde_json::to_vec_pretty(&snapshot)?;
         if bytes.len() as u64 > MAX_REPORT_BYTES {

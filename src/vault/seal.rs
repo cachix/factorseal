@@ -12,6 +12,50 @@ use super::{KeyProtector, KeyProtectorFactory};
 
 mod filesystem;
 mod metadata;
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_metadata(bytes: &[u8]) {
+    if let Ok(value) = metadata::decode_vault_file(bytes) {
+        let encoded = serde_json::to_vec(&value).unwrap();
+        metadata::decode_vault_file(&encoded).unwrap();
+    }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_metadata_seed() -> Vec<u8> {
+    let installation_id = crate::vault::InstallationId::from_bytes([1; 16]);
+    let device_vault_id = crate::vault::VaultId::from_bytes([2; 16]);
+    let public_signing_key = crate::vault::signature::public_key_for_seed(&[0; 32]);
+    let (_, wrapped_installation_secrets) = crate::vault::InstallationSecrets::generate(
+        installation_id,
+        device_vault_id,
+        zeroize::Zeroizing::new([0; 32]),
+        &[0; 32],
+    )
+    .unwrap();
+    let group = UnlockGroup::new([UnlockFactorKind::Biometric]).unwrap();
+    let value = metadata::VaultFile::new(metadata::NewVaultFile {
+        installation_id,
+        device_vault_id,
+        device_key_id: crate::vault::DeviceKeyId::for_public_key(&public_signing_key),
+        actor_id: metadata::actor_id_for_public_key(&public_signing_key).to_vec(),
+        public_signing_key,
+        platform: VaultPlatform::Windows,
+        hardware_backend: "windows-tpm".to_owned(),
+        cryptographic_profile: VaultCryptoProfile::default(),
+        unlock_policy: UnlockPolicy::new([group.clone()]).unwrap(),
+        unlock_slots: vec![metadata::UnlockSlot {
+            group,
+            wrapping_key_label: "synthetic".to_owned(),
+            wrapped_vault_root_key: vec![0; 32],
+            password_protection: None,
+        }],
+        wrapped_installation_secrets,
+        created_at: 0,
+    });
+    value.validate().unwrap();
+    serde_json::to_vec(&value).unwrap()
+}
 #[cfg(feature = "key-protection")]
 mod protectors;
 

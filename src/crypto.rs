@@ -6,7 +6,7 @@
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, AeadInPlace, KeyInit, Payload},
 };
 #[cfg(feature = "key-protection")]
 use pbkdf2::pbkdf2_hmac;
@@ -165,6 +165,31 @@ pub(crate) fn decrypt(
     ciphertext: &[u8],
 ) -> std::result::Result<Zeroizing<Vec<u8>>, AuthenticationError> {
     provider_for(algorithm)?.decrypt(key, nonce, aad, ciphertext)
+}
+
+/// Unwrap a fixed key directly into protected memory, avoiding a plaintext Vec.
+pub(crate) fn decrypt_key(
+    algorithm: EncryptionAlgorithm,
+    key: &[u8; KEY_BYTES],
+    nonce: &[u8; NONCE_BYTES],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> std::result::Result<crate::security::memory::LockedBytes<KEY_BYTES>, AuthenticationError> {
+    if algorithm != EncryptionAlgorithm::Aes256Gcm || ciphertext.len() != KEY_BYTES + 16 {
+        return Err(AuthenticationError);
+    }
+    let mut plaintext =
+        crate::security::memory::LockedBytes::zeroed().map_err(|_| AuthenticationError)?;
+    plaintext.copy_from_slice(&ciphertext[..KEY_BYTES]);
+    Aes256Gcm::new(key.into())
+        .decrypt_in_place_detached(
+            Nonce::from_slice(nonce),
+            aad,
+            &mut plaintext[..],
+            aes_gcm::Tag::from_slice(&ciphertext[KEY_BYTES..]),
+        )
+        .map_err(|_| AuthenticationError)?;
+    Ok(plaintext)
 }
 
 #[cfg(test)]

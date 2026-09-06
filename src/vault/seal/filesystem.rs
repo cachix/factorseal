@@ -92,7 +92,15 @@ pub(super) fn validate_private_permissions(
     path: &Path,
     metadata: &fs::Metadata,
 ) -> VaultResult<()> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[allow(unsafe_code)]
+    let uid = unsafe { libc::geteuid() };
+    if metadata.uid() != uid {
+        return Err(VaultError::Protection(
+            "vault root must be owned by the current user".to_owned(),
+        ));
+    }
 
     let mode = metadata.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {

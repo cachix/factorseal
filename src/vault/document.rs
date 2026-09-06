@@ -600,7 +600,7 @@ impl SecretDocument {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn save(&mut self) -> Vec<u8> {
         self.document.save()
     }

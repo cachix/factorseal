@@ -375,6 +375,12 @@ impl VaultRequest {
     }
 
     pub fn decode(bytes: &[u8]) -> VaultResult<Self> {
+        Self::decode_inner(bytes).inspect_err(|_| {
+            crate::security::events::record(crate::security::events::Kind::MalformedRequest);
+        })
+    }
+
+    fn decode_inner(bytes: &[u8]) -> VaultResult<Self> {
         if bytes.len() > MAX_MESSAGE_BYTES {
             return Err(VaultError::Protocol("request is too large".to_owned()));
         }

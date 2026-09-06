@@ -124,6 +124,17 @@ impl VaultService {
         let result = self
             .handle_inner(caller, request, clock, &valid_until)
             .map_err(|failure| {
+                use crate::security::events::{Kind, record};
+                match &failure.error {
+                    VaultError::AuthorizationRequired => record(Kind::AuthorizationDenied),
+                    VaultError::ApprovalLimited => record(Kind::ApprovalLimited),
+                    VaultError::Replay => record(Kind::ReplayRejected),
+                    VaultError::Signature | VaultError::InvalidData(_) => {
+                        record(Kind::IntegrityFailure);
+                    }
+                    VaultError::Protocol(_) => record(Kind::MalformedRequest),
+                    _ => {}
+                }
                 response_error_with_interaction(&failure.error, failure.interaction)
             });
         let result = match result {

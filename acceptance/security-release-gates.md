@@ -33,6 +33,12 @@ mechanism; they must be exported before losing access to the source vault.
 - Bound pending approvals per caller and globally, rate-limit new approvals
   using monotonic time, and preserve existing requests on overload. Duplicate
   requests do not extend approval expiry or notify the approval UI.
+- Keep retained root/index keys, live DEKs and unwrapped signing seeds in
+  guarded locked pages. Fail on protection errors, zeroize before release,
+  exclude Linux/WER dumps, and wipe Linux forked copies. Configure WER NOHEAP.
+- Record fixed, value-free security counters without request-triggered I/O.
+- Fuzz ten parser families on changes and daily with synthetic corpora,
+  address sanitizer and input/RSS/time bounds.
 - Detect tracked Linux session removal, authenticate logind signal senders, and
   require a transient Secure Enclave key probe before Apple protector use.
 - Preserve typed native failures through public create/unseal APIs.
@@ -93,8 +99,14 @@ reduces retention; it cannot erase all free pages, storage remnants or copies.
 Stateless TPM envelopes may remain usable on their original TPM with valid
 factors. Whole-directory rollback still needs an external trusted checkpoint.
 
-Locked/guarded memory, comprehensive wiping of crypto/Automerge/OS internal
-copies, Windows dump policy and hard key-retention limits for library embedders
-remain open hardening work. Privileged inspection, same-user code injection
+Comprehensive locking/wiping of password, document, crypto/Automerge/OS copies,
+administrator/third-party dump policy and hard key-retention limits for library
+embedders remain excluded. Privileged inspection, same-user code injection
 and exfiltration by an already authorized client are not prevented by executable
 grants. See [SECURITY.md](../SECURITY.md) for the actual security boundary.
+
+The detailed profiles and internal review are recorded in
+[process/memory](../security/process-memory-profile.md),
+[offline integrity](../security/offline-integrity-profile.md), and
+[security review](../security/review.md). The internal review does not satisfy
+the independent external-review gate.

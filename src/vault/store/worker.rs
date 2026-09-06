@@ -416,6 +416,7 @@ fn send_result<T>(
         result
     };
     if fatal {
+        crate::security::events::record(crate::security::events::Kind::IntegrityFailure);
         status.sealed.store(true, Ordering::Release);
     }
     let _ = response.send(result);
@@ -658,7 +659,7 @@ struct DocumentHead {
     key_epoch: u64,
     wrapped_dek: Vec<u8>,
     envelope: EncryptedSnapshot,
-    data_key: Zeroizing<[u8; 32]>,
+    data_key: crate::security::memory::LockedBytes<32>,
 }
 
 impl StoreWorker {

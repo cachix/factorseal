@@ -76,6 +76,8 @@ pub fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -94,6 +96,9 @@ mod tests {
         let link = dir.path().join("link");
         symlink(&path, &link).unwrap();
         assert!(read_private_file(&link, 6).is_err());
+        std::fs::hard_link(&path, dir.path().join("hard-link")).unwrap();
+        assert!(read_private_file(&path, 6).is_err());
+        std::fs::remove_file(dir.path().join("hard-link")).unwrap();
         assert!(read_regular_file(dir.path(), 6).is_err());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(read_private_file(&path, 6).is_err());
