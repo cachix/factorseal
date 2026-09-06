@@ -245,7 +245,6 @@ mod tests {
         use interprocess::os::windows::named_pipe::{PipeListenerOptions, pipe_mode};
         use interprocess::os::windows::security_descriptor::SecurityDescriptor;
         use std::path::{Path, PathBuf};
-        use std::time::{Duration, Instant};
         let directory = PathBuf::from(std::env::var_os("FACTORSEAL_FOREIGN_FIXTURE").unwrap());
         let sid = OwnedToken::from_current_process(TOKEN_QUERY)
             .unwrap()
@@ -258,35 +257,22 @@ mod tests {
         let name = format!("{PIPE_PREFIX}foreign-test-{}", std::process::id());
         let listener = PipeListenerOptions::new()
             .path(Path::new(&name))
-            .nonblocking(true)
+            .nonblocking(false)
             .accept_remote(false)
             .security_descriptor(Some(descriptor))
             .create_duplex::<pipe_mode::Bytes>()
             .unwrap();
         std::fs::write(directory.join("foreign-pipe"), &name).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok(stream) => break stream,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => panic!("foreign pipe accept failed: {error}"),
-            }
-            assert!(Instant::now() < deadline, "foreign pipe was not contacted");
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        loop {
-            match stream.read(&mut [0; 1]) {
-                Ok(0) => break,
-                Ok(_) => panic!("client disclosed request bytes to a foreign account"),
-                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => panic!("foreign pipe read failed: {error}"),
-            }
-            assert!(
-                Instant::now() < deadline,
-                "client did not close foreign pipe"
-            );
-            std::thread::sleep(Duration::from_millis(10));
+        // A blocking accept is already waiting when the client connects. A
+        // polling accept can miss a peer that authenticates and closes in one
+        // scheduler slice. The parent acceptance runner bounds this process
+        // and kills the entire child tree on timeout.
+        let mut stream = listener.accept().unwrap();
+        match stream.read(&mut [0; 1]) {
+            Ok(0) => {}
+            Ok(_) => panic!("client disclosed request bytes to a foreign account"),
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(error) => panic!("foreign pipe read failed: {error}"),
         }
     }
 

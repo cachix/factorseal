@@ -30,7 +30,7 @@ if ($Mode -eq 'Probe') {
         # A timeout is not a pass: the owner's positive control connected.
     } finally { $client.Dispose() }
     $env:FACTORSEAL_FOREIGN_FIXTURE = Join-Path $Fixture 'guest'
-    & (Join-Path $Fixture 'native-tests.exe') --ignored --exact vault::windows_client::tests::serve_foreign_pipe_fixture
+    & (Join-Path $Fixture 'native-tests.exe') --ignored --exact vault::windows_client::tests::serve_foreign_pipe_fixture *> (Join-Path $env:FACTORSEAL_FOREIGN_FIXTURE 'probe.log')
     exit $LASTEXITCODE
 }
 
@@ -96,8 +96,11 @@ try {
     $env:FACTORSEAL_FOREIGN_PIPE = [IO.File]::ReadAllText((Join-Path $guestDirectory 'foreign-pipe'))
     & $harness --ignored --exact vault::windows_client::tests::reject_foreign_pipe_fixture
     if ($LASTEXITCODE -ne 0) { throw 'Client did not reject foreign-account pipe.' }
-    if (-not $probe.WaitForExit(60000)) { $probe.Kill(); $probe.WaitForExit(); throw 'Second-account probe timed out.' }
-    if ($probe.ExitCode -ne 0) { throw "Second-account access controls failed (probe exit $($probe.ExitCode))." }
+    if (-not $probe.WaitForExit(60000)) { $probe.Kill($true); $probe.WaitForExit(); throw 'Second-account probe timed out.' }
+    if ($probe.ExitCode -ne 0) {
+        Get-Content (Join-Path $guestDirectory 'probe.log') -ErrorAction SilentlyContinue
+        throw "Second-account access controls failed (probe exit $($probe.ExitCode))."
+    }
     [IO.File]::WriteAllText((Join-Path $Fixture 'done'), 'done')
     if (-not $server.WaitForExit(10000)) { throw 'Pipe fixture did not exit.' }
     if ($server.ExitCode -ne 0) { throw 'Pipe fixture failed.' }
