@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds of fuzzing per target
+        type: number
+        default: 600
 
 permissions:
   contents: read
@@ -29,6 +34,7 @@ jobs:
         with:
           workspaces: fuzz
           key: fuzz-${{ matrix.target }}
+          cache-on-failure: true
       - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - run: python3 scripts/check-fuzz-lock.py
       - uses: actions/cache@v4
@@ -40,7 +46,7 @@ jobs:
         run: cargo +nightly run --locked --manifest-path fuzz/Cargo.toml --bin seed-corpus -- fuzz/corpus
       - name: Fuzz with address sanitizer and bounded resources
         env:
-          FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '600' || '60' }}
+          FUZZ_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seconds || github.event_name == 'schedule' && 600 || 60 }}
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=$FUZZ_SECONDS -max_len=1048576 -rss_limit_mb=2048 -timeout=10
       - uses: actions/upload-artifact@v4
         if: failure()

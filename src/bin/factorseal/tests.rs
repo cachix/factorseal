@@ -137,12 +137,7 @@ fn oversized_askpass_output_is_rejected_instead_of_truncated() {
 fn an_explicit_file_takes_precedence_over_the_helper() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("factor");
-    fs::write(&file, "from the file\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    factorseal::security::write_private_file(&file, b"from the file\n").unwrap();
 
     let source = FactorSource {
         password_file: Some(&file),
@@ -262,12 +257,7 @@ fn transfer_commands_parse_native_and_password_manager_options() {
 fn archive_passphrase_can_be_read_from_a_private_file() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("archive-passphrase");
-    fs::write(&path, b"correct horse battery staple\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    factorseal::security::write_private_file(&path, b"correct horse battery staple\n").unwrap();
     let passphrase = read_archive_passphrase(Some(&path), true).unwrap();
     assert_eq!(passphrase.as_slice(), b"correct horse battery staple");
 }

@@ -45,6 +45,15 @@ minimize with `cargo +nightly fuzz tmin TARGET ARTIFACT`, add a regression test,
 and retain the minimized synthetic input. Never seed with production vaults or
 credentials, or upload such data as a crash artifact.
 
+Resolved synthetic crashes are committed under `regressions/TARGET/` and
+copied into the corpus by `seed-corpus`, so new campaigns retain them even
+without a cache. The malformed bundle counter fixture is covered by
+[Automerge PR #1540](https://github.com/automerge/automerge/pull/1540); the
+product and fuzz lockfiles pin the same patched fork commit. The lock check
+compares dependency sources and Git revisions as well as version numbers.
+Manual workflow runs default to 600 seconds per target and accept a `seconds`
+input for longer campaigns within the job timeout.
+
 Fuzzing is continuing evidence, not proof that all malformed inputs are safe.
 Dependency-internal decompression and allocation behavior is also subject to
 the harness limits; production embedders must isolate untrusted workloads.

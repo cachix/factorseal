@@ -137,11 +137,11 @@ impl SecretDocument {
         let format = document
             .get(ROOT, FORMAT_KEY)
             .map_err(automerge_error)?
-            .and_then(|(value, _)| value.to_str().map(str::to_owned));
+            .and_then(|(value, _)| value.as_str().map(str::to_owned));
         let version = document
             .get(ROOT, FORMAT_VERSION_KEY)
             .map_err(automerge_error)?
-            .and_then(|(value, _)| value.to_u64());
+            .and_then(|(value, _)| value.as_u64());
         let partition = document
             .get(ROOT, PARTITION_KEY)
             .map_err(automerge_error)?
@@ -177,11 +177,11 @@ impl SecretDocument {
         let format = document
             .get(ROOT, FORMAT_KEY)
             .map_err(automerge_error)?
-            .and_then(|(value, _)| value.to_str().map(str::to_owned));
+            .and_then(|(value, _)| value.as_str().map(str::to_owned));
         let version = document
             .get(ROOT, FORMAT_VERSION_KEY)
             .map_err(automerge_error)?
-            .and_then(|(value, _)| value.to_u64());
+            .and_then(|(value, _)| value.as_u64());
         let partition = document
             .get(ROOT, PARTITION_KEY)
             .map_err(automerge_error)?
@@ -195,7 +195,7 @@ impl SecretDocument {
         let next_seq = document
             .get(ROOT, LEGACY_NEXT_SEQ_KEY)
             .map_err(automerge_error)?
-            .and_then(|(value, _)| value.to_u64())
+            .and_then(|(value, _)| value.as_u64())
             .ok_or_else(descriptor_mismatch)?;
 
         let mut projection = Self::new(actor_id, kind, &partition)?;

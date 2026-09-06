@@ -50,6 +50,7 @@ jobs:
       - name: Run tests
         run: |
           devenv shell -- sh -c '
+            set -eu
             dbus_config="$(dirname "$(command -v dbus-daemon)")/../share/dbus-1/session.conf"
             dbus-run-session --config-file "$dbus_config" -- cargo test --workspace --all-targets --all-features
             dbus-run-session --config-file "$dbus_config" -- env FACTORSEAL_TEST_SECRET_TOOL=/usr/bin/secret-tool cargo test --lib libsecret_store_seal_lookup

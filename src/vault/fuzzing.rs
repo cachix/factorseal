@@ -172,6 +172,19 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
 mod tests {
     use super::*;
     #[test]
+    fn malformed_bundle_returns_errors_without_panicking() {
+        let bytes = include_bytes!("../../fuzz/regressions/document/truncated-counter-bundle.bin");
+        assert!(
+            document::SecretDocument::load(bytes, b"fuzz", DocumentKind::LocalKeyring, None)
+                .is_err()
+        );
+        assert!(
+            document::SecretDocument::migrate_v2(bytes, b"fuzz", DocumentKind::LocalKeyring)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn synthetic_corpus_exercises_production_parsers() {
         for (name, bytes) in seeds() {
             match name {
