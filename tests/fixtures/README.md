@@ -1,3 +1,6 @@
+Password-manager import/export samples and their provenance are in
+[`transfer/`](transfer/README.md).
+
 `keyring-v1.factorseal` contains synthetic keyring metadata and a synthetic value.
 It was generated using the production archive encoder from commit
 `c9ca725f19ba40aceab495a041a101108c9fc1c6`, before the v2 restore fix.

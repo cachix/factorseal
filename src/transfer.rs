@@ -5,6 +5,10 @@ use anyhow::{Context as _, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(test)]
+#[path = "transfer/fixture_tests.rs"]
+mod fixture_tests;
+
 const PERSONAL_FORMAT: &str = "factorseal-personal-secret";
 const PERSONAL_VERSION: u16 = 1;
 const MAX_MANAGER_FILE_BYTES: usize = 128 * 1024 * 1024;
@@ -562,7 +566,18 @@ enum CsvFlavor {
 }
 
 fn import_csv(bytes: &[u8], flavor: CsvFlavor) -> anyhow::Result<Vec<PersonalSecret>> {
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(bytes);
+    let mut builder = csv::ReaderBuilder::new();
+    builder.flexible(true);
+    // KeePass 1.x quotes every column and escapes quotes and backslashes with
+    // a backslash. Keep accepting the unquoted RFC CSV header emitted by older
+    // FactorSeal versions, as well as KeePassX's Title/Username dialect.
+    let without_bom = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    if matches!(flavor, CsvFlavor::KeePass)
+        && without_bom.starts_with(b"\"Account\",\"Login Name\",")
+    {
+        builder.escape(Some(b'\\')).double_quote(false);
+    }
+    let mut reader = builder.from_reader(bytes);
     let headers = reader.headers().context("invalid CSV header")?.clone();
     let index = headers
         .iter()
@@ -633,7 +648,14 @@ fn export_keepass(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Vec<u8
 }
 
 fn export_csv(secrets: &[PersonalSecret], flavor: CsvFlavor) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-    let mut writer = csv::Writer::from_writer(Vec::new());
+    let mut builder = csv::WriterBuilder::new();
+    if matches!(flavor, CsvFlavor::KeePass) {
+        builder
+            .quote_style(csv::QuoteStyle::Always)
+            .double_quote(false)
+            .escape(b'\\');
+    }
+    let mut writer = builder.from_writer(Vec::new());
     match flavor {
         CsvFlavor::OnePassword => writer.write_record([
             "Title",
@@ -663,13 +685,21 @@ fn export_csv(secrets: &[PersonalSecret], flavor: CsvFlavor) -> anyhow::Result<Z
                 &secret.tags.join(", "),
                 secret.notes.as_deref().unwrap_or_default(),
             ])?,
-            CsvFlavor::KeePass => writer.write_record([
-                secret.title.as_str(),
-                secret.username.as_deref().unwrap_or_default(),
-                secret.password.as_deref().unwrap_or_default(),
-                secret.urls.first().map_or("", String::as_str),
-                secret.notes.as_deref().unwrap_or_default(),
-            ])?,
+            CsvFlavor::KeePass => writer.write_record(
+                Zeroizing::new(
+                    [
+                        secret.title.as_str(),
+                        secret.username.as_deref().unwrap_or_default(),
+                        secret.password.as_deref().unwrap_or_default(),
+                        secret.urls.first().map_or("", String::as_str),
+                        secret.notes.as_deref().unwrap_or_default(),
+                    ]
+                    .into_iter()
+                    .map(|value| value.replace('\\', "\\\\"))
+                    .collect::<Vec<_>>(),
+                )
+                .iter(),
+            )?,
         }
     }
     writer
@@ -799,7 +829,7 @@ mod tests {
         let imported = import_manager(TransferFormat::KeePassCsv, source).unwrap();
         assert_eq!(imported[0].username.as_deref(), Some("user"));
         let exported = export_manager(TransferFormat::KeePassCsv, &imported).unwrap();
-        assert!(String::from_utf8_lossy(&exported).starts_with("Account,Login Name"));
+        assert!(String::from_utf8_lossy(&exported).starts_with("\"Account\",\"Login Name\""));
         let again = import_manager(TransferFormat::KeePassCsv, &exported).unwrap();
         assert_eq!(again[0].notes.as_deref(), Some("note"));
     }

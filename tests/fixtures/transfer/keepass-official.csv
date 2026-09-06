@@ -1,0 +1,11 @@
+﻿"Account","Login Name","Password","Web Site","Comments"
+"Sample Entry Title","Greg","ycXfARD2G1AOBzLlhtbn","http://www.somepage.net","Some notes..."
+"Yet Another Sample Entry","Michael","qgyXFZ1iGgNqzg+eZter","http://www.anotherpage.org","More notes..."
+"Entry To Test Special Characters","!\"§$%&/()=?´`_#²³{[]}\\","öäüÖÄÜß€@<>µ©®","http://www.website.com","The user name and password fields contain special characters."
+"Multi-Line Test Entry","User","bBbescXqkgGF21PK09gV","http://www.web.com","This is a multi-line comment.
+This is a multi-line comment.
+This is a multi-line comment.
+This is a multi-line comment.
+This is a multi-line comment.
+This is a multi-line comment.
+This is a multi-line comment."
