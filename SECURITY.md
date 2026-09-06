@@ -43,6 +43,12 @@ worker, with a four-second emergency exit if teardown blocks. Native lifecycle
 and lease monitors also run in that worker. The CLI must be installed alongside
 Desktop or selected through `FACTORSEAL_CLI_EXECUTABLE`.
 
+On Linux, Secret Service item labels and lookup attributes stay in the encrypted
+vault index. Desktop drops that index on seal and does not persist a plaintext
+search cache. Credential lookups while sealed return `IsLocked` immediately;
+users must manually unlock Desktop before applications can look up credentials.
+Clients that explicitly request `Unlock` can still use the normal prompt flow.
+
 Desktop secret-entry fields use bounded zeroizing buffers, omit undo/copy
 history, and send only masked text to the renderer. Submitting, leaving a secret
 view, or sealing clears the inputs. Clipboard, native input methods, crypto

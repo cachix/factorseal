@@ -4,12 +4,14 @@
 //! runs and mirrors the vault's seal state onto the Secret Service `Locked`
 //! properties, the way gnome-keyring keeps answering with locked collections
 //! instead of disappearing. While sealed it has no database access at all:
-//! reads and writes fail with `org.freedesktop.Secret.Error.IsLocked`,
+//! secret reads and writes fail with `org.freedesktop.Secret.Error.IsLocked`,
 //! `Unlock` hands back a prompt, and the prompt asks the host to unseal. Once
 //! unsealed, every vault access goes through the vault protocol under the
 //! host's own grant, so the adapter never holds keys of its own. The session
 //! bus already authenticates peers as the current desktop user, which is the
 //! same boundary provided by the other Secret Service implementations.
+//! Item metadata stays in the encrypted vault. Searches while sealed return
+//! IsLocked immediately; users must unlock Desktop before credential lookup.
 //!
 //! Two hosts exist: the graphical Desktop, which serves the adapter for the
 //! whole session and bridges to its vault worker over the native socket, and
@@ -39,7 +41,7 @@ pub use agent::NAMESPACE;
 use agent::{Agent, Store};
 #[cfg(test)]
 use agent::{INDEX_ITEM, Index};
-use interfaces::{Collection, Item, Prompt, Service};
+use interfaces::{Collection, Item, Prompt, Service, Session};
 
 const BUS_NAME: &str = "org.freedesktop.secrets";
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
@@ -137,8 +139,9 @@ impl SecretServiceHost {
         self.send(Command::Uninstall)
     }
 
-    /// Complete every pending prompt as dismissed, for a host whose unlock
-    /// interface went away without unsealing.
+    /// Complete pending prompts as dismissed, for a host whose unlock
+    /// interface went away without unsealing. Uninvoked prompts retain the
+    /// result until the client calls `Prompt`.
     pub fn dismiss_prompts(&self) -> VaultResult<()> {
         self.send(Command::DismissPrompts)
     }
@@ -220,8 +223,14 @@ enum Command {
 struct Shared {
     agent: RwLock<Option<Arc<Agent>>>,
     sessions: Mutex<HashMap<String, SessionState>>,
-    prompts: Mutex<Vec<String>>,
+    prompts: Mutex<HashMap<String, PromptState>>,
     prompter: Arc<dyn SecretServicePrompter>,
+}
+
+enum PromptState {
+    Waiting,
+    Invoked,
+    Completed { dismissed: bool },
 }
 
 impl Shared {
@@ -229,7 +238,7 @@ impl Shared {
         Self {
             agent: RwLock::new(None),
             sessions: Mutex::new(HashMap::new()),
-            prompts: Mutex::new(Vec::new()),
+            prompts: Mutex::new(HashMap::new()),
             prompter,
         }
     }
@@ -250,28 +259,56 @@ impl Shared {
     }
 
     fn register_prompt(&self, path: String) -> fdo::Result<()> {
-        self.prompts.lock().map_err(poisoned)?.push(path);
+        self.prompts
+            .lock()
+            .map_err(poisoned)?
+            .insert(path, PromptState::Waiting);
         Ok(())
     }
 
-    fn prompt_pending(&self, path: &str) -> fdo::Result<bool> {
+    // Invocation and host completion share a lock so exactly one emits Completed.
+    fn invoke_prompt(&self, path: &str) -> fdo::Result<Option<bool>> {
+        let mut prompts = self.prompts.lock().map_err(poisoned)?;
+        let state = prompts.get_mut(path).ok_or_else(|| {
+            fdo::Error::Failed("Secret Service prompt already completed".to_owned())
+        })?;
+        let dismissed = match state {
+            PromptState::Completed { dismissed } => Some(*dismissed),
+            _ if !self.locked() => Some(false),
+            _ => None,
+        };
+        if dismissed.is_some() {
+            prompts.remove(path);
+        } else {
+            *state = PromptState::Invoked;
+        }
+        Ok(dismissed)
+    }
+
+    fn take_prompt(&self, path: &str) -> fdo::Result<bool> {
         Ok(self
             .prompts
             .lock()
             .map_err(poisoned)?
-            .iter()
-            .any(|pending| pending == path))
+            .remove(path)
+            .is_some())
     }
 
-    fn take_prompt(&self, path: &str) -> fdo::Result<bool> {
+    fn take_prompts(&self, dismissed: bool) -> fdo::Result<Vec<String>> {
         let mut prompts = self.prompts.lock().map_err(poisoned)?;
-        let before = prompts.len();
-        prompts.retain(|pending| pending != path);
-        Ok(prompts.len() != before)
-    }
-
-    fn take_prompts(&self) -> fdo::Result<Vec<String>> {
-        Ok(std::mem::take(&mut *self.prompts.lock().map_err(poisoned)?))
+        let mut ready = Vec::new();
+        prompts.retain(|path, state| {
+            if matches!(state, PromptState::Invoked) {
+                ready.push(path.clone());
+                false
+            } else {
+                if matches!(state, PromptState::Waiting) {
+                    *state = PromptState::Completed { dismissed };
+                }
+                true
+            }
+        });
+        Ok(ready)
     }
 
     fn open_session(
@@ -288,6 +325,20 @@ impl Shared {
         }
         sessions.insert(path, SessionState { owner, session });
         Ok(())
+    }
+
+    fn discard_client_sessions(&self, owner: &str) -> fdo::Result<Vec<String>> {
+        let mut sessions = self.sessions.lock().map_err(poisoned)?;
+        let mut paths = Vec::new();
+        sessions.retain(|path, session| {
+            if session.owner == owner {
+                paths.push(path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        Ok(paths)
     }
 
     fn close_session(&self, path: &str, owner: &str) -> fdo::Result<()> {
@@ -383,6 +434,33 @@ fn run_frontend(
         })?;
     runtime.block_on(async move {
         let connection = Connection::session().await.map_err(dbus_error)?;
+        let bus = fdo::DBusProxy::new(&connection).await.map_err(dbus_error)?;
+        // Subscribe before publishing the service, including clients which
+        // disconnect while their OpenSession reply is being prepared.
+        let mut changes = bus.receive_name_owner_changed().await.map_err(dbus_error)?;
+        let cleanup_shared = Arc::clone(shared);
+        let cleanup_connection = connection.clone();
+        let cleanup = tokio::spawn(async move {
+            use zbus::export::futures_core::Stream;
+            while let Some(change) =
+                std::future::poll_fn(|cx| std::pin::Pin::new(&mut changes).poll_next(cx)).await
+            {
+                let Ok(args) = change.args() else {
+                    continue;
+                };
+                if args.new_owner().is_some() || !args.name().as_str().starts_with(':') {
+                    continue;
+                }
+                if let Ok(paths) = cleanup_shared.discard_client_sessions(args.name().as_str()) {
+                    for path in paths {
+                        let _ = cleanup_connection
+                            .object_server()
+                            .remove::<Session, _>(path)
+                            .await;
+                    }
+                }
+            }
+        });
         // Register every object before claiming the name, so a caller queued
         // on the name never reaches an empty service.
         let server = connection.object_server();
@@ -418,6 +496,7 @@ fn run_frontend(
         complete_prompts(shared, server, true).await;
         uninstall(shared, server).await;
         let _ = connection.release_name(BUS_NAME).await;
+        cleanup.abort();
         Ok(())
     })
 }
@@ -559,12 +638,12 @@ async fn announce_lock_state(server: &ObjectServer) {
 }
 
 async fn complete_prompts(shared: &Arc<Shared>, server: &ObjectServer, dismissed: bool) {
-    let Ok(paths) = shared.take_prompts() else {
+    let Ok(paths) = shared.take_prompts(dismissed) else {
         return;
     };
     for path in paths {
         if let Ok(prompt) = server.interface::<_, Prompt>(path.as_str()).await
-            && let Ok(result) = prompt_result(dismissed)
+            && let Ok(result) = prompt.get().await.result(dismissed)
         {
             let _ = Prompt::completed(prompt.signal_emitter(), dismissed, result).await;
         }
@@ -574,14 +653,11 @@ async fn complete_prompts(shared: &Arc<Shared>, server: &ObjectServer, dismissed
 
 /// `Unlock` prompts complete with the unlocked object paths, or with an
 /// empty string when dismissed, matching the reference implementations.
-fn prompt_result(dismissed: bool) -> fdo::Result<OwnedValue> {
+fn prompt_result(dismissed: bool, objects: Vec<OwnedObjectPath>) -> fdo::Result<OwnedValue> {
     if dismissed {
         OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).map_err(failed)
     } else {
-        OwnedValue::try_from(zbus::zvariant::Value::from(vec![object_path(
-            COLLECTION_PATH,
-        )?]))
-        .map_err(failed)
+        OwnedValue::try_from(zbus::zvariant::Value::from(objects)).map_err(failed)
     }
 }
 
@@ -715,6 +791,22 @@ mod tests {
     fn an_owned_secret_service_name_is_a_nonfatal_integration_conflict() {
         assert!(!secret_service_name_claimed(Err::<(), _>(zbus::Error::NameTaken)).unwrap());
         assert!(secret_service_name_claimed(Ok(())).unwrap());
+    }
+
+    #[test]
+    fn completion_waits_for_invocation_and_is_consumed_once() {
+        for dismissed in [false, true] {
+            let (sender, _) = mpsc::unbounded_channel();
+            let shared = Shared::new(Arc::new(ChannelPrompter(sender)));
+            shared.register_prompt("early".to_owned()).unwrap();
+            shared.register_prompt("late".to_owned()).unwrap();
+            assert_eq!(shared.invoke_prompt("early").unwrap(), None);
+            assert_eq!(shared.take_prompts(dismissed).unwrap(), vec!["early"]);
+            assert_eq!(shared.invoke_prompt("late").unwrap(), Some(dismissed));
+            assert!(shared.invoke_prompt("early").is_err());
+            assert!(shared.invoke_prompt("late").is_err());
+            assert!(shared.take_prompts(dismissed).unwrap().is_empty());
+        }
     }
 
     fn test_service() -> (tempfile::TempDir, Arc<VaultService>, CallerIdentity) {
@@ -998,6 +1090,274 @@ mod tests {
         });
     }
 
+    #[test]
+    fn item_unlock_results_preserve_requested_paths() {
+        let (_directory, agent) = agent();
+        let (item, _) = agent
+            .create_or_replace(
+                "Example".to_owned(),
+                HashMap::new(),
+                &Zeroizing::new(b"value".to_vec()),
+                "text/plain".to_owned(),
+                false,
+            )
+            .unwrap();
+        let (sender, _) = mpsc::unbounded_channel();
+        let shared = Arc::new(Shared::new(Arc::new(ChannelPrompter(sender))));
+        let item_path = item_path(&item.id).unwrap();
+        let alias = object_path(DEFAULT_ALIAS_PATH).unwrap();
+        let missing = object_path(&format!("{ITEM_PREFIX}missing")).unwrap();
+        shared.set_agent(Some(Arc::new(agent))).unwrap();
+        let prompt = Prompt {
+            shared,
+            path: "unused".to_owned(),
+            objects: vec![item_path.clone(), alias.clone(), missing],
+        };
+        assert_eq!(
+            Vec::<OwnedObjectPath>::try_from(prompt.result(false).unwrap()).unwrap(),
+            vec![item_path, alias],
+        );
+    }
+
+    #[test]
+    fn sealed_search_requires_manual_unlock() {
+        let (sender, mut requested) = mpsc::unbounded_channel();
+        let shared = Arc::new(Shared::new(Arc::new(ChannelPrompter(sender))));
+        let service = Service {
+            shared: Arc::clone(&shared),
+        };
+        let collection = Collection { shared };
+        assert!(matches!(
+            service.search_items(HashMap::new()),
+            Err(SecretServiceError::IsLocked(_))
+        ));
+        assert!(matches!(
+            collection.search_items(HashMap::new()),
+            Err(SecretServiceError::IsLocked(_))
+        ));
+        assert!(requested.try_recv().is_err());
+    }
+
+    async fn wait_for_no_sessions(host: &SecretServiceHost) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if host.shared.sessions.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("disconnected clients must release sessions");
+    }
+
+    /// Run with FACTORSEAL_TEST_SECRET_TOOL pointing to libsecret's secret-tool
+    /// on an isolated bus. This exercises a real client's lookup state machine.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn libsecret_store_seal_lookup() {
+        let Some(tool) = std::env::var_os("FACTORSEAL_TEST_SECRET_TOOL") else {
+            return;
+        };
+        runtime().block_on(async {
+            let probe = free_session_bus()
+                .await
+                .expect("test needs an isolated, unused bus");
+            let client = Connection::session().await.unwrap();
+            let bus = fdo::DBusProxy::new(&client).await.unwrap();
+            let mut owners = bus
+                .receive_name_owner_changed_with_args(&[(0, BUS_NAME)])
+                .await
+                .unwrap();
+            let (directory, service, caller) = test_service();
+            let (sender, mut requested) = mpsc::unbounded_channel();
+            let host = SecretServiceHost::start_with(
+                Arc::new(ChannelPrompter(sender)),
+                Duration::from_millis(1),
+            )
+            .unwrap();
+            probe.release_name(BUS_NAME).await.unwrap();
+            loop {
+                if next(&mut owners)
+                    .await
+                    .unwrap()
+                    .args()
+                    .unwrap()
+                    .new_owner()
+                    .is_some()
+                {
+                    break;
+                }
+            }
+            host.install_store(Store::in_process(Arc::clone(&service), caller.clone()))
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            let stored = tokio::task::spawn_blocking({
+                let tool = tool.clone();
+                move || {
+                    use std::io::Write as _;
+                    use std::process::{Command, Stdio};
+                    let mut child = Command::new(tool)
+                        .args([
+                            "store",
+                            "--label=Regression",
+                            "service",
+                            "factorseal-regression",
+                        ])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    child
+                        .stdin
+                        .take()
+                        .unwrap()
+                        .write_all(b"regression-secret")
+                        .unwrap();
+                    child.wait_with_output().unwrap()
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                stored.status.success(),
+                "{}",
+                String::from_utf8_lossy(&stored.stderr)
+            );
+            let collection = Proxy::new(
+                &client,
+                BUS_NAME,
+                COLLECTION_PATH,
+                "org.freedesktop.Secret.Collection",
+            )
+            .await
+            .unwrap();
+            let mut changes = collection.receive_property_changed::<bool>("Locked").await;
+            service.seal().unwrap();
+            host.uninstall().unwrap();
+            loop {
+                if next(&mut changes).await.unwrap().get().await.unwrap() {
+                    break;
+                }
+            }
+            drop(service);
+            // Restart sealed: neither search metadata nor secret values are
+            // available until the user manually unlocks Desktop.
+            drop(host);
+            while next(&mut owners)
+                .await
+                .unwrap()
+                .args()
+                .unwrap()
+                .new_owner()
+                .is_some()
+            {}
+            let (sender, mut requested_after_restart) = mpsc::unbounded_channel();
+            let host = SecretServiceHost::start_with(
+                Arc::new(ChannelPrompter(sender)),
+                Duration::from_millis(1),
+            )
+            .unwrap();
+            while next(&mut owners)
+                .await
+                .unwrap()
+                .args()
+                .unwrap()
+                .new_owner()
+                .is_none()
+            {}
+            assert!(!host.is_installed());
+            let sealed_lookup = tokio::task::spawn_blocking({
+                let tool = tool.clone();
+                move || {
+                    std::process::Command::new(tool)
+                        .args(["lookup", "service", "factorseal-regression"])
+                        .output()
+                        .unwrap()
+                }
+            });
+            let result = tokio::time::timeout(Duration::from_secs(5), sealed_lookup)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!result.status.success());
+            assert!(String::from_utf8_lossy(&result.stderr).contains("sealed"));
+            assert!(result.stdout.is_empty());
+            wait_for_no_sessions(&host).await;
+            assert!(requested.try_recv().is_err());
+            assert!(requested_after_restart.try_recv().is_err());
+            assert!(
+                !directory
+                    .path()
+                    .join("factorseal/secret-service-metadata.json")
+                    .exists()
+            );
+            // Simulate manual unlock; ordinary lookup must then succeed.
+            let root = directory.path().join("factorseal");
+            let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
+            let service =
+                Arc::new(VaultService::new(store, 100, UnsealLeasePolicy::default()).unwrap());
+            service
+                .authorize_secret_service_namespace(
+                    &caller,
+                    NAMESPACE,
+                    SECRET_SERVICE_PERMISSIONS,
+                    100,
+                )
+                .unwrap();
+            host.install_store(Store::in_process(service, caller))
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            let lookup = tokio::task::spawn_blocking(move || {
+                std::process::Command::new(tool)
+                    .args(["lookup", "service", "factorseal-regression"])
+                    .output()
+                    .unwrap()
+            });
+            let result = tokio::time::timeout(Duration::from_secs(10), lookup)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(result.stdout, b"regression-secret");
+            wait_for_no_sessions(&host).await;
+            // More short-lived connections than the global limit must remain
+            // usable without asking clients to explicitly Close on shutdown.
+            for _ in 0..=MAX_SESSIONS {
+                let transient = Connection::session().await.unwrap();
+                let proxy = Proxy::new(
+                    &transient,
+                    BUS_NAME,
+                    SERVICE_PATH,
+                    "org.freedesktop.Secret.Service",
+                )
+                .await
+                .unwrap();
+                let input =
+                    OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
+                let (_, path): (OwnedValue, OwnedObjectPath) =
+                    proxy.call("OpenSession", &("plain", input)).await.unwrap();
+                drop(proxy);
+                transient.close().await.unwrap();
+                wait_for_no_sessions(&host).await;
+                let stale = Proxy::new(&client, BUS_NAME, path, "org.freedesktop.Secret.Session")
+                    .await
+                    .unwrap();
+                assert!(stale.call::<_, _, ()>("Close", &()).await.is_err());
+            }
+        });
+    }
+
     async fn unlock_prompt(client: &Connection, service: &Proxy<'_>) -> Proxy<'static> {
         let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = service
             .call("Unlock", &(vec![object_path(COLLECTION_PATH).unwrap()],))
@@ -1096,7 +1456,16 @@ mod tests {
             let mut completed = prompt.receive_signal("Completed").await.unwrap();
             prompt.call::<_, _, ()>("Prompt", &("",)).await.unwrap();
             prompted.recv().await.expect("host asked to unlock");
+            // This client invokes Prompt only after Desktop finishes unlocking.
             let (_directory, vault_service, caller) = test_service();
+            let agent = Agent::load(Store::in_process(Arc::clone(&vault_service), caller.clone())).unwrap();
+            let (item, _) = agent.create_or_replace(
+                "Example".to_owned(), HashMap::new(), &Zeroizing::new(b"value".to_vec()),
+                "text/plain".to_owned(), false,
+            ).unwrap();
+            let requested = vec![item_path(&item.id).unwrap(), object_path(DEFAULT_ALIAS_PATH).unwrap()];
+            let (_, path): (Vec<OwnedObjectPath>, OwnedObjectPath) = service.call("Unlock", &(requested.clone(),)).await.unwrap();
+            let late_prompt = Proxy::new(&client, BUS_NAME, path, "org.freedesktop.Secret.Prompt").await.unwrap();
             host.install_store(Store::in_process(vault_service, caller))
                 .unwrap()
                 .await
@@ -1108,6 +1477,12 @@ mod tests {
                 Vec::<OwnedObjectPath>::try_from(result).unwrap(),
                 vec![object_path(COLLECTION_PATH).unwrap()]
             );
+            let mut late_completed = late_prompt.receive_signal("Completed").await.unwrap();
+            late_prompt.call::<_, _, ()>("Prompt", &("",)).await.unwrap();
+            let (dismissed, result) = completion(&late_prompt, &mut late_completed).await;
+            assert!(!dismissed);
+            assert_eq!(Vec::<OwnedObjectPath>::try_from(result).unwrap(), requested);
+            assert!(prompted.try_recv().is_err());
             assert!(host.is_installed());
             assert!(!collection.get_property::<bool>("Locked").await.unwrap());
             assert!(prompt.call::<_, _, ()>("Prompt", &("",)).await.is_err());
@@ -1134,6 +1509,7 @@ mod tests {
             // interface goes away.
             let prompt = unlock_prompt(&client, &service).await;
             let mut completed = prompt.receive_signal("Completed").await.unwrap();
+            prompt.call::<_, _, ()>("Prompt", &("",)).await.unwrap();
             host.dismiss_prompts().unwrap();
             let (dismissed, _) = completion(&prompt, &mut completed).await;
             assert!(dismissed);

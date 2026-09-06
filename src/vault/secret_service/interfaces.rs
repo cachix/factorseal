@@ -38,9 +38,10 @@ pub(super) struct Item {
 pub(super) struct Prompt {
     pub(super) shared: Arc<Shared>,
     pub(super) path: String,
+    pub(super) objects: Vec<OwnedObjectPath>,
 }
 
-struct Session {
+pub(super) struct Session {
     shared: Arc<Shared>,
     path: String,
 }
@@ -75,6 +76,7 @@ impl Service {
         input: OwnedValue,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
         let input = session_input(&algorithm, input)?;
         let (session, output) = ProtocolSession::open(&algorithm, &input).map_err(failed)?;
@@ -98,20 +100,33 @@ impl Service {
             let _ = self.shared.close_session(&path, &owner);
             return Err(failed(error));
         }
+        // The disconnect watcher may have removed the session while at()
+        // was awaiting registration. Do not leave an orphan object behind.
+        let alive = async {
+            fdo::DBusProxy::new(connection)
+                .await
+                .map_err(failed)?
+                .name_has_owner(zbus::names::BusName::try_from(owner.as_str()).map_err(failed)?)
+                .await
+        }
+        .await;
+        if !matches!(alive, Ok(true)) || self.shared.session(&object_path, &owner).is_err() {
+            let _ = self.shared.close_session(&path, &owner);
+            let _ = server.remove::<Session, _>(path.as_str()).await;
+            return Err(failed("Secret Service client disconnected"));
+        }
         Ok((session_output(output)?, object_path))
     }
 
-    /// While sealed the index is unreadable, so nothing can be matched; the
-    /// collection itself reports `Locked` and `Unlock` produces the prompt.
+    /// The search index is encrypted. Report IsLocked immediately rather than
+    /// inventing a missing credential or waiting for UI within a method call.
     #[zbus(out_args("unlocked", "locked"))]
-    fn search_items(
+    pub(super) fn search_items(
         &self,
         attributes: HashMap<String, String>,
-    ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
-        match self.shared.agent() {
-            Ok(agent) => Ok((matching_items(&agent, &attributes)?, Vec::new())),
-            Err(_) => Ok((Vec::new(), Vec::new())),
-        }
+    ) -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>), SecretServiceError> {
+        let agent = self.shared.agent()?;
+        Ok((matching_items(&agent, &attributes)?, Vec::new()))
     }
 
     /// Unsealed objects are already unlocked. Sealed ones need the host to
@@ -122,8 +137,18 @@ impl Service {
         objects: Vec<OwnedObjectPath>,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
-        if !self.shared.locked() {
-            return Ok((objects, root_path()?));
+        if objects.is_empty() || !self.shared.locked() {
+            return Ok((unlocked_objects(&self.shared, objects)?, root_path()?));
+        }
+        let objects: Vec<_> = objects
+            .into_iter()
+            .filter(|path| {
+                matches!(path.as_str(), COLLECTION_PATH | DEFAULT_ALIAS_PATH)
+                    || item_id(path.as_str()).is_ok()
+            })
+            .collect();
+        if objects.is_empty() {
+            return Ok((Vec::new(), root_path()?));
         }
         let path = format!("{PROMPT_PREFIX}{}", random_id().map_err(failed)?);
         server
@@ -132,6 +157,7 @@ impl Service {
                 Prompt {
                     shared: Arc::clone(&self.shared),
                     path: path.clone(),
+                    objects,
                 },
             )
             .await
@@ -203,14 +229,12 @@ impl Service {
 #[interface(name = "org.freedesktop.Secret.Collection")]
 impl Collection {
     #[zbus(out_args("results",))]
-    fn search_items(
+    pub(super) fn search_items(
         &self,
         attributes: HashMap<String, String>,
-    ) -> fdo::Result<Vec<OwnedObjectPath>> {
-        match self.shared.agent() {
-            Ok(agent) => matching_items(&agent, &attributes),
-            Err(_) => Ok(Vec::new()),
-        }
+    ) -> Result<Vec<OwnedObjectPath>, SecretServiceError> {
+        let agent = self.shared.agent()?;
+        Ok(matching_items(&agent, &attributes)?)
     }
 
     #[zbus(out_args("item", "prompt"))]
@@ -367,15 +391,25 @@ impl Session {
 impl Prompt {
     /// Ask the host to unseal. `Completed` follows from the host, either when
     /// the vault is published or when the host reports the prompt dismissed.
-    fn prompt(&self, window_id: String) -> fdo::Result<()> {
+    async fn prompt(
+        &self,
+        window_id: String,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        #[zbus(object_server)] server: &ObjectServer,
+    ) -> fdo::Result<()> {
         // The host raises its own window; a parent window hint is not used.
         drop(window_id);
-        if !self.shared.prompt_pending(&self.path)? {
-            return Err(fdo::Error::Failed(
-                "Secret Service prompt already completed".to_owned(),
-            ));
+        if let Some(dismissed) = self.shared.invoke_prompt(&self.path)? {
+            Self::completed(&emitter, dismissed, self.result(dismissed)?)
+                .await
+                .map_err(failed)?;
+            server
+                .remove::<Prompt, _>(self.path.as_str())
+                .await
+                .map_err(failed)?;
+        } else {
+            self.shared.prompter.request_unlock();
         }
-        self.shared.prompter.request_unlock();
         Ok(())
     }
 
@@ -385,7 +419,7 @@ impl Prompt {
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<()> {
         if self.shared.take_prompt(&self.path)? {
-            Self::completed(&emitter, true, prompt_result(true)?)
+            Self::completed(&emitter, true, self.result(true)?)
                 .await
                 .map_err(failed)?;
         }
@@ -402,4 +436,33 @@ impl Prompt {
         dismissed: bool,
         result: OwnedValue,
     ) -> zbus::Result<()>;
+}
+
+/// Return only requested objects that actually exist in the published vault.
+fn unlocked_objects(
+    shared: &Shared,
+    objects: Vec<OwnedObjectPath>,
+) -> fdo::Result<Vec<OwnedObjectPath>> {
+    let Ok(agent) = shared.agent() else {
+        return Ok(Vec::new());
+    };
+    let ids = agent.item_ids().map_err(failed)?;
+    Ok(objects
+        .into_iter()
+        .filter(|path| {
+            matches!(path.as_str(), COLLECTION_PATH | DEFAULT_ALIAS_PATH)
+                || item_id(path.as_str()).is_ok_and(|id| ids.iter().any(|existing| existing == id))
+        })
+        .collect())
+}
+
+impl Prompt {
+    pub(super) fn result(&self, dismissed: bool) -> fdo::Result<OwnedValue> {
+        let objects = if dismissed {
+            Vec::new()
+        } else {
+            unlocked_objects(&self.shared, self.objects.clone())?
+        };
+        prompt_result(dismissed, objects)
+    }
 }

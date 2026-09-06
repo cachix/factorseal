@@ -4,6 +4,9 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Keep Secret Service search metadata encrypted. Sealed searches return
+  `IsLocked` immediately and require manual Desktop unlock before lookup.
+
 The current formats are metadata v8, database schema v5, snapshot envelope v7,
 protected commit v6, document v3, record v2, and native protocol v9. Database
 schema v3 is authenticated and migrated transactionally after unseal: current

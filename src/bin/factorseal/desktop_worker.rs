@@ -107,12 +107,9 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
             .map_err(|e| CliError::DesktopLaunch(e.to_string()))?;
             *reported = true;
             super::platform::serve_vault(
-                &device,
-                &service,
-                root,
-                socket,
-                &lifecycle,
-                !hosts_secret_service,
+                &device, &service, root, socket, &lifecycle,
+                // Desktop owns the adapter policy, including opting out.
+                false,
             )?;
         }
         Ok(())

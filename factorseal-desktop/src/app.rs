@@ -3188,11 +3188,8 @@ fn sync_secret_service(snapshot: &Snapshot, cx: &mut App) {
             | Snapshot::Sealing { .. }
             | Snapshot::Uninitialized { .. }
             | Snapshot::Error(_) => {
-                if host.is_installed() {
-                    host.uninstall()
-                } else {
-                    Ok(())
-                }
+                // Queue behind any install that has not published its agent yet.
+                host.uninstall()
             }
         };
         if let Err(error) = result {
