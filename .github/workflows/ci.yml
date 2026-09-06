@@ -40,7 +40,7 @@ jobs:
       - name: Install native Linux package dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libdbus-1-dev pkg-config
+          sudo apt-get install --yes libdbus-1-dev libsecret-tools pkg-config
       - name: Install devenv
         run: nix profile add nixpkgs#devenv
       - name: Check formatting
@@ -52,6 +52,7 @@ jobs:
           devenv shell -- sh -c '
             dbus_config="$(dirname "$(command -v dbus-daemon)")/../share/dbus-1/session.conf"
             dbus-run-session --config-file "$dbus_config" -- cargo test --workspace --all-targets --all-features
+            dbus-run-session --config-file "$dbus_config" -- env FACTORSEAL_TEST_SECRET_TOOL=/usr/bin/secret-tool cargo test --lib libsecret_store_seal_lookup
           '
       - name: Check the feature combinations packagers and embedders build
         run: |

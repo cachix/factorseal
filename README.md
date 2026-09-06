@@ -113,17 +113,18 @@ $ factorseal desktop
 ```
 
 Desktop initializes and unseals the same vault through a dedicated CLI worker,
-which hosts the authenticated endpoint and Linux `org.freedesktop.secrets`
-adapter. The GUI uses authenticated IPC and releases its unlock password after
+which hosts the authenticated endpoint. On Linux, Desktop hosts the
+`org.freedesktop.secrets` adapter and accesses the worker through authenticated
+IPC. The GUI releases its unlock password after
 handoff; the worker wipes that factor before serving. Install the CLI alongside
 Desktop or set `FACTORSEAL_CLI_EXECUTABLE` to its absolute path. It is an
 alternative to `factorseal agent`, not a client of it, so do not configure both
 to autostart. Repeated Desktop launches activate the existing per-vault
 instance. On Linux, the Desktop package registers D-Bus activation for
-`org.freedesktop.secrets`: a keyring call made while sealed launches or
-activates Desktop, and the bus holds that call until Desktop unseals and claims
-the service name (subject to the calling application's D-Bus timeout). Native
-socket and SecretSpec clients still require Desktop to be unsealed first.
+`org.freedesktop.secrets`. Desktop keeps answering while sealed, but credential
+searches return `IsLocked` immediately: manually unlock Desktop before using
+applications that look up credentials. Native socket and SecretSpec clients
+also require Desktop to be unsealed first.
 Sealing removes the native service endpoint and all unwrapped vault keys.
 
 If the vault does not exist yet, `factorseal agent` stays alive, logs the
@@ -489,12 +490,16 @@ macOS, and Windows.
 ### Linux Secret Service
 
 On Linux, Factorseal Desktop registers `org.freedesktop.secrets` for D-Bus
-activation. A keyring request can therefore launch or activate the sealed
-Desktop; after interactive unsealing, the existing Secret Service adapter owns
-the name and handles the queued request. The caller's D-Bus timeout still
-bounds how long authentication may take. Do not run another provider that owns
-that bus name, such as GNOME Keyring or oo7, at the same time. macOS Keychain
-and Windows Credential Manager remain separate platform interfaces.
+activation and serves a locked collection while the vault is sealed. Item
+labels and lookup attributes remain in the encrypted index; no plaintext search
+cache is written. Manually unlock Desktop before credential lookup. Sealed
+searches return `org.freedesktop.Secret.Error.IsLocked` immediately, without
+opening an unlock window or reporting that the credential is missing. Clients
+that explicitly call `Unlock` can still use the normal prompt flow.
+
+Do not run another provider that owns that bus name, such as GNOME Keyring or
+oo7, at the same time. macOS Keychain and Windows Credential Manager remain
+separate platform interfaces.
 
 ## Vault lifecycle
 

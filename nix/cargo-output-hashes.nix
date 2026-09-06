@@ -8,6 +8,7 @@
   "gpui-component-0.5.2" = "sha256-1x467getYUbc0A7jy8JG2phrhfD/5aT297bcb7Fp5Lg=";
   "gpui-component-assets-0.5.1" = "sha256-1x467getYUbc0A7jy8JG2phrhfD/5aT297bcb7Fp5Lg=";
   "gpui-component-macros-0.5.1" = "sha256-1x467getYUbc0A7jy8JG2phrhfD/5aT297bcb7Fp5Lg=";
+  "gpui-tray-0.1.0" = "0l2nq33pl94gsqlcbzx61dmbzcq3pamgcvzwy06zcg1ka76na7fr";
   "gpui_apple-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "gpui_linux-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "gpui_macos-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";

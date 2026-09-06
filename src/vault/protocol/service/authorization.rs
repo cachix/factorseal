@@ -161,6 +161,23 @@ impl VaultService {
     /// Make the current build of the built-in Linux Secret Service adapter the
     /// sole holder of its namespace. A superseded build loses its grants in
     /// the same generation, and an unchanged build writes nothing.
+    /// Give `caller` the exclusive adapter grant that lets it serve
+    /// `org.freedesktop.secrets` through the vault protocol. The desktop worker
+    /// issues it to the Desktop executable that hosts the adapter.
+    #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
+    pub fn authorize_secret_service_host(
+        &self,
+        caller: &CallerIdentity,
+        now: u64,
+    ) -> VaultResult<()> {
+        self.authorize_secret_service_namespace(
+            caller,
+            crate::vault::SECRET_SERVICE_NAMESPACE,
+            crate::vault::secret_service::SECRET_SERVICE_PERMISSIONS,
+            now,
+        )
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn authorize_secret_service_namespace(
         &self,

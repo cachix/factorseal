@@ -40,7 +40,7 @@ let
   configuredDesktop = pkgs.lib.findFirst (
     package: package.name == "factorseal-desktop-configured"
   ) (throw "configured desktop missing from D-Bus packages") evaluated.services.dbus.packages;
-  autostart = evaluated.environment.etc."xdg/autostart/dev.factorseal.Desktop.desktop".text;
+  desktopUnit = evaluated.systemd.user.services."dev.factorseal.Desktop";
 in
 assert !(builtins.hasAttr "factorseal" evaluated.systemd.user.services);
 assert builtins.elem package evaluated.environment.systemPackages;
@@ -51,7 +51,11 @@ assert
 assert evaluated.environment.variables.FACTORSEAL_CLI_EXECUTABLE == "${package}/bin/factorseal";
 assert evaluated.environment.variables.FACTORSEAL_IDLE_SECONDS == "45";
 assert evaluated.environment.variables.FACTORSEAL_MAXIMUM_SECONDS == "900";
-assert pkgs.lib.hasInfix "factorseal-desktop --background" autostart;
+assert !(builtins.hasAttr "xdg/autostart/dev.factorseal.Desktop.desktop" evaluated.environment.etc);
+assert desktopUnit.serviceConfig.Type == "dbus";
+assert desktopUnit.serviceConfig.BusName == "org.freedesktop.secrets";
+assert desktopUnit.serviceConfig.ExecStart == "${configuredDesktop}/bin/factorseal-desktop --background";
+assert builtins.elem "graphical-session.target" desktopUnit.wantedBy;
 pkgs.runCommand "factorseal-desktop-module-evaluation" { } ''
   executable=${configuredDesktop}/bin/factorseal-desktop
   # Start the actual D-Bus Exec command with no session environment.
@@ -61,5 +65,6 @@ pkgs.runCommand "factorseal-desktop-module-evaluation" { } ''
   printf '%s\n' '${package}/bin/factorseal' 45 900 --keyring-activation > expected
   diff -u expected actual
   grep -Fx "Exec=$executable" ${configuredDesktop}/share/applications/dev.factorseal.Desktop.desktop
+  grep -Fx "SystemdService=dev.factorseal.Desktop.service" ${configuredDesktop}/share/dbus-1/services/org.freedesktop.secrets.service
   touch "$out"
 ''

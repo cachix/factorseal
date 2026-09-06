@@ -132,15 +132,13 @@ pub(super) fn serve_vault(
     root: &Path,
     socket: Option<&Path>,
     lifecycle: &NativeVaultLifecycle,
+    install_secret_service: bool,
     ready: impl FnOnce() -> factorseal::VaultResult<()>,
 ) -> Result<(), CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    serve_linux_vault_with_ready(
-        service,
-        &LinuxVaultOptions::new(socket),
-        Some(lifecycle),
-        ready,
-    )?;
+    let mut options = LinuxVaultOptions::new(socket);
+    options.install_secret_service = install_secret_service;
+    serve_linux_vault_with_ready(service, &options, Some(lifecycle), ready)?;
     Ok(())
 }
 
@@ -151,6 +149,7 @@ pub(super) fn serve_vault(
     root: &Path,
     socket: Option<&Path>,
     lifecycle: &NativeVaultLifecycle,
+    _install_secret_service: bool,
     ready: impl FnOnce() -> factorseal::VaultResult<()>,
 ) -> Result<(), CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
@@ -170,6 +169,7 @@ pub(super) fn serve_vault(
     _root: &Path,
     socket: Option<&Path>,
     lifecycle: &NativeVaultLifecycle,
+    _install_secret_service: bool,
     ready: impl FnOnce() -> factorseal::VaultResult<()>,
 ) -> Result<(), CliError> {
     let pipe_name = socket.map_or_else(

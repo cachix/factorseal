@@ -36,6 +36,7 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
         desktop_executable,
         operation,
         password,
+        hosts_secret_service,
     } = timing::result("desktop_worker", "receive_bootstrap", || {
         receive(&mut std::io::stdin())
     })
@@ -103,20 +104,28 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
             .lock()
             .map_err(|_| CliError::DesktopLaunch("owner lock unavailable".to_owned()))? =
             Arc::downgrade(&service);
-        authorize_hosts(&service, &hosts, now)?;
+        authorize_hosts(&service, &hosts, now, hosts_secret_service)?;
         if initializing {
             service.seal()?;
             Vault::complete_initialization(root)?;
         } else {
             factorseal::diagnostics::event("worker", "serve_vault", "start");
-            super::platform::serve_vault(&device, &service, root, socket, &lifecycle, || {
-                timing::result("desktop_worker", "send_ready", || {
-                    send(&mut std::io::stdout(), &Ok::<(), String>(()))
-                })
-                .map_err(|e| factorseal::VaultError::Protocol(e.to_string()))?;
-                *reported = true;
-                Ok(())
-            })?;
+            super::platform::serve_vault(
+                &device,
+                &service,
+                root,
+                socket,
+                &lifecycle,
+                false,
+                || {
+                    timing::result("desktop_worker", "send_ready", || {
+                        send(&mut std::io::stdout(), &Ok::<(), String>(()))
+                    })
+                    .map_err(|e| factorseal::VaultError::Protocol(e.to_string()))?;
+                    *reported = true;
+                    Ok(())
+                },
+            )?;
         }
         Ok(())
     })();
@@ -166,6 +175,7 @@ fn authorize_hosts(
     service: &VaultService,
     hosts: &HostIdentities,
     now: u64,
+    hosts_secret_service: bool,
 ) -> Result<(), CliError> {
     let caller = &hosts.desktop;
     let mut grants = Vec::from(super::commands::cli_authorizations(&hosts.cli));
@@ -211,6 +221,16 @@ fn authorize_hosts(
     timing::result("desktop_worker", "authorize_host_permissions", || {
         service.authorize_batch(&grants, now)
     })?;
+    // The Desktop hosts the Secret Service adapter and reaches the vault
+    // through its own grant; the worker does not claim the bus name then.
+    #[cfg(target_os = "linux")]
+    if hosts_secret_service {
+        timing::result("desktop_worker", "authorize_secret_service_host", || {
+            service.authorize_secret_service_host(caller, now)
+        })?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = hosts_secret_service;
     Ok(())
 }
 

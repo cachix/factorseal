@@ -29,8 +29,12 @@ mod transport;
 
 #[cfg(all(feature = "vault", target_os = "linux"))]
 mod linux;
-#[cfg(all(feature = "vault", target_os = "linux"))]
+#[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 mod secret_service;
+#[cfg(all(feature = "secret-service-host", target_os = "linux"))]
+pub use secret_service::{
+    NAMESPACE as SECRET_SERVICE_NAMESPACE, SecretServiceHost, SecretServicePrompter,
+};
 
 #[cfg(all(feature = "vault", target_os = "macos"))]
 mod macos;

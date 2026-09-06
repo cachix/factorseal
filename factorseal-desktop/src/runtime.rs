@@ -31,6 +31,9 @@ pub(crate) struct RuntimeConfig {
     pub(crate) root: PathBuf,
     pub(crate) socket: Option<PathBuf>,
     pub(crate) lease: LeasePolicy,
+    /// This Desktop serves `org.freedesktop.secrets` and needs the adapter
+    /// grant from every worker it starts.
+    pub(crate) secret_service: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -243,6 +246,18 @@ impl DesktopRuntime {
             return Err("could not start the initialization worker");
         }
         Ok(())
+    }
+
+    /// Native socket client for the Desktop's own vault access, such as the
+    /// Secret Service adapter it hosts.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn vault_client(&self) -> NativeVaultClient {
+        NativeVaultClient::new(
+            self.config
+                .socket
+                .clone()
+                .unwrap_or_else(|| self.config.root.join(DEFAULT_SOCKET)),
+        )
     }
 
     pub(crate) fn seal(&self) -> Result<(), String> {
@@ -549,6 +564,7 @@ impl DesktopRuntime {
             desktop_executable: desktop,
             operation,
             password: WireSecret::new(password.to_vec()),
+            hosts_secret_service: self.config.secret_service,
         };
         drop(password);
         factorseal::desktop_worker::send(
@@ -986,6 +1002,7 @@ mod tests {
             root: directory.path().to_path_buf(),
             socket: None,
             lease: super::lease_policy(300, 28_800).unwrap(),
+            secret_service: false,
         });
         let group = factorseal::UnlockGroup::new([factorseal::UnlockFactorKind::Password]).unwrap();
         let captured = runtime.unlock_operation(group.clone()).unwrap();

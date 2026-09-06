@@ -61,9 +61,12 @@ impl AssetSource for Assets {
 const SECRET_SERVICE_NAME: &str = "org.freedesktop.secrets";
 #[cfg(target_os = "linux")]
 const ACTIVATION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Set to `0` to keep an instance off the system keyring.
+const SECRET_SERVICE_ENV: &str = "FACTORSEAL_DESKTOP_SECRET_SERVICE";
 
 #[derive(Debug, Parser)]
 #[command(name = "factorseal-desktop", version, about = "FactorSeal Desktop")]
+#[allow(clippy::struct_excessive_bools)]
 struct Args {
     /// Vault directory. Defaults to platform-local user data.
     #[arg(long, env = "FACTORSEAL_ROOT")]
@@ -83,6 +86,9 @@ struct Args {
     /// Activate Desktop for a queued Secret Service request.
     #[arg(long, hide = true)]
     keyring_activation: bool,
+    /// Do not serve `org.freedesktop.secrets` from this instance.
+    #[arg(long, hide = true)]
+    no_secret_service: bool,
 
     /// Idle seconds before hardware-unwrapped keys are discarded.
     #[arg(long, env = "FACTORSEAL_IDLE_SECONDS")]
@@ -137,10 +143,18 @@ fn main() {
         factorseal::diagnostics::finish(false);
         std::process::exit(1);
     });
+    // Only the Desktop managing the default vault speaks for the system
+    // keyring. Development instances on another root, and instances asked
+    // not to, leave `org.freedesktop.secrets` to the configured one.
+    let secret_service = cfg!(target_os = "linux")
+        && !args.no_secret_service
+        && args.root.is_none()
+        && std::env::var_os(SECRET_SERVICE_ENV).is_none_or(|value| value != "0");
     let config = runtime::RuntimeConfig {
         root,
         socket: args.socket,
         lease,
+        secret_service,
     };
     let instance = instance::acquire(&config.root, !args.background || args.keyring_activation)
         .unwrap_or_else(|error| {
@@ -166,10 +180,12 @@ fn main() {
     let instance::Instance::Primary {
         _lock: instance_lock,
         activations,
+        activate,
     } = instance
     else {
         unreachable!("secondary Desktop instances return before application startup")
     };
+    let secret_service_host = start_secret_service(secret_service, activate);
     let _crash_reporting =
         crash_reporting::start(saved.automatic_crash_reports).unwrap_or_else(|error| {
             eprintln!("factorseal-desktop: {error}");
@@ -179,7 +195,16 @@ fn main() {
     gpui_platform::application()
         .with_assets(Assets)
         .with_quit_mode(QuitMode::Explicit)
-        .run(move |cx| app::setup(config, args.background, args.no_tray, activations, cx));
+        .run(move |cx| {
+            app::setup(
+                config,
+                args.background,
+                args.no_tray,
+                activations,
+                secret_service_host,
+                cx,
+            );
+        });
     drop(instance_lock);
     factorseal::diagnostics::finish(true);
 }
@@ -211,6 +236,43 @@ fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
             return Err("timed out waiting for Desktop to unseal the keyring".to_owned());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn start_secret_service(
+    enabled: bool,
+    activate: smol::channel::Sender<()>,
+) -> Option<std::sync::Arc<app::SecretServiceHost>> {
+    #[cfg(target_os = "linux")]
+    {
+        if !enabled {
+            return None;
+        }
+        factorseal::SecretServiceHost::start(std::sync::Arc::new(DesktopPrompter { activate }))
+            .map(std::sync::Arc::new)
+            .map_err(|error| {
+                eprintln!("factorseal-desktop: system keyring integration is unavailable: {error}");
+            })
+            .ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (enabled, activate);
+        None
+    }
+}
+
+/// Brings the unlock window forward when a Secret Service client runs a
+/// prompt, exactly as a second `factorseal-desktop` launch would.
+#[cfg(target_os = "linux")]
+struct DesktopPrompter {
+    activate: smol::channel::Sender<()>,
+}
+
+#[cfg(target_os = "linux")]
+impl factorseal::SecretServicePrompter for DesktopPrompter {
+    fn request_unlock(&self) {
+        let _ = self.activate.try_send(());
     }
 }
 

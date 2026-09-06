@@ -70,6 +70,19 @@ struct EventTask {
     _task: Task<()>,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) type SecretServiceHost = factorseal::SecretServiceHost;
+
+/// Placeholder where no Secret Service is hosted.
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct SecretServiceHost;
+
+#[cfg(target_os = "linux")]
+struct SecretServiceGlobal(Option<Arc<SecretServiceHost>>);
+
+#[cfg(target_os = "linux")]
+impl Global for SecretServiceGlobal {}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum SetupMethod {
     #[default]
@@ -3016,6 +3029,7 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
     }
     cx.global_mut::<DesktopStatus>().unsealed = matches!(snapshot, Snapshot::Unsealed { .. });
     refresh_tray(cx);
+    sync_secret_service(snapshot, cx);
     if matches!(snapshot, Snapshot::Unsealed { .. }) {
         crate::timing::finish_unlock("ui_updated", "ok");
     }
@@ -3135,6 +3149,7 @@ fn close_desktop(_: &CloseDesktop, cx: &mut App) {
         return;
     };
     cx.global_mut::<DesktopWindow>().visible = false;
+    dismiss_secret_service_prompts(cx);
     refresh_tray(cx);
     cx.defer(move |cx| {
         if let Err(error) = handle.update(cx, |_, window, _| window.set_visible(false)) {
@@ -3243,7 +3258,6 @@ fn install_tray(cx: &mut App) {
     }
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn refresh_tray_icon(cx: &mut App) {
     let tray = cx.try_global::<DesktopTray>().map(|tray| tray.0.clone());
     let Some(tray) = tray else {
@@ -3293,6 +3307,7 @@ fn open_desktop_window(
                 }
                 window.set_visible(false);
                 cx.global_mut::<DesktopWindow>().visible = false;
+                dismiss_secret_service_prompts(cx);
                 refresh_tray(cx);
                 false
             });
@@ -3311,6 +3326,7 @@ pub(crate) fn setup(
     background: bool,
     no_tray: bool,
     activations: smol::channel::Receiver<()>,
+    secret_service: Option<Arc<SecretServiceHost>>,
     cx: &mut App,
 ) {
     gpui_component::init(cx);
@@ -3325,6 +3341,10 @@ pub(crate) fn setup(
     let (runtime, receiver) = DesktopRuntime::new(config);
     let initial = runtime.inspect();
     cx.set_global(RuntimeGlobal(Arc::clone(&runtime)));
+    #[cfg(target_os = "linux")]
+    cx.set_global(SecretServiceGlobal(secret_service));
+    #[cfg(not(target_os = "linux"))]
+    drop(secret_service);
     cx.set_global(DesktopStatus {
         unsealed: matches!(initial, Snapshot::Unsealed { .. }),
         quitting: false,
@@ -3339,6 +3359,7 @@ pub(crate) fn setup(
         snapshot: initial.clone(),
         refresh_generation: 0,
     });
+    sync_secret_service(&initial, cx);
     let handle = open_desktop_window(
         Arc::clone(&runtime),
         initial,
@@ -3372,6 +3393,59 @@ pub(crate) fn setup(
     .detach();
     if !background {
         cx.activate(true);
+    }
+}
+
+/// Keep the hosted Secret Service in step with the vault: publish the vault
+/// while it is unsealed and lock the collection otherwise. Clients waiting on
+/// an unlock prompt complete once the vault is published.
+fn sync_secret_service(snapshot: &Snapshot, cx: &mut App) {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(host) = cx.global::<SecretServiceGlobal>().0.clone() else {
+            return;
+        };
+        let result = match snapshot {
+            Snapshot::Unsealed { .. } => {
+                if host.is_installed() {
+                    Ok(())
+                } else {
+                    let runtime = Arc::clone(&cx.global::<RuntimeGlobal>().0);
+                    host.install(Box::new(runtime.vault_client()))
+                }
+            }
+            Snapshot::Unlocking { .. } | Snapshot::Initializing => Ok(()),
+            Snapshot::Sealed { .. }
+            | Snapshot::Sealing { .. }
+            | Snapshot::Uninitialized { .. }
+            | Snapshot::Error(_) => {
+                // Queue behind any install that has not published its agent yet.
+                host.uninstall()
+            }
+        };
+        if let Err(error) = result {
+            eprintln!("factorseal-desktop: system keyring integration: {error}");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (snapshot, cx);
+    }
+}
+
+/// A hidden window cannot answer an unlock prompt. Complete pending prompts
+/// as dismissed so waiting clients get an answer instead of a hang.
+fn dismiss_secret_service_prompts(cx: &mut App) {
+    #[cfg(target_os = "linux")]
+    if !cx.global::<DesktopStatus>().unsealed
+        && let Some(host) = &cx.global::<SecretServiceGlobal>().0
+        && let Err(error) = host.dismiss_prompts()
+    {
+        eprintln!("factorseal-desktop: system keyring integration: {error}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = cx;
     }
 }
 

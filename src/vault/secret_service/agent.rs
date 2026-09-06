@@ -1,30 +1,76 @@
+//! Item index and vault access for the Secret Service adapter.
+
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use zbus::fdo;
 use zeroize::Zeroizing;
 
-use super::{SessionState, failed, no_item, poisoned, random_id, secret_item, unix_time};
+use super::{failed, no_item, poisoned, random_id, secret_item, unix_time};
 use crate::vault::{
-    CallerIdentity, VaultAction, VaultError, VaultMutation, VaultRequest, VaultResponseBody,
-    VaultResult, VaultService, WireSecret, WireSecretAddress,
+    VaultAction, VaultClient, VaultError, VaultMutation, VaultRequest, VaultResponse,
+    VaultResponseBody, VaultResult, WireSecret, WireSecretAddress,
 };
 
-pub(super) const NAMESPACE: &[u8] = b"factorseal/secret-service/v1";
+/// Vault namespace holding Secret Service items and their index.
+pub const NAMESPACE: &[u8] = b"factorseal/secret-service/v1";
 pub(super) const INDEX_ITEM: &str = "secret-service-index";
 const INDEX_VERSION: u8 = 1;
 
-#[derive(Clone)]
+/// Where the adapter's vault requests go: the in-process service of the
+/// headless agent, or the native socket of the Desktop's vault worker.
+trait Backend: Send + Sync {
+    fn request(&self, request: VaultRequest) -> VaultResult<VaultResponse>;
+}
+
+#[cfg(feature = "vault")]
+struct InProcess {
+    service: std::sync::Arc<crate::vault::VaultService>,
+    caller: crate::vault::CallerIdentity,
+}
+
+#[cfg(feature = "vault")]
+impl Backend for InProcess {
+    fn request(&self, request: VaultRequest) -> VaultResult<VaultResponse> {
+        Ok(self.service.handle(&self.caller, request, unix_time()))
+    }
+}
+
+struct Remote {
+    client: Box<dyn VaultClient>,
+}
+
+impl Backend for Remote {
+    fn request(&self, request: VaultRequest) -> VaultResult<VaultResponse> {
+        self.client.request(&request)
+    }
+}
+
 pub(super) struct Store {
-    pub(super) service: Arc<VaultService>,
-    pub(super) caller: CallerIdentity,
+    backend: Box<dyn Backend>,
 }
 
 impl Store {
+    #[cfg(feature = "vault")]
+    pub(super) fn in_process(
+        service: std::sync::Arc<crate::vault::VaultService>,
+        caller: crate::vault::CallerIdentity,
+    ) -> Self {
+        Self {
+            backend: Box::new(InProcess { service, caller }),
+        }
+    }
+
+    pub(super) fn remote(client: Box<dyn VaultClient>) -> Self {
+        Self {
+            backend: Box::new(Remote { client }),
+        }
+    }
+
     fn call(&self, action: VaultAction) -> VaultResult<VaultResponseBody> {
         let request = VaultRequest::new(action)?;
-        let response = self.service.handle(&self.caller, request, unix_time());
+        let response = self.backend.request(request)?;
         response.check_delivery()?;
         response
             .result
@@ -57,6 +103,18 @@ impl Store {
             )),
         }
     }
+
+    /// `Lock` seals the whole vault through the adapter's own grant.
+    pub(super) fn seal(&self) -> VaultResult<()> {
+        match self.call(VaultAction::Seal {
+            namespace: NAMESPACE.to_vec(),
+        })? {
+            VaultResponseBody::Sealed => Ok(()),
+            _ => Err(VaultError::Protocol(
+                "unexpected Secret Service vault response".to_owned(),
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -78,7 +136,6 @@ pub(super) struct IndexItem {
 pub(super) struct Agent {
     pub(super) store: Store,
     index: Mutex<Index>,
-    pub(super) sessions: Mutex<HashMap<String, SessionState>>,
 }
 
 impl Agent {
@@ -100,7 +157,6 @@ impl Agent {
         Ok(Self {
             store,
             index: Mutex::new(index),
-            sessions: Mutex::new(HashMap::new()),
         })
     }
 

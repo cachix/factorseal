@@ -33,9 +33,12 @@ vault-store = [
 ]
 # The full desktop vault feature remains the default. Mobile embedders use
 # `vault-store` + `key-protection` instead.
+secret-service-host = ["vault-client", "dep:secret-service-protocol", "dep:tokio", "dep:zbus"]
+
 vault = [
     "vault-client",
     "vault-store",
+    "secret-service-host",
     "dep:block2",
     "dep:ctrlc",
     "dep:dbus",
@@ -126,7 +129,7 @@ serde_json = "1.0.141"
 sha2 = "0.10.9"
 thiserror = "2.0.12"
 tempfile = { version = "3.20.0", optional = true }
-tokio = { version = "1.47.1", features = ["rt", "sync", "time"], optional = true }
+tokio = { version = "1.47.1", features = ["macros", "rt", "sync", "time"], optional = true }
 turso = { version = "0.8.0-pre.4", default-features = false, optional = true }
 uuid = { version = "1.0", features = ["v4"], optional = true }
 zeroize = "1.8.1"
