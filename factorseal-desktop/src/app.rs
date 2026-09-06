@@ -1245,6 +1245,7 @@ impl DesktopView {
                 error: Some(error.to_owned()),
             };
         } else {
+            window.blur(cx);
             self.snapshot = Snapshot::Unlocking { metadata, group };
         }
         cx.notify();
@@ -1312,6 +1313,7 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme().clone();
+        let unlocking = matches!(self.snapshot, Snapshot::Unlocking { .. });
         let has_multiple_groups = metadata.unlock_policy().groups().len() > 1;
         let mut choices = h_flex().gap_2().flex_wrap();
         for (index, group) in metadata.unlock_policy().groups().iter().enumerate() {
@@ -1321,6 +1323,7 @@ impl DesktopView {
                 Button::new(("unlock-group", index))
                     .label(group.to_string())
                     .selected(selected)
+                    .disabled(unlocking)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.choose_group(chosen.clone(), window, cx);
                     })),
@@ -1332,22 +1335,54 @@ impl DesktopView {
             .unwrap_or(metadata.preferred_unlock_group())
             .requires(factorseal::UnlockFactorKind::Password);
 
+        let title = if unlocking {
+            "Unlocking your vault…"
+        } else {
+            "Vault is sealed"
+        };
+        let description = match &self.snapshot {
+            Snapshot::Unlocking { group, .. }
+                if group.requires(factorseal::UnlockFactorKind::Biometric) =>
+            {
+                "Complete the device authorization prompt if one appears."
+            }
+            Snapshot::Unlocking { .. } => {
+                "FactorSeal’s secure unlock process normally takes a few seconds."
+            }
+            _ => "Unlock to make your secrets available to authorized applications.",
+        };
+        let password_field = if unlocking {
+            // Preserve the form's height without leaving an editable secret field.
+            field_label(
+                "Password",
+                div()
+                    .w_full()
+                    .h(px(40.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.muted),
+            )
+            .opacity(0.5)
+        } else {
+            field_label("Password", self.password.clone())
+        };
+
         vault_card(&theme)
             .child(
                 v_flex()
                     .items_center()
                     .gap_3()
                     .pb_2()
-                    .child(brand_mark(72., theme.foreground))
-                    .child(div().text_2xl().font_semibold().child("Vault is sealed"))
+                    .child(crate::unlock_animation::vault_mark(&theme, unlocking))
+                    .child(div().text_2xl().font_semibold().child(title))
                     .child(
                         div()
                             .text_color(theme.muted_foreground)
                             .text_center()
                             .text_sm()
-                            .child(
-                                "Unlock to make your secrets available to authorized applications.",
-                            ),
+                            .min_h(rems(40. / 16.))
+                            .child(description),
                     ),
             )
             .when(has_multiple_groups, |element| {
@@ -1359,9 +1394,7 @@ impl DesktopView {
                     )
                     .child(choices)
             })
-            .when(needs_password, |element| {
-                element.child(field_label("Password", self.password.clone()))
-            })
+            .when(needs_password, |element| element.child(password_field))
             .when_some(error.map(str::to_owned), |element, error| {
                 element.child(error_banner(error, theme.danger))
             })
@@ -1370,7 +1403,10 @@ impl DesktopView {
                     .primary()
                     .large()
                     .w_full()
-                    .label(if needs_password {
+                    .disabled(unlocking)
+                    .label(if unlocking {
+                        "Unlocking…"
+                    } else if needs_password {
                         "Unlock vault"
                     } else {
                         "Continue with biometrics"
@@ -2815,37 +2851,7 @@ impl DesktopView {
             Snapshot::Sealed { metadata, error } => {
                 self.render_sealed(metadata, error.as_deref(), cx)
             }
-            Snapshot::Unlocking { group, .. } => {
-                vault_card(&theme)
-                    .items_center()
-                    .text_center()
-                    .child(brand_mark(56., theme.foreground))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .text_2xl()
-                            .font_semibold()
-                            .child(Spinner::new().with_size(Size::Large).color(theme.primary))
-                            .child("Unlocking your vault…"),
-                    )
-                    .child(
-                        div().text_sm().text_color(theme.muted_foreground).child(
-                            "FactorSeal’s secure unlock process normally takes a few seconds.",
-                        ),
-                    )
-                    .when(
-                        group.requires(factorseal::UnlockFactorKind::Biometric),
-                        |element| {
-                            element.child(
-                                div().text_sm().text_color(theme.muted_foreground).child(
-                                    "Complete the device authorization prompt if one appears.",
-                                ),
-                            )
-                        },
-                    )
-            }
+            Snapshot::Unlocking { metadata, .. } => self.render_sealed(metadata, None, cx),
             Snapshot::Sealing { .. } => vault_card(&theme)
                 .items_center()
                 .text_center()

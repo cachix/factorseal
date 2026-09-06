@@ -9,6 +9,7 @@ mod settings;
 mod settings_view;
 mod theming;
 mod timing;
+mod unlock_animation;
 
 use std::{borrow::Cow, path::PathBuf};
 
