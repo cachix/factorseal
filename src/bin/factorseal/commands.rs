@@ -1027,7 +1027,7 @@ pub(super) fn run_agent(
     let result = (|| {
         let unsealed = unseal_selected(root, &device, requested_group, factor)?;
         let service = Arc::new(VaultService::open(root, unsealed, unix_time()?, policy)?);
-        serve_vault(&device, &service, root, socket, &lifecycle)
+        serve_vault(&device, &service, root, socket, &lifecycle, true)
     })();
     lifecycle.disarm();
     result

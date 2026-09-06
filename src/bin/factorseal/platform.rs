@@ -132,9 +132,12 @@ pub(super) fn serve_vault(
     root: &Path,
     socket: Option<&Path>,
     lifecycle: &NativeVaultLifecycle,
+    install_secret_service: bool,
 ) -> Result<(), CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    serve_linux_vault_with_lifecycle(service, &LinuxVaultOptions::new(socket), Some(lifecycle))?;
+    let mut options = LinuxVaultOptions::new(socket);
+    options.install_secret_service = install_secret_service;
+    serve_linux_vault_with_lifecycle(service, &options, Some(lifecycle))?;
     Ok(())
 }
 
@@ -145,6 +148,7 @@ pub(super) fn serve_vault(
     root: &Path,
     socket: Option<&Path>,
     lifecycle: &NativeVaultLifecycle,
+    _install_secret_service: bool,
 ) -> Result<(), CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
     serve_macos_vault_with_lifecycle(service, &MacosVaultOptions::new(socket), Some(lifecycle))?;
@@ -158,6 +162,7 @@ pub(super) fn serve_vault(
     _root: &Path,
     socket: Option<&Path>,
     lifecycle: &NativeVaultLifecycle,
+    _install_secret_service: bool,
 ) -> Result<(), CliError> {
     let pipe_name = socket.map_or_else(
         || default_windows_pipe_name(device.installation_id()),

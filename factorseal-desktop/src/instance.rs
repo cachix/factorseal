@@ -11,6 +11,8 @@ pub(crate) enum Instance {
     Primary {
         _lock: File,
         activations: smol::channel::Receiver<()>,
+        /// Raises the window the same way a second launch does.
+        activate: smol::channel::Sender<()>,
     },
     Secondary,
 }
@@ -31,6 +33,7 @@ pub(crate) fn acquire(root: &Path, request_activation: bool) -> Result<Instance,
     let watcher = open_private_file(&activation_path)?;
     watcher.set_len(0).map_err(|error| error.to_string())?;
     let (sender, activations) = smol::channel::bounded(4);
+    let activate = sender.clone();
     std::thread::Builder::new()
         .name("factorseal-desktop-activation".to_owned())
         .spawn(move || watch(&watcher, &sender))
@@ -38,6 +41,7 @@ pub(crate) fn acquire(root: &Path, request_activation: bool) -> Result<Instance,
     Ok(Instance::Primary {
         _lock: file,
         activations,
+        activate,
     })
 }
 
@@ -105,7 +109,10 @@ mod tests {
     fn second_instance_requests_activation() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("vault");
-        let Instance::Primary { _lock, activations } = acquire(&root, false).unwrap() else {
+        let Instance::Primary {
+            _lock, activations, ..
+        } = acquire(&root, false).unwrap()
+        else {
             panic!("first instance was not primary");
         };
         assert!(matches!(acquire(&root, true).unwrap(), Instance::Secondary));

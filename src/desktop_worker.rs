@@ -15,6 +15,10 @@ pub struct Bootstrap {
     pub desktop_executable: PathBuf,
     pub operation: Operation,
     pub password: WireSecret,
+    /// The Desktop serves `org.freedesktop.secrets` itself and needs the
+    /// adapter grant; the worker then leaves the session bus to it.
+    #[serde(default)]
+    pub hosts_secret_service: bool,
 }
 
 #[derive(Serialize, Deserialize)]

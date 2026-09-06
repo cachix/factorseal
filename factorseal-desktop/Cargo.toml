@@ -12,7 +12,7 @@ publish = false
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 directories = "6.0"
-factorseal = { path = "..", default-features = false, features = ["vault-client", "key-protection", "transfer"] }
+factorseal = { path = "..", default-features = false, features = ["vault-client", "key-protection", "transfer", "secret-service-host"] }
 fs2 = "0.4.3"
 gpui = "=0.2.2"
 gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "39c2c86dbee7" }

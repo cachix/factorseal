@@ -35,6 +35,7 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
         desktop_executable,
         operation,
         password,
+        hosts_secret_service,
     } = timing::result("desktop_worker", "receive_bootstrap", || {
         receive(&mut std::io::stdin())
     })
@@ -95,7 +96,7 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
             .lock()
             .map_err(|_| CliError::DesktopLaunch("owner lock unavailable".to_owned()))? =
             Arc::downgrade(&service);
-        authorize_hosts(&service, &desktop_executable, now)?;
+        authorize_hosts(&service, &desktop_executable, now, hosts_secret_service)?;
         if initializing {
             service.seal()?;
             Vault::complete_initialization(root)?;
@@ -105,7 +106,14 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
             })
             .map_err(|e| CliError::DesktopLaunch(e.to_string()))?;
             *reported = true;
-            super::platform::serve_vault(&device, &service, root, socket, &lifecycle)?;
+            super::platform::serve_vault(
+                &device,
+                &service,
+                root,
+                socket,
+                &lifecycle,
+                !hosts_secret_service,
+            )?;
         }
         Ok(())
     })();
@@ -116,7 +124,12 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
     result
 }
 
-fn authorize_hosts(service: &VaultService, executable: &Path, now: u64) -> Result<(), CliError> {
+fn authorize_hosts(
+    service: &VaultService,
+    executable: &Path,
+    now: u64,
+    hosts_secret_service: bool,
+) -> Result<(), CliError> {
     let cli = super::commands::cli_caller_identity()?;
     let caller = timing::result("desktop_worker", "identify_desktop_executable", || {
         super::platform::caller_identity_for_executable(executable)
@@ -164,6 +177,16 @@ fn authorize_hosts(service: &VaultService, executable: &Path, now: u64) -> Resul
     timing::result("desktop_worker", "authorize_host_permissions", || {
         service.authorize_batch(&grants, now)
     })?;
+    // The Desktop hosts the Secret Service adapter and reaches the vault
+    // through its own grant; the worker does not claim the bus name then.
+    #[cfg(target_os = "linux")]
+    if hosts_secret_service {
+        timing::result("desktop_worker", "authorize_secret_service_host", || {
+            service.authorize_secret_service_host(&caller, now)
+        })?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = hosts_secret_service;
     Ok(())
 }
 
