@@ -21,8 +21,9 @@ unmapping. Guard pages protect the allocation boundary, not every byte within
 the usable page. Allocations are never shared with the general-purpose heap,
 so dropping one cannot unlock another key's page.
 
-The retained root's temporary bootstrap source, password inputs, decrypted
-document/value buffers, Argon2 workspace, crypto key schedules/expanded signing
+Retained bootstrap keys, CLI/Desktop passwords, wire values, store responses,
+archive payloads and bounded IPC frames also use locked, guarded allocations.
+Decrypted documents, Argon2 workspace, crypto key schedules/expanded signing
 keys, GUI/native input methods, hardware API outputs, clipboard and OS/library
 copies are not all locked. Existing zeroization narrows their lifetime but does
 not erase earlier swap, snapshots, hibernation images or exported copies. The
@@ -31,8 +32,9 @@ those residual copies matter. Library embedders must also manage process
 hardening, fork behavior, lifecycle and resource isolation themselves.
 
 macOS and Windows CI serialize tests because their default lock budgets are
-small. Product allocations retain only a few key pages; the 128 MiB password
-workspace is deliberately not covered by that budget. A configured lock limit
+small. Secret and archive buffers require lock quotas proportional to their
+size; the 128 MiB password workspace is deliberately not covered by that
+budget. See [memory hardening](../acceptance/memory-hardening.md) for deployment limits. A configured lock limit
 too small for an operation is an explicit failure, not degraded protection.
 
 Platform references:

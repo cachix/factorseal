@@ -35,7 +35,7 @@ mod redaction_tests {
             namespace: b"secretspec".to_vec(),
             mutations: vec![VaultMutation::Put {
                 address: WireSecretAddress::new("demo/default/TOKEN", None),
-                value: WireSecret::new(NEEDLE.to_vec()),
+                value: WireSecret::new(NEEDLE.to_vec()).unwrap(),
                 evict_at: None,
             }],
         })
@@ -43,12 +43,12 @@ mod redaction_tests {
         let response = VaultResponse::success(
             request.request_id(),
             VaultResponseBody::Secret {
-                value: Some(WireSecret::new(NEEDLE.to_vec())),
+                value: Some(WireSecret::new(NEEDLE.to_vec()).unwrap()),
             },
         );
 
         for rendered in [
-            format!("{:?}", WireSecret::new(NEEDLE.to_vec())),
+            format!("{:?}", WireSecret::new(NEEDLE.to_vec()).unwrap()),
             format!("{request:?}"),
             format!("{response:?}"),
         ] {

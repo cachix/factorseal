@@ -960,7 +960,7 @@ mod tests {
                 &VaultRequest::new(VaultAction::Put {
                     namespace: namespace.to_vec(),
                     address: address.clone(),
-                    value: WireSecret::new(b"transport-secret".to_vec()),
+                    value: WireSecret::new(b"transport-secret".to_vec()).unwrap(),
                     evict_at: None,
                 })
                 .unwrap(),
@@ -1017,7 +1017,7 @@ mod tests {
                 &VaultRequest::new(VaultAction::PutProject {
                     project: "transport".to_owned(),
                     address: address.clone(),
-                    value: WireSecret::new(b"project-secret".to_vec()),
+                    value: WireSecret::new(b"project-secret".to_vec()).unwrap(),
                 })
                 .unwrap(),
             )

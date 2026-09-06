@@ -49,7 +49,7 @@ search cache. Credential lookups while sealed return `IsLocked` immediately;
 users must manually unlock Desktop before applications can look up credentials.
 Clients that explicitly request `Unlock` can still use the normal prompt flow.
 
-Desktop secret-entry fields use bounded zeroizing buffers, omit undo/copy
+Desktop secret-entry fields use bounded locked, guarded buffers, omit undo/copy
 history, and send only masked text to the renderer. Submitting, leaving a secret
 view, or sealing clears the inputs. Clipboard, native input methods, crypto
 libraries, and operating-system internals can still hold copies; this is not a
@@ -241,15 +241,14 @@ outside the separately built CLI key owner's dependency graph.
   helpers additionally disable process dumpability (including piped core
   collectors). IPC-only clients stay inspectable for executable authentication.
   Native emergency termination exits without deliberately creating a core dump.
-  Retained root/index keys, live DEKs and unwrapped signing seeds now use
-  guarded, locked allocations with zeroization before release. Linux excludes
-  them from dumps and wipes forked copies; Windows excludes them from WER and
-  disables WER heap collection. Lock/exclusion failures reject the operation.
-  These measures cannot stop privileged memory inspection. Passwords,
-  decrypted documents, Argon2 workspace and library/OS-internal copies are not
-  all locked. Administrator/third-party dumps, physical hardware matrices,
-  code signing/notarization and independent audit remain release limitations.
-  See the [process and memory profile](security/process-memory-profile.md).
+  Keys and retained password/value/IPC buffers use dedicated locked allocations
+  with inaccessible guards and full-region wiping on release. Linux excludes those pages from dumps and wipes
+  them in fork children. Windows suppresses WER heap collection while retaining
+  existing flags. See [memory hardening](acceptance/memory-hardening.md) for
+  allocation failures, deployment limits, test coverage, and buffers outside
+  this protection. Privileged inspection, comprehensive wiping of library/OS
+  copies, Windows LocalDumps/external dump policy, native platform verification,
+  code signing/notarization and independent audit remain limitations.
 - `destroy` removes local state, not every possible hardware authority. Linux
   and non-biometric Windows TPM envelopes have no per-label persistent key to
   revoke. Retained copies can remain usable on the original TPM with valid

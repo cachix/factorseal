@@ -99,9 +99,11 @@ reduces retention; it cannot erase all free pages, storage remnants or copies.
 Stateless TPM envelopes may remain usable on their original TPM with valid
 factors. Whole-directory rollback still needs an external trusted checkpoint.
 
-Comprehensive locking/wiping of password, document, crypto/Automerge/OS copies,
-administrator/third-party dump policy and hard key-retention limits for library
-embedders remain excluded. Privileged inspection, same-user code injection
+Owned keys and retained password/value/IPC buffers now use [locked, guarded pages](memory-hardening.md),
+with Linux per-page dump exclusion/fork wiping and Windows WER heap suppression.
+Comprehensive locking/wiping of plaintext and crypto/Automerge/OS internal copies,
+Windows LocalDumps/external dump policy, native validation and hard key-retention
+limits for library embedders remain open hardening work. Privileged inspection, same-user code injection
 and exfiltration by an already authorized client are not prevented by executable
 grants. See [SECURITY.md](../SECURITY.md) for the actual security boundary.
 

@@ -58,7 +58,7 @@ pub fn envelope(bytes: &[u8]) {
         let _ = keys::InstallationSecrets::open(
             InstallationId::from_bytes([0; 16]),
             VaultId::from_bytes([0; 16]),
-            zeroize::Zeroizing::new([0; 32]),
+            crate::security::memory::LockedKey::zeroed().unwrap(),
             &value,
         );
     }
@@ -131,7 +131,7 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             idle_seconds: 60,
             maximum_seconds: 600,
         },
-        password: WireSecret::new(b"synthetic".to_vec()),
+        password: WireSecret::new(b"synthetic".to_vec()).unwrap(),
         hosts_secret_service: false,
     };
     let mut frame = Vec::new();

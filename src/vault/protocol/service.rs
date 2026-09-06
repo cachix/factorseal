@@ -260,11 +260,11 @@ impl VaultService {
                         })?;
                     crate::vault::secret_service_data::PortableItem::new(
                         item,
-                        super::WireSecret::new(secret.value.to_vec()),
+                        super::WireSecret::from_locked(secret.value),
                     )
                     .encode()?
                 } else {
-                    super::WireSecret::new(secret.value.to_vec())
+                    super::WireSecret::from_locked(secret.value)
                 };
                 return Ok(VaultResponseBody::VaultEntrySecret {
                     value,
@@ -587,7 +587,7 @@ fn secret_service_index(
         &crate::vault::SecretAddress::new(INDEX_ITEM, None)?,
         now,
     )?;
-    Index::decode(bytes.as_ref().map(|b| b.as_slice()))
+    Index::decode(bytes.as_deref())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -637,12 +637,12 @@ fn import_secret_service_item(
                         .0,
                     None,
                 ),
-                value: super::WireSecret::new(portable.value.expose().to_vec()),
+                value: super::WireSecret::new(portable.value.expose().to_vec())?,
                 evict_at: None,
             },
             super::VaultMutation::Put {
                 address: super::WireSecretAddress::new(INDEX_ITEM, None),
-                value: super::WireSecret::new(index_bytes.clone()),
+                value: super::WireSecret::new(index_bytes.clone())?,
                 evict_at: None,
             },
         ],

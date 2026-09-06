@@ -19,9 +19,8 @@ exclude = ["fuzz"]
 [features]
 fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "dep:secret-service-protocol", "hardwareseal/fuzzing"]
 default = ["vault", "cli", "hardware", "secretspec-provider"]
-vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token", "dep:windows"]
+vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token"]
 vault-store = [
-    "dep:windows",
     "dep:aes",
     "dep:aes-gcm",
     "dep:automerge",
@@ -54,7 +53,6 @@ vault = [
     "dep:objc2-foundation",
     "dep:sysinfo",
     "dep:widestring",
-    "dep:windows",
 ]
 cli = [
     "dep:clap",
@@ -66,7 +64,7 @@ cli = [
     "transfer",
 ]
 diagnostics = ["dep:directories", "transfer"]
-transfer = ["dep:anyhow", "dep:csv", "dep:tempfile", "dep:uuid", "dep:windows", "dep:nt-token"]
+transfer = ["dep:anyhow", "dep:csv", "dep:tempfile", "dep:uuid", "dep:nt-token"]
 secretspec-provider = [
     "dep:async-trait",
     "dep:percent-encoding",
@@ -87,7 +85,6 @@ key-protection = [
     "dep:nt-token",
     "dep:pbkdf2",
     "dep:polyval",
-    "dep:windows",
 ]
 hardware = ["key-protection", "dep:hardwareseal"]
 
@@ -163,20 +160,20 @@ interprocess = { version = "2.4.2", optional = true }
 nt-token = { version = "0.5.0", optional = true }
 sysinfo = { version = "0.37.2", default-features = false, features = ["system"], optional = true }
 widestring = { version = "1.2.1", optional = true }
-windows = { version = "0.61.3", optional = true, features = [
+windows = { version = "0.61.3", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_ErrorReporting",
     "Win32_System_Power",
     "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
-    "Win32_System_Memory",
-    "Win32_System_SystemInformation",
-    "Win32_System_ErrorReporting",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

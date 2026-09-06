@@ -6,6 +6,16 @@ All notable changes to FactorSeal will be documented in this file.
 
 - Keep Secret Service search metadata encrypted. Sealed searches return
   `IsLocked` immediately and require manual Desktop unlock before lookup.
+- Store root/index, signing, document, password-derived and archive keys in
+  locked pages with guard pages; wipe before release and fail on lock errors.
+  Exclude Linux key mappings from dumps and wipe them in fork children. Suppress
+  Windows WER heap collection. Document remaining plaintext and native-test limits
+  in `acceptance/memory-hardening.md`.
+- Extend locked storage to retained CLI/Desktop passwords, secret editor text,
+  wire values, store responses, archive payloads, and bounded IPC frames. Fail
+  edits/operations on lock exhaustion; preserve existing base64/wire formats.
+  `WireSecret::new` is now fallible and request/response `encode` returns
+  `LockedBytes`. Large archives require a sufficient OS memory-lock quota.
 
 The current formats are metadata v8, database schema v5, snapshot envelope v7,
 protected commit v6, document v3, record v2, and native protocol v12. Database

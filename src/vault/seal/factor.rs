@@ -232,7 +232,7 @@ pub(super) fn unprotect_with_factor(
     protection: &NestedProtection,
     vault_root_key_payload: &Zeroizing<Vec<u8>>,
     factor: UnsealFactor<'_>,
-) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
+) -> VaultResult<crate::security::memory::LockedKey<KEY_BYTES>> {
     let factor_key = derive_factor_key(factor, &protection.factor)?;
     let vault_root_key = crate::timing::result("password_factor", "decrypt_root_key", || {
         crate::crypto::decrypt(
@@ -255,7 +255,7 @@ pub(super) fn unprotect_with_factor(
 fn derive_factor_key(
     factor: UnsealFactor<'_>,
     parameters: &FactorParameters,
-) -> VaultResult<Zeroizing<[u8; KEY_BYTES]>> {
+) -> VaultResult<crate::security::memory::LockedKey<KEY_BYTES>> {
     validate_factor_parameters(parameters)?;
     match (factor, parameters) {
         (
@@ -279,7 +279,7 @@ fn derive_factor_key(
             let mut memory = memory::Argon2Memory::new(params.block_count())?;
             crate::timing::record("password_factor", "allocate_memory", started, "ok");
             let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-            let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
+            let mut key = crate::security::memory::LockedKey::zeroed()?;
             let derived = crate::timing::result("password_factor", "argon2id", || {
                 argon2
                     .hash_password_into_with_memory(password, salt, &mut *key, memory.blocks())
@@ -301,11 +301,7 @@ fn derive_factor_key(
                 return Err(factor_empty_error(parameters.kind()));
             }
             crate::timing::result("password_factor", "pbkdf2_hmac_sha256", || {
-                Ok(crate::crypto::derive_pbkdf2_password_key(
-                    password,
-                    salt,
-                    *iterations,
-                ))
+                crate::crypto::derive_pbkdf2_password_key(password, salt, *iterations)
             })
         }
     }
@@ -363,16 +359,14 @@ fn factor_empty_error(kind: NestedFactorKind) -> VaultError {
 pub(super) fn decode_key<const LENGTH: usize>(
     plaintext: &Zeroizing<Vec<u8>>,
     name: &'static str,
-) -> VaultResult<Zeroizing<[u8; LENGTH]>> {
+) -> VaultResult<crate::security::memory::LockedKey<LENGTH>> {
     let length = plaintext.len();
     if length != LENGTH {
         return Err(VaultError::Protection(format!(
             "unwrapped {name} has {length} bytes"
         )));
     }
-    let mut bytes = Zeroizing::new([0_u8; LENGTH]);
-    bytes.copy_from_slice(plaintext);
-    Ok(bytes)
+    crate::security::memory::LockedKey::from_slice(plaintext)
 }
 
 #[cfg(all(test, feature = "key-protection"))]

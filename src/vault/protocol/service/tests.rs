@@ -339,7 +339,7 @@ fn typed_actions_select_semantic_document_kinds() {
         VaultAction::PutCache {
             project: "demo".to_owned(),
             address: project_address("demo"),
-            value: WireSecret::new(vec![]),
+            value: WireSecret::new(vec![]).unwrap(),
             evict_at: None,
         },
         VaultAction::DeleteCache {
@@ -482,7 +482,7 @@ fn durable_project_documents_are_partitioned_and_kind_authorized() {
         VaultRequest::new(VaultAction::PutProject {
             project: "demo".to_owned(),
             address: project_address("demo"),
-            value: WireSecret::new(b"secret".to_vec()),
+            value: WireSecret::new(b"secret".to_vec()).unwrap(),
         })
         .unwrap(),
         101,
@@ -540,7 +540,7 @@ fn project_metadata_listing_is_paginated_value_free_and_separately_authorized() 
             VaultRequest::new(VaultAction::PutProject {
                 project: project.to_owned(),
                 address,
-                value: WireSecret::new(value.to_vec()),
+                value: WireSecret::new(value.to_vec()).unwrap(),
             })
             .unwrap(),
             101,
@@ -714,13 +714,13 @@ fn vault_inventory_is_value_free_paginated_and_permission_manager_only() {
         VaultAction::Put {
             namespace: b"application".to_vec(),
             address: WireSecretAddress::new("account", Some("password".to_owned())),
-            value: WireSecret::new(b"local-secret-value".to_vec()),
+            value: WireSecret::new(b"local-secret-value".to_vec()).unwrap(),
             evict_at: None,
         },
         VaultAction::PutProject {
             project: "demo".to_owned(),
             address: project_key("demo", "TOKEN"),
-            value: WireSecret::new(b"project-secret-value".to_vec()),
+            value: WireSecret::new(b"project-secret-value".to_vec()).unwrap(),
         },
     ] {
         assert!(matches!(
@@ -816,7 +816,7 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
                 &manager,
                 VaultRequest::new(VaultAction::ImportVaultEntry {
                     entry: source.clone(),
-                    value: WireSecret::new(b"first".to_vec()),
+                    value: WireSecret::new(b"first".to_vec()).unwrap(),
                     evict_at: None,
                     replace_existing: false,
                 })
@@ -871,7 +871,7 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
             &manager,
             VaultRequest::new(VaultAction::ImportVaultEntry {
                 entry: source.clone(),
-                value: WireSecret::new(b"second".to_vec()),
+                value: WireSecret::new(b"second".to_vec()).unwrap(),
                 evict_at: None,
                 replace_existing,
             })
@@ -1117,7 +1117,7 @@ fn project_history_is_paginated_value_free_and_separately_authorized() {
             VaultAction::PutProject {
                 project: "alpha".to_owned(),
                 address: token.clone(),
-                value: WireSecret::new(b"first-secret-value".to_vec()),
+                value: WireSecret::new(b"first-secret-value".to_vec()).unwrap(),
             },
         ),
         (
@@ -1125,7 +1125,7 @@ fn project_history_is_paginated_value_free_and_separately_authorized() {
             VaultAction::PutProject {
                 project: "alpha".to_owned(),
                 address: token.clone(),
-                value: WireSecret::new(b"second-secret-value".to_vec()),
+                value: WireSecret::new(b"second-secret-value".to_vec()).unwrap(),
             },
         ),
         (
@@ -1294,7 +1294,7 @@ fn request_round_trip_is_versioned_and_bounded() {
             namespace: b"secretspec".to_vec(),
             mutations: vec![VaultMutation::Put {
                 address: address(),
-                value: WireSecret::new(b"secret".to_vec()),
+                value: WireSecret::new(b"secret".to_vec()).unwrap(),
                 evict_at: None,
             }],
         },
@@ -1735,7 +1735,7 @@ fn direct_service_requests_obey_the_wire_size_bound() {
         address: address(),
         // JSON represents bytes as decimal array elements, so this is
         // unambiguously larger than the one-MiB protocol message limit.
-        value: WireSecret::new(vec![0; MAX_MESSAGE_BYTES]),
+        value: WireSecret::new(vec![0; MAX_MESSAGE_BYTES]).unwrap(),
         evict_at: None,
     })
     .unwrap();
@@ -1774,7 +1774,7 @@ fn exact_grant_is_required_and_replay_is_rejected() {
             VaultAction::Put {
                 namespace: b"secretspec".to_vec(),
                 address: address(),
-                value: WireSecret::new(b"secret".to_vec()),
+                value: WireSecret::new(b"secret".to_vec()).unwrap(),
                 evict_at: None,
             },
         )
@@ -1806,7 +1806,7 @@ fn exact_grant_is_required_and_replay_is_rejected() {
         VaultRequest::new(VaultAction::Put {
             namespace: b"secretspec".to_vec(),
             address: address(),
-            value: WireSecret::new(b"secret".to_vec()),
+            value: WireSecret::new(b"secret".to_vec()).unwrap(),
             evict_at: None,
         })
         .unwrap(),
@@ -1880,7 +1880,7 @@ fn local_keyring_operations_are_separate_from_disposable_cache_entries() {
         VaultRequest::new(VaultAction::Put {
             namespace: b"factorseal/keyring/v1".to_vec(),
             address: address(),
-            value: WireSecret::new(b"durable secret".to_vec()),
+            value: WireSecret::new(b"durable secret".to_vec()).unwrap(),
             evict_at: None,
         })
         .unwrap(),
@@ -1939,7 +1939,7 @@ fn cache_grants_cannot_authorize_durable_keyring_operations() {
         VaultRequest::new(VaultAction::Put {
             namespace: b"shared-name".to_vec(),
             address: address(),
-            value: WireSecret::new(b"must not persist".to_vec()),
+            value: WireSecret::new(b"must not persist".to_vec()).unwrap(),
             evict_at: None,
         })
         .unwrap(),
@@ -1975,12 +1975,12 @@ fn batch_mutations_are_pre_authorized_and_commit_together() {
             mutations: vec![
                 VaultMutation::Put {
                     address: first.clone(),
-                    value: WireSecret::new(b"first".to_vec()),
+                    value: WireSecret::new(b"first".to_vec()).unwrap(),
                     evict_at: None,
                 },
                 VaultMutation::Put {
                     address: second.clone(),
-                    value: WireSecret::new(b"second".to_vec()),
+                    value: WireSecret::new(b"second".to_vec()).unwrap(),
                     evict_at: None,
                 },
             ],
@@ -2024,12 +2024,12 @@ fn batch_mutations_are_pre_authorized_and_commit_together() {
             mutations: vec![
                 VaultMutation::Put {
                     address: first.clone(),
-                    value: WireSecret::new(b"first".to_vec()),
+                    value: WireSecret::new(b"first".to_vec()).unwrap(),
                     evict_at: None,
                 },
                 VaultMutation::Put {
                     address: second.clone(),
-                    value: WireSecret::new(b"second".to_vec()),
+                    value: WireSecret::new(b"second".to_vec()).unwrap(),
                     evict_at: None,
                 },
             ],
@@ -2200,7 +2200,7 @@ fn export_obeys_record_delivery_expiry() {
         &manager,
         VaultRequest::new(VaultAction::ImportVaultEntry {
             entry: entry.clone(),
-            value: WireSecret::new(b"secret".to_vec()),
+            value: WireSecret::new(b"secret".to_vec()).unwrap(),
             evict_at: Some(150),
             replace_existing: false,
         })
@@ -2246,7 +2246,16 @@ fn pending_permissions_fit_transport() {
             context,
         )
         .unwrap();
-        let response = service.handle(&manager, request, 100);
+        // Distinct callers keep the pagination stress test within per-caller limits.
+        let requester = CallerIdentity::new(
+            CallerPlatform::Linux,
+            "uid:1000",
+            format!("audit-{i}"),
+            [7; 32],
+            None,
+        )
+        .unwrap();
+        let response = service.handle(&requester, request, 100);
         assert_eq!(
             response.result.unwrap_err().code,
             VaultResponseErrorCode::AuthorizationRequired
@@ -2306,4 +2315,70 @@ fn pending_permissions_fit_transport() {
         stale.result.unwrap_err().code,
         VaultResponseErrorCode::Conflict
     );
+}
+
+#[test]
+fn checked_mutations_reject_stale_state_without_partial_writes() {
+    use sha2::{Digest as _, Sha256};
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let caller = caller();
+    let address = address();
+    service
+        .authorize_entry(
+            &caller,
+            b"secretspec",
+            &address,
+            [GrantPermission::Get, GrantPermission::Put],
+            None,
+            100,
+        )
+        .unwrap();
+    let mutate = |expected_sha256, value: &[u8]| {
+        // Put intentionally precedes Check: all checks must pass before any write.
+        let request = VaultRequest::new(VaultAction::Mutate {
+            namespace: b"secretspec".to_vec(),
+            mutations: vec![
+                VaultMutation::Put {
+                    address: address.clone(),
+                    value: WireSecret::new(value.to_vec()).unwrap(),
+                    evict_at: None,
+                },
+                VaultMutation::Check {
+                    address: address.clone(),
+                    expected_sha256,
+                },
+            ],
+        })
+        .unwrap();
+        let request = VaultRequest::decode(&request.encode().unwrap()).unwrap();
+        service.handle(&caller, request, 101).result
+    };
+    assert!(mutate(None, b"initial").is_ok());
+    assert_eq!(
+        mutate(None, b"lost update").unwrap_err().code,
+        VaultResponseErrorCode::Conflict
+    );
+    assert_eq!(
+        mutate(Some(Sha256::digest(b"stale").into()), b"lost update")
+            .unwrap_err()
+            .code,
+        VaultResponseErrorCode::Conflict
+    );
+    assert!(mutate(Some(Sha256::digest(b"initial").into()), b"updated").is_ok());
+    let result = service
+        .handle(
+            &caller,
+            VaultRequest::new(VaultAction::Get {
+                namespace: b"secretspec".to_vec(),
+                address,
+            })
+            .unwrap(),
+            102,
+        )
+        .result
+        .unwrap();
+    let VaultResponseBody::Secret { value: Some(value) } = result else {
+        panic!("missing value")
+    };
+    assert_eq!(value.expose(), b"updated");
 }

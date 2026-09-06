@@ -469,10 +469,7 @@ fn get_many_reads_one_document_without_writing() {
         )
         .unwrap();
     assert_eq!(values.len(), 3);
-    assert_eq!(
-        values[0].as_deref().map(Vec::as_slice),
-        Some(b"durable".as_slice())
-    );
+    assert_eq!(values[0].as_deref(), Some(b"durable".as_slice()));
     assert!(values[1].is_none());
     assert!(values[2].is_none());
     assert_eq!(
@@ -1039,10 +1036,7 @@ fn expired_records_are_swept_from_every_document_kind() {
             70,
         )
         .unwrap();
-    assert_eq!(
-        values[0].as_deref().map(Vec::as_slice),
-        Some(b"durable".as_slice())
-    );
+    assert_eq!(values[0].as_deref(), Some(b"durable".as_slice()));
     assert!(values[1].is_none());
     assert!(
         store

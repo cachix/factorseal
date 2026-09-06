@@ -1,11 +1,11 @@
 //! Bounded bootstrap messages carried only over inherited private pipes.
 //! Factors are never command-line arguments, environment variables, or files.
 
+use crate::security::LockedBytes;
 use crate::{UnlockGroup, UnlockPolicy, WireSecret};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use zeroize::Zeroizing;
 
 const MAX_BOOTSTRAP_BYTES: usize = 128 * 1024;
 
@@ -36,7 +36,8 @@ pub enum Operation {
 
 /// Send one bounded message; serialized factors are wiped after delivery.
 pub fn send(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
-    let bytes = Zeroizing::new(serde_json::to_vec(message)?);
+    let bytes = crate::security::memory::serialize_locked(message, MAX_BOOTSTRAP_BYTES)
+        .map_err(io::Error::other)?;
     if bytes.is_empty() || bytes.len() > MAX_BOOTSTRAP_BYTES {
         return Err(io::Error::other("invalid desktop worker message length"));
     }
@@ -54,7 +55,7 @@ pub fn receive<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> io::Re
     if length == 0 || length > MAX_BOOTSTRAP_BYTES {
         return Err(io::Error::other("invalid desktop worker message length"));
     }
-    let mut bytes = Zeroizing::new(vec![0; length]);
+    let mut bytes = LockedBytes::zeroed(length).map_err(io::Error::other)?;
     reader.read_exact(&mut bytes)?;
     Ok(serde_json::from_slice(&bytes)?)
 }

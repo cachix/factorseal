@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use factorseal::security::LockedBytes;
 use factorseal::{
     DocumentKind, MAX_LIST_PAGE_SIZE, NativeVaultClient, SecretAddress, UnlockGroup, UnlockPolicy,
     Vault, VaultAction, VaultArchive, VaultClient, VaultEntryImportStatus, VaultEntryMetadata,
@@ -192,6 +193,8 @@ impl DesktopRuntime {
         group: UnlockGroup,
         password: Zeroizing<Vec<u8>>,
     ) -> Result<(), &'static str> {
+        let password =
+            LockedBytes::from_zeroizing(password).map_err(|_| "could not lock password memory")?;
         if self
             .unlock_in_progress
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -227,6 +230,8 @@ impl DesktopRuntime {
         policy: UnlockPolicy,
         password: Zeroizing<Vec<u8>>,
     ) -> Result<(), &'static str> {
+        let password =
+            LockedBytes::from_zeroizing(password).map_err(|_| "could not lock password memory")?;
         if self
             .unlock_in_progress
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -288,7 +293,7 @@ impl DesktopRuntime {
         let request = VaultRequest::new(VaultAction::Put {
             namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
             address: WireSecretAddress::new(name, None),
-            value: WireSecret::new(encoded.to_vec()),
+            value: WireSecret::new(encoded.to_vec()).map_err(|e| e.to_string())?,
             evict_at: None,
         })
         .map_err(|error| error.to_string())?;
@@ -373,7 +378,10 @@ impl DesktopRuntime {
                 address: SecretAddress::new(address_name, None)
                     .map_err(|error| error.to_string())?,
             };
-            prepared.push((entry, WireSecret::new(value.to_vec())));
+            prepared.push((
+                entry,
+                WireSecret::new(value.to_vec()).map_err(|e| e.to_string())?,
+            ));
         }
         let mut summary = TransferSummary::default();
         for (entry, value) in prepared {
@@ -449,7 +457,7 @@ impl DesktopRuntime {
         self: Arc<Self>,
         metadata: VaultMetadata,
         group: UnlockGroup,
-        password: Zeroizing<Vec<u8>>,
+        password: LockedBytes,
     ) {
         let result = self.supervise_worker(&metadata, group, password);
         factorseal::diagnostics::event(
@@ -467,7 +475,7 @@ impl DesktopRuntime {
         });
     }
 
-    fn run_initialization(self: Arc<Self>, policy: UnlockPolicy, password: Zeroizing<Vec<u8>>) {
+    fn run_initialization(self: Arc<Self>, policy: UnlockPolicy, password: LockedBytes) {
         factorseal::diagnostics::event("desktop", "initialize_vault", "start");
         let result = (|| {
             let mut worker = self.spawn_worker(
@@ -497,7 +505,7 @@ impl DesktopRuntime {
     fn spawn_worker(
         &self,
         operation: factorseal::desktop_worker::Operation,
-        password: Zeroizing<Vec<u8>>,
+        password: LockedBytes,
     ) -> Result<Worker, String> {
         use std::process::{Command, Stdio};
         let desktop = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -523,10 +531,9 @@ impl DesktopRuntime {
         let bootstrap = factorseal::desktop_worker::Bootstrap {
             desktop_executable: desktop,
             operation,
-            password: WireSecret::new(password.to_vec()),
+            password: WireSecret::from_locked(password),
             hosts_secret_service: self.config.secret_service,
         };
-        drop(password);
         factorseal::desktop_worker::send(
             worker
                 .child
@@ -559,7 +566,7 @@ impl DesktopRuntime {
         &self,
         metadata: &VaultMetadata,
         group: UnlockGroup,
-        password: Zeroizing<Vec<u8>>,
+        password: LockedBytes,
     ) -> Result<(), String> {
         let mut worker = crate::timing::result("desktop_startup", "spawn_worker", || {
             self.spawn_worker(self.unlock_operation(group)?, password)

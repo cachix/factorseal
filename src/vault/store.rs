@@ -180,7 +180,7 @@ impl VaultStore {
         namespace: &[u8],
         address: &SecretAddress,
         now: u64,
-    ) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
+    ) -> VaultResult<Option<crate::security::LockedBytes>> {
         self.get_with_deadline(scope, namespace, address, now)
             .map(|value| value.map(|secret| secret.value))
     }

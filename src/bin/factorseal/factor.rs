@@ -2,6 +2,7 @@ use std::io::IsTerminal as _;
 use std::path::Path;
 use std::process;
 
+use factorseal::security::LockedBytes;
 use zeroize::Zeroizing;
 
 use super::commands::read_bounded;
@@ -23,7 +24,7 @@ pub(super) struct FactorSource<'a> {
 pub(super) fn read_factor(
     source: FactorSource<'_>,
     confirm: bool,
-) -> Result<Zeroizing<Vec<u8>>, CliError> {
+) -> Result<LockedBytes, CliError> {
     let secret = if let Some(path) = source.password_file {
         read_password_file(path)?
     } else if let Some(helper) = source.askpass {
@@ -61,16 +62,19 @@ pub(super) fn read_factor(
     Ok(secret)
 }
 
-fn prompt_on_terminal(label: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+fn prompt_on_terminal(label: &str) -> Result<LockedBytes, String> {
     rpassword::prompt_password(label)
-        .map(|secret| Zeroizing::new(secret.into_bytes()))
         .map_err(|error| error.to_string())
+        .and_then(|secret| {
+            LockedBytes::from_zeroizing(Zeroizing::new(secret.into_bytes()))
+                .map_err(|e| e.to_string())
+        })
 }
 
 pub(super) fn read_archive_passphrase(
     passphrase_file: Option<&Path>,
     confirm: bool,
-) -> Result<Zeroizing<Vec<u8>>, CliError> {
+) -> Result<LockedBytes, CliError> {
     let passphrase = if let Some(path) = passphrase_file {
         read_private_secret_file(path).map_err(CliError::ArchivePassphrase)?
     } else if std::io::stdin().is_terminal() {
@@ -101,7 +105,7 @@ pub(super) fn read_archive_passphrase(
 ///
 /// The secret crosses a pipe rather than the filesystem, so it is never
 /// written next to the vault it protects.
-fn run_askpass(helper: &Path, label: &str) -> Result<Zeroizing<Vec<u8>>, CliError> {
+fn run_askpass(helper: &Path, label: &str) -> Result<LockedBytes, CliError> {
     let mut child = process::Command::new(helper)
         .arg(label)
         .stdin(process::Stdio::null())
@@ -132,7 +136,7 @@ fn run_askpass(helper: &Path, label: &str) -> Result<Zeroizing<Vec<u8>>, CliErro
         )));
     }
     strip_one_line_ending(&mut secret);
-    Ok(secret)
+    LockedBytes::from_zeroizing(secret).map_err(|e| CliError::Askpass(e.to_string()))
 }
 
 fn strip_one_line_ending(bytes: &mut Zeroizing<Vec<u8>>) {
@@ -145,13 +149,13 @@ fn strip_one_line_ending(bytes: &mut Zeroizing<Vec<u8>>) {
     }
 }
 
-fn read_password_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, CliError> {
+fn read_password_file(path: &Path) -> Result<LockedBytes, CliError> {
     read_private_secret_file(path).map_err(CliError::Password)
 }
 
-fn read_private_secret_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
+fn read_private_secret_file(path: &Path) -> Result<LockedBytes, String> {
     let mut bytes = factorseal::security::read_private_file(path, MAX_FACTOR_BYTES)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     strip_one_line_ending(&mut bytes);
-    Ok(bytes)
+    LockedBytes::from_zeroizing(bytes).map_err(|e| e.to_string())
 }

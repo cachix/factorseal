@@ -1,52 +1,74 @@
 //! Password entry without editor ropes, undo history, or plaintext render caches.
 //! Only masked text is passed to GPUI's renderer and text-query callbacks.
 
+use factorseal::security::LockedBytes;
 use gpui::{
     App, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, KeyDownEvent, MouseButton, Pixels, Point, SharedString, TextRun, UTF16Selection,
     Window, canvas, div, prelude::*, px,
 };
 use gpui_component::{ActiveTheme as _, input::InputEvent};
-use std::ops::Range;
+use std::ops::{Deref, Range};
 use zeroize::Zeroizing;
 
 const MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Default)]
-struct SecretBuffer(Zeroizing<String>);
+struct LockedText(LockedBytes);
+impl Deref for LockedText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("secret edits preserve valid UTF-8")
+    }
+}
+#[derive(Default)]
+struct SecretBuffer {
+    text: LockedText,
+    allocation_failed: bool,
+}
 impl SecretBuffer {
     fn replace(&mut self, range: Range<usize>, text: &str) -> bool {
+        self.replace_with(range, text, LockedBytes::zeroed)
+    }
+    fn replace_with(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        allocate: impl FnOnce(usize) -> factorseal::VaultResult<LockedBytes>,
+    ) -> bool {
         if range.start > range.end
-            || range.end > self.0.len()
-            || !self.0.is_char_boundary(range.start)
-            || !self.0.is_char_boundary(range.end)
-            || self.0.len() - range.len() + text.len() > MAX_BYTES
+            || range.end > self.text.len()
+            || !self.text.is_char_boundary(range.start)
+            || !self.text.is_char_boundary(range.end)
+            || self.text.len() - range.len() + text.len() > MAX_BYTES
             || text.contains(['\n', '\r'])
         {
             return false;
         }
-        // Allocate exactly once, then wipe the entire superseded allocation.
-        let mut next = Zeroizing::new(String::with_capacity(
-            self.0.len() - range.len() + text.len(),
-        ));
-        next.push_str(&self.0[..range.start]);
-        next.push_str(text);
-        next.push_str(&self.0[range.end..]);
-        self.0 = next;
+        // Allocate and lock before copying; the superseded mapping wipes on drop.
+        let Ok(mut next) = allocate(self.text.len() - range.len() + text.len()) else {
+            self.allocation_failed = true;
+            return false;
+        };
+        next[..range.start].copy_from_slice(self.text[..range.start].as_bytes());
+        next[range.start..range.start + text.len()].copy_from_slice(text.as_bytes());
+        next[range.start + text.len()..].copy_from_slice(self.text[range.end..].as_bytes());
+        self.text = LockedText(next);
+        self.allocation_failed = false;
         true
     }
     fn byte_offset(&self, offset: usize) -> usize {
         let mut count = 0;
-        for (index, ch) in self.0.char_indices() {
+        for (index, ch) in self.text.char_indices() {
             if count >= offset {
                 return index;
             }
             count += ch.len_utf16();
         }
-        self.0.len()
+        self.text.len()
     }
     fn utf16_offset(&self, offset: usize) -> usize {
-        self.0[..offset].encode_utf16().count()
+        self.text[..offset].encode_utf16().count()
     }
 }
 
@@ -82,7 +104,11 @@ impl SecretInputState {
         self
     }
     pub(crate) fn value(&self) -> Zeroizing<String> {
-        Zeroizing::new(self.secret.0.to_string())
+        Zeroizing::new(if self.secret.allocation_failed {
+            String::new()
+        } else {
+            self.secret.text.to_string()
+        })
     }
     pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
         self.secret = SecretBuffer::default();
@@ -95,7 +121,7 @@ impl SecretInputState {
     pub(crate) fn set_value(&mut self, value: &str, _: &mut Window, cx: &mut Context<Self>) {
         self.clear(cx);
         self.secret.replace(0..0, value);
-        let end = self.secret.0.len();
+        let end = self.secret.text.len();
         self.selection = end..end;
         self.reversed = false;
     }
@@ -107,14 +133,14 @@ impl SecretInputState {
     }
     fn byte_index_for_point(&self, point: Point<Pixels>) -> usize {
         let Some((line, origin)) = &self.last_layout else {
-            return self.secret.0.len();
+            return self.secret.text.len();
         };
         let index = line.closest_index_for_x(point.x - origin.x) / "•".len();
         self.secret
-            .0
+            .text
             .char_indices()
             .nth(index)
-            .map_or(self.secret.0.len(), |(i, _)| i)
+            .map_or(self.secret.text.len(), |(i, _)| i)
     }
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
@@ -131,7 +157,7 @@ impl SecretInputState {
                 shift: modifiers.shift,
             }),
             "a" if command => {
-                self.selection = 0..self.secret.0.len();
+                self.selection = 0..self.secret.text.len();
                 self.reversed = false;
                 cx.notify();
             }
@@ -146,11 +172,11 @@ impl SecretInputState {
             "backspace" | "delete" => {
                 if self.selection.is_empty() {
                     if key == "backspace" {
-                        self.selection.start = self.secret.0[..self.selection.start]
+                        self.selection.start = self.secret.text[..self.selection.start]
                             .char_indices()
                             .next_back()
                             .map_or(0, |(i, _)| i);
-                    } else if let Some(ch) = self.secret.0[self.selection.end..].chars().next() {
+                    } else if let Some(ch) = self.secret.text[self.selection.end..].chars().next() {
                         self.selection.end += ch.len_utf8();
                     }
                 }
@@ -169,17 +195,17 @@ impl SecretInputState {
                 };
                 let next = match key {
                     "home" => 0,
-                    "end" => self.secret.0.len(),
+                    "end" => self.secret.text.len(),
                     "left" if !modifiers.shift && !self.selection.is_empty() => {
                         self.selection.start
                     }
                     "right" if !modifiers.shift && !self.selection.is_empty() => self.selection.end,
-                    "left" => self.secret.0[..end]
+                    "left" => self.secret.text[..end]
                         .char_indices()
                         .next_back()
                         .map_or(0, |(i, _)| i),
                     _ => {
-                        end + self.secret.0[end..]
+                        end + self.secret.text[end..]
                             .chars()
                             .next()
                             .map_or(0, char::len_utf8)
@@ -250,8 +276,8 @@ impl EntityInputHandler for SecretInputState {
             self.reversed = false;
             self.marked = None;
             cx.emit(InputEvent::Change);
-            cx.notify();
         }
+        cx.notify();
     }
     fn replace_and_mark_text_in_range(
         &mut self,
@@ -268,6 +294,7 @@ impl EntityInputHandler for SecretInputState {
         let start = range.start;
         let utf16_start = self.secret.utf16_offset(start);
         if !self.secret.replace(range, text) {
+            cx.notify();
             return;
         }
         self.selection = start + text.len()..start + text.len();
@@ -303,17 +330,17 @@ impl Render for SecretInputState {
     #[allow(clippy::too_many_lines)]
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
-        let text: SharedString = if self.secret.0.is_empty() {
+        let text: SharedString = if self.secret.text.is_empty() {
             self.placeholder.clone()
         } else {
-            "•".repeat(self.secret.0.chars().count()).into()
+            "•".repeat(self.secret.text.chars().count()).into()
         };
-        let color = if self.secret.0.is_empty() {
+        let color = if self.secret.text.is_empty() {
             cx.theme().muted_foreground
         } else {
             cx.theme().foreground
         };
-        div()
+        let input = div()
             .w_full()
             .h(px(40.))
             .px_3()
@@ -354,7 +381,7 @@ impl Render for SecretInputState {
                         let input = entity.read(cx);
                         let focus = input.focus.clone();
                         let masked_index =
-                            |index| input.secret.0[..index].chars().count() * "•".len();
+                            |index| input.secret.text[..index].chars().count() * "•".len();
                         let selection =
                             masked_index(input.selection.start)..masked_index(input.selection.end);
                         let caret = line.x_for_index(if input.reversed {
@@ -409,13 +436,43 @@ impl Render for SecretInputState {
                 )
                 .w_full()
                 .h_full(),
-            )
+            );
+        div()
+            .w_full()
+            .child(input)
+            .when(self.secret.allocation_failed, |this| {
+                this.child(div().text_xs().child("Unable to secure input memory"))
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_lock_keeps_previous_edit_and_reports_failure_until_recovery() {
+        let mut secret = SecretBuffer::default();
+        assert!(secret.replace(0..0, "original"));
+        assert!(!secret.replace_with(0..8, "replacement", |_| Err(
+            factorseal::VaultError::Protection("test lock failure".into())
+        )));
+        assert_eq!(&*secret.text, "original");
+        assert!(secret.allocation_failed);
+        assert!(secret.replace(0..8, "recovered"));
+        assert!(!secret.allocation_failed);
+        assert_eq!(&*secret.text, "recovered");
+    }
+    #[test]
+    fn large_password_edits_and_clear_preserve_utf8() {
+        let mut secret = SecretBuffer::default();
+        let text = "🔐".repeat(MAX_BYTES / 4);
+        assert!(secret.replace(0..0, &text));
+        assert_eq!(&*secret.text, text);
+        assert!(!secret.replace(0..0, "x"));
+        assert_eq!(&*secret.text, text);
+        assert!(secret.replace(0..MAX_BYTES, ""));
+        assert!(secret.text.is_empty());
+    }
     #[test]
     fn bounded_utf8_edits_preserve_only_current_text() {
         let mut secret = SecretBuffer::default();
@@ -424,10 +481,10 @@ mod tests {
         assert_eq!(secret.utf16_offset(5), 3);
         assert!(!secret.replace(2..3, "x"));
         assert!(secret.replace(1..5, "X"));
-        assert_eq!(&*secret.0, "aXb");
+        assert_eq!(&*secret.text, "aXb");
         assert!(!secret.replace(0..0, &"x".repeat(MAX_BYTES)));
         assert!(!secret.replace(0..0, "\n"));
         assert!(secret.replace(0..3, ""));
-        assert!(secret.0.is_empty());
+        assert!(secret.text.is_empty());
     }
 }

@@ -383,7 +383,7 @@ impl Shared {
         &self,
         session: OwnedObjectPath,
         owner: &str,
-        value: &Zeroizing<Vec<u8>>,
+        value: &[u8],
         content_type: String,
     ) -> fdo::Result<Secret> {
         let value = self
@@ -918,7 +918,7 @@ mod tests {
         assert_eq!(updated.content_type, "application/octet-stream");
         assert_eq!(updated.attributes, attributes);
         agent.delete_item(&item.id).unwrap();
-        assert_eq!(agent.store.get(secret_item(&item.id)).unwrap(), None);
+        assert!(agent.store.get(secret_item(&item.id)).unwrap().is_none());
         assert!(agent.all_items().unwrap().is_empty());
         let index: Index = serde_json::from_slice(
             &agent
@@ -1626,7 +1626,7 @@ mod tests {
             &target.caller,
             VaultRequest::new(VaultAction::ImportVaultEntry {
                 entry: entry.metadata.clone(),
-                value: WireSecret::new(entry.value.expose().to_vec()),
+                value: WireSecret::new(entry.value.expose().to_vec()).unwrap(),
                 evict_at: entry.evict_at,
                 replace_existing,
             })
@@ -1701,7 +1701,7 @@ mod tests {
             .unwrap();
         assert_eq!(import_item(&target, &entry, false), KeptExisting);
         assert_eq!(
-            &**target.store.get(secret_item(&saved.id)).unwrap().unwrap(),
+            &*target.store.get(secret_item(&saved.id)).unwrap().unwrap(),
             b"changed"
         );
         assert_eq!(
@@ -1710,7 +1710,7 @@ mod tests {
         );
         assert_eq!(import_item(&target, &entry, true), Replaced);
         assert_eq!(
-            &**target.store.get(secret_item(&saved.id)).unwrap().unwrap(),
+            &*target.store.get(secret_item(&saved.id)).unwrap().unwrap(),
             b"backup"
         );
         assert_eq!(target.item(&saved.id).unwrap().content_type, "text/plain");
@@ -1725,7 +1725,7 @@ mod tests {
         assert_eq!(reloaded.all_items().unwrap().len(), 2);
         assert_eq!(reloaded.item(&saved.id).unwrap().label, "Restored");
         assert_eq!(
-            &**reloaded
+            &*reloaded
                 .store
                 .get(secret_item(&unrelated.id))
                 .unwrap()
@@ -1757,7 +1757,7 @@ mod tests {
             &target.caller,
             VaultRequest::new(VaultAction::ImportVaultEntry {
                 entry: entry.metadata.clone(),
-                value: WireSecret::new(b"malformed".to_vec()),
+                value: WireSecret::new(b"malformed".to_vec()).unwrap(),
                 evict_at: None,
                 replace_existing: true,
             })
@@ -1892,7 +1892,7 @@ mod tests {
                 b"new".as_slice()
             };
             assert_eq!(
-                &**target.store.get(secret_item(&item.id)).unwrap().unwrap(),
+                &*target.store.get(secret_item(&item.id)).unwrap().unwrap(),
                 expected
             );
         }
@@ -1952,7 +1952,7 @@ mod tests {
                 "factorseal-release-drill"
             );
             assert_eq!(
-                &**reloaded
+                &*reloaded
                     .store
                     .get(secret_item(&restored.id))
                     .unwrap()

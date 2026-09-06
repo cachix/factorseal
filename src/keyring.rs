@@ -87,7 +87,7 @@ impl<T: VaultClient + ?Sized> Keyring for T {
             VaultAction::Put {
                 namespace: namespace.to_vec(),
                 address: address.clone(),
-                value: WireSecret::new(value.to_vec()),
+                value: WireSecret::new(value.to_vec())?,
                 evict_at,
             },
         )? {
@@ -144,7 +144,7 @@ mod tests {
         fn request(&self, request: &VaultRequest) -> crate::VaultResult<crate::VaultResponse> {
             let body = match &request.action {
                 VaultAction::Get { .. } => VaultResponseBody::Secret {
-                    value: Some(WireSecret::new(b"secret".to_vec())),
+                    value: Some(WireSecret::new(b"secret".to_vec()).unwrap()),
                 },
                 VaultAction::Put { .. } => VaultResponseBody::Stored,
                 VaultAction::Delete { .. } => VaultResponseBody::Deleted { existed: true },

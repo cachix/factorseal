@@ -56,7 +56,7 @@ trait CryptoProvider: Sync {
         password: &[u8],
         salt: &[u8],
         iterations: u32,
-    ) -> Zeroizing<[u8; KEY_BYTES]>;
+    ) -> crate::vault::VaultResult<crate::security::memory::LockedKey<KEY_BYTES>>;
 }
 
 struct RustCryptoAes256Gcm;
@@ -109,10 +109,10 @@ impl CryptoProvider for RustCryptoAes256Gcm {
         password: &[u8],
         salt: &[u8],
         iterations: u32,
-    ) -> Zeroizing<[u8; KEY_BYTES]> {
-        let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
+    ) -> crate::vault::VaultResult<crate::security::memory::LockedKey<KEY_BYTES>> {
+        let mut key = crate::security::memory::LockedKey::zeroed()?;
         pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut *key);
-        key
+        Ok(key)
     }
 }
 
@@ -133,7 +133,7 @@ pub(crate) fn derive_pbkdf2_password_key(
     password: &[u8],
     salt: &[u8],
     iterations: u32,
-) -> Zeroizing<[u8; KEY_BYTES]> {
+) -> crate::vault::VaultResult<crate::security::memory::LockedKey<KEY_BYTES>> {
     DEFAULT_PROVIDER.derive_pbkdf2_password_key(password, salt, iterations)
 }
 
@@ -174,12 +174,12 @@ pub(crate) fn decrypt_key(
     nonce: &[u8; NONCE_BYTES],
     aad: &[u8],
     ciphertext: &[u8],
-) -> std::result::Result<crate::security::memory::LockedBytes<KEY_BYTES>, AuthenticationError> {
+) -> std::result::Result<crate::security::memory::LockedKey<KEY_BYTES>, AuthenticationError> {
     if algorithm != EncryptionAlgorithm::Aes256Gcm || ciphertext.len() != KEY_BYTES + 16 {
         return Err(AuthenticationError);
     }
     let mut plaintext =
-        crate::security::memory::LockedBytes::zeroed().map_err(|_| AuthenticationError)?;
+        crate::security::memory::LockedKey::zeroed().map_err(|_| AuthenticationError)?;
     plaintext.copy_from_slice(&ciphertext[..KEY_BYTES]);
     Aes256Gcm::new(key.into())
         .decrypt_in_place_detached(
@@ -256,7 +256,7 @@ mod tests {
     #[cfg(feature = "key-protection")]
     #[test]
     fn pbkdf2_hmac_sha256_matches_known_answer() {
-        let output = derive_pbkdf2_password_key(b"password", b"salt", 1);
+        let output = derive_pbkdf2_password_key(b"password", b"salt", 1).unwrap();
         assert_eq!(
             hex::encode(output.as_slice()),
             "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"

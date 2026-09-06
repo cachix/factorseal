@@ -63,8 +63,8 @@ pub(super) fn create_with_protectors(
         platform,
         cryptographic_profile,
     } = creation;
-    let mut vault_root_key = Zeroizing::new([0_u8; KEY_BYTES]);
-    let mut signing_seed = Zeroizing::new([0_u8; SIGNING_SEED_BYTES]);
+    let mut vault_root_key = crate::security::memory::LockedKey::<KEY_BYTES>::zeroed()?;
+    let mut signing_seed = crate::security::memory::LockedKey::<SIGNING_SEED_BYTES>::zeroed()?;
     getrandom::fill(&mut *vault_root_key)?;
     getrandom::fill(&mut *signing_seed)?;
     let public_signing_key = public_key_for_seed(&signing_seed);
@@ -196,6 +196,8 @@ pub(super) fn unseal_with_protectors(
             decode_key::<KEY_BYTES>(&root_payload, "vault root key")
         })?
     };
+    // Retire the backend-owned pageable copy as soon as the key is locked.
+    drop(root_payload);
     let secrets = crate::timing::result("key_hierarchy", "open_installation_secrets", || {
         InstallationSecrets::open(
             stored.installation_id,

@@ -2,11 +2,12 @@ use std::fmt;
 #[cfg(feature = "vault-store")]
 use std::io;
 
+use crate::security::LockedBytes;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "vault-store")]
 use sha2::{Digest, Sha256};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::vault::encoding::base64_bytes;
 use crate::vault::{
@@ -196,10 +197,10 @@ impl WireSecretAddress {
     }
 }
 
-/// Secret bytes that wipe their allocation on drop. They travel as base64.
+/// Secret bytes held in locked, guarded memory. They travel as base64.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct WireSecret(#[serde(with = "base64_bytes")] Vec<u8>);
+pub struct WireSecret(#[serde(with = "locked_base64")] LockedBytes);
 
 impl fmt::Debug for WireSecret {
     /// Requests and responses carry this type and derive `Debug`, so a
@@ -211,9 +212,19 @@ impl fmt::Debug for WireSecret {
 }
 
 impl WireSecret {
+    pub fn new(bytes: Vec<u8>) -> VaultResult<Self> {
+        LockedBytes::from_zeroizing(Zeroizing::new(bytes)).map(Self)
+    }
+
+    /// Transfer already locked storage without copying or relocking it.
     #[must_use]
-    pub fn new(bytes: Vec<u8>) -> Self {
+    pub fn from_locked(bytes: LockedBytes) -> Self {
         Self(bytes)
+    }
+
+    #[must_use]
+    pub fn into_locked(self) -> LockedBytes {
+        self.0
     }
 
     #[must_use]
@@ -222,9 +233,62 @@ impl WireSecret {
     }
 }
 
-impl Drop for WireSecret {
-    fn drop(&mut self) {
-        self.0.zeroize();
+mod locked_base64 {
+    use super::LockedBytes;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde::{Deserializer, Serializer, de::Visitor, ser::Error as _};
+
+    pub(super) fn serialize<S: Serializer>(
+        value: &LockedBytes,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let size = base64::encoded_len(value.len(), true)
+            .ok_or_else(|| S::Error::custom("secret is too large"))?;
+        let mut encoded = LockedBytes::zeroed(size).map_err(S::Error::custom)?;
+        STANDARD
+            .encode_slice(value, &mut encoded)
+            .map_err(S::Error::custom)?;
+        let text = std::str::from_utf8(&encoded).map_err(S::Error::custom)?;
+        serializer.serialize_str(text)
+    }
+    fn decode<E: serde::de::Error>(encoded: &str) -> Result<LockedBytes, E> {
+        if !encoded.len().is_multiple_of(4) {
+            return Err(E::custom("invalid base64 secret"));
+        }
+        let padding = if encoded.ends_with("==") {
+            2
+        } else {
+            usize::from(encoded.ends_with('='))
+        };
+        let size = (encoded.len() / 4 * 3)
+            .checked_sub(padding)
+            .ok_or_else(|| E::custom("invalid base64 secret"))?;
+        let mut value = LockedBytes::zeroed(size).map_err(E::custom)?;
+        let written = STANDARD
+            .decode_slice(encoded, &mut value)
+            .map_err(|_| E::custom("invalid base64 secret"))?;
+        if written != size {
+            return Err(E::custom("invalid base64 length"));
+        }
+        Ok(value)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<LockedBytes, D::Error> {
+        struct SecretVisitor;
+        impl Visitor<'_> for SecretVisitor {
+            type Value = LockedBytes;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a base64 secret")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                decode(v)
+            }
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+                decode(&zeroize::Zeroizing::new(v))
+            }
+        }
+        deserializer.deserialize_str(SecretVisitor)
     }
 }
 
@@ -390,14 +454,9 @@ impl VaultRequest {
         Ok(request)
     }
 
-    pub fn encode(&self) -> VaultResult<Zeroizing<Vec<u8>>> {
+    pub fn encode(&self) -> VaultResult<LockedBytes> {
         self.validate_fields()?;
-        let bytes =
-            serde_json::to_vec(self).map_err(|error| VaultError::Protocol(error.to_string()))?;
-        if bytes.len() > MAX_MESSAGE_BYTES {
-            return Err(VaultError::Protocol("request is too large".to_owned()));
-        }
-        Ok(Zeroizing::new(bytes))
+        crate::security::memory::serialize_locked(self, MAX_MESSAGE_BYTES)
     }
 
     #[cfg(feature = "vault-store")]
@@ -768,7 +827,7 @@ pub enum VaultMutation {
     /// Require the value at the start of the batch to match before applying any changes.
     Check {
         address: WireSecretAddress,
-        expected: Option<WireSecret>,
+        expected_sha256: Option<[u8; 32]>,
     },
     Put {
         address: WireSecretAddress,
@@ -855,14 +914,11 @@ impl VaultResponse {
         Ok(response)
     }
 
-    pub fn encode(&self) -> VaultResult<Zeroizing<Vec<u8>>> {
+    pub fn encode(&self) -> VaultResult<LockedBytes> {
         self.check_delivery()?;
-        let bytes =
-            serde_json::to_vec(self).map_err(|error| VaultError::Protocol(error.to_string()))?;
-        if bytes.len() > MAX_MESSAGE_BYTES {
-            return Err(VaultError::Protocol("response is too large".to_owned()));
-        }
-        Ok(Zeroizing::new(bytes))
+        let bytes = crate::security::memory::serialize_locked(self, MAX_MESSAGE_BYTES)?;
+        self.check_delivery()?;
+        Ok(bytes)
     }
 
     pub(crate) fn check_delivery(&self) -> VaultResult<()> {
@@ -1251,5 +1307,41 @@ pub fn read_permission_pages(
             cursor: next.clone(),
         };
         cursor = Some(next);
+    }
+}
+
+#[cfg(test)]
+mod locked_secret_tests {
+    use super::WireSecret;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    #[test]
+    fn secret_serialization_preserves_legacy_base64_and_ownership() {
+        for length in [0, 1, 2, 3, 4097] {
+            let source = vec![0xfb; length];
+            let secret = WireSecret::new(source.clone()).unwrap();
+            let encoded = serde_json::to_vec(&secret).unwrap();
+            assert_eq!(
+                encoded,
+                serde_json::to_vec(&STANDARD.encode(&source)).unwrap()
+            );
+            let decoded: WireSecret = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded.expose(), source);
+            let address = decoded.expose().as_ptr();
+            let transferred = WireSecret::from_locked(decoded.into_locked());
+            assert_eq!(transferred.expose().as_ptr(), address);
+            assert_eq!(format!("{transferred:?}"), "WireSecret([REDACTED])");
+        }
+    }
+
+    #[test]
+    fn invalid_secret_encoding_is_rejected_without_echoing_input() {
+        for encoded in ["bad", "====", "AA=A", "secret!!", "AB==", "AAA"] {
+            let json = serde_json::to_vec(encoded).unwrap();
+            let error = serde_json::from_slice::<WireSecret>(&json).unwrap_err();
+            assert!(!error.to_string().contains(encoded));
+        }
+        let escaped: WireSecret = serde_json::from_str(r#""\u0059Q==""#).unwrap();
+        assert_eq!(escaped.expose(), b"a");
     }
 }

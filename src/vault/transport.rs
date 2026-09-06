@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "vault")]
 use sha2::{Digest, Sha256};
+#[cfg(feature = "vault")]
 use zeroize::Zeroizing;
 
 use super::{VaultError, VaultResult};
@@ -122,7 +123,7 @@ pub(crate) fn exchange_request(
 pub(crate) fn read_frame(
     reader: &mut impl Read,
     budget: IoBudget,
-) -> VaultResult<Zeroizing<Vec<u8>>> {
+) -> VaultResult<crate::security::LockedBytes> {
     let mut length = [0_u8; 4];
     read_exact_bounded(reader, &mut length, budget)
         .map_err(|error| VaultError::Protocol(format!("could not read frame length: {error}")))?;
@@ -133,7 +134,7 @@ pub(crate) fn read_frame(
             "frame length is outside the supported range".to_owned(),
         ));
     }
-    let mut bytes = Zeroizing::new(vec![0_u8; length]);
+    let mut bytes = crate::security::LockedBytes::zeroed(length)?;
     read_exact_bounded(reader, &mut bytes, budget)
         .map_err(|error| VaultError::Protocol(format!("could not read frame: {error}")))?;
     Ok(bytes)

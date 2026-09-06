@@ -16,7 +16,6 @@ use secretspec_ipc::protocol::provider::{
 };
 use secretspec_ipc::provider::{ProvidedSecret, ProviderHandler, SecretValue, serve_provider};
 use secretspec_ipc::server::{RequestContext, RpcResult, ServerConfig};
-use zeroize::Zeroizing;
 
 use super::CliError;
 
@@ -65,9 +64,11 @@ impl FactorsealProvider {
         mut action: F,
     ) -> RpcResult<VaultResponseBody>
     where
-        F: FnMut() -> VaultAction,
+        F: FnMut() -> factorseal::VaultResult<VaultAction>,
     {
-        let first = self.request_once(action()).await;
+        let first = self
+            .request_once(action().map_err(|e| map_vault_error(&e))?)
+            .await;
         let interaction = match &first {
             Err(error) if error.data.kind == ErrorKind::InteractionRequired => {
                 error.data.interaction.clone()
@@ -78,7 +79,10 @@ impl FactorsealProvider {
             return first;
         };
         match self.wait_for_permission(context, &interaction.id).await? {
-            PermissionWaitStatus::Granted => self.request_once(action()).await,
+            PermissionWaitStatus::Granted => {
+                self.request_once(action().map_err(|e| map_vault_error(&e))?)
+                    .await
+            }
             PermissionWaitStatus::Denied => Err(RpcError::new(ErrorKind::PermissionDenied)),
             PermissionWaitStatus::Expired => Err(RpcError::interaction_required(Some(interaction))),
             PermissionWaitStatus::Pending => unreachable!("permission wait loops while pending"),
@@ -222,14 +226,16 @@ impl ProviderHandler for FactorsealProvider {
         let address = self.wire_address(address)?;
         let project = self.project()?.to_owned();
         match self
-            .request(&context, || VaultAction::GetCache {
-                project: project.clone(),
-                address: address.clone(),
+            .request(&context, || {
+                Ok(VaultAction::GetCache {
+                    project: project.clone(),
+                    address: address.clone(),
+                })
             })
             .await?
         {
             VaultResponseBody::Secret { value: Some(value) } => {
-                let bytes = Zeroizing::new(value.expose().to_vec());
+                let bytes = value.into_locked();
                 let value = std::str::from_utf8(&bytes)
                     .map_err(|_| RpcError::new(ErrorKind::OperationFailed))?;
                 Ok(Some(ProvidedSecret::new(value.to_owned(), None)))
@@ -252,11 +258,13 @@ impl ProviderHandler for FactorsealProvider {
         let address = self.wire_address(address)?;
         let project = self.project()?.to_owned();
         let response = self
-            .request(&context, || VaultAction::PutCache {
-                project: project.clone(),
-                address: address.clone(),
-                value: WireSecret::new(value.expose().as_bytes().to_vec()),
-                evict_at: None,
+            .request(&context, || {
+                Ok(VaultAction::PutCache {
+                    project: project.clone(),
+                    address: address.clone(),
+                    value: WireSecret::new(value.expose().as_bytes().to_vec())?,
+                    evict_at: None,
+                })
             })
             .await?;
         matches!(response, VaultResponseBody::Stored)
@@ -283,11 +291,13 @@ impl ProviderHandler for FactorsealProvider {
         let address = self.wire_address(address)?;
         let project = self.project()?.to_owned();
         let response = self
-            .request(&context, || VaultAction::PutCache {
-                project: project.clone(),
-                address: address.clone(),
-                value: WireSecret::new(value.expose().as_bytes().to_vec()),
-                evict_at: Some(evict_at),
+            .request(&context, || {
+                Ok(VaultAction::PutCache {
+                    project: project.clone(),
+                    address: address.clone(),
+                    value: WireSecret::new(value.expose().as_bytes().to_vec())?,
+                    evict_at: Some(evict_at),
+                })
             })
             .await?;
         matches!(response, VaultResponseBody::Stored)
@@ -299,9 +309,11 @@ impl ProviderHandler for FactorsealProvider {
         let address = self.wire_address(address)?;
         let project = self.project()?.to_owned();
         match self
-            .request(&context, || VaultAction::DeleteCache {
-                project: project.clone(),
-                address: address.clone(),
+            .request(&context, || {
+                Ok(VaultAction::DeleteCache {
+                    project: project.clone(),
+                    address: address.clone(),
+                })
             })
             .await?
         {

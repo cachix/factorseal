@@ -48,10 +48,10 @@ const MAX_RETAINED_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 const EXPIRY: Provenance = Provenance::service(ServiceReason::Expiry);
 
 /// One value per requested address, absent when missing or expired.
-pub(super) type SecretValues = Vec<Option<Zeroizing<Vec<u8>>>>;
+pub(super) type SecretValues = Vec<Option<crate::security::LockedBytes>>;
 
 pub(crate) struct StoredSecret {
-    pub(crate) value: Zeroizing<Vec<u8>>,
+    pub(crate) value: crate::security::LockedBytes,
     pub(crate) expires_at: Option<u64>,
 }
 
@@ -668,7 +668,7 @@ struct DocumentHead {
     key_epoch: u64,
     wrapped_dek: Vec<u8>,
     envelope: EncryptedSnapshot,
-    data_key: crate::security::memory::LockedBytes<32>,
+    data_key: crate::security::memory::LockedKey<32>,
 }
 
 impl StoreWorker {
@@ -765,7 +765,10 @@ impl StoreWorker {
         let (read, expires_at) = document.get_with_deadline(address, now)?;
         match read {
             SecretRead::Missing => Ok(None),
-            SecretRead::Value(value) => Ok(Some(StoredSecret { value, expires_at })),
+            SecretRead::Value(value) => Ok(Some(StoredSecret {
+                value: crate::security::LockedBytes::from_zeroizing(value)?,
+                expires_at,
+            })),
             SecretRead::Conflict => Err(VaultError::Conflict),
             SecretRead::Expired => {
                 let expiry = EXPIRY;
@@ -800,7 +803,9 @@ impl StoreWorker {
         addresses
             .iter()
             .map(|address| match document.get(address, now)? {
-                SecretRead::Value(value) => Ok(Some(value)),
+                SecretRead::Value(value) => {
+                    Ok(Some(crate::security::LockedBytes::from_zeroizing(value)?))
+                }
                 SecretRead::Missing | SecretRead::Expired => Ok(None),
                 SecretRead::Conflict => Err(VaultError::Conflict),
             })

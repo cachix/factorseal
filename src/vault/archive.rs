@@ -160,14 +160,7 @@ fn encrypt_archive(archive: &VaultArchive, passphrase: &[u8]) -> VaultResult<Zer
     };
     let aad =
         serde_json::to_vec(&header).map_err(|error| VaultError::InvalidData(error.to_string()))?;
-    let plaintext = Zeroizing::new(
-        serde_json::to_vec(archive).map_err(|error| VaultError::InvalidData(error.to_string()))?,
-    );
-    if plaintext.len() > MAX_ARCHIVE_PAYLOAD_BYTES {
-        return Err(VaultError::InvalidData(
-            "FactorSeal archive is too large".to_owned(),
-        ));
-    }
+    let plaintext = crate::security::memory::serialize_locked(archive, MAX_ARCHIVE_PAYLOAD_BYTES)?;
     let key = derive_key(passphrase, &header.kdf)?;
     let encrypted =
         crate::crypto::encrypt(&key, &aad, &plaintext).map_err(|_| VaultError::Crypto)?;
@@ -215,6 +208,7 @@ pub fn decrypt_vault_archive(bytes: &[u8], passphrase: &[u8]) -> VaultResult<Vau
         &ciphertext,
     )
     .map_err(|_| VaultError::Protection("incorrect passphrase or damaged archive".to_owned()))?;
+    let plaintext = crate::security::LockedBytes::from_zeroizing(plaintext)?;
     let mut archive: VaultArchive = serde_json::from_slice(&plaintext)
         .map_err(|error| VaultError::InvalidData(format!("invalid archive contents: {error}")))?;
     if archive.version == 1 {
@@ -256,7 +250,10 @@ fn validate_header(header: &ArchiveHeader) -> VaultResult<()> {
     Ok(())
 }
 
-fn derive_key(passphrase: &[u8], kdf: &ArchiveKdf) -> VaultResult<Zeroizing<[u8; 32]>> {
+fn derive_key(
+    passphrase: &[u8],
+    kdf: &ArchiveKdf,
+) -> VaultResult<crate::security::memory::LockedKey<32>> {
     validate_header(&ArchiveHeader {
         format: FORMAT.to_owned(),
         version: VERSION,
@@ -274,7 +271,7 @@ fn derive_key(passphrase: &[u8], kdf: &ArchiveKdf) -> VaultResult<Zeroizing<[u8;
     let params = Params::new(kdf.memory_kib, kdf.iterations, kdf.parallelism, Some(32))
         .map_err(|error| VaultError::Protection(format!("invalid archive KDF: {error}")))?;
     let mut memory = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
-    let mut key = Zeroizing::new([0_u8; 32]);
+    let mut key = crate::security::memory::LockedKey::zeroed()?;
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into_with_memory(passphrase, &salt, &mut *key, &mut memory)
         .map_err(|error| VaultError::Protection(format!("archive KDF failed: {error}")))?;
@@ -432,7 +429,7 @@ mod tests {
                     partition: b"factorseal/personal-secrets/v1".to_vec(),
                     address: SecretAddress::new("example", None).unwrap(),
                 },
-                value: WireSecret::new(b"needle-secret".to_vec()),
+                value: WireSecret::new(b"needle-secret".to_vec()).unwrap(),
                 evict_at: None,
             }],
         )
@@ -503,12 +500,12 @@ mod tests {
             vec![
                 VaultArchiveEntry {
                     metadata: metadata(SecretAddress::new(INDEX_ITEM, None).unwrap()),
-                    value: WireSecret::new(serde_json::to_vec(&index).unwrap()),
+                    value: WireSecret::new(serde_json::to_vec(&index).unwrap()).unwrap(),
                     evict_at: None,
                 },
                 VaultArchiveEntry {
                     metadata: metadata(item.address().unwrap()),
-                    value: WireSecret::new(b"legacy secret".to_vec()),
+                    value: WireSecret::new(b"legacy secret".to_vec()).unwrap(),
                     evict_at: None,
                 },
             ],

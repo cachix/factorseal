@@ -577,7 +577,7 @@ mod tests {
                 &VaultRequest::new(VaultAction::Put {
                     namespace: namespace.to_vec(),
                     address: address.clone(),
-                    value: WireSecret::new(b"transport-secret".to_vec()),
+                    value: WireSecret::new(b"transport-secret".to_vec()).unwrap(),
                     evict_at: None,
                 })
                 .unwrap(),

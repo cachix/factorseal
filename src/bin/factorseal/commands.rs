@@ -76,7 +76,7 @@ pub(super) fn initialize(
     let unsealed = Vault::prepare_with_unlock_policy_and_profile(
         root,
         &policy,
-        credentials(password.as_ref().map(|value| value.as_slice())),
+        credentials(password.as_deref()),
         cryptographic_profile,
     )?;
     drop(password);
@@ -352,7 +352,7 @@ fn import_personal_secrets(
                 partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
                 address: factorseal::SecretAddress::new(name, None)?,
             },
-            value: WireSecret::new(secret.encode().map_err(transfer_error)?.to_vec()),
+            value: WireSecret::new(secret.encode().map_err(transfer_error)?.to_vec())?,
             evict_at: None,
         });
     }
@@ -471,7 +471,7 @@ pub(super) fn set_project_value(
         VaultAction::PutProject {
             project,
             address,
-            value: factorseal::WireSecret::new(value.to_vec()),
+            value: factorseal::WireSecret::new(value.to_vec())?,
         },
         |body| matches!(body, VaultResponseBody::Stored),
     )
@@ -850,11 +850,7 @@ pub(super) fn destroy_vault(
     let group = select_unlock_group(&device, requested_group)?;
     super::platform::harden_key_owner()?;
     let password = read_password_for_groups(std::slice::from_ref(&group), factor, false)?;
-    Vault::destroy_with_unlock_group(
-        root,
-        &group,
-        credentials(password.as_ref().map(|value| value.as_slice())),
-    )?;
+    Vault::destroy_with_unlock_group(root, &group, credentials(password.as_deref()))?;
     println!(
         "Removed local Factorseal vault at {}. Retained TPM envelopes or backups are not revoked.",
         root.display()
@@ -1715,12 +1711,8 @@ fn unseal_selected(
 ) -> Result<UnsealedVault, CliError> {
     let group = select_unlock_group(device, requested_group)?;
     let password = read_password_for_groups(std::slice::from_ref(&group), factor, false)?;
-    Vault::unseal_with_unlock_group(
-        root,
-        &group,
-        credentials(password.as_ref().map(|value| value.as_slice())),
-    )
-    .map_err(Into::into)
+    Vault::unseal_with_unlock_group(root, &group, credentials(password.as_deref()))
+        .map_err(Into::into)
 }
 
 fn select_unlock_group(
@@ -1753,7 +1745,7 @@ pub(super) fn read_password_for_groups(
     groups: &[UnlockGroup],
     factor: FactorSource<'_>,
     confirm: bool,
-) -> Result<Option<Zeroizing<Vec<u8>>>, CliError> {
+) -> Result<Option<factorseal::security::LockedBytes>, CliError> {
     groups
         .iter()
         .any(|group| group.requires(UnlockFactorKind::Password))

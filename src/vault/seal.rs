@@ -29,7 +29,7 @@ pub(crate) fn fuzz_metadata_seed() -> Vec<u8> {
     let (_, wrapped_installation_secrets) = crate::vault::InstallationSecrets::generate(
         installation_id,
         device_vault_id,
-        zeroize::Zeroizing::new([0; 32]),
+        crate::security::memory::LockedKey::zeroed().unwrap(),
         &[0; 32],
     )
     .unwrap();

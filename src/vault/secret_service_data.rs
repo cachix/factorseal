@@ -91,9 +91,8 @@ impl PortableItem {
         }
     }
     pub(crate) fn encode(&self) -> VaultResult<WireSecret> {
-        serde_json::to_vec(self)
-            .map(WireSecret::new)
-            .map_err(|e| VaultError::InvalidData(e.to_string()))
+        let bytes = serde_json::to_vec(self).map_err(|e| VaultError::InvalidData(e.to_string()))?;
+        WireSecret::new(bytes)
     }
     pub(crate) fn decode(bytes: &[u8], address: &SecretAddress) -> VaultResult<Self> {
         let item: Self =

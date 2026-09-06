@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use sha2::{Digest as _, Sha256};
 use zbus::fdo;
 use zeroize::Zeroizing;
 
@@ -58,7 +59,7 @@ impl Store {
 
     fn index(&self) -> VaultResult<Index> {
         let bytes = self.get(INDEX_ITEM)?;
-        Index::decode(bytes.as_ref().map(|b| b.as_slice()))
+        Index::decode(bytes.as_deref())
     }
 
     #[cfg(feature = "vault")]
@@ -90,15 +91,16 @@ impl Store {
         })
     }
 
-    pub(super) fn get(&self, item: impl Into<String>) -> VaultResult<Option<Zeroizing<Vec<u8>>>> {
+    pub(super) fn get(
+        &self,
+        item: impl Into<String>,
+    ) -> VaultResult<Option<crate::security::LockedBytes>> {
         let response = self.call(VaultAction::Get {
             namespace: NAMESPACE.to_vec(),
             address: WireSecretAddress::new(item, None),
         })?;
         match response {
-            VaultResponseBody::Secret { value } => {
-                Ok(value.map(|value| Zeroizing::new(value.expose().to_vec())))
-            }
+            VaultResponseBody::Secret { value } => Ok(value.map(WireSecret::into_locked)),
             _ => Err(VaultError::Protocol(
                 "unexpected Secret Service vault response".to_owned(),
             )),
@@ -157,6 +159,8 @@ impl Agent {
         Ok(self.store.index().map_err(failed)?.items)
     }
 
+    // Keep the owned D-Bus inputs available when a concurrent writer requires a retry.
+    #[allow(clippy::needless_pass_by_value)]
     pub(super) fn create_or_replace(
         &self,
         label: String,
@@ -167,7 +171,7 @@ impl Agent {
     ) -> fdo::Result<(IndexItem, bool)> {
         for _ in 0..16 {
             let expected = self.store.get(INDEX_ITEM).map_err(failed)?;
-            let index = Index::decode(expected.as_deref().map(|b| b.as_slice())).map_err(failed)?;
+            let index = Index::decode(expected.as_deref()).map_err(failed)?;
             let existing = replace
                 .then(|| {
                     index
@@ -200,16 +204,18 @@ impl Agent {
             let result = self.store.mutate(vec![
                 VaultMutation::Check {
                     address: WireSecretAddress::new(INDEX_ITEM, None),
-                    expected: expected.map(|bytes| WireSecret::new(bytes.to_vec())),
+                    expected_sha256: expected
+                        .as_ref()
+                        .map(|bytes| Sha256::digest(bytes.as_slice()).into()),
                 },
                 VaultMutation::Put {
                     address: WireSecretAddress::new(secret_item(&id), None),
-                    value: WireSecret::new(value.to_vec()),
+                    value: WireSecret::new(value.to_vec()).map_err(failed)?,
                     evict_at: None,
                 },
                 VaultMutation::Put {
                     address: WireSecretAddress::new(INDEX_ITEM, None),
-                    value: WireSecret::new(index_bytes),
+                    value: WireSecret::new(index_bytes).map_err(failed)?,
                     evict_at: None,
                 },
             ]);
@@ -224,6 +230,8 @@ impl Agent {
         ))
     }
 
+    // Keep the owned D-Bus inputs available when a concurrent writer requires a retry.
+    #[allow(clippy::needless_pass_by_value)]
     pub(super) fn set_secret(
         &self,
         id: &str,
@@ -232,7 +240,7 @@ impl Agent {
     ) -> fdo::Result<()> {
         for _ in 0..16 {
             let expected = self.store.get(INDEX_ITEM).map_err(failed)?;
-            let index = Index::decode(expected.as_deref().map(|b| b.as_slice())).map_err(failed)?;
+            let index = Index::decode(expected.as_deref()).map_err(failed)?;
             let mut next = index.clone();
             let item = next
                 .items
@@ -245,16 +253,18 @@ impl Agent {
             let result = self.store.mutate(vec![
                 VaultMutation::Check {
                     address: WireSecretAddress::new(INDEX_ITEM, None),
-                    expected: expected.map(|bytes| WireSecret::new(bytes.to_vec())),
+                    expected_sha256: expected
+                        .as_ref()
+                        .map(|bytes| Sha256::digest(bytes.as_slice()).into()),
                 },
                 VaultMutation::Put {
                     address: WireSecretAddress::new(secret_item(id), None),
-                    value: WireSecret::new(value.to_vec()),
+                    value: WireSecret::new(value.to_vec()).map_err(failed)?,
                     evict_at: None,
                 },
                 VaultMutation::Put {
                     address: WireSecretAddress::new(INDEX_ITEM, None),
-                    value: WireSecret::new(index_bytes),
+                    value: WireSecret::new(index_bytes).map_err(failed)?,
                     evict_at: None,
                 },
             ]);
@@ -272,7 +282,7 @@ impl Agent {
     pub(super) fn delete_item(&self, id: &str) -> fdo::Result<()> {
         for _ in 0..16 {
             let expected = self.store.get(INDEX_ITEM).map_err(failed)?;
-            let index = Index::decode(expected.as_deref().map(|b| b.as_slice())).map_err(failed)?;
+            let index = Index::decode(expected.as_deref()).map_err(failed)?;
             let mut next = index.clone();
             let Some(position) = next.items.iter().position(|item| item.id == id) else {
                 return Err(no_item(id));
@@ -282,14 +292,16 @@ impl Agent {
             let result = self.store.mutate(vec![
                 VaultMutation::Check {
                     address: WireSecretAddress::new(INDEX_ITEM, None),
-                    expected: expected.map(|bytes| WireSecret::new(bytes.to_vec())),
+                    expected_sha256: expected
+                        .as_ref()
+                        .map(|bytes| Sha256::digest(bytes.as_slice()).into()),
                 },
                 VaultMutation::Delete {
                     address: WireSecretAddress::new(secret_item(id), None),
                 },
                 VaultMutation::Put {
                     address: WireSecretAddress::new(INDEX_ITEM, None),
-                    value: WireSecret::new(index_bytes),
+                    value: WireSecret::new(index_bytes).map_err(failed)?,
                     evict_at: None,
                 },
             ]);

@@ -5,12 +5,10 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "key-protection")]
 use sha2::Sha256;
-#[cfg(feature = "key-protection")]
-use zeroize::Zeroizing;
 
 use crate::EncryptionAlgorithm;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
-use crate::security::memory::LockedBytes;
+use crate::security::memory::LockedKey;
 
 #[cfg(feature = "vault-store")]
 use super::{DocumentId, DocumentKind};
@@ -36,7 +34,7 @@ const DOCUMENT_KEY_DOMAIN: &[u8] = b"factorseal/document-key/v1\0";
 #[allow(dead_code)]
 pub(crate) struct InstallationSecrets {
     #[cfg(any(feature = "key-protection", feature = "vault-store"))]
-    retained_keys: LockedBytes<64>,
+    retained_keys: LockedKey<64>,
     wrapped_signing_seed: WrappedKey,
 }
 
@@ -76,7 +74,7 @@ impl InstallationSecrets {
     pub(crate) fn generate(
         installation_id: InstallationId,
         device_vault_id: VaultId,
-        root_key: Zeroizing<[u8; KEY_BYTES]>,
+        root_key: LockedKey<KEY_BYTES>,
         signing_seed: &[u8; KEY_BYTES],
     ) -> VaultResult<(Self, WrappedInstallationSecrets)> {
         let wrapped = WrappedInstallationSecrets {
@@ -105,7 +103,7 @@ impl InstallationSecrets {
     pub(crate) fn open(
         installation_id: InstallationId,
         device_vault_id: VaultId,
-        root_key: Zeroizing<[u8; KEY_BYTES]>,
+        root_key: LockedKey<KEY_BYTES>,
         wrapped: &WrappedInstallationSecrets,
     ) -> VaultResult<Self> {
         wrapped.validate()?;
@@ -140,7 +138,7 @@ impl InstallationSecrets {
         &self,
         installation_id: InstallationId,
         device_vault_id: VaultId,
-    ) -> VaultResult<LockedBytes<KEY_BYTES>> {
+    ) -> VaultResult<LockedKey<KEY_BYTES>> {
         unwrap_key(
             self.root_key(),
             &installation_key_aad(installation_id, device_vault_id, b"signing-seed"),
@@ -157,8 +155,8 @@ impl InstallationSecrets {
         document_id: DocumentId,
         kind: DocumentKind,
         epoch: u64,
-    ) -> VaultResult<(LockedBytes<KEY_BYTES>, WrappedKey)> {
-        let mut key = LockedBytes::zeroed().map_err(memory_error)?;
+    ) -> VaultResult<(LockedKey<KEY_BYTES>, WrappedKey)> {
+        let mut key = LockedKey::zeroed()?;
         getrandom::fill(&mut *key)?;
         let wrapped = wrap_key(
             self.root_key(),
@@ -177,7 +175,7 @@ impl InstallationSecrets {
         kind: DocumentKind,
         epoch: u64,
         wrapped: &WrappedKey,
-    ) -> VaultResult<LockedBytes<KEY_BYTES>> {
+    ) -> VaultResult<LockedKey<KEY_BYTES>> {
         unwrap_key(
             self.root_key(),
             &document_key_aad(installation_id, vault_id, document_id, kind, epoch),
@@ -187,21 +185,15 @@ impl InstallationSecrets {
     }
 }
 
-#[cfg(any(feature = "key-protection", feature = "vault-store"))]
-#[allow(clippy::needless_pass_by_value)]
-fn memory_error(error: std::io::Error) -> VaultError {
-    VaultError::Protection(format!("cannot protect key memory: {error}"))
-}
-
 #[cfg(feature = "key-protection")]
 fn retain_keys(
     root: &[u8; KEY_BYTES],
     installation: InstallationId,
     vault: VaultId,
-) -> VaultResult<LockedBytes<64>> {
-    let mut keys = LockedBytes::zeroed().map_err(memory_error)?;
+) -> VaultResult<LockedKey<64>> {
+    let mut keys = LockedKey::zeroed()?;
     keys[..KEY_BYTES].copy_from_slice(root);
-    keys[KEY_BYTES..].copy_from_slice(&*derive_index_key(root, installation, vault));
+    keys[KEY_BYTES..].copy_from_slice(&*derive_index_key(root, installation, vault)?);
     Ok(keys)
 }
 
@@ -232,15 +224,15 @@ fn derive_index_key(
     root_key: &[u8; KEY_BYTES],
     installation_id: InstallationId,
     device_vault_id: VaultId,
-) -> Zeroizing<[u8; KEY_BYTES]> {
+) -> VaultResult<LockedKey<KEY_BYTES>> {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(root_key).expect("HMAC accepts a 256-bit root key");
     mac.update(INDEX_KEY_DOMAIN);
     mac.update(installation_id.as_bytes());
     mac.update(device_vault_id.as_bytes());
-    let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
+    let mut key = LockedKey::zeroed()?;
     key.copy_from_slice(&mac.finalize().into_bytes());
-    key
+    Ok(key)
 }
 
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
@@ -264,7 +256,7 @@ fn unwrap_key(
     aad: &[u8],
     wrapped: &WrappedKey,
     label: &str,
-) -> VaultResult<LockedBytes<KEY_BYTES>> {
+) -> VaultResult<LockedKey<KEY_BYTES>> {
     wrapped.validate()?;
     let plaintext = crate::crypto::decrypt_key(
         wrapped.encryption_algorithm,
@@ -326,14 +318,14 @@ mod tests {
     fn operational_keys_are_identity_bound() {
         let installation_id = InstallationId::from_bytes([7; 16]);
         let vault_id = VaultId::from_bytes([8; 16]);
-        let root = Zeroizing::new([10; KEY_BYTES]);
+        let root = LockedKey::from_slice(&[10; KEY_BYTES]).unwrap();
         let signing = [11; KEY_BYTES];
         let (secrets, wrapped) =
             InstallationSecrets::generate(installation_id, vault_id, root, &signing).unwrap();
         let reopened = InstallationSecrets::open(
             installation_id,
             vault_id,
-            Zeroizing::new([10; KEY_BYTES]),
+            LockedKey::from_slice(&[10; KEY_BYTES]).unwrap(),
             &wrapped,
         )
         .unwrap();
@@ -359,7 +351,7 @@ mod tests {
             InstallationSecrets::open(
                 InstallationId::from_bytes([6; 16]),
                 vault_id,
-                Zeroizing::new([10; KEY_BYTES]),
+                LockedKey::from_slice(&[10; KEY_BYTES]).unwrap(),
                 &wrapped,
             )
             .is_err()
@@ -368,7 +360,7 @@ mod tests {
             InstallationSecrets::open(
                 installation_id,
                 vault_id,
-                Zeroizing::new([12; KEY_BYTES]),
+                LockedKey::from_slice(&[12; KEY_BYTES]).unwrap(),
                 &wrapped,
             )
             .is_err()
@@ -384,14 +376,14 @@ mod tests {
         let (_, wrapped_installation) = InstallationSecrets::generate(
             installation_id,
             vault_id,
-            Zeroizing::new([10; KEY_BYTES]),
+            LockedKey::from_slice(&[10; KEY_BYTES]).unwrap(),
             &signing,
         )
         .unwrap();
         let reopened = InstallationSecrets::open(
             installation_id,
             vault_id,
-            Zeroizing::new([10; KEY_BYTES]),
+            LockedKey::from_slice(&[10; KEY_BYTES]).unwrap(),
             &wrapped_installation,
         )
         .unwrap();

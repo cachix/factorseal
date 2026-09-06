@@ -1,5 +1,6 @@
 //! Action normalization and grant-checked vault operation execution.
 
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use crate::vault::{
@@ -210,7 +211,7 @@ impl ActionContext<'_> {
             .get_with_deadline(self.scope, namespace, &address, self.clock.wall())?
             .map(|secret| {
                 self.accept_deadline(secret.expires_at)?;
-                Ok::<_, VaultError>(WireSecret::new(secret.value.to_vec()))
+                Ok::<_, VaultError>(WireSecret::from_locked(secret.value))
             })
             .transpose()?;
         Ok(VaultResponseBody::Secret { value })
@@ -229,7 +230,7 @@ impl ActionContext<'_> {
             .get_with_deadline(self.scope, namespace, &address, self.clock.wall())?
             .map(|secret| {
                 self.accept_deadline(secret.expires_at)?;
-                Ok::<_, VaultError>(WireSecret::new(secret.value.to_vec()))
+                Ok::<_, VaultError>(WireSecret::from_locked(secret.value))
             })
             .transpose()?;
         Ok(VaultResponseBody::Secret { value })
@@ -468,7 +469,10 @@ impl ActionContext<'_> {
         let mut operations = Vec::with_capacity(mutations.len());
         for mutation in mutations {
             match mutation {
-                VaultMutation::Check { address, expected } => {
+                VaultMutation::Check {
+                    address,
+                    expected_sha256,
+                } => {
                     let address = address.resolve()?;
                     self.require(namespace, Some(&address), GrantPermission::Get)?;
                     let current = self.store.get_with_deadline(
@@ -480,8 +484,10 @@ impl ActionContext<'_> {
                     if let Some(current) = &current {
                         self.accept_deadline(current.expires_at)?;
                     }
-                    if current.as_ref().map(|value| value.value.as_slice())
-                        != expected.as_ref().map(WireSecret::expose)
+                    if current
+                        .as_ref()
+                        .map(|value| <[u8; 32]>::from(Sha256::digest(value.value.as_slice())))
+                        != expected_sha256
                     {
                         return Err(VaultError::Conflict);
                     }

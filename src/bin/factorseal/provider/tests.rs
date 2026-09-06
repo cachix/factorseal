@@ -55,7 +55,7 @@ impl VaultClient for MemoryVault {
                         .unwrap()
                         .get(&(project.clone(), address.clone()))
                         .cloned()
-                        .map(WireSecret::new),
+                        .map(|value| WireSecret::new(value).unwrap()),
                 }
             }
             VaultAction::PutCache {
