@@ -25,6 +25,11 @@ let
         substitute "${cfg.desktopPackage}/$entry" "$out/$entry" \
           --replace-fail "${cfg.desktopPackage}/bin/factorseal-desktop" "$out/bin/factorseal-desktop"
       done
+      # dbus-broker starts the user service below instead of a bare process,
+      # so the same instance serves the whole session and a failed start
+      # fails queued callers instead of leaving them waiting.
+      printf 'SystemdService=dev.factorseal.Desktop.service\n' \
+        >> "$out/share/dbus-1/services/org.freedesktop.secrets.service"
     '';
     meta = cfg.desktopPackage.meta;
   };
@@ -176,21 +181,30 @@ in
       };
     };
 
-    environment.etc."xdg/autostart/dev.factorseal.Desktop.desktop" =
-      lib.mkIf (cfg.mode == "desktop" && cfg.desktop.autostart)
-        {
-          text = ''
-            [Desktop Entry]
-            Type=Application
-            Name=Factorseal Desktop
-            Comment=Unlock and manage the Factorseal hardware-backed vault
-            Exec=${desktopPackage}/bin/factorseal-desktop --background
-            TryExec=${desktopPackage}/bin/factorseal-desktop
-            Icon=dev.factorseal.Desktop
-            Terminal=false
-            Categories=Utility;Security;
-            X-GNOME-Autostart-enabled=true
-          '';
-        };
+    # The Desktop owns org.freedesktop.secrets for the whole graphical session:
+    # it answers with a locked collection while the vault is sealed and asks
+    # for the unseal through a prompt. Running it as a bus-activated user
+    # service lets dbus-broker start this exact instance on demand and lets
+    # systemd bring it back, sealed, if it exits.
+    systemd.user.services."dev.factorseal.Desktop" = lib.mkIf (cfg.mode == "desktop") {
+      description = "Factorseal Desktop";
+      documentation = [ "https://github.com/domenkozar/factorseal" ];
+      partOf = [ "graphical-session.target" ];
+      after = [
+        "graphical-session.target"
+        "dbus.socket"
+      ];
+      wants = [ "dbus.socket" ];
+      wantedBy = lib.optional cfg.desktop.autostart "graphical-session.target";
+      environment.DBUS_SESSION_BUS_ADDRESS = "unix:path=%t/bus";
+      serviceConfig = {
+        Type = "dbus";
+        BusName = "org.freedesktop.secrets";
+        ExecStart = "${desktopPackage}/bin/factorseal-desktop --background";
+        Restart = "on-failure";
+        RestartSec = 2;
+        Slice = "app.slice";
+      };
+    };
   };
 }

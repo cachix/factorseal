@@ -172,3 +172,15 @@ the schema version advances. Unknown formats are rejected and never deleted.
   activation helper exits with a failure when the Desktop does not publish the
   name in time, so dbus-broker fails waiting clients instead of queuing them
   forever.
+- Keep the system keyring available while the vault is sealed on Linux. The
+  Desktop now owns `org.freedesktop.secrets` for the whole session and
+  bridges to its vault worker over the native socket under an adapter grant
+  of its own, so the collection stays registered and reports `Locked` while
+  sealed, reads and writes answer `IsLocked`, and `Unlock` returns a prompt
+  that raises the unseal window and completes on unseal or dismissal. The
+  headless agent keeps serving in-process. On NixOS the Desktop is a
+  bus-activated `dev.factorseal.Desktop` user service instead of an XDG
+  autostart entry, so dbus-broker starts that instance on demand and systemd
+  restarts it if it exits. Instances started with `--no-secret-service`, with
+  `FACTORSEAL_DESKTOP_SECRET_SERVICE=0`, or on a non-default `--root` leave
+  the bus name to the configured Desktop.
