@@ -22,7 +22,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Verify native memory, process and private-file protections
-        run: cargo test -p factorseal --lib --all-features security::
+        run: |
+          cargo test -p factorseal --lib --all-features security::
       - name: Verify Windows accounts and both pipe authentication directions
         if: runner.os == 'Windows'
         shell: pwsh
