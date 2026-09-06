@@ -20,34 +20,76 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  fuzz:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [metadata, protocol, document, history, envelope, commit_chain, secret_service, archive, transfer, bootstrap]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-          key: fuzz-${{ matrix.target }}
+          key: fuzz-build
           cache-on-failure: true
       - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - run: python3 scripts/check-fuzz-lock.py
+      - name: Generate synthetic valid and invalid seeds
+        run: cargo +nightly run --locked --manifest-path fuzz/Cargo.toml --bin seed-corpus -- fuzz/seeds
+      - name: Build fuzz binaries with address sanitizer
+        run: |
+          mkdir -p fuzz/bin
+          for target in metadata protocol document history envelope commit_chain secret_service archive transfer bootstrap; do
+            cargo +nightly fuzz build "$target" --sanitizer address --target x86_64-unknown-linux-gnu
+            cp "fuzz/target/x86_64-unknown-linux-gnu/release/$target" "fuzz/bin/$target"
+          done
+      - name: Package binaries and seeds
+        # Tar preserves executable permissions when transferred as an artifact.
+        run: tar -czf fuzz-runtime.tar.gz -C fuzz bin seeds
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-runtime
+          path: fuzz-runtime.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  fuzz:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [metadata, protocol, document, history, envelope, commit_chain, secret_service, archive, transfer, bootstrap]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fuzz-runtime
+      - name: Unpack binaries and seeds
+        run: |
+          mkdir -p fuzz
+          tar -xzf fuzz-runtime.tar.gz -C fuzz
       - uses: actions/cache@v4
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: corpus-${{ matrix.target }}-
-      - name: Generate synthetic valid and invalid seeds
-        run: cargo +nightly run --locked --manifest-path fuzz/Cargo.toml --bin seed-corpus -- fuzz/corpus
+      - name: Add generated seeds and regression cases to the corpus
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "fuzz/corpus/$FUZZ_TARGET" "fuzz/artifacts/$FUZZ_TARGET"
+          cp -a "fuzz/seeds/$FUZZ_TARGET/." "fuzz/corpus/$FUZZ_TARGET/"
       - name: Fuzz with address sanitizer and bounded resources
         env:
+          FUZZ_TARGET: ${{ matrix.target }}
           FUZZ_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seconds || github.event_name == 'schedule' && 600 || 60 }}
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=$FUZZ_SECONDS -max_len=1048576 -rss_limit_mb=2048 -timeout=10
+          # Match cargo-fuzz's address sanitizer runtime default.
+          ASAN_OPTIONS: detect_odr_violation=0
+        run: |
+          "./fuzz/bin/$FUZZ_TARGET" "fuzz/corpus/$FUZZ_TARGET" \
+            "-artifact_prefix=fuzz/artifacts/$FUZZ_TARGET/" \
+            "-max_total_time=$FUZZ_SECONDS" -max_len=1048576 -rss_limit_mb=2048 -timeout=10
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
