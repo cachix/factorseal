@@ -139,11 +139,11 @@ tempfile = "3.20.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = { version = "0.9.12", optional = true }
 zbus = { version = "5.14.0", default-features = false, features = ["tokio"], optional = true }
-nix = { version = "0.31.3", features = ["socket", "user", "process", "resource"], optional = true }
+nix = { version = "0.31.3", features = ["socket", "user", "process", "resource", "poll"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", optional = true }
-nix = { version = "0.31.3", features = ["socket", "user", "process", "resource"], optional = true }
+nix = { version = "0.31.3", features = ["socket", "user", "process", "resource", "poll"], optional = true }
 objc2 = { version = "0.6.4", optional = true }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "block2"], optional = true }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDate", "NSNotification", "NSOperation", "NSRunLoop", "NSString", "block2"], optional = true }

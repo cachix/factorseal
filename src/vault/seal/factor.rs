@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 #[cfg(feature = "key-protection")]
+mod memory;
+
+#[cfg(feature = "key-protection")]
 use super::super::InstallationId;
 use super::super::{VaultError, VaultResult};
 
@@ -272,18 +275,22 @@ fn derive_factor_key(
                 .map_err(|error| {
                     VaultError::Protection(format!("invalid Argon2 parameters: {error}"))
                 })?;
-            // The convenience API owns an ordinary Vec<Block> which is not
-            // wiped on drop, even with argon2's zeroize feature enabled.
-            let mut memory = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
+            let started = std::time::Instant::now();
+            let mut memory = memory::Argon2Memory::new(params.block_count())?;
+            crate::timing::record("password_factor", "allocate_memory", started, "ok");
             let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
             let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
-            crate::timing::result("password_factor", "argon2id", || {
+            let derived = crate::timing::result("password_factor", "argon2id", || {
                 argon2
-                    .hash_password_into_with_memory(password, salt, &mut *key, &mut memory)
+                    .hash_password_into_with_memory(password, salt, &mut *key, memory.blocks())
                     .map_err(|error| {
                         VaultError::Protection(format!("factor derivation failed: {error}"))
                     })
-            })?;
+            });
+            let started = std::time::Instant::now();
+            drop(memory);
+            crate::timing::record("password_factor", "wipe_memory", started, "ok");
+            derived?;
             Ok(key)
         }
         (

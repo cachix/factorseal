@@ -37,7 +37,26 @@ pub(crate) struct RuntimeConfig {
 pub(crate) struct VaultContents {
     pub(crate) entries: Vec<VaultEntryMetadata>,
     pub(crate) permissions: Vec<factorseal::Permission>,
+    pub(crate) permissions_loading: bool,
+    pub(crate) permissions_error: Option<String>,
     pub(crate) secret_service_error: Option<String>,
+}
+
+impl VaultContents {
+    pub(crate) fn complete_permissions(
+        &mut self,
+        result: Result<Vec<factorseal::Permission>, String>,
+    ) {
+        if !self.permissions_loading {
+            return;
+        }
+        self.permissions_loading = false;
+        self.permissions_error = None;
+        match result {
+            Ok(permissions) => self.permissions = permissions,
+            Err(error) => self.permissions_error = Some(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -424,6 +443,16 @@ impl DesktopRuntime {
         load_vault_contents_from_client(&native_client(&self.config, metadata))
     }
 
+    pub(crate) fn load_permissions(
+        &self,
+        metadata: &VaultMetadata,
+    ) -> Result<Vec<factorseal::Permission>, String> {
+        load_permissions(|action| {
+            let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
+            self.request_live(metadata, &request)
+        })
+    }
+
     fn request_live(
         &self,
         metadata: &VaultMetadata,
@@ -567,10 +596,20 @@ impl DesktopRuntime {
             .lock()
             .map_err(|_| "desktop worker lock unavailable".to_owned())?
             .replace(worker.0.stdin.take().ok_or("worker input unavailable")?);
-        let (contents, contents_error) = match self.load_live_contents(metadata) {
-            Ok(contents) => (contents, None),
-            Err(error) => (VaultContents::default(), Some(error)),
-        };
+        // Publish the inventory before requesting permissions. The UI starts
+        // that request once it has applied this first unlocked snapshot.
+        let client = native_client(&self.config, metadata);
+        let (contents, contents_error) =
+            match load_vault_entries(|action| request_contents(&client, action)) {
+                Ok(contents) => (contents, None),
+                Err(error) => (
+                    VaultContents {
+                        permissions_loading: true,
+                        ..VaultContents::default()
+                    },
+                    Some(error),
+                ),
+            };
         let _ = self.events.try_send(Snapshot::Unsealed {
             metadata: metadata.clone(),
             idle_deadline,
@@ -634,17 +673,30 @@ fn unique_personal_name(title: &str, occupied: &[String]) -> String {
 }
 
 fn load_vault_contents_from_client(client: &impl VaultClient) -> Result<VaultContents, String> {
-    load_vault_contents(|action| {
-        let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
-        client
-            .request(&request)
-            .map_err(|error| error.to_string())?
-            .result
-            .map_err(|error| error.message)
-    })
+    load_vault_contents(|action| request_contents(client, action))
+}
+
+fn request_contents(
+    client: &impl VaultClient,
+    action: VaultAction,
+) -> Result<VaultResponseBody, String> {
+    let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
+    client
+        .request(&request)
+        .map_err(|error| error.to_string())?
+        .result
+        .map_err(|error| error.message)
 }
 
 fn load_vault_contents(
+    mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
+) -> Result<VaultContents, String> {
+    let mut contents = load_vault_entries(&mut request)?;
+    contents.complete_permissions(Ok(load_permissions(request)?));
+    Ok(contents)
+}
+
+fn load_vault_entries(
     mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
 ) -> Result<VaultContents, String> {
     let mut entries = Vec::new();
@@ -673,6 +725,22 @@ fn load_vault_contents(
         cursor = next_cursor;
     }
 
+    Ok(VaultContents {
+        entries,
+        permissions_loading: true,
+        secret_service_error: {
+            let started = std::time::Instant::now();
+            let error = secret_service_error();
+            crate::timing::record("desktop_inventory", "probe_secret_service", started, "ok");
+            error
+        },
+        ..VaultContents::default()
+    })
+}
+
+fn load_permissions(
+    mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
+) -> Result<Vec<factorseal::Permission>, String> {
     let VaultResponseBody::Permissions { permissions, .. } =
         crate::timing::result("desktop_inventory", "list_permissions", || {
             request(VaultAction::ListPermissions)
@@ -680,16 +748,7 @@ fn load_vault_contents(
     else {
         return Err("vault returned an unexpected permission-list response".to_owned());
     };
-    Ok(VaultContents {
-        entries,
-        permissions,
-        secret_service_error: {
-            let started = std::time::Instant::now();
-            let error = secret_service_error();
-            crate::timing::record("desktop_inventory", "probe_secret_service", started, "ok");
-            error
-        },
-    })
+    Ok(permissions)
 }
 
 #[cfg(target_os = "linux")]
@@ -950,5 +1009,53 @@ mod tests {
         assert!(responses.is_empty());
         assert_eq!(contents.entries, vec![first, second]);
         assert!(contents.permissions.is_empty());
+        assert!(!contents.permissions_loading);
+    }
+
+    #[test]
+    fn initial_inventory_does_not_wait_for_permissions() {
+        let entry = VaultEntryMetadata {
+            document_kind: DocumentKind::SecretSpecProject,
+            partition: b"project".to_vec(),
+            address: SecretAddress::secret_spec(
+                SecretSpecAddress::convention("project", "default", "TOKEN").unwrap(),
+            )
+            .unwrap(),
+        };
+        let mut contents = super::load_vault_entries(|action| {
+            assert!(matches!(
+                action,
+                factorseal::VaultAction::ListVaultEntries { .. }
+            ));
+            Ok(VaultResponseBody::VaultEntries {
+                entries: vec![entry.clone()],
+                next_cursor: None,
+            })
+        })
+        .unwrap();
+        assert_eq!(contents.entries, vec![entry.clone()]);
+        assert!(contents.permissions_loading);
+        assert!(contents.permissions.is_empty());
+
+        // An unsuccessful follow-up must leave the visible inventory intact.
+        contents.complete_permissions(Err("permission request failed".to_owned()));
+        assert_eq!(contents.entries, vec![entry]);
+        assert!(!contents.permissions_loading);
+        assert_eq!(
+            contents.permissions_error.as_deref(),
+            Some("permission request failed")
+        );
+    }
+
+    #[test]
+    fn deferred_permissions_do_not_replace_already_refreshed_contents() {
+        let mut contents = super::VaultContents {
+            permissions_loading: true,
+            ..super::VaultContents::default()
+        };
+        contents.complete_permissions(Ok(Vec::new()));
+        assert!(!contents.permissions_loading);
+        contents.complete_permissions(Err("stale response".to_owned()));
+        assert!(contents.permissions_error.is_none());
     }
 }

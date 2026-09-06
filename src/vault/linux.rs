@@ -97,15 +97,31 @@ pub fn serve_linux_vault_with_lifecycle(
     options: &LinuxVaultOptions,
     lifecycle_monitor: Option<&LinuxVaultLifecycle>,
 ) -> VaultResult<()> {
+    serve_linux_vault_with_ready(service, options, lifecycle_monitor, || Ok(()))
+}
+
+/// Notify the owner after the listener and lifecycle hooks are ready.
+#[doc(hidden)]
+pub fn serve_linux_vault_with_ready(
+    service: &Arc<VaultService>,
+    options: &LinuxVaultOptions,
+    lifecycle_monitor: Option<&LinuxVaultLifecycle>,
+    ready: impl FnOnce() -> VaultResult<()>,
+) -> VaultResult<()> {
     validate_socket_options("Linux", &options.socket_path, options.poll_interval)?;
     if options.install_lifecycle_monitor {
         service.enable_emergency_exit();
     }
-    let (listener, _socket_guard) = bind_listener(&options.socket_path)?;
+    let (listener, _socket_guard) =
+        crate::timing::result("vault_startup", "bind_listener", || {
+            bind_listener(&options.socket_path)
+        })?;
 
     let stopping = Arc::new(AtomicBool::new(false));
     if let Some(monitor) = lifecycle_monitor {
-        monitor.attach(service)?;
+        crate::timing::result("vault_startup", "attach_lifecycle", || {
+            monitor.attach(service)
+        })?;
     } else if options.install_lifecycle_monitor {
         return Err(VaultError::Protocol(
             "Linux lifecycle monitor was not prepared".to_owned(),
@@ -123,29 +139,31 @@ pub fn serve_linux_vault_with_lifecycle(
     // publish the optional desktop compatibility interface on.
     let has_session_bus =
         options.install_secret_service && std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
-    let served = std::thread::scope(|scope| {
-        let secret_service = has_session_bus.then(|| {
-            let service = Arc::clone(service);
-            let stopping = Arc::clone(&stopping);
-            scope.spawn(move || super::secret_service::serve_secret_service(service, stopping))
-        });
-        let caller_cache = CallerIdentityCache::default();
-        let result = accept_until_sealed(
-            service,
-            &listener,
-            &stopping,
-            &options.socket_path,
-            options.poll_interval,
-            || Ok(lifecycle_monitor.is_some_and(LinuxVaultLifecycle::requested)),
-            |stream| caller_identity(stream, &caller_cache),
-        );
-        stopping.store(true, Ordering::Release);
-        if let Some(thread) = secret_service {
-            thread
-                .join()
-                .map_err(|_| VaultError::Protocol("Secret Service thread panicked".to_owned()))??;
-        }
-        result
+    let served = ready().and_then(|()| {
+        std::thread::scope(|scope| {
+            let secret_service = has_session_bus.then(|| {
+                let service = Arc::clone(service);
+                let stopping = Arc::clone(&stopping);
+                scope.spawn(move || super::secret_service::serve_secret_service(service, stopping))
+            });
+            let caller_cache = CallerIdentityCache::default();
+            let result = accept_until_sealed(
+                service,
+                &listener,
+                &stopping,
+                &options.socket_path,
+                options.poll_interval,
+                || Ok(lifecycle_monitor.is_some_and(LinuxVaultLifecycle::requested)),
+                |stream| caller_identity(stream, &caller_cache),
+            );
+            stopping.store(true, Ordering::Release);
+            if let Some(thread) = secret_service {
+                thread.join().map_err(|_| {
+                    VaultError::Protocol("Secret Service thread panicked".to_owned())
+                })??;
+            }
+            result
+        })
     });
     let sealed = service.seal();
     served.and(sealed)
@@ -818,6 +836,36 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "hardware")]
+    fn readiness_failure_seals_and_removes_the_bound_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("factorseal");
+        let unsealed = Vault::create_for_test(&root).unwrap();
+        let store = VaultStore::open(&root, unsealed).unwrap();
+        let service = Arc::new(
+            VaultService::new(store, unix_time().unwrap(), UnsealLeasePolicy::default()).unwrap(),
+        );
+        let options = LinuxVaultOptions {
+            socket_path: root.join("ready.sock"),
+            install_signal_handler: false,
+            install_lifecycle_monitor: false,
+            install_secret_service: false,
+            ..LinuxVaultOptions::new("unused")
+        };
+        let mut reported = false;
+        let result = serve_linux_vault_with_ready(&service, &options, None, || {
+            reported = true;
+            // The private listener must already exist when readiness is sent.
+            UnixStream::connect(&options.socket_path).unwrap();
+            Err(VaultError::Protocol("owner disconnected".to_owned()))
+        });
+        assert!(reported);
+        assert!(result.is_err());
+        assert!(service.expire_if_needed(unix_time().unwrap()).unwrap());
+        assert!(!options.socket_path.exists());
+    }
+
+    #[test]
     fn session_lock_events_are_filtered_to_tracked_user_sessions() {
         let paths = Mutex::new(HashSet::from([
             "/org/freedesktop/login1/session/_32".to_owned()
@@ -888,9 +936,22 @@ mod tests {
             install_secret_service: false,
         };
         let server_service = Arc::clone(&service);
-        let server = std::thread::spawn(move || serve_linux_vault(&server_service, &options));
+        let (ready_sender, ready_receiver) = sync_channel(1);
+        let server = std::thread::spawn(move || {
+            serve_linux_vault_with_ready(&server_service, &options, None, || {
+                ready_sender.send(()).unwrap();
+                Ok(())
+            })
+        });
         let client = LinuxVaultClient::new(socket);
-        wait_until_ready(&client, &server);
+        ready_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        let status = client
+            .request(&VaultRequest::new(VaultAction::Status).unwrap())
+            .unwrap();
+        assert!(
+            status.result.is_ok(),
+            "the first probe after readiness must succeed"
+        );
         assert_approval_wait_allows_concurrent_request(&service, &caller, &client, now);
 
         let address = WireSecretAddress::new("project/default/TOKEN", None);
@@ -1054,32 +1115,5 @@ mod tests {
                 permissions
             }) if revision > 0 && permissions.len() == 1
         ));
-    }
-
-    /// Wait for the server thread to reach its accept loop.
-    ///
-    /// The retry interval bounds what a broken server costs, which yielding
-    /// does not: an attempt against a server that will never answer takes
-    /// however long its transport takes to refuse. When the wait runs out the
-    /// server has usually already failed, and its error is the useful one.
-    #[cfg(feature = "hardware")]
-    fn wait_until_ready(
-        client: &LinuxVaultClient,
-        server: &std::thread::JoinHandle<VaultResult<()>>,
-    ) {
-        let mut last = None;
-        for _ in 0..200 {
-            let status = VaultRequest::new(VaultAction::Status).unwrap();
-            match client.request(&status) {
-                Ok(_) => return,
-                Err(error) => last = Some(error),
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(
-            server.is_finished(),
-            "the Linux vault is still serving but unreachable: {last:?}"
-        );
-        panic!("the Linux vault thread exited during startup: {last:?}");
     }
 }

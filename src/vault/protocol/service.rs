@@ -203,7 +203,9 @@ impl VaultService {
         let approval =
             ApprovalCandidate::for_request(caller, application.as_ref(), &request.action);
         let provenance = Provenance::caller(caller, application.as_ref());
-        let mut state = self.state.lock_live(clock.sample().1)?;
+        let mut state = crate::timing::result("vault_request", "lock_live", || {
+            self.state.lock_live(clock.sample().1)
+        })?;
         let now = clock.wall();
         state.consume(request.request_id())?;
         let result = match request.action {

@@ -55,6 +55,18 @@ service readiness, and inventory loading. Desktop passes this setting to its
 CLI worker. Logs contain phase names, durations, and success/error outcomes.
 The worker-ready wait includes the worker's startup phases, and host-authorization
 timing includes its grant read and any batched write; these nested timings are not additive.
+Readiness is reported after the native listener and lifecycle hooks are installed.
+The first status probe includes caller authentication and request handling; request
+lock waits are nested within handling. Linux also logs listener setup, expiry
+sweeps, and Secret Service name claiming, authorization, and index loading.
+SecretSpec discovery leaves an unchanged, correctly protected claim in place.
+Its timings separate directory preparation and comparison from temporary-file
+writing, disk flush, and rename; the latter phases appear only when replacing a claim.
+Host executable identification overlaps TPM/password unsealing; only
+`wait_host_identities` adds time after unsealing if identification is still running.
+Password timings separate scratch-memory allocation, Argon2, and secure cleanup.
+The initial unlocked view waits for inventory, then loads permissions separately;
+`permissions_ready` records when that follow-up has reached the UI.
 
 The installed CLI launches the separately packaged application with:
 

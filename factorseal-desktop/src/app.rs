@@ -1721,12 +1721,28 @@ impl DesktopView {
     }
 
     fn render_permission_rows(
-        permissions: &[&factorseal::Permission],
-        has_any: bool,
+        contents: &VaultContents,
         query: &str,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme().clone();
+        if contents.permissions_loading {
+            return div()
+                .p_4()
+                .text_color(theme.muted_foreground)
+                .child("Loading permissions…");
+        }
+        if let Some(error) = &contents.permissions_error {
+            return div()
+                .p_4()
+                .text_color(theme.danger)
+                .child(format!("Could not load permissions: {error}"));
+        }
+        let permissions: Vec<_> = contents
+            .permissions
+            .iter()
+            .filter(|permission| permission_matches_search(permission, query))
+            .collect();
         let mut rows = v_flex()
             .w_full()
             .rounded_lg()
@@ -1778,7 +1794,11 @@ impl DesktopView {
             );
         }
         if permissions.is_empty() {
-            rows = rows.child(Self::empty_item_rows(has_any, query, cx));
+            rows = rows.child(Self::empty_item_rows(
+                !contents.permissions.is_empty(),
+                query,
+                cx,
+            ));
         }
         rows
     }
@@ -1827,19 +1847,9 @@ impl DesktopView {
         let guidance = category_guidance(kind);
         let query = self.vault_search.read(cx).value().trim().to_lowercase();
         let (item_count, item_rows) = if kind == factorseal::DocumentKind::Authorization {
-            let permissions: Vec<_> = contents
-                .permissions
-                .iter()
-                .filter(|permission| permission_matches_search(permission, &query))
-                .collect();
             (
                 contents.permissions.len(),
-                Self::render_permission_rows(
-                    &permissions,
-                    !contents.permissions.is_empty(),
-                    &query,
-                    cx,
-                ),
+                Self::render_permission_rows(contents, &query, cx),
             )
         } else {
             let all_entries: Vec<_> = contents
@@ -2852,6 +2862,56 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
     if matches!(snapshot, Snapshot::Unsealed { .. }) {
         crate::timing::finish_unlock("ui_updated", "ok");
     }
+    load_deferred_permissions(snapshot, cx);
+}
+
+fn load_deferred_permissions(snapshot: &Snapshot, cx: &mut App) {
+    let Snapshot::Unsealed {
+        metadata, contents, ..
+    } = snapshot
+    else {
+        return;
+    };
+    if !contents.permissions_loading {
+        return;
+    }
+    let metadata = metadata.clone();
+    let generation = cx.global::<DesktopWindow>().refresh_generation;
+    let runtime = Arc::clone(&cx.global::<RuntimeGlobal>().0);
+    cx.spawn(async move |cx| {
+        let started = std::time::Instant::now();
+        let result = smol::unblock(move || runtime.load_permissions(&metadata)).await;
+        cx.update(|cx| {
+            let desktop = cx.global_mut::<DesktopWindow>();
+            // A seal, another unlock, or a refresh supersedes this request.
+            if desktop.refresh_generation != generation {
+                return;
+            }
+            if let Snapshot::Unsealed { contents, .. } = &mut desktop.snapshot {
+                contents.complete_permissions(result.clone());
+            }
+            let view_holder = Arc::clone(&desktop.view);
+            if let Ok(holder) = view_holder.lock()
+                && let Some(view) = holder.as_ref()
+            {
+                view.update(cx, |view, cx| {
+                    // Patch only permissions, retaining edits and selection
+                    // made since the first unlocked snapshot was displayed.
+                    if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot {
+                        contents.complete_permissions(result.clone());
+                        cx.notify();
+                    }
+                });
+            }
+            crate::timing::record(
+                "desktop_inventory",
+                "permissions_ready",
+                started,
+                if result.is_ok() { "ok" } else { "error" },
+            );
+        });
+    })
+    .detach();
 }
 
 fn refresh_desktop_snapshot(runtime: Arc<DesktopRuntime>, cx: &mut App) {

@@ -18,6 +18,9 @@ mod platform;
 #[cfg(feature = "secretspec-provider")]
 #[path = "factorseal/provider.rs"]
 mod provider;
+#[cfg(feature = "secretspec-provider")]
+#[path = "factorseal/secretspec_discovery.rs"]
+mod secretspec_discovery;
 #[path = "../timing.rs"]
 mod timing;
 

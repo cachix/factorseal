@@ -52,22 +52,6 @@ pub(crate) fn serve_secret_service(
     service: Arc<VaultService>,
     stopping: Arc<AtomicBool>,
 ) -> VaultResult<()> {
-    let executable = std::env::current_exe().map_err(|error| {
-        VaultError::Protocol(format!("could not resolve Factorseal executable: {error}"))
-    })?;
-    let caller = linux_caller_identity_for_executable(executable)?;
-    service.authorize_secret_service_namespace(
-        &caller,
-        NAMESPACE,
-        [
-            GrantPermission::Get,
-            GrantPermission::Put,
-            GrantPermission::Delete,
-            GrantPermission::Seal,
-        ],
-        unix_time(),
-    )?;
-
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -75,17 +59,45 @@ pub(crate) fn serve_secret_service(
             VaultError::Protocol(format!("could not start Secret Service runtime: {error}"))
         })?;
     runtime.block_on(async move {
+        let connection = Connection::session().await.map_err(dbus_error)?;
+        let caller =
+            crate::timing::result("secret_service_startup", "identify_executable", || {
+                let executable = std::env::current_exe().map_err(|error| {
+                    VaultError::Protocol(format!(
+                        "could not resolve Factorseal executable: {error}"
+                    ))
+                })?;
+                linux_caller_identity_for_executable(executable)
+            })?;
+        crate::timing::result("secret_service_startup", "authorize_namespace", || {
+            service.authorize_secret_service_namespace(
+                &caller,
+                NAMESPACE,
+                [
+                    GrantPermission::Get,
+                    GrantPermission::Put,
+                    GrantPermission::Delete,
+                    GrantPermission::Seal,
+                ],
+                unix_time(),
+            )
+        })?;
         let store = Store {
             service: Arc::clone(&service),
             caller,
         };
-        let agent = Arc::new(Agent::load(store)?);
-        let connection = Connection::session().await.map_err(dbus_error)?;
+        let agent = Arc::new(crate::timing::result(
+            "secret_service_startup",
+            "load_agent",
+            || Agent::load(store),
+        )?);
+        let started = std::time::Instant::now();
         let claimed = claim_secret_service_name(&connection, TAKEOVER_POLL, || {
             Ok(stopping.load(Ordering::Acquire) || service.expire_if_needed(unix_time())?)
         })
-        .await?;
-        if !claimed {
+        .await;
+        crate::timing::record_result("secret_service_startup", "claim_name", started, &claimed);
+        if !claimed? {
             return Ok(());
         }
         let server = connection.object_server();
@@ -582,9 +594,9 @@ mod tests {
         runtime.block_on(async {
             let (_directory, agent) = agent();
             let agent = Arc::new(agent);
-            let Ok(server_connection) = Connection::session().await else {
-                return;
-            };
+            let server_connection = Connection::session()
+                .await
+                .expect("DBUS_SESSION_BUS_ADDRESS must identify a reachable session bus");
             if let Err(error) = server_connection
                 .request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into())
                 .await

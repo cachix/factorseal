@@ -274,6 +274,7 @@ pub(crate) fn pipe_io_error(operation: &str, error: &io::Error) -> VaultError {
 pub(crate) mod unix_socket {
     use std::fs;
     use std::io;
+    use std::os::fd::AsFd;
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
@@ -281,6 +282,7 @@ pub(crate) mod unix_socket {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
     use nix::unistd::getuid;
 
     use super::{
@@ -360,7 +362,8 @@ pub(crate) mod unix_socket {
                         }
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(poll_interval);
+                        wait_for_connection(listener, poll_interval)
+                            .map_err(|error| path_io_error(socket_path, &error))?;
                     }
                     Err(error) => return Err(path_io_error(socket_path, &error)),
                 }
@@ -368,6 +371,18 @@ pub(crate) mod unix_socket {
             service.seal()?;
             Ok(())
         })
+    }
+
+    // Wake on a queued connection, retaining the bounded timeout for lease
+    // expiry and lifecycle checks when the listener is idle.
+    fn wait_for_connection(listener: &UnixListener, timeout: Duration) -> io::Result<()> {
+        let mut descriptors = [PollFd::new(listener.as_fd(), PollFlags::POLLIN)];
+        let timeout = PollTimeout::try_from(timeout)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        match poll(&mut descriptors, timeout) {
+            Ok(_) | Err(nix::errno::Errno::EINTR) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Exchange one request with an accepted Unix peer after platform-native
@@ -384,7 +399,9 @@ pub(crate) mod unix_socket {
             crate::timing::result("vault_ipc", "authenticate_caller", || authenticate(stream))?;
         let bytes = read_frame(stream, IoBudget::new(IPC_FRAME_IO_TIMEOUT))?;
         let request = VaultRequest::decode(&bytes)?;
+        let started = std::time::Instant::now();
         let response = service.handle(&caller, request, unix_time()?);
+        crate::timing::record_result("vault_ipc", "handle_request", started, &response.result);
         let bytes = response.encode()?;
         // Give delivery its own I/O budget, never beyond the authority that
         // authorized this result. A committed write can outlive its reply.
@@ -463,6 +480,43 @@ pub(crate) mod unix_socket {
             {
                 let _ = fs::remove_file(&self.0);
             }
+        }
+    }
+    #[cfg(test)]
+    mod readiness_tests {
+        use super::*;
+
+        #[test]
+        fn incoming_connection_wakes_an_idle_listener() {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("wake.sock");
+            let (listener, _guard) = bind_listener(&socket).unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    wait_for_connection(&listener, Duration::from_secs(5)).unwrap();
+                    sender.send(()).unwrap();
+                });
+                std::thread::sleep(Duration::from_millis(20));
+                let _client = UnixStream::connect(&socket).unwrap();
+                receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+                listener.accept().unwrap();
+            });
+        }
+
+        #[test]
+        fn idle_listener_returns_for_lifecycle_checks() {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("idle.sock");
+            let (listener, _guard) = bind_listener(&socket).unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    wait_for_connection(&listener, Duration::from_millis(20)).unwrap();
+                    sender.send(()).unwrap();
+                });
+                receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+            });
         }
     }
 }
