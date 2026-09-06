@@ -40,7 +40,26 @@ pub(crate) struct RuntimeConfig {
 pub(crate) struct VaultContents {
     pub(crate) entries: Vec<VaultEntryMetadata>,
     pub(crate) permissions: Vec<factorseal::Permission>,
+    pub(crate) permissions_loading: bool,
+    pub(crate) permissions_error: Option<String>,
     pub(crate) secret_service_error: Option<String>,
+}
+
+impl VaultContents {
+    pub(crate) fn complete_permissions(
+        &mut self,
+        result: Result<Vec<factorseal::Permission>, String>,
+    ) {
+        if !self.permissions_loading {
+            return;
+        }
+        self.permissions_loading = false;
+        self.permissions_error = None;
+        match result {
+            Ok(permissions) => self.permissions = permissions,
+            Err(error) => self.permissions_error = Some(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -439,6 +458,16 @@ impl DesktopRuntime {
         load_vault_contents_from_client(&native_client(&self.config, metadata))
     }
 
+    pub(crate) fn load_permissions(
+        &self,
+        metadata: &VaultMetadata,
+    ) -> Result<Vec<factorseal::Permission>, String> {
+        load_permissions(|action| {
+            let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
+            self.request_live(metadata, &request)
+        })
+    }
+
     fn request_live(
         &self,
         metadata: &VaultMetadata,
@@ -463,6 +492,11 @@ impl DesktopRuntime {
         password: Zeroizing<Vec<u8>>,
     ) {
         let result = self.supervise_worker(&metadata, group, password);
+        factorseal::diagnostics::event(
+            "desktop",
+            "supervise_worker",
+            if result.is_ok() { "ok" } else { "error" },
+        );
         if let Ok(mut pipe) = self.lifeline.lock() {
             pipe.take();
         }
@@ -474,6 +508,7 @@ impl DesktopRuntime {
     }
 
     fn run_initialization(self: Arc<Self>, policy: UnlockPolicy, password: Zeroizing<Vec<u8>>) {
+        factorseal::diagnostics::event("desktop", "initialize_vault", "start");
         let result = (|| {
             let mut worker = self.spawn_worker(
                 factorseal::desktop_worker::Operation::Initialize { policy },
@@ -484,6 +519,11 @@ impl DesktopRuntime {
             Vault::inspect(&self.config.root).map_err(|error| error.to_string())
         })();
         self.unlock_in_progress.store(false, Ordering::Release);
+        factorseal::diagnostics::event(
+            "desktop",
+            "initialize_vault",
+            if result.is_ok() { "ok" } else { "error" },
+        );
         let snapshot = match result {
             Ok(metadata) => Snapshot::Sealed {
                 metadata,
@@ -515,7 +555,11 @@ impl DesktopRuntime {
         let child = command
             .spawn()
             .map_err(|e| format!("could not start vault worker: {e}"))?;
-        let mut worker = Worker(child);
+        factorseal::diagnostics::event("desktop", "spawn_worker", "ok");
+        let mut worker = Worker {
+            child,
+            exit_reported: false,
+        };
         let bootstrap = factorseal::desktop_worker::Bootstrap {
             desktop_executable: desktop,
             operation,
@@ -524,7 +568,11 @@ impl DesktopRuntime {
         };
         drop(password);
         factorseal::desktop_worker::send(
-            worker.0.stdin.as_mut().ok_or("worker input unavailable")?,
+            worker
+                .child
+                .stdin
+                .as_mut()
+                .ok_or("worker input unavailable")?,
             &bootstrap,
         )
         .map_err(|e| e.to_string())?;
@@ -563,7 +611,8 @@ impl DesktopRuntime {
             crate::timing::result("desktop_startup", "wait_service_ready", || {
                 let deadline = std::time::Instant::now() + Duration::from_secs(10);
                 loop {
-                    if let Some(status) = worker.0.try_wait().map_err(|e| e.to_string())? {
+                    if let Some(status) = worker.child.try_wait().map_err(|e| e.to_string())? {
+                        worker.record_exit(status);
                         return Err(format!("vault worker exited before serving: {status}"));
                     }
                     if let Some(deadlines) =
@@ -582,11 +631,27 @@ impl DesktopRuntime {
         self.lifeline
             .lock()
             .map_err(|_| "desktop worker lock unavailable".to_owned())?
-            .replace(worker.0.stdin.take().ok_or("worker input unavailable")?);
-        let (contents, contents_error) = match self.load_live_contents(metadata) {
-            Ok(contents) => (contents, None),
-            Err(error) => (VaultContents::default(), Some(error)),
-        };
+            .replace(
+                worker
+                    .child
+                    .stdin
+                    .take()
+                    .ok_or("worker input unavailable")?,
+            );
+        // Publish the inventory before requesting permissions. The UI starts
+        // that request once it has applied this first unlocked snapshot.
+        let client = native_client(&self.config, metadata);
+        let (contents, contents_error) =
+            match load_vault_entries(|action| request_contents(&client, action)) {
+                Ok(contents) => (contents, None),
+                Err(error) => (
+                    VaultContents {
+                        permissions_loading: true,
+                        ..VaultContents::default()
+                    },
+                    Some(error),
+                ),
+            };
         let _ = self.events.try_send(Snapshot::Unsealed {
             metadata: metadata.clone(),
             idle_deadline,
@@ -602,16 +667,30 @@ impl DesktopRuntime {
 }
 
 /// On every error, terminate and reap the child rather than leaving an orphan.
-struct Worker(std::process::Child);
+struct Worker {
+    child: std::process::Child,
+    exit_reported: bool,
+}
 impl Worker {
+    fn record_exit(&mut self, status: std::process::ExitStatus) {
+        if !self.exit_reported {
+            factorseal::diagnostics::child_exit(self.child.id(), status);
+            self.exit_reported = true;
+        }
+    }
+
     fn read_ready(&mut self) -> Result<(), String> {
         factorseal::desktop_worker::receive::<Result<(), String>>(
-            self.0.stdout.as_mut().ok_or("worker output unavailable")?,
+            self.child
+                .stdout
+                .as_mut()
+                .ok_or("worker output unavailable")?,
         )
         .map_err(|e| format!("vault worker startup failed: {e}"))?
     }
     fn wait(&mut self) -> Result<(), String> {
-        let status = self.0.wait().map_err(|e| e.to_string())?;
+        let status = self.child.wait().map_err(|e| e.to_string())?;
+        self.record_exit(status);
         if status.success() {
             Ok(())
         } else {
@@ -621,8 +700,16 @@ impl Worker {
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if let Ok(Some(status)) = self.child.try_wait() {
+            self.record_exit(status);
+            return;
+        }
+        let _ = self.child.kill();
+        if let Ok(status) = self.child.wait() {
+            // Reap the key owner before any diagnostic disk I/O.
+            factorseal::diagnostics::event("worker", "supervisor_cleanup", "terminate");
+            self.record_exit(status);
+        }
     }
 }
 
@@ -650,17 +737,30 @@ fn unique_personal_name(title: &str, occupied: &[String]) -> String {
 }
 
 fn load_vault_contents_from_client(client: &impl VaultClient) -> Result<VaultContents, String> {
-    load_vault_contents(|action| {
-        let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
-        client
-            .request(&request)
-            .map_err(|error| error.to_string())?
-            .result
-            .map_err(|error| error.message)
-    })
+    load_vault_contents(|action| request_contents(client, action))
+}
+
+fn request_contents(
+    client: &impl VaultClient,
+    action: VaultAction,
+) -> Result<VaultResponseBody, String> {
+    let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
+    client
+        .request(&request)
+        .map_err(|error| error.to_string())?
+        .result
+        .map_err(|error| error.message)
 }
 
 fn load_vault_contents(
+    mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
+) -> Result<VaultContents, String> {
+    let mut contents = load_vault_entries(&mut request)?;
+    contents.complete_permissions(Ok(load_permissions(request)?));
+    Ok(contents)
+}
+
+fn load_vault_entries(
     mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
 ) -> Result<VaultContents, String> {
     let mut entries = Vec::new();
@@ -689,6 +789,22 @@ fn load_vault_contents(
         cursor = next_cursor;
     }
 
+    Ok(VaultContents {
+        entries,
+        permissions_loading: true,
+        secret_service_error: {
+            let started = std::time::Instant::now();
+            let error = secret_service_error();
+            crate::timing::record("desktop_inventory", "probe_secret_service", started, "ok");
+            error
+        },
+        ..VaultContents::default()
+    })
+}
+
+fn load_permissions(
+    mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
+) -> Result<Vec<factorseal::Permission>, String> {
     let VaultResponseBody::Permissions { permissions, .. } =
         crate::timing::result("desktop_inventory", "list_permissions", || {
             request(VaultAction::ListPermissions)
@@ -696,16 +812,7 @@ fn load_vault_contents(
     else {
         return Err("vault returned an unexpected permission-list response".to_owned());
     };
-    Ok(VaultContents {
-        entries,
-        permissions,
-        secret_service_error: {
-            let started = std::time::Instant::now();
-            let error = secret_service_error();
-            crate::timing::record("desktop_inventory", "probe_secret_service", started, "ok");
-            error
-        },
-    })
+    Ok(permissions)
 }
 
 #[cfg(target_os = "linux")]
@@ -967,5 +1074,53 @@ mod tests {
         assert!(responses.is_empty());
         assert_eq!(contents.entries, vec![first, second]);
         assert!(contents.permissions.is_empty());
+        assert!(!contents.permissions_loading);
+    }
+
+    #[test]
+    fn initial_inventory_does_not_wait_for_permissions() {
+        let entry = VaultEntryMetadata {
+            document_kind: DocumentKind::SecretSpecProject,
+            partition: b"project".to_vec(),
+            address: SecretAddress::secret_spec(
+                SecretSpecAddress::convention("project", "default", "TOKEN").unwrap(),
+            )
+            .unwrap(),
+        };
+        let mut contents = super::load_vault_entries(|action| {
+            assert!(matches!(
+                action,
+                factorseal::VaultAction::ListVaultEntries { .. }
+            ));
+            Ok(VaultResponseBody::VaultEntries {
+                entries: vec![entry.clone()],
+                next_cursor: None,
+            })
+        })
+        .unwrap();
+        assert_eq!(contents.entries, vec![entry.clone()]);
+        assert!(contents.permissions_loading);
+        assert!(contents.permissions.is_empty());
+
+        // An unsuccessful follow-up must leave the visible inventory intact.
+        contents.complete_permissions(Err("permission request failed".to_owned()));
+        assert_eq!(contents.entries, vec![entry]);
+        assert!(!contents.permissions_loading);
+        assert_eq!(
+            contents.permissions_error.as_deref(),
+            Some("permission request failed")
+        );
+    }
+
+    #[test]
+    fn deferred_permissions_do_not_replace_already_refreshed_contents() {
+        let mut contents = super::VaultContents {
+            permissions_loading: true,
+            ..super::VaultContents::default()
+        };
+        contents.complete_permissions(Ok(Vec::new()));
+        assert!(!contents.permissions_loading);
+        contents.complete_permissions(Err("stale response".to_owned()));
+        assert!(contents.permissions_error.is_none());
     }
 }

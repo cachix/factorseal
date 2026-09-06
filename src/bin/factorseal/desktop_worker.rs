@@ -3,8 +3,8 @@
 use super::{CliError, timing};
 use factorseal::desktop_worker::{Bootstrap, Operation, receive, send};
 use factorseal::{
-    DocumentKind, GrantAuthorization, GrantAuthorizationTarget, GrantPermission, UnlockCredentials,
-    UnsealLeasePolicy, Vault, VaultCryptoProfile, VaultService,
+    CallerIdentity, DocumentKind, GrantAuthorization, GrantAuthorizationTarget, GrantPermission,
+    UnlockCredentials, UnsealLeasePolicy, Vault, VaultCryptoProfile, VaultService,
 };
 use std::io::Read as _;
 use std::path::Path;
@@ -19,6 +19,7 @@ pub(super) fn run(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
         "harden_key_owner",
         super::platform::harden_key_owner,
     )?;
+    factorseal::diagnostics::event("worker", "bootstrap", "start");
     let mut reported = false;
     let result = run_inner(root, socket, &mut reported);
     // This pipe carries only status, never keys or secret values.
@@ -58,36 +59,43 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
     let initializing = matches!(operation, Operation::Initialize { .. });
     #[cfg(feature = "secretspec-provider")]
     timing::result("desktop_worker", "publish_secretspec_claim", || {
-        super::commands::publish_secretspec_claim_for_default_root(root)
+        super::secretspec_discovery::publish_for_default_root(root)
     })?;
-    let (unsealed, lease) = match operation {
-        Operation::Initialize { policy } => (
-            Vault::prepare_with_unlock_policy_and_profile(
-                root,
-                &policy,
-                UnlockCredentials::with_password(password.expose()),
-                VaultCryptoProfile::Default,
-            )?,
-            UnsealLeasePolicy::default(),
-        ),
-        Operation::Unlock {
-            group,
-            idle_seconds,
-            maximum_seconds,
-        } => (
-            Vault::unseal_with_unlock_group(
-                root,
-                &group,
-                UnlockCredentials::with_password(password.expose()),
-            )?,
-            UnsealLeasePolicy {
-                idle_timeout: Duration::from_secs(idle_seconds),
-                maximum_lifetime: Duration::from_secs(maximum_seconds),
-            },
-        ),
-    };
-    // Drop the only bootstrap factor before opening the database or serving.
-    drop(password);
+    let ((unsealed, lease), hosts) = prepare_unlock(
+        || identify_hosts(&desktop_executable),
+        || {
+            let unlocked = match operation {
+                Operation::Initialize { policy } => (
+                    Vault::prepare_with_unlock_policy_and_profile(
+                        root,
+                        &policy,
+                        UnlockCredentials::with_password(password.expose()),
+                        VaultCryptoProfile::Default,
+                    )?,
+                    UnsealLeasePolicy::default(),
+                ),
+                Operation::Unlock {
+                    group,
+                    idle_seconds,
+                    maximum_seconds,
+                } => (
+                    Vault::unseal_with_unlock_group(
+                        root,
+                        &group,
+                        UnlockCredentials::with_password(password.expose()),
+                    )?,
+                    UnsealLeasePolicy {
+                        idle_timeout: Duration::from_secs(idle_seconds),
+                        maximum_lifetime: Duration::from_secs(maximum_seconds),
+                    },
+                ),
+            };
+            // Release the bootstrap factor before waiting for identification
+            // or opening the database.
+            drop(password);
+            Ok(unlocked)
+        },
+    )?;
     let device = unsealed.public().clone();
     let result = (|| {
         let now = super::commands::unix_time()?;
@@ -96,20 +104,27 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
             .lock()
             .map_err(|_| CliError::DesktopLaunch("owner lock unavailable".to_owned()))? =
             Arc::downgrade(&service);
-        authorize_hosts(&service, &desktop_executable, now, hosts_secret_service)?;
+        authorize_hosts(&service, &hosts, now, hosts_secret_service)?;
         if initializing {
             service.seal()?;
             Vault::complete_initialization(root)?;
         } else {
-            timing::result("desktop_worker", "send_ready", || {
-                send(&mut std::io::stdout(), &Ok::<(), String>(()))
-            })
-            .map_err(|e| CliError::DesktopLaunch(e.to_string()))?;
-            *reported = true;
+            factorseal::diagnostics::event("worker", "serve_vault", "start");
             super::platform::serve_vault(
-                &device, &service, root, socket, &lifecycle,
-                // Desktop owns the adapter policy, including opting out.
+                &device,
+                &service,
+                root,
+                socket,
+                &lifecycle,
                 false,
+                || {
+                    timing::result("desktop_worker", "send_ready", || {
+                        send(&mut std::io::stdout(), &Ok::<(), String>(()))
+                    })
+                    .map_err(|e| factorseal::VaultError::Protocol(e.to_string()))?;
+                    *reported = true;
+                    Ok(())
+                },
             )?;
         }
         Ok(())
@@ -121,20 +136,52 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
     result
 }
 
+struct HostIdentities {
+    cli: CallerIdentity,
+    desktop: CallerIdentity,
+}
+
+// Keep native unsealing on the calling thread; the helper sees executable
+// paths only, never the password or unsealed keys. Scoped joining also reaps
+// the helper when either operation fails.
+fn prepare_unlock<T>(
+    identify: impl FnOnce() -> Result<HostIdentities, CliError> + Send,
+    unlock: impl FnOnce() -> Result<T, CliError>,
+) -> Result<(T, HostIdentities), CliError> {
+    std::thread::scope(|scope| {
+        let identities = std::thread::Builder::new()
+            .name("factorseal-host-identities".to_owned())
+            .spawn_scoped(scope, identify)
+            .map_err(|error| CliError::DesktopLaunch(error.to_string()))?;
+        let unsealed = unlock();
+        let hosts = timing::result("desktop_worker", "wait_host_identities", || {
+            identities.join().map_err(|_| {
+                CliError::DesktopLaunch("executable identification thread panicked".to_owned())
+            })?
+        });
+        Ok((unsealed?, hosts?))
+    })
+}
+
+fn identify_hosts(executable: &Path) -> Result<HostIdentities, CliError> {
+    let cli = super::commands::cli_caller_identity()?;
+    let desktop = timing::result("desktop_worker", "identify_desktop_executable", || {
+        super::platform::caller_identity_for_executable(executable)
+    })?;
+    Ok(HostIdentities { cli, desktop })
+}
+
 fn authorize_hosts(
     service: &VaultService,
-    executable: &Path,
+    hosts: &HostIdentities,
     now: u64,
     hosts_secret_service: bool,
 ) -> Result<(), CliError> {
-    let cli = super::commands::cli_caller_identity()?;
-    let caller = timing::result("desktop_worker", "identify_desktop_executable", || {
-        super::platform::caller_identity_for_executable(executable)
-    })?;
-    let mut grants = Vec::from(super::commands::cli_authorizations(&cli));
+    let caller = &hosts.desktop;
+    let mut grants = Vec::from(super::commands::cli_authorizations(&hosts.cli));
     grants.extend([
         GrantAuthorization {
-            caller: &caller,
+            caller,
             target: GrantAuthorizationTarget::Kind {
                 kind: DocumentKind::SecretSpecProject,
             },
@@ -142,7 +189,7 @@ fn authorize_hosts(
             expires_at: None,
         },
         GrantAuthorization {
-            caller: &caller,
+            caller,
             target: GrantAuthorizationTarget::Namespace {
                 scope: DocumentKind::LocalKeyring,
                 namespace: super::PERSONAL_SECRET_NAMESPACE,
@@ -156,7 +203,7 @@ fn authorize_hosts(
             expires_at: None,
         },
         GrantAuthorization {
-            caller: &caller,
+            caller,
             target: GrantAuthorizationTarget::Namespace {
                 scope: DocumentKind::LocalKeyring,
                 namespace: DESKTOP_CONTROL,
@@ -165,7 +212,7 @@ fn authorize_hosts(
             expires_at: None,
         },
         GrantAuthorization {
-            caller: &caller,
+            caller,
             target: GrantAuthorizationTarget::PermissionManagement,
             permissions: &[GrantPermission::ManagePermissions],
             expires_at: None,
@@ -179,7 +226,7 @@ fn authorize_hosts(
     #[cfg(target_os = "linux")]
     if hosts_secret_service {
         timing::result("desktop_worker", "authorize_secret_service_host", || {
-            service.authorize_secret_service_host(&caller, now)
+            service.authorize_secret_service_host(caller, now)
         })?;
     }
     #[cfg(not(target_os = "linux"))]
@@ -204,6 +251,7 @@ fn watch_parent(owner: Arc<Mutex<Weak<VaultService>>>) -> Result<(), CliError> {
             {
                 let _ = service.seal();
             }
+            factorseal::diagnostics::finish(true);
             // Also bounds a native prompt or initialization before service ownership.
             std::process::exit(0);
         })
@@ -217,6 +265,81 @@ mod tests {
     use std::io::{BufRead as _, Write as _};
     use std::process::{Command, Stdio};
     use std::time::Instant;
+
+    fn test_hosts() -> HostIdentities {
+        let caller = CallerIdentity::new(
+            factorseal::CallerPlatform::Linux,
+            "uid:1000",
+            "test-executable",
+            [1; 32],
+            None,
+        )
+        .unwrap();
+        HostIdentities {
+            cli: caller.clone(),
+            desktop: caller,
+        }
+    }
+
+    #[test]
+    fn executable_identification_overlaps_unlock_on_the_calling_thread() {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let calling_thread = std::thread::current().id();
+        let (value, _) = prepare_unlock(
+            move || {
+                assert_ne!(std::thread::current().id(), calling_thread);
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(test_hosts())
+            },
+            || {
+                assert_eq!(std::thread::current().id(), calling_thread);
+                started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                release_tx.send(()).unwrap();
+                Ok(42)
+            },
+        )
+        .unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn failed_identification_drops_the_unsealed_result() {
+        struct Unsealed<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Unsealed<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let dropped = std::sync::atomic::AtomicBool::new(false);
+        let result = prepare_unlock(
+            || Err(CliError::DesktopLaunch("identity failed".to_owned())),
+            || Ok(Unsealed(&dropped)),
+        );
+        assert!(result.is_err());
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn failed_unlock_still_joins_executable_identification() {
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let finished = std::sync::atomic::AtomicBool::new(false);
+        let identification_finished = &finished;
+        let result = prepare_unlock(
+            move || {
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                identification_finished.store(true, std::sync::atomic::Ordering::Release);
+                Ok(test_hosts())
+            },
+            || {
+                release_tx.send(()).unwrap();
+                Err::<(), _>(CliError::DesktopLaunch("unlock failed".to_owned()))
+            },
+        );
+        assert!(result.is_err());
+        assert!(finished.load(std::sync::atomic::Ordering::Acquire));
+    }
 
     #[test]
     fn parent_loss_terminates_worker_before_service_creation() {

@@ -119,6 +119,17 @@ pub fn serve_windows_vault_with_lifecycle(
     options: &WindowsVaultOptions,
     lifecycle_monitor: Option<&WindowsVaultLifecycle>,
 ) -> VaultResult<()> {
+    serve_windows_vault_with_ready(service, options, lifecycle_monitor, || Ok(()))
+}
+
+/// Notify the owner after the listener and lifecycle hooks are ready.
+#[doc(hidden)]
+pub fn serve_windows_vault_with_ready(
+    service: &Arc<VaultService>,
+    options: &WindowsVaultOptions,
+    lifecycle_monitor: Option<&WindowsVaultLifecycle>,
+    ready: impl FnOnce() -> VaultResult<()>,
+) -> VaultResult<()> {
     validate_options(options)?;
     if options.install_lifecycle_monitor {
         service.enable_emergency_exit();
@@ -153,7 +164,7 @@ pub fn serve_windows_vault_with_lifecycle(
     // Every exit from the loop discards the hardware-unwrapped keys, including
     // the error exits. Returning `?` straight out of the loop skipped the lock
     // and left them to whatever the caller did next.
-    let served = accept_until_sealed(service, options, &listener, &stopping);
+    let served = ready().and_then(|()| accept_until_sealed(service, options, &listener, &stopping));
     let sealed = service.seal();
     served.and(sealed)
 }

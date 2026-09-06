@@ -12,6 +12,8 @@ mod algorithm;
 mod crypto;
 #[cfg(all(feature = "vault-client", feature = "key-protection"))]
 pub mod desktop_worker;
+#[cfg(feature = "diagnostics")]
+pub mod diagnostics;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod error;
 pub mod security;
@@ -83,7 +85,7 @@ pub type NativeVaultClient = LinuxVaultClient;
 #[cfg(all(feature = "vault", target_os = "linux"))]
 pub use vault::{
     LinuxVaultLifecycle, LinuxVaultOptions, linux_caller_identity_for_executable,
-    serve_linux_vault, serve_linux_vault_with_lifecycle,
+    serve_linux_vault, serve_linux_vault_with_lifecycle, serve_linux_vault_with_ready,
 };
 #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 pub use vault::{SECRET_SERVICE_NAMESPACE, SecretServiceHost, SecretServicePrompter};
@@ -96,7 +98,7 @@ pub type NativeVaultClient = MacosVaultClient;
 #[cfg(all(feature = "vault", target_os = "macos"))]
 pub use vault::{
     MacosVaultLifecycle, MacosVaultOptions, macos_caller_identity_for_executable,
-    serve_macos_vault, serve_macos_vault_with_lifecycle,
+    serve_macos_vault, serve_macos_vault_with_lifecycle, serve_macos_vault_with_ready,
 };
 
 #[cfg(all(feature = "vault-client", target_os = "windows"))]
@@ -107,7 +109,8 @@ pub type NativeVaultClient = WindowsVaultClient;
 #[cfg(all(feature = "vault", target_os = "windows"))]
 pub use vault::{
     WindowsVaultLifecycle, WindowsVaultOptions, serve_windows_vault,
-    serve_windows_vault_with_lifecycle, windows_caller_identity_for_executable,
+    serve_windows_vault_with_lifecycle, serve_windows_vault_with_ready,
+    windows_caller_identity_for_executable,
 };
 
 #[cfg(feature = "hardware")]

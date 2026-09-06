@@ -59,8 +59,10 @@ cli = [
     "dep:clap_complete_nushell",
     "dep:directories",
     "dep:rpassword",
+    "diagnostics",
     "transfer",
 ]
+diagnostics = ["dep:directories", "transfer"]
 transfer = ["dep:anyhow", "dep:csv", "dep:tempfile", "dep:uuid", "dep:windows", "dep:nt-token"]
 secretspec-provider = [
     "dep:async-trait",
@@ -142,11 +144,11 @@ tempfile = "3.20.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = { version = "0.9.12", optional = true }
 zbus = { version = "5.14.0", default-features = false, features = ["tokio"], optional = true }
-nix = { version = "0.31.3", features = ["socket", "user", "process", "resource"], optional = true }
+nix = { version = "0.31.3", features = ["socket", "user", "process", "resource", "poll"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", optional = true }
-nix = { version = "0.31.3", features = ["socket", "user", "process", "resource"], optional = true }
+nix = { version = "0.31.3", features = ["socket", "user", "process", "resource", "poll"], optional = true }
 objc2 = { version = "0.6.4", optional = true }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "block2"], optional = true }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDate", "NSNotification", "NSOperation", "NSRunLoop", "NSString", "block2"], optional = true }
@@ -182,6 +184,9 @@ missing_errors_doc = "allow"
 
 [profile.test]
 debug = 0
+
+[profile.release]
+debug = "line-tables-only"
 
 # Password stretching intentionally uses production-strength Argon2 settings
 # in the desktop app. Optimize only its implementation in development builds

@@ -9,17 +9,17 @@ use factorseal::{CallerIdentity, NativeVaultClient, VaultMetadata, VaultService}
 #[cfg(target_os = "linux")]
 use factorseal::{
     LinuxVaultClient, LinuxVaultLifecycle, LinuxVaultOptions, linux_caller_identity_for_executable,
-    serve_linux_vault_with_lifecycle,
+    serve_linux_vault_with_ready,
 };
 #[cfg(target_os = "macos")]
 use factorseal::{
     MacosVaultClient, MacosVaultLifecycle, MacosVaultOptions, macos_caller_identity_for_executable,
-    serve_macos_vault_with_lifecycle,
+    serve_macos_vault_with_ready,
 };
 #[cfg(target_os = "windows")]
 use factorseal::{
     WindowsVaultClient, WindowsVaultLifecycle, WindowsVaultOptions, default_windows_pipe_name,
-    serve_windows_vault_with_lifecycle, windows_caller_identity_for_executable,
+    serve_windows_vault_with_ready, windows_caller_identity_for_executable,
 };
 
 use super::CliError;
@@ -133,11 +133,12 @@ pub(super) fn serve_vault(
     socket: Option<&Path>,
     lifecycle: &NativeVaultLifecycle,
     install_secret_service: bool,
+    ready: impl FnOnce() -> factorseal::VaultResult<()>,
 ) -> Result<(), CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
     let mut options = LinuxVaultOptions::new(socket);
     options.install_secret_service = install_secret_service;
-    serve_linux_vault_with_lifecycle(service, &options, Some(lifecycle))?;
+    serve_linux_vault_with_ready(service, &options, Some(lifecycle), ready)?;
     Ok(())
 }
 
@@ -149,9 +150,15 @@ pub(super) fn serve_vault(
     socket: Option<&Path>,
     lifecycle: &NativeVaultLifecycle,
     _install_secret_service: bool,
+    ready: impl FnOnce() -> factorseal::VaultResult<()>,
 ) -> Result<(), CliError> {
     let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
-    serve_macos_vault_with_lifecycle(service, &MacosVaultOptions::new(socket), Some(lifecycle))?;
+    serve_macos_vault_with_ready(
+        service,
+        &MacosVaultOptions::new(socket),
+        Some(lifecycle),
+        ready,
+    )?;
     Ok(())
 }
 
@@ -163,15 +170,17 @@ pub(super) fn serve_vault(
     socket: Option<&Path>,
     lifecycle: &NativeVaultLifecycle,
     _install_secret_service: bool,
+    ready: impl FnOnce() -> factorseal::VaultResult<()>,
 ) -> Result<(), CliError> {
     let pipe_name = socket.map_or_else(
         || default_windows_pipe_name(device.installation_id()),
         |path| path.to_string_lossy().into_owned(),
     );
-    serve_windows_vault_with_lifecycle(
+    serve_windows_vault_with_ready(
         service,
         &WindowsVaultOptions::new(pipe_name),
         Some(lifecycle),
+        ready,
     )?;
     Ok(())
 }
@@ -183,6 +192,7 @@ pub(super) fn serve_vault(
     _root: &Path,
     _socket: Option<&Path>,
     _lifecycle: &(),
+    _ready: impl FnOnce() -> factorseal::VaultResult<()>,
 ) -> Result<(), CliError> {
     Err(CliError::UnsupportedPlatform)
 }

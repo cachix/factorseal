@@ -117,12 +117,12 @@ pub(crate) use store::VaultStore;
 #[cfg(all(feature = "vault", target_os = "linux"))]
 pub use linux::{
     LinuxVaultLifecycle, LinuxVaultOptions, linux_caller_identity_for_executable,
-    serve_linux_vault, serve_linux_vault_with_lifecycle,
+    serve_linux_vault, serve_linux_vault_with_lifecycle, serve_linux_vault_with_ready,
 };
 #[cfg(all(feature = "vault", target_os = "macos"))]
 pub use macos::{
     MacosVaultLifecycle, MacosVaultOptions, macos_caller_identity_for_executable,
-    serve_macos_vault, serve_macos_vault_with_lifecycle,
+    serve_macos_vault, serve_macos_vault_with_lifecycle, serve_macos_vault_with_ready,
 };
 
 // Linux and macOS share one Unix socket client; each target names it after
@@ -135,7 +135,8 @@ pub use unix_client::UnixVaultClient as MacosVaultClient;
 #[cfg(all(feature = "vault", target_os = "windows"))]
 pub use windows::{
     WindowsVaultLifecycle, WindowsVaultOptions, serve_windows_vault,
-    serve_windows_vault_with_lifecycle, windows_caller_identity_for_executable,
+    serve_windows_vault_with_lifecycle, serve_windows_vault_with_ready,
+    windows_caller_identity_for_executable,
 };
 #[cfg(all(feature = "vault-client", target_os = "windows"))]
 pub use windows_client::{WindowsVaultClient, default_windows_pipe_name};

@@ -10,6 +10,7 @@ fn enabled() -> bool {
 }
 
 pub(crate) fn begin_unlock() {
+    factorseal::diagnostics::event("desktop_unlock", "request_accepted", "ok");
     if !enabled() {
         return;
     }
@@ -21,7 +22,8 @@ pub(crate) fn begin_unlock() {
     );
 }
 
-pub(crate) fn mark_unlock(phase: &str, outcome: &str) {
+pub(crate) fn mark_unlock(phase: &'static str, outcome: &'static str) {
+    factorseal::diagnostics::event("desktop_unlock", phase, outcome);
     if !enabled() {
         return;
     }
@@ -38,7 +40,13 @@ pub(crate) fn mark_unlock(phase: &str, outcome: &str) {
     );
 }
 
-pub(crate) fn record(scope: &str, phase: &str, started: Instant, outcome: &str) {
+pub(crate) fn record(
+    scope: &'static str,
+    phase: &'static str,
+    started: Instant,
+    outcome: &'static str,
+) {
+    factorseal::diagnostics::timing(scope, phase, outcome, started.elapsed());
     if enabled() {
         eprintln!(
             "factorseal timing scope={scope} phase={phase} elapsed_ms={:.3} outcome={outcome}",
@@ -48,8 +56,8 @@ pub(crate) fn record(scope: &str, phase: &str, started: Instant, outcome: &str) 
 }
 
 pub(crate) fn result<T, E>(
-    scope: &str,
-    phase: &str,
+    scope: &'static str,
+    phase: &'static str,
     operation: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
     let started = Instant::now();
@@ -63,7 +71,7 @@ pub(crate) fn result<T, E>(
     result
 }
 
-pub(crate) fn finish_unlock(phase: &str, outcome: &str) {
+pub(crate) fn finish_unlock(phase: &'static str, outcome: &'static str) {
     mark_unlock(phase, outcome);
     if let Ok(mut started) = UNLOCK_STARTED.lock() {
         *started = None;

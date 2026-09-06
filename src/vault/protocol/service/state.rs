@@ -133,7 +133,9 @@ impl ServiceState {
             return Ok(true);
         }
         if live.last_purge_at != now {
-            live.store.purge_expired_at(now)?;
+            crate::timing::result("vault_maintenance", "purge_expired", || {
+                live.store.purge_expired_at(now)
+            })?;
             live.last_purge_at = now;
             #[cfg(all(test, feature = "hardware"))]
             {

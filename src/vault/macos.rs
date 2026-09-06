@@ -102,6 +102,17 @@ pub fn serve_macos_vault_with_lifecycle(
     options: &MacosVaultOptions,
     lifecycle_monitor: Option<&MacosVaultLifecycle>,
 ) -> VaultResult<()> {
+    serve_macos_vault_with_ready(service, options, lifecycle_monitor, || Ok(()))
+}
+
+/// Notify the owner after the listener and lifecycle hooks are ready.
+#[doc(hidden)]
+pub fn serve_macos_vault_with_ready(
+    service: &Arc<VaultService>,
+    options: &MacosVaultOptions,
+    lifecycle_monitor: Option<&MacosVaultLifecycle>,
+    ready: impl FnOnce() -> VaultResult<()>,
+) -> VaultResult<()> {
     if options.install_lifecycle_monitor {
         service.enable_emergency_exit();
     }
@@ -127,20 +138,22 @@ pub fn serve_macos_vault_with_lifecycle(
     // the error exits. Returning `?` straight out of the loop skipped the lock
     // and left them to whatever the caller did next.
     let caller_cache = CallerIdentityCache::default();
-    let served = accept_until_sealed(
-        service,
-        &listener,
-        &stopping,
-        &options.socket_path,
-        options.poll_interval,
-        || {
-            if let Some(monitor) = lifecycle_monitor.as_ref() {
-                monitor.process();
-            }
-            Ok(lifecycle_monitor.is_some_and(MacosVaultLifecycle::requested))
-        },
-        |stream| caller_identity(stream, &caller_cache),
-    );
+    let served = ready().and_then(|()| {
+        accept_until_sealed(
+            service,
+            &listener,
+            &stopping,
+            &options.socket_path,
+            options.poll_interval,
+            || {
+                if let Some(monitor) = lifecycle_monitor.as_ref() {
+                    monitor.process();
+                }
+                Ok(lifecycle_monitor.is_some_and(MacosVaultLifecycle::requested))
+            },
+            |stream| caller_identity(stream, &caller_cache),
+        )
+    });
     let sealed = service.seal();
     served.and(sealed)
 }

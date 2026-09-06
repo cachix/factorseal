@@ -1,6 +1,7 @@
 mod app;
 mod appearance;
 mod branding;
+mod crash_reporting;
 mod instance;
 mod runtime;
 mod secret_input;
@@ -8,6 +9,7 @@ mod settings;
 mod settings_view;
 mod theming;
 mod timing;
+mod unlock_animation;
 
 use std::{borrow::Cow, path::PathBuf};
 
@@ -31,6 +33,9 @@ impl AssetSource for Assets {
             branding::CLOSE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../../assets/logo/factorseal-close.svg"
             )))),
+            branding::BUG_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-bug.svg"
+            )))),
             _ => gpui_component_assets::Assets.load(path),
         }
     }
@@ -43,6 +48,7 @@ impl AssetSource for Assets {
                 branding::MICRO_MARK_ASSET.into(),
                 branding::SEARCH_ASSET.into(),
                 branding::CLOSE_ASSET.into(),
+                branding::BUG_ASSET.into(),
             ]
             .into_iter()
             .filter(|asset: &SharedString| asset.starts_with(path)),
@@ -94,8 +100,12 @@ struct Args {
 }
 
 fn main() {
+    if let Err(error) = factorseal::diagnostics::initialize("desktop") {
+        eprintln!("factorseal-desktop: diagnostics unavailable: {error}");
+    }
     if let Err(error) = factorseal::security::disable_core_dumps() {
         eprintln!("factorseal-desktop: could not disable core dumps: {error}");
+        factorseal::diagnostics::finish(false);
         std::process::exit(1);
     }
     #[cfg(target_os = "linux")]
@@ -111,6 +121,7 @@ fn main() {
     let args = Args::parse();
     let root = runtime::explicit_or_default_root(args.root.as_deref()).unwrap_or_else(|error| {
         eprintln!("factorseal-desktop: {error}");
+        factorseal::diagnostics::finish(false);
         std::process::exit(1);
     });
     let saved = settings::path()
@@ -119,6 +130,7 @@ fn main() {
             |path| settings::load(&path),
         )
         .unwrap_or_else(|error| {
+            factorseal::diagnostics::event("desktop", "load_settings", "error");
             eprintln!("could not read desktop settings: {error:#}");
             settings::DesktopSettings::default()
         });
@@ -128,6 +140,7 @@ fn main() {
     )
     .unwrap_or_else(|error| {
         eprintln!("factorseal-desktop: {error}");
+        factorseal::diagnostics::finish(false);
         std::process::exit(1);
     });
     // Only the Desktop managing the default vault speaks for the system
@@ -146,6 +159,7 @@ fn main() {
     let instance = instance::acquire(&config.root, !args.background || args.keyring_activation)
         .unwrap_or_else(|error| {
             eprintln!("factorseal-desktop: {error}");
+            factorseal::diagnostics::finish(false);
             std::process::exit(1);
         });
     if matches!(instance, instance::Instance::Secondary) {
@@ -160,6 +174,7 @@ fn main() {
             // leave those callers hanging indefinitely.
             std::process::exit(1);
         }
+        factorseal::diagnostics::finish(true);
         return;
     }
     let instance::Instance::Primary {
@@ -170,24 +185,13 @@ fn main() {
     else {
         unreachable!("secondary Desktop instances return before application startup")
     };
-    #[cfg(target_os = "linux")]
-    let secret_service_host = secret_service
-        .then(|| {
-            factorseal::SecretServiceHost::start(std::sync::Arc::new(DesktopPrompter { activate }))
-                .map(std::sync::Arc::new)
-                .map_err(|error| {
-                    eprintln!(
-                        "factorseal-desktop: system keyring integration is unavailable: {error}"
-                    );
-                })
-                .ok()
-        })
-        .flatten();
-    #[cfg(not(target_os = "linux"))]
-    let secret_service_host = {
-        drop(activate);
-        None
-    };
+    let secret_service_host = start_secret_service(secret_service, activate);
+    let _crash_reporting =
+        crash_reporting::start(saved.automatic_crash_reports).unwrap_or_else(|error| {
+            eprintln!("factorseal-desktop: {error}");
+            None
+        });
+    factorseal::diagnostics::event("desktop", "open_application", "start");
     gpui_platform::application()
         .with_assets(Assets)
         .with_quit_mode(QuitMode::Explicit)
@@ -202,6 +206,7 @@ fn main() {
             );
         });
     drop(instance_lock);
+    factorseal::diagnostics::finish(true);
 }
 
 #[cfg(target_os = "linux")]
@@ -231,6 +236,29 @@ fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
             return Err("timed out waiting for Desktop to unseal the keyring".to_owned());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn start_secret_service(
+    enabled: bool,
+    activate: smol::channel::Sender<()>,
+) -> Option<std::sync::Arc<app::SecretServiceHost>> {
+    #[cfg(target_os = "linux")]
+    {
+        if !enabled {
+            return None;
+        }
+        factorseal::SecretServiceHost::start(std::sync::Arc::new(DesktopPrompter { activate }))
+            .map(std::sync::Arc::new)
+            .map_err(|error| {
+                eprintln!("factorseal-desktop: system keyring integration is unavailable: {error}");
+            })
+            .ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (enabled, activate);
+        None
     }
 }
 

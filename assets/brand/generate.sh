@@ -36,7 +36,7 @@ cp "$logo_dir/factorseal-mark-micro-paper.svg" "$logo_dir/dev.factorseal.Desktop
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title description">
   <title id="title">FactorSeal application icon</title>
-  <desc id="description">An Ink chip and stepped keyhole on a Paper application tile.</desc>
+  <desc id="description">An Ink chip and tapered keyhole on a Paper application tile.</desc>
   <rect width="160" height="160" rx="34" fill="#F7F3EA"/>
   <g transform="translate(16 16) scale(.8)">
 SVG

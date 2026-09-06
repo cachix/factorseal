@@ -1,5 +1,5 @@
 use crate::secret_input::SecretInputState;
-use std::sync::Arc;
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Div, Global, Hsla, MenuItem, Render, Subscription, Task,
@@ -7,11 +7,12 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Root, Selectable as _, Sizable as _, Size,
-    StyledExt as _,
+    StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
+    dialog::{Cancel as CancelDialog, Confirm as ConfirmDialog, DialogFooter},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     link::Link,
     scroll::ScrollableElement as _,
     spinner::Spinner,
@@ -76,8 +77,10 @@ pub(crate) type SecretServiceHost = factorseal::SecretServiceHost;
 #[cfg(not(target_os = "linux"))]
 pub(crate) struct SecretServiceHost;
 
+#[cfg(target_os = "linux")]
 struct SecretServiceGlobal(Option<Arc<SecretServiceHost>>);
 
+#[cfg(target_os = "linux")]
 impl Global for SecretServiceGlobal {}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -554,6 +557,10 @@ fn selection_for_search(selection: Option<&VaultSelection>) -> Option<VaultSelec
 #[allow(clippy::struct_excessive_bools)]
 struct DesktopView {
     settings_open: bool,
+    issue_report_busy: bool,
+    issue_report_notice: Option<&'static str>,
+    issue_description: Option<gpui::Entity<TextareaState>>,
+    issue_report_error: Rc<Cell<Option<&'static str>>>,
     settings: gpui::Entity<crate::settings_view::SettingsView>,
     runtime: Arc<DesktopRuntime>,
     snapshot: Snapshot,
@@ -580,6 +587,165 @@ struct DesktopView {
 }
 
 impl DesktopView {
+    fn report_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.issue_report_busy {
+            return;
+        }
+        let description = self.issue_description.get_or_insert_with(|| {
+            cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .rows(5)
+                    .placeholder("What were you doing? What happened, and what did you expect? Include steps to reproduce if you can.")
+            })
+        }).clone();
+        self.issue_report_error.set(None);
+        let error = Rc::clone(&self.issue_report_error);
+        let view = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let send_view = view.clone();
+            let cancel_view = view.clone();
+            dialog
+                .title("Report an issue")
+                .width(px(520.))
+                .overlay_closable(false)
+                .child("Describe what went wrong")
+                .child(Textarea::new(&description).h(rems(140. / 16.)))
+                .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                    .child("Your description and recent diagnostic logs will be sent to Sentry. Don’t include passwords or secret values. Up to 4,000 characters."))
+                .when_some(error.get(), |dialog, error| dialog.child(error_banner(error.to_owned(), cx.theme().danger)))
+                .footer(
+                    DialogFooter::new()
+                        .child(Button::new("cancel-issue-report").label("Cancel")
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(CancelDialog), cx)))
+                        .child(Button::new("send-issue-report").primary().label("Send report")
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(ConfirmDialog { secondary: false }), cx))),
+                )
+                .on_ok(move |_, window, cx| {
+                    send_view.update(cx, |view, cx| view.submit_issue(window, cx)).unwrap_or(true)
+                })
+                .on_cancel(move |_, _, cx| {
+                    let _ = cancel_view.update(cx, |view, _| view.issue_description = None);
+                    true
+                })
+        });
+        if let Some(description) = &self.issue_description {
+            description.update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn submit_issue(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.issue_report_busy {
+            return false;
+        }
+        let Some(input) = &self.issue_description else {
+            return false;
+        };
+        let description = input.read(cx).value().to_string();
+        if let Err(error) = factorseal::diagnostics::validate_issue_description(&description) {
+            self.issue_report_error.set(Some(error));
+            cx.notify();
+            return false;
+        }
+        if !crate::crash_reporting::configured() {
+            self.issue_report_error.set(Some(
+                "Issue submission is unavailable. You can export diagnostics from Settings.",
+            ));
+            cx.notify();
+            return false;
+        }
+        self.issue_report_busy = true;
+        self.issue_report_notice = Some("Sending issue report…");
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result =
+                smol::unblock(move || crate::crash_reporting::submit_issue(&description)).await;
+            let queued = result.is_ok();
+            let notice = if let Ok(id) = result {
+                let mut sent = false;
+                for _ in 0..20 {
+                    let id = id.clone();
+                    sent = smol::unblock(move || crate::crash_reporting::issue_sent(&id))
+                        .await
+                        .unwrap_or(false);
+                    if sent {
+                        break;
+                    }
+                    smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                }
+                if sent {
+                    "Issue report sent to Sentry with recent diagnostic logs."
+                } else {
+                    "Issue report queued for Sentry. Desktop will retry automatically."
+                }
+            } else {
+                "Could not queue the issue report. Try again or export diagnostics from Settings."
+            };
+            let _ = view.update(cx, |view, cx| {
+                view.issue_report_busy = false;
+                view.issue_report_notice = Some(notice);
+                if queued {
+                    view.issue_description = None;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
+    fn render_footer(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let security_label = self.security_label();
+        v_flex()
+            .w_full()
+            .flex_none()
+            .when_some(self.issue_report_notice, |view, notice| {
+                view.child(
+                    div()
+                        .py_2()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(notice),
+                )
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_none()
+                    .h(rems(48. / 16.))
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Button::new("report-issue")
+                                    .icon(gpui_component::Icon::default().path(branding::BUG_ASSET))
+                                    .ghost()
+                                    .small()
+                                    .disabled(self.issue_report_busy)
+                                    .tooltip("Report an issue")
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.report_issue(window, cx);
+                                    })),
+                            )
+                            .child(branding::TAGLINE),
+                    )
+                    .child(
+                        Link::new("footer-security-link")
+                            .href("https://factorseal.dev/security")
+                            .child(security_label),
+                    ),
+            )
+    }
+
     fn security_label(&self) -> String {
         let backend = self.snapshot.metadata().map_or_else(
             || {
@@ -668,6 +834,10 @@ impl DesktopView {
         );
         Self {
             settings_open: false,
+            issue_report_busy: false,
+            issue_report_notice: None,
+            issue_description: None,
+            issue_report_error: Rc::new(Cell::new(None)),
             settings,
             runtime,
             snapshot,
@@ -1088,6 +1258,7 @@ impl DesktopView {
                 error: Some(error.to_owned()),
             };
         } else {
+            window.blur(cx);
             self.snapshot = Snapshot::Unlocking { metadata, group };
         }
         cx.notify();
@@ -1155,6 +1326,7 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme().clone();
+        let unlocking = matches!(self.snapshot, Snapshot::Unlocking { .. });
         let has_multiple_groups = metadata.unlock_policy().groups().len() > 1;
         let mut choices = h_flex().gap_2().flex_wrap();
         for (index, group) in metadata.unlock_policy().groups().iter().enumerate() {
@@ -1164,6 +1336,7 @@ impl DesktopView {
                 Button::new(("unlock-group", index))
                     .label(group.to_string())
                     .selected(selected)
+                    .disabled(unlocking)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.choose_group(chosen.clone(), window, cx);
                     })),
@@ -1175,22 +1348,54 @@ impl DesktopView {
             .unwrap_or(metadata.preferred_unlock_group())
             .requires(factorseal::UnlockFactorKind::Password);
 
+        let title = if unlocking {
+            "Unlocking your vault…"
+        } else {
+            "Vault is sealed"
+        };
+        let description = match &self.snapshot {
+            Snapshot::Unlocking { group, .. }
+                if group.requires(factorseal::UnlockFactorKind::Biometric) =>
+            {
+                "Complete the device authorization prompt if one appears."
+            }
+            Snapshot::Unlocking { .. } => {
+                "FactorSeal’s secure unlock process normally takes a few seconds."
+            }
+            _ => "Unlock to make your secrets available to authorized applications.",
+        };
+        let password_field = if unlocking {
+            // Preserve the form's height without leaving an editable secret field.
+            field_label(
+                "Password",
+                div()
+                    .w_full()
+                    .h(px(40.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.muted),
+            )
+            .opacity(0.5)
+        } else {
+            field_label("Password", self.password.clone())
+        };
+
         vault_card(&theme)
             .child(
                 v_flex()
                     .items_center()
                     .gap_3()
                     .pb_2()
-                    .child(brand_mark(72., theme.foreground))
-                    .child(div().text_2xl().font_semibold().child("Vault is sealed"))
+                    .child(crate::unlock_animation::vault_mark(&theme, unlocking))
+                    .child(div().text_2xl().font_semibold().child(title))
                     .child(
                         div()
                             .text_color(theme.muted_foreground)
                             .text_center()
                             .text_sm()
-                            .child(
-                                "Unlock to make your secrets available to authorized applications.",
-                            ),
+                            .min_h(rems(40. / 16.))
+                            .child(description),
                     ),
             )
             .when(has_multiple_groups, |element| {
@@ -1202,9 +1407,7 @@ impl DesktopView {
                     )
                     .child(choices)
             })
-            .when(needs_password, |element| {
-                element.child(field_label("Password", self.password.clone()))
-            })
+            .when(needs_password, |element| element.child(password_field))
             .when_some(error.map(str::to_owned), |element, error| {
                 element.child(error_banner(error, theme.danger))
             })
@@ -1213,7 +1416,10 @@ impl DesktopView {
                     .primary()
                     .large()
                     .w_full()
-                    .label(if needs_password {
+                    .disabled(unlocking)
+                    .label(if unlocking {
+                        "Unlocking…"
+                    } else if needs_password {
                         "Unlock vault"
                     } else {
                         "Continue with biometrics"
@@ -1732,12 +1938,28 @@ impl DesktopView {
     }
 
     fn render_permission_rows(
-        permissions: &[&factorseal::Permission],
-        has_any: bool,
+        contents: &VaultContents,
         query: &str,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme().clone();
+        if contents.permissions_loading {
+            return div()
+                .p_4()
+                .text_color(theme.muted_foreground)
+                .child("Loading permissions…");
+        }
+        if let Some(error) = &contents.permissions_error {
+            return div()
+                .p_4()
+                .text_color(theme.danger)
+                .child(format!("Could not load permissions: {error}"));
+        }
+        let permissions: Vec<_> = contents
+            .permissions
+            .iter()
+            .filter(|permission| permission_matches_search(permission, query))
+            .collect();
         let mut rows = v_flex()
             .w_full()
             .rounded_lg()
@@ -1789,7 +2011,11 @@ impl DesktopView {
             );
         }
         if permissions.is_empty() {
-            rows = rows.child(Self::empty_item_rows(has_any, query, cx));
+            rows = rows.child(Self::empty_item_rows(
+                !contents.permissions.is_empty(),
+                query,
+                cx,
+            ));
         }
         rows
     }
@@ -1838,19 +2064,9 @@ impl DesktopView {
         let guidance = category_guidance(kind);
         let query = self.vault_search.read(cx).value().trim().to_lowercase();
         let (item_count, item_rows) = if kind == factorseal::DocumentKind::Authorization {
-            let permissions: Vec<_> = contents
-                .permissions
-                .iter()
-                .filter(|permission| permission_matches_search(permission, &query))
-                .collect();
             (
                 contents.permissions.len(),
-                Self::render_permission_rows(
-                    &permissions,
-                    !contents.permissions.is_empty(),
-                    &query,
-                    cx,
-                ),
+                Self::render_permission_rows(contents, &query, cx),
             )
         } else {
             let all_entries: Vec<_> = contents
@@ -2648,37 +2864,7 @@ impl DesktopView {
             Snapshot::Sealed { metadata, error } => {
                 self.render_sealed(metadata, error.as_deref(), cx)
             }
-            Snapshot::Unlocking { group, .. } => {
-                vault_card(&theme)
-                    .items_center()
-                    .text_center()
-                    .child(brand_mark(56., theme.foreground))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .text_2xl()
-                            .font_semibold()
-                            .child(Spinner::new().with_size(Size::Large).color(theme.primary))
-                            .child("Unlocking your vault…"),
-                    )
-                    .child(
-                        div().text_sm().text_color(theme.muted_foreground).child(
-                            "FactorSeal’s secure unlock process normally takes a few seconds.",
-                        ),
-                    )
-                    .when(
-                        group.requires(factorseal::UnlockFactorKind::Biometric),
-                        |element| {
-                            element.child(
-                                div().text_sm().text_color(theme.muted_foreground).child(
-                                    "Complete the device authorization prompt if one appears.",
-                                ),
-                            )
-                        },
-                    )
-            }
+            Snapshot::Unlocking { metadata, .. } => self.render_sealed(metadata, None, cx),
             Snapshot::Sealing { .. } => vault_card(&theme)
                 .items_center()
                 .text_center()
@@ -2730,10 +2916,10 @@ fn vault_browser_height(window: &Window, compact: bool, cx: &App) -> gpui::Pixel
 
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dialog_layer = Root::render_dialog_layer(window, cx);
         window.set_rem_size(crate::appearance::rem_size(cx));
         let theme = cx.theme().clone();
         let header_status = self.render_header_status(cx);
-        let security_label = self.security_label();
         let unsealed = !self.settings_open && matches!(self.snapshot, Snapshot::Unsealed { .. });
         let compact = window.viewport_size().width < px(800.) * crate::appearance::scale(cx);
         let body_max_width = if self.settings_open {
@@ -2811,25 +2997,8 @@ impl Render for DesktopView {
                     )
                     .overflow_y_scrollbar(),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .flex_none()
-                    .h(rems(48. / 16.))
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(branding::TAGLINE)
-                    .child(
-                        Link::new("footer-security-link")
-                            .href("https://factorseal.dev/security")
-                            .child(security_label),
-                    ),
-            )
+            .child(self.render_footer(cx))
+            .children(dialog_layer)
     }
 }
 
@@ -2864,6 +3033,56 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
     if matches!(snapshot, Snapshot::Unsealed { .. }) {
         crate::timing::finish_unlock("ui_updated", "ok");
     }
+    load_deferred_permissions(snapshot, cx);
+}
+
+fn load_deferred_permissions(snapshot: &Snapshot, cx: &mut App) {
+    let Snapshot::Unsealed {
+        metadata, contents, ..
+    } = snapshot
+    else {
+        return;
+    };
+    if !contents.permissions_loading {
+        return;
+    }
+    let metadata = metadata.clone();
+    let generation = cx.global::<DesktopWindow>().refresh_generation;
+    let runtime = Arc::clone(&cx.global::<RuntimeGlobal>().0);
+    cx.spawn(async move |cx| {
+        let started = std::time::Instant::now();
+        let result = smol::unblock(move || runtime.load_permissions(&metadata)).await;
+        cx.update(|cx| {
+            let desktop = cx.global_mut::<DesktopWindow>();
+            // A seal, another unlock, or a refresh supersedes this request.
+            if desktop.refresh_generation != generation {
+                return;
+            }
+            if let Snapshot::Unsealed { contents, .. } = &mut desktop.snapshot {
+                contents.complete_permissions(result.clone());
+            }
+            let view_holder = Arc::clone(&desktop.view);
+            if let Ok(holder) = view_holder.lock()
+                && let Some(view) = holder.as_ref()
+            {
+                view.update(cx, |view, cx| {
+                    // Patch only permissions, retaining edits and selection
+                    // made since the first unlocked snapshot was displayed.
+                    if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot {
+                        contents.complete_permissions(result.clone());
+                        cx.notify();
+                    }
+                });
+            }
+            crate::timing::record(
+                "desktop_inventory",
+                "permissions_ready",
+                started,
+                if result.is_ok() { "ok" } else { "error" },
+            );
+        });
+    })
+    .detach();
 }
 
 fn refresh_desktop_snapshot(runtime: Arc<DesktopRuntime>, cx: &mut App) {
@@ -2914,6 +3133,7 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
                 desktop.visible = true;
             }
             Err(error) => {
+                factorseal::diagnostics::event("desktop", "open_window", "error");
                 eprintln!("failed to open FactorSeal Desktop: {error}");
                 return;
             }
@@ -2935,6 +3155,7 @@ fn close_desktop(_: &CloseDesktop, cx: &mut App) {
         if let Err(error) = handle.update(cx, |_, window, _| window.set_visible(false)) {
             forget_desktop_window(handle, cx);
             refresh_tray(cx);
+            factorseal::diagnostics::event("desktop", "hide_window", "error");
             eprintln!("failed to hide FactorSeal Desktop window: {error}");
         }
     });
@@ -2952,6 +3173,7 @@ fn seal_vault(_: &SealVault, cx: &mut App) {
     if let Some(runtime) = cx.try_global::<RuntimeGlobal>()
         && let Err(error) = runtime.0.seal()
     {
+        factorseal::diagnostics::event("desktop", "seal_vault", "error");
         eprintln!("failed to seal FactorSeal vault: {error}");
     }
 }
@@ -2965,8 +3187,10 @@ fn quit(_: &Quit, cx: &mut App) {
     if let Some(tray) = tray
         && let Err(error) = tray.close(cx)
     {
+        factorseal::diagnostics::event("desktop", "close_tray", "error");
         eprintln!("failed to close FactorSeal tray: {error}");
     }
+    factorseal::diagnostics::finish(true);
     cx.quit();
 }
 
@@ -2998,6 +3222,7 @@ fn refresh_tray(cx: &mut App) {
     if let Some(tray) = tray
         && let Err(error) = tray.refresh_menu(cx)
     {
+        factorseal::diagnostics::event("desktop", "refresh_tray_menu", "error");
         eprintln!("failed to refresh FactorSeal tray menu: {error}");
     }
 }
@@ -3026,11 +3251,13 @@ fn install_tray(cx: &mut App) {
     });
     match tray {
         Ok(tray) => cx.set_global(DesktopTray(tray)),
-        Err(error) => eprintln!("FactorSeal tray unavailable: {error}"),
+        Err(error) => {
+            factorseal::diagnostics::event("desktop", "install_tray", "error");
+            eprintln!("FactorSeal tray unavailable: {error}");
+        }
     }
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn refresh_tray_icon(cx: &mut App) {
     let tray = cx.try_global::<DesktopTray>().map(|tray| tray.0.clone());
     let Some(tray) = tray else {
@@ -3040,6 +3267,7 @@ pub(crate) fn refresh_tray_icon(cx: &mut App) {
     match factorseal_icon(dark_background, cx) {
         Ok(icon) => {
             if let Err(error) = tray.set_icon(Some(icon), cx) {
+                factorseal::diagnostics::event("desktop", "refresh_tray_icon", "error");
                 eprintln!("failed to refresh FactorSeal tray bitmap: {error}");
             }
         }
@@ -3113,7 +3341,10 @@ pub(crate) fn setup(
     let (runtime, receiver) = DesktopRuntime::new(config);
     let initial = runtime.inspect();
     cx.set_global(RuntimeGlobal(Arc::clone(&runtime)));
+    #[cfg(target_os = "linux")]
     cx.set_global(SecretServiceGlobal(secret_service));
+    #[cfg(not(target_os = "linux"))]
+    drop(secret_service);
     cx.set_global(DesktopStatus {
         unsealed: matches!(initial, Snapshot::Unsealed { .. }),
         quitting: false,

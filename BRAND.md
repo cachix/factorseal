@@ -15,12 +15,18 @@ your own machine—not a remote security service.
 
 ## Mark
 
-The FactorSeal mark is a filled, softly rounded hardware chip with two substantial
-pins per side and a stepped keyhole in negative space.
+The FactorSeal mark is a filled hardware chip with rounded corners, two
+pins per side, and a round, tapered keyhole in negative space.
 The chip represents the local device and its hardware root of trust. The
 keyhole represents a sealed secret without promising a particular biometric or
-physical key. Its circular head and square shoulders evoke a machined opening.
-The stepped keyhole is the distinguishing detail; preserve it in every variant.
+physical key. Its circular head and tapered stem use the keyhole shape from
+[SecretSpec](https://secretspec.dev/), scaled to fit the chip.
+Preserve these proportions in every variant.
+The primary chip uses a 5-unit corner radius on its 96-unit body. Pins are
+16 units wide, project 16 units beyond the body, and use a 2-unit radius.
+The keyhole is 60 units tall and centered within the body.
+The small mark retains heavier, grid-aligned pins and a larger opening for
+legibility, with 0.5-unit body corners and 0.25-unit pin corners.
 
 The canonical asset is [`assets/logo/factorseal-mark.svg`](assets/logo/factorseal-mark.svg).
 Keep the mark one color. Do not fill the keyhole with an accent color, put the

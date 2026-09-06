@@ -10,6 +10,8 @@
   libxkbcommon,
   qt6,
   vulkan-loader,
+  sentryDsn ? lib.removeSuffix "\n" (builtins.readFile ../factorseal-desktop/sentry-dsn.txt),
+  sentryEnvironment ? "production",
 }:
 
 let
@@ -18,6 +20,8 @@ in
 rustPlatform.buildRustPackage {
   pname = "factorseal-desktop";
   version = "0.1.0";
+  FACTORSEAL_SENTRY_DSN = sentryDsn;
+  FACTORSEAL_SENTRY_ENVIRONMENT = sentryEnvironment;
 
   src = lib.fileset.toSource {
     root = ../.;
@@ -55,6 +59,8 @@ rustPlatform.buildRustPackage {
 
   doCheck = false;
   strictDeps = true;
+  # Keep release line tables available for local panic backtraces.
+  dontStrip = true;
 
   installPhase = ''
     runHook preInstall

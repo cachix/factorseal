@@ -76,6 +76,12 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
+    /// Show the local diagnostics directory or export reports for sharing.
+    Diagnostics {
+        /// Write recent logs and crash reports to a private JSON file.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Internal desktop bootstrap over inherited private pipes.
     #[command(hide = true)]
     DesktopWorker,
@@ -298,6 +304,36 @@ pub(super) enum Command {
     /// Serve the SecretSpec external-provider protocol over standard I/O.
     #[cfg(feature = "secretspec-provider")]
     Provider,
+}
+
+impl Command {
+    pub(super) fn diagnostic_name(&self) -> &'static str {
+        match self {
+            Self::Completions { .. } => "completions",
+            Self::Diagnostics { .. } => "diagnostics",
+            Self::DesktopWorker => "desktop_worker",
+            Self::SignPermission { .. } => "sign_permission",
+            Self::Init { .. } => "initialize",
+            Self::Agent { .. } => "agent",
+            Self::Desktop { .. } => "desktop",
+            Self::Status => "status",
+            Self::Seal => "seal",
+            Self::Set { .. } => "set",
+            Self::Get { .. } => "get",
+            Self::Delete { .. } => "delete",
+            Self::Projects { .. } => "projects",
+            Self::List { .. } => "list",
+            Self::History { .. } => "history",
+            Self::Export { .. } => "export",
+            Self::Import { .. } => "import",
+            Self::Destroy { .. } => "destroy",
+            Self::GrantCli { .. } => "grant_cli",
+            Self::HardwareSelfTest { .. } => "hardware_self_test",
+            Self::Permissions { .. } => "permissions",
+            #[cfg(feature = "secretspec-provider")]
+            Self::Provider => "provider",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

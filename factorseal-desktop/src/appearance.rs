@@ -206,6 +206,7 @@ pub(crate) fn update(settings: crate::settings::DesktopSettings, cx: &mut App) -
         .as_deref()
         .context("desktop configuration directory is unavailable")?;
     crate::settings::save(path, &settings)?;
+    crate::crash_reporting::set_enabled(settings.automatic_crash_reports);
     if security_changed {
         crate::app::set_next_lease(
             crate::runtime::lease_policy(settings.idle_seconds, settings.maximum_seconds)
