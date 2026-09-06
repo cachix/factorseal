@@ -174,9 +174,12 @@ impl LiveStateGuard<'_> {
         candidate: ApprovalCandidate,
         now: u64,
     ) -> VaultResult<VaultInteractionReference> {
-        let interaction = self.live.approvals.create(candidate, now)?;
-        self.approval_changed.notify_all();
-        Ok(interaction)
+        let revision = self.live.approvals.revision();
+        let interaction = self.live.approvals.create(candidate, now);
+        if self.live.approvals.revision() != revision {
+            self.approval_changed.notify_all();
+        }
+        interaction
     }
 
     pub(super) fn list_permissions(&mut self, now: u64) -> VaultResult<(u64, Vec<Permission>)> {

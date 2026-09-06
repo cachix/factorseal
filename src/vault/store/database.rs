@@ -14,9 +14,20 @@ pub(super) fn open_lock(root: &Path) -> VaultResult<fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(&path).map_err(|error| {
+    crate::security::regular::open_regular(&path, &mut options).map_err(|error| {
         VaultError::Database(format!("I/O error for `{}`: {error}", path.display()))
     })
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn lock_file_rejects_a_final_symlink() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    fs::write(&target, b"untouched").unwrap();
+    std::os::unix::fs::symlink(&target, directory.path().join(LOCK_FILE)).unwrap();
+    assert!(open_lock(directory.path()).is_err());
+    assert_eq!(fs::read(target).unwrap(), b"untouched");
 }
 
 pub(super) async fn query_optional_blob(

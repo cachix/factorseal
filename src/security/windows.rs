@@ -36,7 +36,9 @@ use windows::Win32::Security::{
 #[cfg(feature = "key-protection")]
 use windows::Win32::{
     Security::{
-        Authorization::GetNamedSecurityInfoW, GetSecurityDescriptorControl, SE_DACL_PROTECTED,
+        Authorization::GetNamedSecurityInfoW, GetSecurityDescriptorControl,
+        GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, OWNER_SECURITY_INFORMATION,
+        SE_DACL_PROTECTED,
     },
     Storage::FileSystem::CreateDirectoryW,
 };
@@ -152,11 +154,11 @@ pub(crate) fn validate_private_file(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-/// SDDL for a protected DACL that grants `user_sid` full control over the
-/// directory and everything created inside it, and nothing to anyone else.
+/// Set an explicit user owner (also for elevated tokens) and a protected DACL
+/// granting that user full control over the directory and its children.
 #[cfg(feature = "key-protection")]
 fn owner_only_sddl(user_sid: &str) -> String {
-    format!("D:P(A;OICI;FA;;;{user_sid})")
+    format!("O:{user_sid}D:P(A;OICI;FA;;;{user_sid})")
 }
 
 /// Map a Win32 failure to the `io::Error` `std::fs` would have produced, so
@@ -217,25 +219,24 @@ pub(crate) fn create_owner_only_directory(root: &Path) -> io::Result<()> {
         .map_err(|error| win32_io_error(&error))
 }
 
-/// Reject `path` unless its DACL is protected from inheritance and grants
-/// access to the current user only.
+/// Reject `path` unless the current user owns it and its protected DACL grants
+/// access to that user only.
 #[cfg(feature = "key-protection")]
 pub(crate) fn validate_owner_only_directory(path: &Path) -> io::Result<()> {
     let user_sid = current_user_sid().map_err(|error| io::Error::other(error.to_string()))?;
     let name = HSTRING::from(path);
-    let mut dacl: *mut ACL = ptr::null_mut();
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     // SAFETY: every out-pointer references a live local. The descriptor is a
-    // `LocalAlloc` buffer owned by the guard below, and `dacl` points inside
-    // it, so both stay valid until the guard drops.
+    // `LocalAlloc` buffer owned by the guard below, which stays live through
+    // descriptor validation.
     let status = unsafe {
         GetNamedSecurityInfoW(
             &name,
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             None,
             None,
-            Some(&raw mut dacl),
+            None,
             None,
             &raw mut descriptor,
         )
@@ -250,6 +251,36 @@ pub(crate) fn validate_owner_only_directory(path: &Path) -> io::Result<()> {
         ));
     }
     let _descriptor = LocalMemory(descriptor.0);
+    validate_directory_descriptor(path, &user_sid, descriptor)
+}
+
+#[cfg(feature = "key-protection")]
+fn validate_directory_descriptor(
+    path: &Path,
+    user_sid: &str,
+    descriptor: PSECURITY_DESCRIPTOR,
+) -> io::Result<()> {
+    let mut owner = PSID::default();
+    let mut defaulted = windows::core::BOOL::default();
+    // SAFETY: the caller keeps the queried/converted descriptor alive, and
+    // every output points to a live local. Returned pointers borrow it.
+    unsafe { GetSecurityDescriptorOwner(descriptor, &raw mut owner, &raw mut defaulted) }
+        .map_err(|error| win32_io_error(&error))?;
+    if owner.0.is_null() || string_sid(owner)? != user_sid {
+        return Err(permission_error(path, "must be owned by the current user"));
+    }
+    let mut dacl = ptr::null_mut();
+    let mut present = windows::core::BOOL::default();
+    // SAFETY: the descriptor and output pointers are live, as above.
+    unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &raw mut present,
+            &raw mut dacl,
+            &raw mut defaulted,
+        )
+    }
+    .map_err(|error| win32_io_error(&error))?;
     let mut control = 0_u16;
     let mut revision = 0_u32;
     // SAFETY: `descriptor` is a valid security descriptor until the guard
@@ -266,16 +297,16 @@ pub(crate) fn validate_owner_only_directory(path: &Path) -> io::Result<()> {
             path,
             &format!(
                 "inherits permissions from its parent directory; {}",
-                repair_hint(path, &user_sid)
+                repair_hint(path, user_sid)
             ),
         ));
     }
-    if dacl.is_null() {
+    if !present.as_bool() || dacl.is_null() {
         return Err(permission_error(
             path,
             &format!(
                 "has no access control list, so every user can read it; {}",
-                repair_hint(path, &user_sid)
+                repair_hint(path, user_sid)
             ),
         ));
     }
@@ -285,7 +316,7 @@ pub(crate) fn validate_owner_only_directory(path: &Path) -> io::Result<()> {
                 path,
                 &format!(
                     "grants access to `{trustee}` rather than only `{user_sid}`; {}",
-                    repair_hint(path, &user_sid)
+                    repair_hint(path, user_sid)
                 ),
             ));
         }
@@ -374,10 +405,99 @@ mod tests {
 
     #[test]
     #[cfg(feature = "key-protection")]
+    fn directory_security_rejects_wrong_or_missing_owner_even_with_a_private_dacl() {
+        let user_sid = current_user_sid().unwrap();
+        for (owner, expected) in [
+            (format!("O:{user_sid}"), true),
+            ("O:WD".to_owned(), false),
+            (String::new(), false),
+        ] {
+            let sddl = HSTRING::from(format!("{owner}D:P(A;OICI;FA;;;{user_sid})"));
+            let mut descriptor = PSECURITY_DESCRIPTOR::default();
+            // SAFETY: the string and output are live; LocalMemory owns the result.
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    &sddl,
+                    SDDL_REVISION_1,
+                    &raw mut descriptor,
+                    None,
+                )
+            }
+            .unwrap();
+            let _descriptor = LocalMemory(descriptor.0);
+            let result =
+                validate_directory_descriptor(Path::new("test-root"), &user_sid, descriptor);
+            if expected {
+                result.unwrap();
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("must be owned by the current user")
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "key-protection")]
+    fn vault_children_inherit_private_access_under_a_shared_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("icacls")
+                .arg(directory.path())
+                .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        let root = directory.path().join("vault");
+        create_owner_only_directory(&root).unwrap();
+        validate_owner_only_directory(&root).unwrap();
+        // Exercise ordinary child creation, as used by metadata and database
+        // files, rather than assigning explicit private permissions to them.
+        for name in [
+            "factorseal.json",
+            "vault.db",
+            "vault.db-wal",
+            "vault.db-shm",
+            "vault.lock",
+        ] {
+            let path = root.join(name);
+            fs::write(&path, b"private").unwrap();
+            let mut dacl = ptr::null_mut();
+            let mut descriptor = PSECURITY_DESCRIPTOR::default();
+            // SAFETY: outputs are live and LocalMemory owns the returned descriptor.
+            let status = unsafe {
+                GetNamedSecurityInfoW(
+                    &HSTRING::from(path.as_path()),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    Some(&raw mut dacl),
+                    None,
+                    &raw mut descriptor,
+                )
+            };
+            assert_eq!(status, ERROR_SUCCESS);
+            let _descriptor = LocalMemory(descriptor.0);
+            assert!(!dacl.is_null());
+            assert_eq!(
+                granted_trustees(dacl).unwrap(),
+                [current_user_sid().unwrap()]
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "key-protection")]
     fn owner_only_sddl_grants_full_control_to_one_protected_trustee() {
         assert_eq!(
             owner_only_sddl("S-1-5-21-1-2-3-1001"),
-            "D:P(A;OICI;FA;;;S-1-5-21-1-2-3-1001)"
+            "O:S-1-5-21-1-2-3-1001D:P(A;OICI;FA;;;S-1-5-21-1-2-3-1001)"
         );
     }
 

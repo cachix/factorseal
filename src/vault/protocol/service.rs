@@ -437,7 +437,9 @@ fn response_error_with_interaction(
     interaction: Option<super::VaultInteractionReference>,
 ) -> VaultResponseError {
     let code = match error {
-        VaultError::AuthorizationRequired => VaultResponseErrorCode::AuthorizationRequired,
+        VaultError::AuthorizationRequired | VaultError::ApprovalLimited => {
+            VaultResponseErrorCode::AuthorizationRequired
+        }
         VaultError::Replay => VaultResponseErrorCode::Replay,
         VaultError::Sealed | VaultError::WorkerUnavailable | VaultError::AgentUnreachable(_) => {
             VaultResponseErrorCode::Sealed
@@ -460,6 +462,11 @@ fn response_error_with_interaction(
     };
     let message = match code {
         VaultResponseErrorCode::InvalidRequest => "the request is invalid",
+        VaultResponseErrorCode::AuthorizationRequired
+            if matches!(error, VaultError::ApprovalLimited) =>
+        {
+            "approval request limit reached; retry later"
+        }
         VaultResponseErrorCode::AuthorizationRequired => "application authorization is required",
         VaultResponseErrorCode::Replay => "the request was already consumed",
         VaultResponseErrorCode::Sealed => "the vault is sealed",

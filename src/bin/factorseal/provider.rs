@@ -369,7 +369,9 @@ fn map_vault_error(error: &VaultError) -> RpcError {
         VaultError::EmptyAddress { .. } | VaultError::AddressTooLong { .. } => {
             ErrorKind::InvalidParams
         }
-        VaultError::AuthorizationRequired => ErrorKind::PermissionDenied,
+        VaultError::AuthorizationRequired | VaultError::ApprovalLimited => {
+            ErrorKind::PermissionDenied
+        }
         VaultError::Sealed => return RpcError::interaction_required(None),
         // The provider endpoint is intentionally independent of the agent. If
         // the initialized vault has no live worker or listener, SecretSpec can

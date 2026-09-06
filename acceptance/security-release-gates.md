@@ -28,6 +28,11 @@ mechanism; they must be exported before losing access to the source vault.
   short-lived key-owning helper, not the inspectable IPC client.
 - Clear caller-owned Argon2 workspace and writable JNI/WebAuthN secret buffers.
   Disable Unix core files and Linux key-owner dumpability before acquiring keys.
+- Reject metadata/lock final links and non-regular files without blocking on
+  Unix FIFOs. Validate Windows root ownership as well as its protected DACL.
+- Bound pending approvals per caller and globally, rate-limit new approvals
+  using monotonic time, and preserve existing requests on overload. Duplicate
+  requests do not extend approval expiry or notify the approval UI.
 - Detect tracked Linux session removal, authenticate logind signal senders, and
   require a transient Secure Enclave key probe before Apple protector use.
 - Preserve typed native failures through public create/unseal APIs.
@@ -58,6 +63,8 @@ Enclave, Android or two-account acceptance.
 - Windows private files: run ACL creation/replacement tests in shared parent
   directories and verify a second account cannot read intermediate or final
   export files. Test reparse-point/password inputs and permission-query failure.
+  Run the root-owner descriptor and child-inheritance regressions; verify a
+  second account cannot read metadata, database, WAL, or lock files.
 
 - Windows: run tests on Windows, including the connected-pipe owner test;
   additionally squat a permissive pipe from a different account and capture

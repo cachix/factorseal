@@ -1361,12 +1361,10 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     assert!(interaction.id.starts_with("prm_"));
     assert!((101..=101 + denied_elapsed).contains(&(interaction.expires_at - 7 * 24 * 60 * 60)));
 
-    let repeated_started = Instant::now();
     let repeated = service.handle(&provider, get("demo"), 201);
-    let repeated_elapsed = repeated_started.elapsed().as_secs() + 1;
     let refreshed = repeated.result.unwrap_err().interaction.unwrap();
     assert_eq!(refreshed.id, interaction.id);
-    assert!((201..=201 + repeated_elapsed).contains(&(refreshed.expires_at - 7 * 24 * 60 * 60)));
+    assert_eq!(refreshed.expires_at, interaction.expires_at);
 
     let pending = service.handle(
         &provider,
@@ -1592,6 +1590,54 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
             status: PermissionWaitStatus::Denied
         })
     ));
+}
+
+#[test]
+fn approval_overload_returns_no_interaction_and_preserves_existing_requests() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let provider = caller();
+    let request = |index| {
+        let project = format!("project-{index}");
+        VaultRequest::new_with_application(
+            VaultAction::GetCache {
+                address: project_address(&project),
+                project: project.clone(),
+            },
+            VaultApplicationContext::new(Some(project), None, None, None).unwrap(),
+        )
+        .unwrap()
+    };
+    let original = service
+        .handle(&provider, request(0), 100)
+        .result
+        .unwrap_err()
+        .interaction
+        .unwrap();
+    for index in 1..8 {
+        assert!(
+            service
+                .handle(&provider, request(index), 100)
+                .result
+                .unwrap_err()
+                .interaction
+                .is_some()
+        );
+    }
+    let error = service
+        .handle(&provider, request(8), 100)
+        .result
+        .unwrap_err();
+    assert_eq!(error.code, VaultResponseErrorCode::AuthorizationRequired);
+    assert_eq!(error.message, "approval request limit reached; retry later");
+    assert!(error.interaction.is_none());
+    let repeated = service
+        .handle(&provider, request(0), 100)
+        .result
+        .unwrap_err()
+        .interaction
+        .unwrap();
+    assert_eq!(original.id, repeated.id);
+    assert_eq!(original.expires_at, repeated.expires_at);
 }
 
 #[test]

@@ -1,5 +1,13 @@
 //! Process, password, and file protections shared by product entry points.
 
+#[cfg(any(
+    feature = "transfer",
+    feature = "key-protection",
+    feature = "vault-client",
+    feature = "vault-store"
+))]
+pub(crate) mod regular;
+
 #[cfg(feature = "key-protection")]
 mod password;
 #[cfg(feature = "key-protection")]

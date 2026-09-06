@@ -391,6 +391,9 @@ pub enum VaultError {
     #[error("application authorization is required")]
     AuthorizationRequired,
 
+    #[error("approval request limit reached; retry later")]
+    ApprovalLimited,
+
     #[error("no supported hardware security backend is available")]
     HardwareUnavailable,
 

@@ -6,31 +6,11 @@ use zeroize::Zeroizing;
 fn open_regular(path: &Path, private: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
+    let file = super::regular::open_regular(path, &mut options)?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        // NONBLOCK ensures a FIFO cannot block before fstat rejects it.
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
-        options.share_mode(1); // Allow readers, deny concurrent writers/deletion.
-    }
-    let file = options.open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::other("input must be a regular file"));
-    }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt as _;
-        use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-            return Err(io::Error::other("reparse-point inputs are not accepted"));
-        }
         if private {
             super::windows::validate_private_file(&file)?;
         }

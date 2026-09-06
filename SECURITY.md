@@ -130,6 +130,21 @@ from a descriptor opened once, so the path, size, and bytes always describe the
 same image, and the peer's process start time is compared before and after
 resolution, so a reused process ID cannot inherit another process's grant.
 
+Pending project approvals are capped at 128 globally and 16 per authenticated
+caller. A monotonic sliding minute permits at most 128 new approvals globally
+and eight per caller, including approvals subsequently granted or denied.
+Overload rejects new approvals without evicting existing ones. Repeating a
+pending request returns its original identifier and expiry without refreshing
+the approval UI. These are lease-local abuse controls, not isolation from a
+same-user process that can run different executables or restart the vault.
+
+Metadata and lock files reject final symlinks/reparse points and non-regular
+files through the opened handle; Unix FIFO opens are nonblocking. Ancestor
+path replacement, hard links, and database sidecar handling still require
+separate review. Windows root validation checks current-user ownership as well
+as its protected DACL; child-file ACL inheritance also has a native regression
+test, but two-account acceptance remains required.
+
 ## Broad administrative and compatibility authority
 
 A permission manager can inspect and change grants and use portable vault

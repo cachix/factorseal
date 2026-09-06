@@ -1,6 +1,6 @@
 //! Persisted vault metadata, validation, and bounded JSON I/O.
 
-use std::fs;
+use std::fs::OpenOptions;
 use std::io::Read;
 use std::path::Path;
 
@@ -255,7 +255,8 @@ fn unsupported_version_error(bytes: &[u8], original: String) -> VaultError {
 }
 
 fn read_bounded_vault_file(path: &Path) -> VaultResult<Vec<u8>> {
-    let file = fs::File::open(path).map_err(|error| path_error(path, error))?;
+    let file = crate::security::regular::open_regular(path, OpenOptions::new().read(true))
+        .map_err(|error| path_error(path, error))?;
     let metadata = file.metadata().map_err(|error| path_error(path, error))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_VAULT_FILE_BYTES {
         return Err(VaultError::Protection(
@@ -316,4 +317,70 @@ pub(super) fn actor_id_for_public_key(public_key: &[u8]) -> [u8; KEY_BYTES] {
     digest.update(b"factorseal/automerge-actor/v1\0");
     digest.update(public_key);
     digest.finalize().into()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn metadata_reads_reject_links_directories_and_oversized_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metadata");
+        fs::write(&path, b"metadata").unwrap();
+        assert_eq!(read_bounded_vault_file(&path).unwrap(), b"metadata");
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(read_bounded_vault_file(&link).is_err());
+        assert!(read_bounded_vault_file(directory.path()).is_err());
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_VAULT_FILE_BYTES + 1)
+            .unwrap();
+        assert!(read_bounded_vault_file(&path).is_err());
+    }
+
+    #[test]
+    fn metadata_fifo_is_rejected_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::time::{Duration, Instant};
+
+        const CHILD: &str = "FACTORSEAL_TEST_METADATA_FIFO";
+        if let Some(path) = std::env::var_os(CHILD) {
+            assert!(read_bounded_vault_file(Path::new(&path)).is_err());
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("metadata");
+        let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: path is a live NUL-terminated string in a private test directory.
+        #[allow(unsafe_code)]
+        let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(result, 0);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "vault::seal::metadata::tests::metadata_fifo_is_rejected_without_blocking",
+            ])
+            .env(CHILD, &fifo)
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("metadata read blocked on a FIFO");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
