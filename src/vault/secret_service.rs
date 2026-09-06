@@ -38,6 +38,7 @@ const DEFAULT_ALIAS_PATH: &str = "/org/freedesktop/secrets/aliases/default";
 const ITEM_PREFIX: &str = "/org/freedesktop/secrets/collection/factorseal/";
 const SESSION_PREFIX: &str = "/org/freedesktop/secrets/session/";
 const MAX_SESSIONS: usize = 1024;
+const TAKEOVER_POLL: Duration = Duration::from_secs(1);
 
 type Secret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
 type Properties = HashMap<String, OwnedValue>;
@@ -80,13 +81,11 @@ pub(crate) fn serve_secret_service(
         };
         let agent = Arc::new(Agent::load(store)?);
         let connection = Connection::session().await.map_err(dbus_error)?;
-        let name_claim = connection
-            .request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into())
-            .await;
-        if !secret_service_name_claimed(name_claim)? {
-            eprintln!(
-                "FactorSeal: Secret Service integration is unavailable because {BUS_NAME} is already provided by another process"
-            );
+        let claimed = claim_secret_service_name(&connection, TAKEOVER_POLL, || {
+            Ok(stopping.load(Ordering::Acquire) || service.expire_if_needed(unix_time())?)
+        })
+        .await?;
+        if !claimed {
             return Ok(());
         }
         let server = connection.object_server();
@@ -294,6 +293,54 @@ fn secret_service_name_claimed<T>(result: Result<T, zbus::Error>) -> VaultResult
         Err(error) => Err(dbus_error(error)),
     }
 }
+/// Claim the Secret Service name, taking it over from a previous provider once
+/// that provider releases it.
+///
+/// Another Secret Service (gnome-keyring, KWallet, or a second FactorSeal
+/// instance) may still own `org.freedesktop.secrets` when the vault unseals.
+/// Giving up at that point left the name unowned for the rest of this process
+/// once the other provider exited or crashed, while the desktop activation
+/// helper kept waiting on this process to publish it. Returns `false` when
+/// `should_stop` reports that the vault sealed or the service is stopping
+/// before the name became available.
+async fn claim_secret_service_name(
+    connection: &Connection,
+    poll: Duration,
+    mut should_stop: impl FnMut() -> VaultResult<bool>,
+) -> VaultResult<bool> {
+    let bus = fdo::DBusProxy::new(connection).await.map_err(dbus_error)?;
+    let name = zbus::names::BusName::try_from(BUS_NAME)
+        .map_err(|error| VaultError::Protocol(format!("invalid Secret Service name: {error}")))?;
+    let mut announced = false;
+    loop {
+        let claim = connection
+            .request_name_with_flags(BUS_NAME, fdo::RequestNameFlags::DoNotQueue.into())
+            .await;
+        if secret_service_name_claimed(claim)? {
+            return Ok(true);
+        }
+        if !announced {
+            eprintln!(
+                "FactorSeal: {BUS_NAME} is currently provided by another process; FactorSeal takes over when it is released"
+            );
+            announced = true;
+        }
+        loop {
+            if should_stop()? {
+                return Ok(false);
+            }
+            tokio::time::sleep(poll).await;
+            let owned = bus
+                .name_has_owner(name.clone())
+                .await
+                .map_err(|error| dbus_error(error.into()))?;
+            if !owned {
+                break;
+            }
+        }
+    }
+}
+
 fn failed(error: impl std::fmt::Display) -> fdo::Error {
     fdo::Error::Failed(error.to_string())
 }
@@ -456,6 +503,66 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secret_service_name_is_taken_over_once_the_previous_owner_releases_it() {
+        // Skips outside a desktop session and when a real Secret Service owns
+        // the bus name; Linux CI runs the suite under `dbus-run-session`.
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let Ok(previous_owner) = Connection::session().await else {
+                return;
+            };
+            match previous_owner
+                .request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into())
+                .await
+            {
+                Ok(_) => {}
+                Err(zbus::Error::NameTaken) => return,
+                Err(error) => panic!("could not register the Secret Service test name: {error}"),
+            }
+            let claimant = Connection::session().await.unwrap();
+            let poll = Duration::from_millis(1);
+            // Stopping while another provider still owns the name gives up.
+            let claimed = claim_secret_service_name(&claimant, poll, || Ok(true))
+                .await
+                .unwrap();
+            assert!(!claimed);
+            // Release the name only once the claimant is observed waiting for it.
+            let release = Arc::new(tokio::sync::Notify::new());
+            let releaser = {
+                let release = Arc::clone(&release);
+                let previous_owner = previous_owner.clone();
+                tokio::spawn(async move {
+                    release.notified().await;
+                    assert!(previous_owner.release_name(BUS_NAME).await.unwrap());
+                })
+            };
+            let claimed = claim_secret_service_name(&claimant, poll, || {
+                release.notify_one();
+                Ok(false)
+            })
+            .await
+            .unwrap();
+            assert!(claimed);
+            releaser.await.unwrap();
+            let bus = fdo::DBusProxy::new(&claimant).await.unwrap();
+            let owner = bus
+                .get_name_owner(zbus::names::BusName::try_from(BUS_NAME).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                owner.to_string(),
+                claimant.unique_name().unwrap().to_string()
+            );
+        });
+    }
     #[cfg(target_os = "linux")]
     #[test]
     #[allow(clippy::too_many_lines)]

@@ -165,3 +165,10 @@ the schema version advances. Unknown formats are rejected and never deleted.
   value. Path arguments complete files and directories, and internal commands
   stay hidden. Completion answers from the command definition alone: it never
   resolves a vault root, reads vault metadata, or contacts the service.
+- Keep the Secret Service name under FactorSeal's control on Linux: when
+  another provider still owns `org.freedesktop.secrets` at unseal, the vault
+  now takes the name over as soon as that provider releases it or crashes,
+  instead of giving up for the rest of the session. The desktop keyring
+  activation helper exits with a failure when the Desktop does not publish the
+  name in time, so dbus-broker fails waiting clients instead of queuing them
+  forever.
