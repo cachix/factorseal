@@ -3,14 +3,14 @@
   <title id="title">FactorSeal small icon</title>
   <desc id="description">An optically adjusted chip and keyhole for icons from 16 to 24 pixels.</desc>
   <g fill="#F7F3EA">
-    <path fill-rule="evenodd" d="M5 3H11Q13 3 13 5V11Q13 13 11 13H5Q3 13 3 11V5Q3 3 5 3Z M8 4A2 2 0 0 1 9 7.732V9H10V11H6V9H7V7.732A2 2 0 0 1 8 4Z"/>
-    <rect x="5" y="1" width="2" height="3" rx=".5"/>
-    <rect x="9" y="1" width="2" height="3" rx=".5"/>
-    <rect x="5" y="12" width="2" height="3" rx=".5"/>
-    <rect x="9" y="12" width="2" height="3" rx=".5"/>
-    <rect x="1" y="5" width="3" height="2" rx=".5"/>
-    <rect x="1" y="9" width="3" height="2" rx=".5"/>
-    <rect x="12" y="5" width="3" height="2" rx=".5"/>
-    <rect x="12" y="9" width="3" height="2" rx=".5"/>
+    <path fill-rule="evenodd" d="M3.5 3H12.5A.5 .5 0 0 1 13 3.5V12.5A.5 .5 0 0 1 12.5 13H3.5A.5 .5 0 0 1 3 12.5V3.5A.5 .5 0 0 1 3.5 3Z M8 4 C6.92 4 6.044 4.876 6.044 5.956 C6.044 6.762 6.533 7.454 7.23 7.753 L6.643 11.5 H9.496 L8.838 7.723 C9.499 7.409 9.956 6.736 9.956 5.956 C9.956 4.876 9.08 4 8 4 Z"/>
+    <rect x="5" y="1" width="2" height="3" rx=".25"/>
+    <rect x="9" y="1" width="2" height="3" rx=".25"/>
+    <rect x="5" y="12" width="2" height="3" rx=".25"/>
+    <rect x="9" y="12" width="2" height="3" rx=".25"/>
+    <rect x="1" y="5" width="3" height="2" rx=".25"/>
+    <rect x="1" y="9" width="3" height="2" rx=".25"/>
+    <rect x="12" y="5" width="3" height="2" rx=".25"/>
+    <rect x="12" y="9" width="3" height="2" rx=".25"/>
   </g>
 </svg>
