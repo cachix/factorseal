@@ -16,6 +16,8 @@ mod platform;
 #[cfg(feature = "secretspec-provider")]
 #[path = "factorseal/provider.rs"]
 mod provider;
+#[path = "../timing.rs"]
+mod timing;
 
 use cli::{Cli, Command};
 use commands::{

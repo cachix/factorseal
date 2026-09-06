@@ -1,6 +1,6 @@
 //! Protected commit-chain verification and bounded-history compaction.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Value, params};
@@ -8,9 +8,11 @@ use turso::{Value, params};
 use crate::vault::{DocumentId, DocumentKind, VaultError, VaultId, VaultResult};
 
 use super::{
-    DocumentRow, MAX_COMMIT_CHAIN, MAX_RETAINED_COMMITS, StoreWorker, VerifiedDocument,
-    VerifiedStoreState,
+    DocumentRow, MAX_COMMIT_CHAIN, MAX_RETAINED_COMMITS, MAX_RETAINED_SNAPSHOT_BYTES, StoreWorker,
+    VerifiedDocument, VerifiedStoreState,
 };
+
+const VERIFY_BATCH_SIZE: usize = 32;
 use crate::vault::store::chain::{CommitContents, ProtectedCommit, digest};
 use crate::vault::store::database::{
     array_from_blob, database_error, document_id_from_blob, from_i64, query_count,
@@ -50,19 +52,25 @@ impl StoreWorker {
         let mut visited = HashSet::new();
         let mut count = 0_usize;
         while let Some(commit_id) = current {
-            count += 1;
-            if count > MAX_COMMIT_CHAIN || !visited.insert(commit_id) {
-                return Err(VaultError::InvalidData(
-                    "protected commit chain is cyclic or too long".to_owned(),
-                ));
+            let records = self.verify_commit_batch(commit_id).await?;
+            let sizes = self.verify_batch_payloads(&records).await?;
+            for (record, snapshot_bytes) in records.into_iter().zip(sizes) {
+                count += 1;
+                if count > MAX_COMMIT_CHAIN || !visited.insert(record.commit_id) {
+                    return Err(VaultError::InvalidData(
+                        "protected commit chain is cyclic or too long".to_owned(),
+                    ));
+                }
+                current = record.previous_commit_id;
+                verified.retained_snapshot_bytes = verified
+                    .retained_snapshot_bytes
+                    .saturating_add(snapshot_bytes);
+                // Traversal starts at the global head: first seen is newest.
+                verified
+                    .documents
+                    .entry(record.document_id)
+                    .or_insert_with(|| VerifiedDocument::new(&record, snapshot_bytes));
             }
-            let record = self.verify_protected_commit(commit_id).await?;
-            current = record.previous_commit_id;
-            // Traversal starts at the global head: first seen is newest.
-            verified
-                .documents
-                .entry(record.document_id)
-                .or_insert_with(|| VerifiedDocument::from(&record));
         }
 
         self.verify_protected_row_sets(count).await?;
@@ -103,11 +111,7 @@ impl StoreWorker {
         .ok_or_else(|| VaultError::InvalidData("document commit is missing".to_owned()))?;
         let record: ProtectedCommit = serde_json::from_slice(&record)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-        record.verify(
-            commit_id,
-            self.device.device_key_id(),
-            self.device.public_signing_key(),
-        )?;
+        record.verify(commit_id, self.device.device_key_id(), &self.verifying_key)?;
         if record.vault_id != self.device.device_vault_id()
             || record.document_id != document_id
             || record.generation != generation
@@ -119,64 +123,106 @@ impl StoreWorker {
         Ok(())
     }
 
-    async fn verify_protected_commit(&self, commit_id: [u8; 32]) -> VaultResult<ProtectedCommit> {
+    /// Fetch only a bounded batch of small commit records. The SQL links are
+    /// untrusted until each record's signature and duplicated columns agree.
+    async fn verify_commit_batch(&self, commit_id: [u8; 32]) -> VaultResult<Vec<ProtectedCommit>> {
         let mut rows = self
             .connection
             .query(
-                "SELECT previous_commit_id, document_id, generation, record
-                 FROM protected_commits WHERE commit_id = ?1",
-                [commit_id.to_vec()],
+                "WITH RECURSIVE batch AS (
+                     SELECT commit_id, previous_commit_id, document_id, generation, record, 0 AS depth
+                     FROM protected_commits WHERE commit_id = ?1
+                     UNION ALL
+                     SELECT parent.commit_id, parent.previous_commit_id, parent.document_id,
+                            parent.generation, parent.record, batch.depth + 1
+                     FROM protected_commits AS parent
+                     JOIN batch ON parent.commit_id = batch.previous_commit_id
+                     WHERE batch.depth + 1 < ?2
+                 )
+                 SELECT commit_id, previous_commit_id, document_id, generation, record
+                 FROM batch ORDER BY depth",
+                params![commit_id.to_vec(), to_i64(VERIFY_BATCH_SIZE as u64)?],
             )
             .await
             .map_err(database_error)?;
-        let row = rows.next().await.map_err(database_error)?.ok_or_else(|| {
-            VaultError::InvalidData("protected commit chain is incomplete".to_owned())
-        })?;
-        let stored_previous = row_optional_blob(&row, 0)?
-            .map(|bytes| array_from_blob(&bytes, "previous commit ID"))
-            .transpose()?;
-        let stored_document_id = document_id_from_blob(&row_blob(&row, 1)?)?;
-        let stored_generation = from_i64(row_integer(&row, 2)?, "commit generation")?;
-        let record_bytes = row_blob(&row, 3)?;
-        drop(rows);
-        let record: ProtectedCommit = serde_json::from_slice(&record_bytes)
-            .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-        record.verify(
-            commit_id,
-            self.device.device_key_id(),
-            self.device.public_signing_key(),
-        )?;
-        if stored_previous != record.previous_commit_id
-            || stored_document_id != record.document_id
-            || stored_generation != record.generation
-            || record.vault_id != self.device.device_vault_id()
-        {
+        let mut expected = Some(commit_id);
+        let mut records = Vec::with_capacity(VERIFY_BATCH_SIZE);
+        while let Some(row) = rows.next().await.map_err(database_error)? {
+            let stored_id = array_from_blob(&row_blob(&row, 0)?, "commit ID")?;
+            if expected != Some(stored_id) || records.len() >= VERIFY_BATCH_SIZE {
+                return Err(VaultError::Signature);
+            }
+            let stored_previous = row_optional_blob(&row, 1)?
+                .map(|bytes| array_from_blob(&bytes, "previous commit ID"))
+                .transpose()?;
+            let stored_document_id = document_id_from_blob(&row_blob(&row, 2)?)?;
+            let stored_generation = from_i64(row_integer(&row, 3)?, "commit generation")?;
+            let record: ProtectedCommit = serde_json::from_slice(&row_blob(&row, 4)?)
+                .map_err(|error| VaultError::InvalidData(error.to_string()))?;
+            record.verify(stored_id, self.device.device_key_id(), &self.verifying_key)?;
+            if stored_previous != record.previous_commit_id
+                || stored_document_id != record.document_id
+                || stored_generation != record.generation
+                || record.vault_id != self.device.device_vault_id()
+            {
+                return Err(VaultError::InvalidData(
+                    "protected commit SQL metadata does not match its signed record".to_owned(),
+                ));
+            }
+            expected = record.previous_commit_id;
+            records.push(record);
+        }
+        if records.is_empty() {
             return Err(VaultError::InvalidData(
-                "protected commit SQL metadata does not match its signed record".to_owned(),
+                "protected commit chain is incomplete".to_owned(),
             ));
         }
-        self.verify_protected_commit_payload(&record).await?;
-        Ok(record)
+        Ok(records)
     }
 
-    async fn verify_protected_commit_payload(&self, record: &ProtectedCommit) -> VaultResult<()> {
-        let snapshot = query_optional_blob(
-            &self.connection,
-            "SELECT envelope FROM document_snapshots
-             WHERE document_id = ?1 AND generation = ?2",
-            params![
-                record.document_id.as_bytes().to_vec(),
-                to_i64(record.generation)?,
-            ],
-        )
-        .await?
-        .ok_or_else(|| {
-            VaultError::InvalidData("protected commit snapshot is missing".to_owned())
-        })?;
-        if digest(&snapshot) != record.snapshot_digest {
-            return Err(VaultError::Signature);
+    /// Stream ciphertext separately so batching does not retain a batch of
+    /// potentially large snapshots in memory or sort their contents.
+    async fn verify_batch_payloads(&self, records: &[ProtectedCommit]) -> VaultResult<Vec<u64>> {
+        let mut expected = BTreeMap::new();
+        let mut parameters = Vec::with_capacity(records.len() * 2);
+        for (index, record) in records.iter().enumerate() {
+            if expected
+                .insert((record.document_id, record.generation), index)
+                .is_some()
+            {
+                return Err(VaultError::InvalidData(
+                    "duplicate protected snapshot generation".to_owned(),
+                ));
+            }
+            parameters.push(Value::Blob(record.document_id.as_bytes().to_vec()));
+            parameters.push(Value::Integer(to_i64(record.generation)?));
         }
-        Ok(())
+        let predicates = std::iter::repeat_n("(document_id = ? AND generation = ?)", records.len())
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let mut rows = self.connection.query(
+            &format!("SELECT document_id, generation, envelope FROM document_snapshots WHERE {predicates}"),
+            parameters,
+        ).await.map_err(database_error)?;
+        let mut sizes = vec![0; records.len()];
+        while let Some(row) = rows.next().await.map_err(database_error)? {
+            let key = (
+                document_id_from_blob(&row_blob(&row, 0)?)?,
+                from_i64(row_integer(&row, 1)?, "snapshot generation")?,
+            );
+            let index = expected.remove(&key).ok_or(VaultError::Signature)?;
+            let snapshot = row_blob(&row, 2)?;
+            if digest(&snapshot) != records[index].snapshot_digest {
+                return Err(VaultError::Signature);
+            }
+            sizes[index] = snapshot.len() as u64;
+        }
+        if !expected.is_empty() {
+            return Err(VaultError::InvalidData(
+                "protected commit snapshot is missing".to_owned(),
+            ));
+        }
+        Ok(sizes)
     }
 
     async fn verify_protected_row_sets(&self, chain_count: usize) -> VaultResult<()> {
@@ -277,12 +323,29 @@ impl StoreWorker {
     }
 
     pub(super) async fn compact_if_needed(&mut self) -> VaultResult<()> {
-        if self.verified.chain_length
-            <= MAX_RETAINED_COMMITS.max(self.verified.documents.len().saturating_mul(2))
-        {
-            return Ok(());
+        self.compact_with_byte_limit(MAX_RETAINED_SNAPSHOT_BYTES)
+            .await
+    }
+
+    pub(super) async fn compact_with_byte_limit(&mut self, byte_limit: u64) -> VaultResult<()> {
+        let too_many_commits = self.verified.chain_length
+            > MAX_RETAINED_COMMITS.max(self.verified.documents.len().saturating_mul(2));
+        // Never compact just because the current data is large: require at
+        // least half the retained ciphertext to be superseded as well.
+        let too_many_bytes = self.verified.retained_snapshot_bytes > byte_limit
+            && self.verified.retained_snapshot_bytes
+                > self
+                    .verified
+                    .documents
+                    .values()
+                    .fold(0_u64, |total, document| {
+                        total.saturating_add(document.snapshot_bytes)
+                    })
+                    .saturating_mul(2);
+        if too_many_commits || too_many_bytes {
+            self.compact().await?;
         }
-        self.compact().await
+        Ok(())
     }
 
     /// Replace the commit history with a freshly signed minimal chain that
@@ -313,9 +376,20 @@ impl StoreWorker {
             head: commits.last().map(|commit| commit.commit_id),
             documents: commits
                 .iter()
-                .map(|commit| (commit.document_id, VerifiedDocument::from(commit)))
+                .map(|commit| {
+                    (
+                        commit.document_id,
+                        VerifiedDocument::new(
+                            commit,
+                            verified.documents[&commit.document_id].snapshot_bytes,
+                        ),
+                    )
+                })
                 .collect(),
             chain_length: commits.len(),
+            retained_snapshot_bytes: verified.documents.values().fold(0_u64, |total, document| {
+                total.saturating_add(document.snapshot_bytes)
+            }),
         };
         self.checkpoint().await?;
         Ok(())

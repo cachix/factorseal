@@ -41,6 +41,8 @@ const MAX_COMMIT_CHAIN: usize = 1_000_000;
 /// the whole chain, so an unpruned history grows both the database and unseal
 /// latency without bound in the number of writes.
 const MAX_RETAINED_COMMITS: usize = 256;
+/// Also bound retained ciphertext when a small number of writes are large.
+const MAX_RETAINED_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 /// Provenance recorded when the store removes a record on its own because
 /// its eviction deadline passed.
 const EXPIRY: Provenance = Provenance::service(ServiceReason::Expiry);
@@ -587,6 +589,7 @@ struct StoreWorker {
     secrets: InstallationSecrets,
     lock_file: fs::File,
     verified: VerifiedStoreState,
+    verifying_key: crate::vault::signature::PreparedVerifyingKey,
 }
 
 /// The only freshness/scheduling authority during a lease. Never reconstruct
@@ -596,16 +599,18 @@ struct VerifiedStoreState {
     head: Option<[u8; 32]>,
     documents: BTreeMap<DocumentId, VerifiedDocument>,
     chain_length: usize,
+    retained_snapshot_bytes: u64,
 }
 
 #[derive(Clone)]
 struct VerifiedDocument {
     row: DocumentRow,
     snapshot_digest: [u8; 32],
+    snapshot_bytes: u64,
 }
 
-impl From<&ProtectedCommit> for VerifiedDocument {
-    fn from(commit: &ProtectedCommit) -> Self {
+impl VerifiedDocument {
+    fn new(commit: &ProtectedCommit, snapshot_bytes: u64) -> Self {
         Self {
             row: DocumentRow {
                 vault_id: commit.vault_id,
@@ -618,6 +623,7 @@ impl From<&ProtectedCommit> for VerifiedDocument {
                 next_eviction: commit.next_eviction,
             },
             snapshot_digest: commit.snapshot_digest,
+            snapshot_bytes,
         }
     }
 }
@@ -686,12 +692,15 @@ impl StoreWorker {
             if opened_result.is_ok() { "ok" } else { "error" },
         );
         let opened = opened_result?;
+        let verifying_key =
+            crate::vault::signature::PreparedVerifyingKey::new(opened.device.public_signing_key())?;
         let mut worker = Self {
             connection: opened.connection,
             device: opened.device,
             secrets: opened.secrets,
             lock_file: opened.lock_file,
             verified: VerifiedStoreState::default(),
+            verifying_key,
         };
         let chain_started = Instant::now();
         let chain_result = worker.verify_commit_chain().await;

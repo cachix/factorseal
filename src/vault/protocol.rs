@@ -11,7 +11,7 @@ pub use grant::GrantPermission;
 #[cfg(feature = "vault-store")]
 pub use lease::UnsealLeasePolicy;
 #[cfg(feature = "vault-store")]
-pub use service::VaultService;
+pub use service::{GrantAuthorization, GrantAuthorizationTarget, VaultService};
 pub use wire::{
     CallerIdentity, CallerPlatform, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
     MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionOperation, PermissionPrincipal,

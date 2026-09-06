@@ -67,7 +67,10 @@ pub use vault::{
 pub use vault::{VaultArchive, VaultArchiveEntry, decrypt_vault_archive, encrypt_vault_archive};
 
 #[cfg(feature = "vault-store")]
-pub use vault::{CallerIdentity, CallerPlatform, GrantPermission, UnsealLeasePolicy, VaultService};
+pub use vault::{
+    CallerIdentity, CallerPlatform, GrantAuthorization, GrantAuthorizationTarget, GrantPermission,
+    UnsealLeasePolicy, VaultService,
+};
 
 #[cfg(feature = "key-protection")]
 pub use vault::{HardwareBackend, KeyProtector, KeyProtectorFactory};

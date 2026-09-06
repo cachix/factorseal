@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -103,6 +103,7 @@ pub(super) struct GrantRequirement<'a> {
     pub permission: GrantPermission,
 }
 
+#[cfg(all(test, feature = "hardware"))]
 pub(super) fn store_grant(
     store: &VaultStore,
     caller: &CallerIdentity,
@@ -111,6 +112,26 @@ pub(super) fn store_grant(
     expires_at: Option<u64>,
     now: u64,
 ) -> VaultResult<()> {
+    store_prepared_grants(
+        store,
+        prepare_grant(caller, target, permissions, expires_at, now)?,
+        now,
+    )
+}
+
+pub(super) struct PreparedGrant {
+    address: SecretAddress,
+    value: Zeroizing<Vec<u8>>,
+    expires_at: Option<u64>,
+}
+
+pub(super) fn prepare_grant(
+    caller: &CallerIdentity,
+    target: GrantTarget<'_>,
+    permissions: impl IntoIterator<Item = GrantPermission>,
+    expires_at: Option<u64>,
+    now: u64,
+) -> VaultResult<Vec<PreparedGrant>> {
     caller.validate()?;
     if expires_at.is_some_and(|deadline| deadline <= now) {
         return Err(VaultError::Expired);
@@ -123,6 +144,7 @@ pub(super) fn store_grant(
             "grant must contain a permission".to_owned(),
         ));
     }
+    let mut grants = Vec::with_capacity(permissions.len());
     for permission in permissions {
         let grant = AccessGrant {
             version: GRANT_VERSION,
@@ -134,15 +156,65 @@ pub(super) fn store_grant(
         let bytes = Zeroizing::new(
             serde_json::to_vec(&grant).map_err(|error| VaultError::Protocol(error.to_string()))?,
         );
-        store.put_at(
+        grants.push(PreparedGrant {
+            address: grant_address(caller_fingerprint, target_digest, permission)?,
+            value: bytes,
+            expires_at,
+        });
+    }
+    Ok(grants)
+}
+
+pub(super) fn store_prepared_grants(
+    store: &VaultStore,
+    grants: Vec<PreparedGrant>,
+    now: u64,
+) -> VaultResult<()> {
+    // Match sequential authorization when a batch mentions one grant twice:
+    // the last requested lifetime wins, even if it matches the existing value.
+    let mut seen = HashSet::new();
+    let mut grants: Vec<_> = grants
+        .into_iter()
+        .rev()
+        .filter(|grant| seen.insert(grant.address.clone()))
+        .collect();
+    grants.reverse();
+    if grants.is_empty() {
+        return Ok(());
+    }
+    let addresses: Vec<_> = grants.iter().map(|grant| grant.address.clone()).collect();
+    let existing = crate::timing::result("grant_storage", "read_existing_permissions", || {
+        store.get_many(
             DocumentKind::Authorization,
             GRANT_DOCUMENT_NAMESPACE,
-            &grant_address(caller_fingerprint, target_digest, permission)?,
-            &bytes,
-            expires_at,
-            &Provenance::service(ServiceReason::GrantStorage),
+            &addresses,
             now,
-        )?;
+        )
+    })?;
+    let operations: Vec<_> = grants
+        .into_iter()
+        .zip(existing)
+        .filter(|(grant, existing)| {
+            existing
+                .as_ref()
+                .is_none_or(|value| value.as_slice() != grant.value.as_slice())
+        })
+        .map(|(grant, _)| DocumentOperation::Put {
+            address: grant.address,
+            value: grant.value,
+            evict_at: grant.expires_at,
+        })
+        .collect();
+    if !operations.is_empty() {
+        crate::timing::result("grant_storage", "persist_permissions", || {
+            store.mutate(
+                DocumentKind::Authorization,
+                GRANT_DOCUMENT_NAMESPACE,
+                operations,
+                &Provenance::service(ServiceReason::GrantStorage),
+                now,
+            )
+        })?;
     }
     Ok(())
 }

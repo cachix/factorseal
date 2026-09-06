@@ -1,10 +1,10 @@
 //! Dedicated key owner launched by Desktop. No GUI libraries are linked here.
 
-use super::CliError;
+use super::{CliError, timing};
 use factorseal::desktop_worker::{Bootstrap, Operation, receive, send};
 use factorseal::{
-    DocumentKind, GrantPermission, UnlockCredentials, UnsealLeasePolicy, Vault, VaultCryptoProfile,
-    VaultService,
+    DocumentKind, GrantAuthorization, GrantAuthorizationTarget, GrantPermission, UnlockCredentials,
+    UnsealLeasePolicy, Vault, VaultCryptoProfile, VaultService,
 };
 use std::io::Read as _;
 use std::path::Path;
@@ -14,7 +14,11 @@ use std::time::Duration;
 const DESKTOP_CONTROL: &[u8] = b"factorseal/desktop-control/v1";
 
 pub(super) fn run(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
-    super::platform::harden_key_owner()?;
+    timing::result(
+        "desktop_worker",
+        "harden_key_owner",
+        super::platform::harden_key_owner,
+    )?;
     let mut reported = false;
     let result = run_inner(root, socket, &mut reported);
     // This pipe carries only status, never keys or secret values.
@@ -31,19 +35,30 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
         desktop_executable,
         operation,
         password,
-    } = receive(&mut std::io::stdin()).map_err(|e| CliError::DesktopLaunch(e.to_string()))?;
+    } = timing::result("desktop_worker", "receive_bootstrap", || {
+        receive(&mut std::io::stdin())
+    })
+    .map_err(|e| CliError::DesktopLaunch(e.to_string()))?;
     if !desktop_executable.is_absolute() || !desktop_executable.is_file() {
         return Err(CliError::DesktopLaunch(
             "desktop executable must be an absolute regular file".to_owned(),
         ));
     }
     let owner = Arc::new(Mutex::new(Weak::<VaultService>::new()));
-    watch_parent(Arc::clone(&owner))?;
-    let lifecycle = super::platform::prepare_lifecycle()?;
-    lifecycle.arm()?;
+    timing::result("desktop_worker", "watch_parent", || {
+        watch_parent(Arc::clone(&owner))
+    })?;
+    let lifecycle = timing::result(
+        "desktop_worker",
+        "prepare_lifecycle",
+        super::platform::prepare_lifecycle,
+    )?;
+    timing::result("desktop_worker", "arm_lifecycle", || lifecycle.arm())?;
     let initializing = matches!(operation, Operation::Initialize { .. });
     #[cfg(feature = "secretspec-provider")]
-    super::commands::publish_secretspec_claim_for_default_root(root)?;
+    timing::result("desktop_worker", "publish_secretspec_claim", || {
+        super::commands::publish_secretspec_claim_for_default_root(root)
+    })?;
     let (unsealed, lease) = match operation {
         Operation::Initialize { policy } => (
             Vault::prepare_with_unlock_policy_and_profile(
@@ -80,41 +95,15 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
             .lock()
             .map_err(|_| CliError::DesktopLaunch("owner lock unavailable".to_owned()))? =
             Arc::downgrade(&service);
-        super::commands::authorize_cli(&service, now)?;
-        let caller = super::platform::caller_identity_for_executable(&desktop_executable)?;
-        service.authorize_document_kind(
-            &caller,
-            DocumentKind::SecretSpecProject,
-            super::PROJECT_PERMISSIONS,
-            None,
-            now,
-        )?;
-        service.authorize_namespace(
-            &caller,
-            super::PERSONAL_SECRET_NAMESPACE,
-            [
-                GrantPermission::List,
-                GrantPermission::Get,
-                GrantPermission::Put,
-                GrantPermission::Delete,
-            ],
-            None,
-            now,
-        )?;
-        service.authorize_namespace(
-            &caller,
-            DESKTOP_CONTROL,
-            [GrantPermission::Seal],
-            None,
-            now,
-        )?;
-        service.authorize_permission_manager(&caller, now)?;
+        authorize_hosts(&service, &desktop_executable, now)?;
         if initializing {
             service.seal()?;
             Vault::complete_initialization(root)?;
         } else {
-            send(&mut std::io::stdout(), &Ok::<(), String>(()))
-                .map_err(|e| CliError::DesktopLaunch(e.to_string()))?;
+            timing::result("desktop_worker", "send_ready", || {
+                send(&mut std::io::stdout(), &Ok::<(), String>(()))
+            })
+            .map_err(|e| CliError::DesktopLaunch(e.to_string()))?;
             *reported = true;
             super::platform::serve_vault(&device, &service, root, socket, &lifecycle)?;
         }
@@ -125,6 +114,57 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
         Vault::discard_initialization(root)?;
     }
     result
+}
+
+fn authorize_hosts(service: &VaultService, executable: &Path, now: u64) -> Result<(), CliError> {
+    let cli = super::commands::cli_caller_identity()?;
+    let caller = timing::result("desktop_worker", "identify_desktop_executable", || {
+        super::platform::caller_identity_for_executable(executable)
+    })?;
+    let mut grants = Vec::from(super::commands::cli_authorizations(&cli));
+    grants.extend([
+        GrantAuthorization {
+            caller: &caller,
+            target: GrantAuthorizationTarget::Kind {
+                kind: DocumentKind::SecretSpecProject,
+            },
+            permissions: &super::PROJECT_PERMISSIONS,
+            expires_at: None,
+        },
+        GrantAuthorization {
+            caller: &caller,
+            target: GrantAuthorizationTarget::Namespace {
+                scope: DocumentKind::LocalKeyring,
+                namespace: super::PERSONAL_SECRET_NAMESPACE,
+            },
+            permissions: &[
+                GrantPermission::List,
+                GrantPermission::Get,
+                GrantPermission::Put,
+                GrantPermission::Delete,
+            ],
+            expires_at: None,
+        },
+        GrantAuthorization {
+            caller: &caller,
+            target: GrantAuthorizationTarget::Namespace {
+                scope: DocumentKind::LocalKeyring,
+                namespace: DESKTOP_CONTROL,
+            },
+            permissions: &[GrantPermission::Seal],
+            expires_at: None,
+        },
+        GrantAuthorization {
+            caller: &caller,
+            target: GrantAuthorizationTarget::PermissionManagement,
+            permissions: &[GrantPermission::ManagePermissions],
+            expires_at: None,
+        },
+    ]);
+    timing::result("desktop_worker", "authorize_host_permissions", || {
+        service.authorize_batch(&grants, now)
+    })?;
+    Ok(())
 }
 
 fn watch_parent(owner: Arc<Mutex<Weak<VaultService>>>) -> Result<(), CliError> {

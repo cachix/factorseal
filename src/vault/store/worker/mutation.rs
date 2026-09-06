@@ -314,6 +314,7 @@ impl StoreWorker {
             protected_record,
             ..
         } = prepared;
+        let snapshot_bytes = snapshot_envelope.len() as u64;
         Self::persist_snapshot(&transaction, document_id, generation, snapshot_envelope).await?;
         Self::persist_protected_record(
             &transaction,
@@ -326,9 +327,14 @@ impl StoreWorker {
         Self::advance_commit_head(&transaction, protected_commit.commit_id).await?;
         transaction.commit().await.map_err(database_error)?;
         self.verified.head = Some(protected_commit.commit_id);
-        self.verified
-            .documents
-            .insert(document_id, VerifiedDocument::from(&protected_commit));
+        self.verified.retained_snapshot_bytes = self
+            .verified
+            .retained_snapshot_bytes
+            .saturating_add(snapshot_bytes);
+        self.verified.documents.insert(
+            document_id,
+            VerifiedDocument::new(&protected_commit, snapshot_bytes),
+        );
         Ok(())
     }
 

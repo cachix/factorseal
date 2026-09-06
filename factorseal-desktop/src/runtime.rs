@@ -537,21 +537,32 @@ impl DesktopRuntime {
         group: UnlockGroup,
         password: Zeroizing<Vec<u8>>,
     ) -> Result<(), String> {
-        let mut worker = self.spawn_worker(self.unlock_operation(group)?, password)?;
-        worker.read_ready()?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let (idle_deadline, absolute_deadline) = loop {
-            if let Some(status) = worker.0.try_wait().map_err(|e| e.to_string())? {
-                return Err(format!("vault worker exited before serving: {status}"));
-            }
-            if let Some(deadlines) = live_status(&self.config, metadata)? {
-                break deadlines;
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err("vault worker did not become ready".to_owned());
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        };
+        let mut worker = crate::timing::result("desktop_startup", "spawn_worker", || {
+            self.spawn_worker(self.unlock_operation(group)?, password)
+        })?;
+        crate::timing::result("desktop_startup", "wait_worker_ready", || {
+            worker.read_ready()
+        })?;
+        let (idle_deadline, absolute_deadline) =
+            crate::timing::result("desktop_startup", "wait_service_ready", || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(status) = worker.0.try_wait().map_err(|e| e.to_string())? {
+                        return Err(format!("vault worker exited before serving: {status}"));
+                    }
+                    if let Some(deadlines) =
+                        crate::timing::result("desktop_startup", "probe_live_status", || {
+                            live_status(&self.config, metadata)
+                        })?
+                    {
+                        return Ok(deadlines);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err("vault worker did not become ready".to_owned());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            })?;
         self.lifeline
             .lock()
             .map_err(|_| "desktop worker lock unavailable".to_owned())?

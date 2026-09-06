@@ -380,7 +380,8 @@ pub(crate) mod unix_socket {
         stream.set_nonblocking(true).map_err(|error| {
             VaultError::Protocol(format!("could not bound client I/O: {error}"))
         })?;
-        let caller = authenticate(stream)?;
+        let caller =
+            crate::timing::result("vault_ipc", "authenticate_caller", || authenticate(stream))?;
         let bytes = read_frame(stream, IoBudget::new(IPC_FRAME_IO_TIMEOUT))?;
         let request = VaultRequest::decode(&bytes)?;
         let response = service.handle(&caller, request, unix_time()?);

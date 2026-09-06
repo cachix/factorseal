@@ -82,7 +82,7 @@ impl ProtectedCommit {
         &self,
         expected_commit_id: [u8; 32],
         expected_device_key_id: DeviceKeyId,
-        public_key: &[u8],
+        public_key: &signature::PreparedVerifyingKey,
     ) -> VaultResult<()> {
         if self.version != COMMIT_VERSION
             || self.commit_id != expected_commit_id
@@ -108,9 +108,8 @@ impl ProtectedCommit {
         if digest(&transcript) != self.commit_id {
             return Err(VaultError::Signature);
         }
-        signature::verify_with(
+        public_key.verify(
             self.signature_algorithm,
-            public_key,
             &commit_signature_payload(&self.commit_id),
             &self.signature,
         )
@@ -189,7 +188,7 @@ mod tests {
     #[test]
     fn commit_binds_every_field_under_its_signature() {
         let seed = [9; 32];
-        let public_key = public_key_for_seed(&seed);
+        let public_key = signature::PreparedVerifyingKey::new(&public_key_for_seed(&seed)).unwrap();
         let commit = ProtectedCommit::new(contents(), &seed).unwrap();
         commit
             .verify(commit.commit_id, commit.device_key_id, &public_key)
@@ -228,7 +227,8 @@ mod tests {
                 .verify(
                     commit.commit_id,
                     commit.device_key_id,
-                    &public_key_for_seed(&[0x18; 32])
+                    &signature::PreparedVerifyingKey::new(&public_key_for_seed(&[0x18; 32]))
+                        .unwrap()
                 )
                 .is_err()
         );

@@ -12,13 +12,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use factorseal::{
-    DocumentKind, GrantPermission, HistoryEntry, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
-    MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionState, SecretSpecAddress,
-    UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealLeasePolicy,
-    UnsealedVault, Vault, VaultAction, VaultArchive, VaultArchiveEntry, VaultClient,
-    VaultCryptoProfile, VaultEntryImportStatus, VaultEntryMetadata, VaultError, VaultMetadata,
-    VaultRequest, VaultResponseBody, VaultResponseErrorCode, VaultService, WireSecret,
-    decrypt_vault_archive, encrypt_vault_archive,
+    CallerIdentity, DocumentKind, GrantAuthorization, GrantAuthorizationTarget, GrantPermission,
+    HistoryEntry, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
+    PermissionChange, PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind,
+    UnlockGroup, UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultArchive,
+    VaultArchiveEntry, VaultClient, VaultCryptoProfile, VaultEntryImportStatus, VaultEntryMetadata,
+    VaultError, VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode,
+    VaultService, WireSecret, decrypt_vault_archive, encrypt_vault_archive,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -1236,25 +1236,47 @@ pub(super) fn grant_cli(
 }
 
 pub(super) fn authorize_cli(service: &VaultService, now: u64) -> Result<(), CliError> {
+    let caller = cli_caller_identity()?;
+    super::timing::result("cli_authorization", "authorize_permissions", || {
+        service.authorize_batch(&cli_authorizations(&caller), now)
+    })?;
+    Ok(())
+}
+
+pub(super) fn cli_caller_identity() -> Result<CallerIdentity, CliError> {
     let executable =
         std::env::current_exe().map_err(|error| CliError::CurrentExecutable(error.to_string()))?;
-    let caller = caller_identity_for_executable(&executable)?;
-    service.authorize_document_kind(
-        &caller,
-        DocumentKind::SecretSpecProject,
-        PROJECT_PERMISSIONS,
-        None,
-        now,
-    )?;
-    service.authorize_namespace(
-        &caller,
-        CLI_CONTROL_NAMESPACE,
-        [GrantPermission::Seal],
-        None,
-        now,
-    )?;
-    service.authorize_permission_manager(&caller, now)?;
-    Ok(())
+    super::timing::result("cli_authorization", "identify_executable", || {
+        caller_identity_for_executable(&executable)
+    })
+}
+
+pub(super) fn cli_authorizations(caller: &CallerIdentity) -> [GrantAuthorization<'_>; 3] {
+    [
+        GrantAuthorization {
+            caller,
+            target: GrantAuthorizationTarget::Kind {
+                kind: DocumentKind::SecretSpecProject,
+            },
+            permissions: &PROJECT_PERMISSIONS,
+            expires_at: None,
+        },
+        GrantAuthorization {
+            caller,
+            target: GrantAuthorizationTarget::Namespace {
+                scope: DocumentKind::LocalKeyring,
+                namespace: CLI_CONTROL_NAMESPACE,
+            },
+            permissions: &[GrantPermission::Seal],
+            expires_at: None,
+        },
+        GrantAuthorization {
+            caller,
+            target: GrantAuthorizationTarget::PermissionManagement,
+            permissions: &[GrantPermission::ManagePermissions],
+            expires_at: None,
+        },
+    ]
 }
 
 pub(super) fn manage_permissions(

@@ -59,6 +59,36 @@ type DeviceVerifyingKey = VerifyingKey<MlDsa65>;
 #[cfg(feature = "vault-store")]
 type DeviceSignature = Signature<MlDsa65>;
 
+/// Reuse the public key's expanded matrix across a vault's signature checks.
+#[cfg(feature = "vault-store")]
+pub(crate) struct PreparedVerifyingKey(DeviceVerifyingKey);
+
+#[cfg(feature = "vault-store")]
+impl PreparedVerifyingKey {
+    pub(crate) fn new(public_key: &[u8]) -> VaultResult<Self> {
+        Ok(Self(DeviceVerifyingKey::new(
+            &public_key.try_into().map_err(|_| VaultError::Signature)?,
+        )))
+    }
+
+    pub(crate) fn verify(
+        &self,
+        algorithm: SignatureAlgorithm,
+        payload: &[u8],
+        signature: &[u8],
+    ) -> VaultResult<()> {
+        match algorithm {
+            SignatureAlgorithm::MlDsa65 => {
+                let signature =
+                    DeviceSignature::try_from(signature).map_err(|_| VaultError::Signature)?;
+                self.0
+                    .verify(payload, &signature)
+                    .map_err(|_| VaultError::Signature)
+            }
+        }
+    }
+}
+
 #[cfg(any(feature = "key-protection", test))]
 pub(crate) fn public_key_for_seed(seed: &[u8; SIGNING_SEED_BYTES]) -> Vec<u8> {
     signing_key_from_seed(seed)
@@ -80,12 +110,7 @@ pub(crate) fn sign(seed: &[u8; SIGNING_SEED_BYTES], payload: &[u8]) -> VaultResu
 
 #[cfg(feature = "vault-store")]
 pub(crate) fn verify(public_key: &[u8], payload: &[u8], signature: &[u8]) -> VaultResult<()> {
-    let public_key =
-        DeviceVerifyingKey::new(&public_key.try_into().map_err(|_| VaultError::Signature)?);
-    let signature = DeviceSignature::try_from(signature).map_err(|_| VaultError::Signature)?;
-    public_key
-        .verify(payload, &signature)
-        .map_err(|_| VaultError::Signature)
+    PreparedVerifyingKey::new(public_key)?.verify(CURRENT_SIGNATURE_ALGORITHM, payload, signature)
 }
 
 #[cfg(feature = "vault-store")]

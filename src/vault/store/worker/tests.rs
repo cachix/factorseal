@@ -1408,6 +1408,185 @@ fn compaction_bounds_the_chain_and_keeps_every_document_readable() {
 }
 
 #[test]
+fn byte_compaction_preserves_current_documents_and_reopen_accounting() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut worker = StoreWorker::open(&root, Vault::create_for_test(&root).unwrap())
+            .await
+            .unwrap();
+        let scope = DocumentKind::SecretSpecProviderCache;
+        let address = SecretAddress::new("byte-limit", None).unwrap();
+        let partitions: [&[u8]; 2] = [b"first", b"second"];
+        let provenance = provenance();
+        let context = worker.context(&provenance, TEST_NOW);
+        for generation in 0..6 {
+            let partition = partitions[generation % 2];
+            worker
+                .put(
+                    worker.document_id(scope, partition),
+                    scope,
+                    partition,
+                    &address,
+                    generation.to_string().as_bytes(),
+                    None,
+                    &context,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(worker.verified.chain_length, 6);
+        let original_bytes = worker.verified.retained_snapshot_bytes;
+        // Exercise the same byte policy with small fixtures, below the count trigger.
+        worker.compact_with_byte_limit(1).await.unwrap();
+        assert_eq!(worker.verified.chain_length, 2);
+        assert!(worker.verified.retained_snapshot_bytes < original_bytes);
+        assert_eq!(
+            worker.verified.retained_snapshot_bytes,
+            query_count(
+                &worker.connection,
+                "SELECT SUM(length(envelope)) FROM document_snapshots",
+                ()
+            )
+            .await
+            .unwrap()
+        );
+        let retained_bytes = worker.verified.retained_snapshot_bytes;
+        let head = worker.verified.head;
+        // Current data above the limit must not cause compaction on every write/check.
+        worker.compact_with_byte_limit(1).await.unwrap();
+        assert_eq!(worker.verified.head, head);
+        drop(worker);
+
+        let mut worker = StoreWorker::open(&root, Vault::unseal_for_test(&root).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(worker.verified.retained_snapshot_bytes, retained_bytes);
+        assert_eq!(worker.verified.chain_length, 2);
+        for (partition, expected) in partitions.into_iter().zip([b"4", b"5"]) {
+            assert_eq!(
+                worker
+                    .get(
+                        worker.document_id(scope, partition),
+                        scope,
+                        partition,
+                        &address,
+                        TEST_NOW
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .value
+                    .as_slice(),
+                expected
+            );
+        }
+    });
+}
+
+#[test]
+fn byte_compaction_rejects_tampered_historical_snapshots() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut worker = StoreWorker::open(&root, Vault::create_for_test(&root).unwrap())
+            .await
+            .unwrap();
+        let scope = DocumentKind::SecretSpecProviderCache;
+        let partition = b"history";
+        let address = SecretAddress::new("byte-limit", None).unwrap();
+        let document_id = worker.document_id(scope, partition);
+        let provenance = provenance();
+        let context = worker.context(&provenance, TEST_NOW);
+        for generation in 0..4 {
+            worker
+                .put(
+                    document_id,
+                    scope,
+                    partition,
+                    &address,
+                    generation.to_string().as_bytes(),
+                    None,
+                    &context,
+                )
+                .await
+                .unwrap();
+        }
+        worker
+            .connection
+            .execute(
+                "UPDATE document_snapshots SET envelope = X'00' WHERE generation = 1",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(worker.compact_with_byte_limit(1).await.is_err());
+        assert_eq!(
+            query_count(
+                &worker.connection,
+                "SELECT COUNT(*) FROM protected_commits",
+                ()
+            )
+            .await
+            .unwrap(),
+            4
+        );
+    });
+    assert!(VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).is_err());
+}
+
+#[test]
+fn batched_verification_checks_history_beyond_the_first_batch() {
+    let (_directory, root, store) = store();
+    let address = SecretAddress::new("batch-boundary", None).unwrap();
+    for generation in 0..65 {
+        store
+            .put_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"batch",
+                &address,
+                generation.to_string().as_bytes(),
+                None,
+                &provenance(),
+                TEST_NOW,
+            )
+            .unwrap();
+    }
+    drop(store);
+    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
+    assert_eq!(
+        reopened
+            .get_at(
+                DocumentKind::SecretSpecProviderCache,
+                b"batch",
+                &address,
+                TEST_NOW
+            )
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        b"64"
+    );
+    drop(reopened);
+    execute_database_mutation(
+        &root,
+        "UPDATE document_snapshots SET envelope = X'00' WHERE generation = 1",
+    );
+    assert!(matches!(
+        VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()),
+        Err(VaultError::Signature)
+    ));
+}
+
+#[test]
 fn a_compacted_chain_still_detects_snapshot_tamper() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();

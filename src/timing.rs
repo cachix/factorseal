@@ -22,16 +22,10 @@ pub(crate) fn result<T, E>(
 ) -> Result<T, E> {
     let started = Instant::now();
     let result = operation();
-    record(
-        scope,
-        phase,
-        started,
-        if result.is_ok() { "ok" } else { "error" },
-    );
+    record_result(scope, phase, started, &result);
     result
 }
 
-#[cfg(feature = "vault-store")]
 pub(crate) fn record_result<T, E>(
     scope: &str,
     phase: &str,

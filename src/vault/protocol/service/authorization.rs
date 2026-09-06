@@ -6,28 +6,54 @@ use crate::vault::{DocumentKind, VaultResult};
 
 #[cfg(target_os = "linux")]
 use super::super::grant::store_exclusive_grant;
-use super::super::grant::{GrantTarget, store_grant};
+use super::super::grant::{GrantTarget, PreparedGrant, prepare_grant, store_prepared_grants};
 use super::super::{CallerIdentity, GrantPermission, WireSecretAddress};
 use super::VaultService;
 use super::approvals::PERMISSION_CONTROL_NAMESPACE;
 
+/// Scope of a trusted, in-process grant authorization.
 #[derive(Clone, Copy)]
-enum AuthorizationTarget<'a> {
-    Kind {
-        kind: DocumentKind,
-    },
+pub enum GrantAuthorizationTarget<'a> {
+    /// Every partition of one document kind.
+    Kind { kind: DocumentKind },
+    /// One namespace within a document kind.
     Namespace {
         scope: DocumentKind,
         namespace: &'a [u8],
     },
+    /// One entry within a namespace.
     Entry {
         scope: DocumentKind,
         namespace: &'a [u8],
         address: &'a WireSecretAddress,
     },
+    /// The internal permission-management namespace.
+    PermissionManagement,
 }
 
+/// One grant in an atomic authorization batch. Unmentioned grants are retained.
+pub struct GrantAuthorization<'a> {
+    pub caller: &'a CallerIdentity,
+    pub target: GrantAuthorizationTarget<'a>,
+    pub permissions: &'a [GrantPermission],
+    pub expires_at: Option<u64>,
+}
+
+use GrantAuthorizationTarget as AuthorizationTarget;
+
 impl VaultService {
+    /// Authorize several scopes or callers in one document generation, skipping
+    /// unchanged grants. All requests are validated before any grant is written.
+    /// Only trusted in-process hosts can invoke this; it is not an IPC action.
+    pub fn authorize_batch(&self, grants: &[GrantAuthorization<'_>], now: u64) -> VaultResult<()> {
+        let mut state = self.state.lock_live(Instant::now())?;
+        let mut prepared = Vec::new();
+        for grant in grants {
+            prepared.extend(prepare_authorization(grant, now)?);
+        }
+        store_prepared_grants(state.store(), prepared, now)?;
+        state.touch(now, Instant::now())
+    }
     /// Permit an authenticated executable to operate on every partition of a
     /// semantic document kind. Reserved for Factorseal's own CLI.
     pub fn authorize_document_kind(
@@ -196,44 +222,51 @@ impl VaultService {
         expires_at: Option<u64>,
         now: u64,
     ) -> VaultResult<()> {
-        let mut state = self.state.lock_live(Instant::now())?;
-        match target {
-            AuthorizationTarget::Kind { kind } => store_grant(
-                state.store(),
+        let permissions: Vec<_> = permissions.into_iter().collect();
+        self.authorize_batch(
+            &[GrantAuthorization {
                 caller,
-                GrantTarget::Kind { kind },
-                permissions,
+                target,
+                permissions: &permissions,
                 expires_at,
-                now,
-            )?,
-            AuthorizationTarget::Namespace { scope, namespace } => store_grant(
-                state.store(),
-                caller,
-                GrantTarget::Namespace { scope, namespace },
-                permissions,
-                expires_at,
-                now,
-            )?,
-            AuthorizationTarget::Entry {
+            }],
+            now,
+        )
+    }
+}
+
+fn prepare_authorization(
+    grant: &GrantAuthorization<'_>,
+    now: u64,
+) -> VaultResult<Vec<PreparedGrant>> {
+    let entry;
+    let target = match grant.target {
+        AuthorizationTarget::Kind { kind } => GrantTarget::Kind { kind },
+        AuthorizationTarget::Namespace { scope, namespace } => {
+            GrantTarget::Namespace { scope, namespace }
+        }
+        AuthorizationTarget::PermissionManagement => GrantTarget::Namespace {
+            scope: DocumentKind::Authorization,
+            namespace: PERMISSION_CONTROL_NAMESPACE,
+        },
+        AuthorizationTarget::Entry {
+            scope,
+            namespace,
+            address,
+        } => {
+            entry = address.resolve()?;
+            GrantTarget::Entry {
                 scope,
                 namespace,
-                address,
-            } => {
-                let address = address.resolve()?;
-                store_grant(
-                    state.store(),
-                    caller,
-                    GrantTarget::Entry {
-                        scope,
-                        namespace,
-                        address: &address,
-                    },
-                    permissions,
-                    expires_at,
-                    now,
-                )?;
+                address: &entry,
             }
         }
-        state.touch(now, Instant::now())
-    }
+    };
+    prepare_grant(
+        grant.caller,
+        target,
+        grant.permissions.iter().copied(),
+        grant.expires_at,
+        now,
+    )
 }

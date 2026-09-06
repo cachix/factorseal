@@ -22,6 +22,7 @@ mod actions;
 mod approvals;
 #[cfg(feature = "vault-store")]
 mod authorization;
+pub use authorization::{GrantAuthorization, GrantAuthorizationTarget};
 #[cfg(feature = "vault-store")]
 mod state;
 mod time;

@@ -159,6 +159,164 @@ fn caller() -> CallerIdentity {
     .unwrap()
 }
 
+fn authorization_generation(directory: &tempfile::TempDir) -> i64 {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let path = directory.path().join("factorseal").join(crate::vault::DATABASE_FILE);
+        let database = turso::Builder::new_local(path.to_str().unwrap()).build().await.unwrap();
+        let connection = database.connect().unwrap();
+        let mut rows = connection.query(
+            "SELECT COALESCE(MAX(generation), 0) FROM documents WHERE document_kind = 'authorization'", ()
+        ).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let turso::Value::Integer(generation) = row.get_value(0).unwrap() else { panic!("expected generation"); };
+        generation
+    })
+}
+
+#[test]
+fn authorization_batch_writes_once_and_unchanged_restarts_write_nothing() {
+    let (directory, service) = service(100, UnsealLeasePolicy::default());
+    let cli = caller();
+    let desktop =
+        CallerIdentity::new(CallerPlatform::Linux, "uid:1000", "desktop", [8; 32], None).unwrap();
+    let grants = [
+        GrantAuthorization {
+            caller: &cli,
+            target: GrantAuthorizationTarget::Kind {
+                kind: DocumentKind::SecretSpecProject,
+            },
+            permissions: &[
+                GrantPermission::List,
+                GrantPermission::Get,
+                GrantPermission::Put,
+                GrantPermission::Delete,
+            ],
+            expires_at: None,
+        },
+        GrantAuthorization {
+            caller: &desktop,
+            target: GrantAuthorizationTarget::Namespace {
+                scope: DocumentKind::LocalKeyring,
+                namespace: b"personal",
+            },
+            permissions: &[GrantPermission::List, GrantPermission::Get],
+            expires_at: None,
+        },
+        GrantAuthorization {
+            caller: &desktop,
+            target: GrantAuthorizationTarget::PermissionManagement,
+            permissions: &[GrantPermission::ManagePermissions],
+            expires_at: None,
+        },
+    ];
+    service.authorize_batch(&grants, 100).unwrap();
+    assert_eq!(authorization_generation(&directory), 1);
+    service.authorize_batch(&grants, 101).unwrap();
+    assert_eq!(authorization_generation(&directory), 1);
+    // Individual authorization entry points have the same no-op behavior.
+    service
+        .authorize_namespace(&desktop, b"personal", [GrantPermission::Get], None, 102)
+        .unwrap();
+    assert_eq!(authorization_generation(&directory), 1);
+    let request = || {
+        VaultRequest::new(VaultAction::Get {
+            namespace: b"personal".to_vec(),
+            address: WireSecretAddress::new("token", None),
+        })
+        .unwrap()
+    };
+    assert!(matches!(
+        service.handle(&desktop, request(), 102).result,
+        Ok(VaultResponseBody::Secret { value: None })
+    ));
+    assert!(matches!(
+        service.handle(&cli, request(), 102).result,
+        Err(VaultResponseError {
+            code: VaultResponseErrorCode::AuthorizationRequired,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn authorization_batch_preserves_expiry_and_last_request_wins() {
+    let (directory, service) = service(100, UnsealLeasePolicy::default());
+    let caller = caller();
+    let grant = |expires_at| GrantAuthorization {
+        caller: &caller,
+        target: GrantAuthorizationTarget::Namespace {
+            scope: DocumentKind::LocalKeyring,
+            namespace: b"personal",
+        },
+        permissions: &[GrantPermission::Get],
+        expires_at,
+    };
+    service.authorize_batch(&[grant(None)], 100).unwrap();
+    // Last request restores the existing lifetime: the whole batch is a no-op.
+    service
+        .authorize_batch(&[grant(Some(200)), grant(None)], 101)
+        .unwrap();
+    assert_eq!(authorization_generation(&directory), 1);
+    service
+        .authorize_batch(&[grant(None), grant(Some(200))], 102)
+        .unwrap();
+    assert_eq!(authorization_generation(&directory), 2);
+    service.authorize_batch(&[grant(Some(200))], 103).unwrap();
+    assert_eq!(authorization_generation(&directory), 2);
+    let request = || {
+        VaultRequest::new(VaultAction::Get {
+            namespace: b"personal".to_vec(),
+            address: WireSecretAddress::new("token", None),
+        })
+        .unwrap()
+    };
+    assert!(matches!(
+        service.handle(&caller, request(), 199).result,
+        Ok(VaultResponseBody::Secret { value: None })
+    ));
+    assert!(matches!(
+        service.handle(&caller, request(), 200).result,
+        Err(VaultResponseError {
+            code: VaultResponseErrorCode::AuthorizationRequired,
+            ..
+        })
+    ));
+    service.authorize_batch(&[grant(Some(300))], 201).unwrap();
+    assert!(matches!(
+        service.handle(&caller, request(), 201).result,
+        Ok(VaultResponseBody::Secret { value: None })
+    ));
+}
+
+#[test]
+fn authorization_batch_validation_is_atomic() {
+    let (directory, service) = service(100, UnsealLeasePolicy::default());
+    let caller = caller();
+    let target = GrantAuthorizationTarget::Namespace {
+        scope: DocumentKind::LocalKeyring,
+        namespace: b"personal",
+    };
+    let grants = [
+        GrantAuthorization {
+            caller: &caller,
+            target,
+            permissions: &[GrantPermission::Get],
+            expires_at: None,
+        },
+        GrantAuthorization {
+            caller: &caller,
+            target,
+            permissions: &[GrantPermission::Put],
+            expires_at: Some(100),
+        },
+    ];
+    assert!(matches!(
+        service.authorize_batch(&grants, 100),
+        Err(VaultError::Expired)
+    ));
+    assert_eq!(authorization_generation(&directory), 0);
+}
+
 fn address() -> WireSecretAddress {
     WireSecretAddress::new("secretspec/demo/default/API_KEY", None)
 }

@@ -49,6 +49,13 @@ devenv shell cargo run -p factorseal-desktop
 Install both binaries together, or set `FACTORSEAL_CLI_EXECUTABLE` to the absolute
 CLI path. The Nix Desktop package supplies this dependency automatically.
 
+Set `FACTORSEAL_TIMINGS=1` when launching Desktop to log unlock timings to
+stderr, including worker setup, executable authentication, permission writes,
+service readiness, and inventory loading. Desktop passes this setting to its
+CLI worker. Logs contain phase names, durations, and success/error outcomes.
+The worker-ready wait includes the worker's startup phases, and host-authorization
+timing includes its grant read and any batched write; these nested timings are not additive.
+
 The installed CLI launches the separately packaged application with:
 
 ```console
