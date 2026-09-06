@@ -10,7 +10,6 @@ repository = "https://github.com/domenkozar/factorseal"
 [workspace]
 members = [
     "crates/hardwareseal",
-    "crates/gpui-tray",
     "crates/secret-service-protocol",
     "factorseal-desktop",
 ]

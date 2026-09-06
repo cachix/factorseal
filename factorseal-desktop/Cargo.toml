@@ -18,7 +18,7 @@ gpui = "=0.2.2"
 gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "39c2c86dbee7" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component.git", rev = "39c2c86dbee7" }
 gpui_platform = { git = "https://github.com/zed-industries/zed.git" }
-gpui-tray = { path = "../crates/gpui-tray" }
+gpui-tray = { version = "=0.1.0", git = "https://github.com/domenkozar/gpui-tray.git", rev = "9793fb38b1dbe6b5fdabcb288521ab63c1b30f27" }
 rfd = { version = "0.15.4", default-features = false, features = ["async-std", "xdg-portal"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }

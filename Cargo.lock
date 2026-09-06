@@ -3451,6 +3451,7 @@ dependencies = [
 [[package]]
 name = "gpui-tray"
 version = "0.1.0"
+source = "git+https://github.com/domenkozar/gpui-tray.git?rev=9793fb38b1dbe6b5fdabcb288521ab63c1b30f27#9793fb38b1dbe6b5fdabcb288521ab63c1b30f27"
 dependencies = [
  "async-channel",
  "gpui",
@@ -3459,7 +3460,6 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
- "static_assertions",
  "thiserror 2.0.20",
  "windows 0.62.2",
  "zbus",
