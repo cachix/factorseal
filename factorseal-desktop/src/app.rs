@@ -544,6 +544,18 @@ enum VaultSelection {
     Permission(factorseal::Permission),
 }
 
+impl VaultSelection {
+    /// Dedicated pages share a breadcrumb and omit the vault navigation/sidebar.
+    fn page_title(&self) -> Option<&'static str> {
+        match self {
+            Self::Devices => Some("Devices"),
+            Self::Import => Some("Import"),
+            Self::Export => Some("Export"),
+            _ => None,
+        }
+    }
+}
+
 fn selection_for_search(selection: Option<&VaultSelection>) -> Option<VaultSelection> {
     match selection {
         Some(VaultSelection::Entry(entry)) if is_personal_secret(entry) => {
@@ -2696,12 +2708,10 @@ impl DesktopView {
     }
 
     fn render_vault_breadcrumb(&self, cx: &mut Context<Self>) -> Div {
-        let title = match self.selected_vault_item.as_ref() {
-            Some(VaultSelection::Devices) => Some("Devices"),
-            Some(VaultSelection::Import) => Some("Import"),
-            Some(VaultSelection::Export) => Some("Export"),
-            _ => None,
-        };
+        let title = self
+            .selected_vault_item
+            .as_ref()
+            .and_then(VaultSelection::page_title);
         let theme = cx.theme();
         if let Some(title) = title {
             h_flex()
@@ -2735,10 +2745,11 @@ impl DesktopView {
     ) -> Div {
         let theme = cx.theme().clone();
         let corner = crate::appearance::rem_size(cx) * 0.75 - px(1.);
-        let standalone_screen = matches!(
-            self.selected_vault_item.as_ref(),
-            Some(VaultSelection::Import | VaultSelection::Export | VaultSelection::Devices)
-        );
+        let standalone_screen = self
+            .selected_vault_item
+            .as_ref()
+            .and_then(VaultSelection::page_title)
+            .is_some();
         h_flex()
             .w_full()
             .h(browser_height)
@@ -2791,7 +2802,10 @@ impl DesktopView {
             .gap_3()
             .child(self.render_vault_breadcrumb(cx))
             .when(
-                self.selected_vault_item != Some(VaultSelection::Devices),
+                self.selected_vault_item
+                    .as_ref()
+                    .and_then(VaultSelection::page_title)
+                    .is_none(),
                 |row| {
                     row.child(
                         h_flex()
@@ -2808,10 +2822,6 @@ impl DesktopView {
                                 Button::new("import-vault")
                                     .small()
                                     .label("Import")
-                                    .selected(
-                                        self.selected_vault_item.as_ref()
-                                            == Some(&VaultSelection::Import),
-                                    )
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.select_vault_item(VaultSelection::Import, cx);
                                     })),
@@ -2820,10 +2830,6 @@ impl DesktopView {
                                 Button::new("export-vault")
                                     .small()
                                     .label("Export")
-                                    .selected(
-                                        self.selected_vault_item.as_ref()
-                                            == Some(&VaultSelection::Export),
-                                    )
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.select_vault_item(VaultSelection::Export, cx);
                                     })),
