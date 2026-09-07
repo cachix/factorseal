@@ -594,6 +594,7 @@ struct DesktopView {
     devices: factorseal::desktop_worker::sync::network::View,
     devices_busy: bool,
     devices_loaded: bool,
+    device_pairing: Option<bool>,
     devices_notice: Option<String>,
     device_name: gpui::Entity<InputState>,
     pairing_ticket: gpui::Entity<SecretInputState>,
@@ -871,6 +872,7 @@ impl DesktopView {
             devices: factorseal::desktop_worker::sync::network::View::default(),
             devices_busy: false,
             devices_loaded: false,
+            device_pairing: None,
             devices_notice: None,
             device_name: cx.new(|cx| {
                 let name = crate::appearance::current(cx)
