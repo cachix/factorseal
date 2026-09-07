@@ -135,6 +135,11 @@ impl VerifiedGroup {
         }
         Ok(())
     }
+    pub(crate) fn contains_enrollment(&self, request: [u8; 32]) -> bool {
+        self.chain
+            .iter()
+            .any(|certificate| certificate.body.enrollment == Some(request))
+    }
     fn current(&self) -> &GroupCertificate {
         self.chain.last().expect("verified nonempty chain")
     }

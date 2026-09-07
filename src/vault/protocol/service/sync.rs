@@ -6,11 +6,11 @@ use crate::personal::{
     PersonalSecret,
     replica::ReplicaHeads,
     sync::{
-        CiphertextSpool, MemberPublicKeys, Membership, PacketId, PersonalConflict, ReceiveOutcome,
-        SyncApplyPage, SyncStatus,
+        CiphertextSpool, MemberPublicKeys, Membership, PacketId, PairingInvitation, PairingRequest,
+        PairingStatus, PersonalConflict, ReceiveOutcome, SyncApplyPage, SyncStatus, VerifiedGroup,
     },
 };
-use crate::vault::store::{SyncCommand, SyncReply};
+use crate::vault::store::{PairingCommand, SyncCommand, SyncReply};
 
 impl VaultService {
     /// Create/load the reader identity without exporting its secret seeds.
@@ -150,5 +150,93 @@ impl VaultService {
         // not refresh it, and lifecycle sealing is independent of this mutex.
         let state = self.state.lock_live(Instant::now())?;
         state.store().personal_sync(command)
+    }
+}
+
+impl VaultService {
+    /// Create the first signed group. Transport credentials stay with the host.
+    pub fn initialize_personal_sync(
+        &self,
+        endpoint: [u8; 32],
+        name: String,
+    ) -> VaultResult<VerifiedGroup> {
+        self.pairing_group(PairingCommand::Initialize { endpoint, name })
+    }
+    /// Load the durably pinned public chain; never refreshes the unseal lease.
+    pub fn personal_sync_group(&self) -> VaultResult<VerifiedGroup> {
+        match self.sync_command(SyncCommand::Group)? {
+            SyncReply::Group(group) => Ok(group),
+            _ => Err(VaultError::WorkerUnavailable),
+        }
+    }
+    /// Create/retrieve a five-minute invitation, persisted before display.
+    pub fn invite_personal_sync_device(&self) -> VaultResult<PairingInvitation> {
+        match self.sync_command(SyncCommand::Pairing(PairingCommand::Invite))? {
+            SyncReply::Invitation(invitation) => Ok(invitation),
+            _ => Err(VaultError::WorkerUnavailable),
+        }
+    }
+    /// Call after scanning the ticket and fetching the chain from its pinned
+    /// endpoint. This persists the joining transcript before sending it.
+    pub fn request_personal_sync_pairing(
+        &self,
+        invitation: PairingInvitation,
+        group: VerifiedGroup,
+        endpoint: [u8; 32],
+        name: String,
+    ) -> VaultResult<PairingRequest> {
+        match self.sync_command(SyncCommand::Pairing(PairingCommand::Join {
+            invitation,
+            group,
+            endpoint,
+            name,
+        }))? {
+            SyncReply::PairingRequest(request) => Ok(request),
+            _ => Err(VaultError::WorkerUnavailable),
+        }
+    }
+    /// Stage an incoming request for user review; this grants no membership.
+    /// The host must pass the authenticated iroh peer identity, not a wire claim.
+    pub fn stage_personal_sync_pairing(
+        &self,
+        request: PairingRequest,
+        peer: [u8; 32],
+    ) -> VaultResult<PairingRequest> {
+        if request.endpoint() != peer {
+            return Err(VaultError::Protocol("pairing endpoint mismatch".into()));
+        }
+        match self.sync_command(SyncCommand::Pairing(PairingCommand::Stage(request)))? {
+            SyncReply::PairingRequest(request) => Ok(request),
+            _ => Err(VaultError::WorkerUnavailable),
+        }
+    }
+    /// Explicit user approval only, after comparing verification codes on both
+    /// devices. Names the full reviewed request ID, never just a short code.
+    pub fn approve_personal_sync_pairing(&self, expected: [u8; 32]) -> VaultResult<VerifiedGroup> {
+        self.pairing_group(PairingCommand::Approve(expected))
+    }
+    /// Accept the approved joining response or extend an existing pinned chain.
+    /// Unknown initial controllers and unsigned membership are never accepted.
+    pub fn accept_personal_sync_group(&self, group: VerifiedGroup) -> VaultResult<VerifiedGroup> {
+        self.pairing_group(PairingCommand::Accept(group))
+    }
+    pub fn cancel_personal_sync_pairing(&self) -> VaultResult<()> {
+        self.sync_command(SyncCommand::Pairing(PairingCommand::Cancel))
+            .map(|_| ())
+    }
+    fn pairing_group(&self, command: PairingCommand) -> VaultResult<VerifiedGroup> {
+        match self.sync_command(SyncCommand::Pairing(command))? {
+            SyncReply::Group(group) => Ok(group),
+            _ => Err(VaultError::WorkerUnavailable),
+        }
+    }
+}
+
+impl VaultService {
+    pub fn personal_sync_pairing_status(&self) -> VaultResult<PairingStatus> {
+        match self.sync_command(SyncCommand::PairingStatus)? {
+            SyncReply::PairingStatus(status) => Ok(status),
+            _ => Err(VaultError::WorkerUnavailable),
+        }
     }
 }

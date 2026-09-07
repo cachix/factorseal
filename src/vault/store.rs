@@ -55,7 +55,7 @@ mod database;
 mod migration;
 mod worker;
 #[cfg(feature = "personal-sync")]
-pub(crate) use worker::{SyncCommand, SyncReply};
+pub(crate) use worker::{PairingCommand, SyncCommand, SyncReply};
 
 pub(crate) use worker::StoredSecret;
 use worker::{Command, SecretValues, WorkerControl, request};

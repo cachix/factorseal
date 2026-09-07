@@ -36,7 +36,7 @@ mod mutation;
 #[cfg(feature = "personal-sync")]
 mod sync;
 #[cfg(feature = "personal-sync")]
-pub(crate) use sync::{SyncCommand, SyncReply};
+pub(crate) use sync::{PairingCommand, SyncCommand, SyncReply};
 
 const COMMAND_QUEUE: usize = 64;
 const MAX_COMMIT_CHAIN: usize = 1_000_000;

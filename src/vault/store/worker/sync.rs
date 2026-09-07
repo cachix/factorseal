@@ -12,9 +12,15 @@ use crate::personal::{
     },
 };
 use crate::vault::document::PreparedPublication;
+mod pairing;
+use crate::personal::sync::{PairingInvitation, PairingRequest, VerifiedGroup};
+pub(crate) use pairing::PairingCommand;
 
 pub(crate) enum SyncCommand {
     Identity,
+    Group,
+    PairingStatus,
+    Pairing(PairingCommand),
     Membership,
     Configure(Membership),
     Prepare,
@@ -31,6 +37,10 @@ pub(crate) enum SyncCommand {
 
 pub(crate) enum SyncReply {
     Identity(MemberPublicKeys),
+    Group(VerifiedGroup),
+    PairingStatus(crate::personal::sync::PairingStatus),
+    Invitation(PairingInvitation),
+    PairingRequest(PairingRequest),
     Membership(Membership),
     Prepared(Option<(Vec<u8>, Membership)>),
     Received(ReceiveOutcome),
@@ -53,12 +63,65 @@ impl StoreWorker {
             ),
         };
         let mut state = document.sync_state()?;
+        if let Some(pinned) = &state.pairing.group {
+            let group = pinned.verified()?;
+            if state.membership.as_ref().map(Membership::digest)
+                != Some(group.membership().digest())
+            {
+                return Err(not_configured());
+            }
+        }
         let mut replicas = document.sync_replicas()?;
         let provenance = Provenance::service(ServiceReason::PersonalSync);
         let context = self.context(&provenance, unix_time()?);
         let installation = self.device.installation_id();
         let vault = self.device.device_vault_id();
         let reply = match command {
+            SyncCommand::PairingStatus => {
+                return Ok(SyncReply::PairingStatus(
+                    crate::personal::sync::PairingStatus {
+                        invitation: state.pairing.invitation.clone(),
+                        request: state
+                            .pairing
+                            .joining
+                            .as_ref()
+                            .map(|(_, request, _)| request.clone())
+                            .or_else(|| state.pairing.staged.clone()),
+                        joining: state.pairing.joining.is_some(),
+                    },
+                ));
+            }
+            SyncCommand::Group => {
+                return state
+                    .pairing
+                    .group
+                    .as_ref()
+                    .ok_or_else(not_configured)?
+                    .verified()
+                    .map(SyncReply::Group);
+            }
+            SyncCommand::Pairing(command) => {
+                if state.reader.is_none() {
+                    let identity = ReaderIdentity::generate()?;
+                    state.reader = Some(self.secrets.protect_reader(
+                        installation,
+                        vault,
+                        &identity,
+                    )?);
+                }
+                let identity = self.secrets.open_reader(
+                    installation,
+                    vault,
+                    state.reader.as_ref().expect("created reader"),
+                )?;
+                let previous = state.membership.as_ref().map(Membership::digest);
+                let reply = pairing::handle(&mut state, &identity, command, unix_time()?)?;
+                if previous != state.membership.as_ref().map(Membership::digest) {
+                    state.prepared = None;
+                    replicas.pending = replicas.replicas.keys().cloned().collect();
+                }
+                reply
+            }
             SyncCommand::Membership => {
                 return state
                     .membership
@@ -86,6 +149,11 @@ impl StoreWorker {
                 SyncReply::Identity(identity.public_keys().clone())
             }
             SyncCommand::Configure(membership) => {
+                if state.pairing.group.is_some() || state.pairing.joining.is_some() {
+                    return Err(VaultError::Protocol(
+                        "signed membership is pinned; raw configuration is disabled".into(),
+                    ));
+                }
                 let wrapped = state.reader.as_ref().ok_or_else(not_configured)?;
                 let identity = self.secrets.open_reader(installation, vault, wrapped)?;
                 if !membership.members().contains(identity.public_keys()) {

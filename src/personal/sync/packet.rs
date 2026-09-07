@@ -303,6 +303,10 @@ pub(crate) fn fuzz(bytes: &[u8]) {
         .unwrap()
     });
     let _ = super::VerifiedGroup::decode(bytes, group.members()[0].id());
+    let _ = super::PairingRequest::decode(bytes);
+    if let Ok(ticket) = std::str::from_utf8(bytes) {
+        let _ = super::PairingInvitation::from_ticket(ticket);
+    }
     if let Ok(packet) = VerifiedPacket::verify(bytes, group) {
         assert_eq!(packet.as_bytes(), bytes);
         let _ = packet.open(&ReaderIdentity::synthetic(), group);
@@ -329,7 +333,14 @@ pub(crate) fn fuzz_seeds() -> Vec<Vec<u8>> {
         crate::personal::replica::PersonalReplica::new(&item.id, b"synthetic").unwrap();
     replica.set(Some(&item), None).unwrap();
     let update = replica.update().unwrap();
+    let signed = identity.create_group([1; 32], "Synthetic".into()).unwrap();
+    let invitation = super::PairingInvitation::new(&signed, 100).unwrap();
+    let request = identity
+        .request_pairing(&invitation, &signed, [2; 32], "Synthetic".into(), 100)
+        .unwrap();
     vec![
+        invitation.ticket().unwrap().as_bytes().to_vec(),
+        request.encode().unwrap(),
         identity
             .create_group([1; 32], "Synthetic".into())
             .unwrap()

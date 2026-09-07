@@ -157,10 +157,11 @@ a peer alone does not establish initial trust.
 Each current reader has exactly one named iroh endpoint binding. Additional
 bindings with no reader identity authorize ciphertext storage/forwarding only.
 They add no encryption recipient. At most 16 readers and 32 transport endpoints
-are allowed. These certificates are currently separate from the vault worker's
-trusted `configure_personal_sync` API: a host must install the same authorized
-membership there. Automatic enrollment and durable certificate pinning in the
-worker are not yet connected.
+are allowed. The worker now persists its controller pin and signed chain in the
+local encrypted sync state, together with the matching packet membership. Once
+pinned (or joining is pending), the legacy raw `configure_personal_sync` API is
+disabled. A membership change invalidates prepared old-epoch ciphertext and
+queues all existing personal histories for publication to the new recipients.
 
 `personal-sync-network` adds an iroh 1.1 courier library using ALPN
 `factorseal/personal-sync/1`. The embedding host supplies the endpoint and owns
@@ -193,7 +194,54 @@ application, online-device count, or convergence. A group update is synchronized
 with spool operations and invalidates stale requests, but cannot retract bytes
 already released before that update.
 
-QR invitations, user approval, persistent transport credentials, automatic
-membership distribution, background process/control IPC, peer application
-receipts, and the Devices UI remain integration work. No continuously unlocked
+Pairing network routing, persistent transport credentials, automatic membership
+distribution, background process/control IPC, peer application receipts, and the
+Devices UI remain integration work. No continuously unlocked
 phone is required by the courier, and an iroh relay is not persistent storage.
+
+
+## Durable pairing management
+
+The lease-bound trusted host API now supports creating a signed group, issuing
+an invitation, preparing/staging a joining request, approving that exact request,
+accepting its signed response, cancelling pending pairing and restoring pending
+status. None of these methods is exposed through application IPC. Only the
+controller issues invitations and approves new readers. The worker never exports
+reader seeds. Both pairing devices must be unlocked for their management steps;
+subsequent ciphertext forwarding does not require unlocking.
+
+An invitation lasts five minutes and contains a random 256-bit bearer secret,
+the controller fingerprint, inviting endpoint, current certificate digest and
+expiry. The 136-byte payload has a versioned URL-safe base64 ticket under 256
+characters. `personal-sync-network` can render that ticket as an SVG QR. Public
+reader keys are fetched separately. Tickets and SVGs are sensitive: owned ticket,
+serialization and SVG buffers are wiped on drop where supported; QR library
+intermediates and deserializer allocations are not all wiped or page-locked.
+
+The joining worker verifies the offered chain against the scanned controller
+and exact certificate digest. It persists a request binding the invitation,
+joining endpoint, reader keys and device name, with an HMAC capability proof and
+an ML-DSA reader signature. The controller validates that request and binds the
+invitation to the first valid staged request. A different request is rejected
+until cancellation or invitation expiry. The transport host must pass iroh's
+authenticated endpoint ID into staging; a claimed endpoint from wire data is not
+sufficient.
+
+Both devices display the same 12-hex-digit verification code (48 bits) derived
+from the complete request. The host must obtain explicit user approval after
+comparison, then pass the full 32-byte request ID to approval. Staging alone
+changes no membership. Approval checks expiry, consumes the invitation and commits
+a signed successor containing the request digest before returning it. Retrying
+that approval after a restart returns the committed chain. The joining device
+requires its persisted invitation anchor, an extension containing its approved
+request digest, and its own current reader/endpoint binding before accepting.
+A delayed approved response remains acceptable after invitation expiry; expiry
+limits approval, not delivery of an already committed decision.
+
+Pending requests survive restart without generating a new randomized signature
+or verification code. Cancellation removes pending authorization. Existing members
+accept only extensions of their pinned chain; unknown initial chains, rollback,
+forks and unapproved initial responses are rejected. The approval API requires a
+trusted host: enforcing the actual user interaction and fetching/sending pairing
+messages over iroh are still UI/background-host integration work. The ciphertext
+courier itself does not accept unpaired connections or perform enrollment.

@@ -24,6 +24,8 @@ pub(crate) struct PreparedPublication {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PersonalSyncState {
     pub reader: Option<WrappedReaderIdentity>,
+    #[serde(default)]
+    pub pairing: crate::personal::sync::pairing::PairingState,
     pub membership: Option<Membership>,
     pub prepared: Option<PreparedPublication>,
     pub receipts: Vec<ReceivedPacket>,

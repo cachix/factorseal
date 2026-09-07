@@ -66,7 +66,7 @@ cli = [
 ]
 diagnostics = ["dep:directories", "transfer"]
 personal = ["dep:anyhow", "dep:uuid"]
-personal-sync-network = ["personal-sync", "dep:iroh", "tokio/net", "tokio/rt-multi-thread", "tokio/io-util"]
+personal-sync-network = ["personal-sync", "dep:iroh", "dep:qrcode", "tokio/net", "tokio/rt-multi-thread", "tokio/io-util"]
 personal-sync = ["vault-store", "key-protection", "dep:hpke", "dep:aes-gcm-hpke", "dep:tempfile"]
 transfer = ["personal", "dep:csv", "dep:tempfile", "dep:nt-token", "dep:zip"]
 secretspec-provider = [
@@ -123,6 +123,7 @@ hardwareseal = { version = "0.1.0", path = "crates/hardwareseal", features = ["a
 hex = "0.4.3"
 hmac = { version = "0.12.1", optional = true }
 iroh = { version = "=1.1.0", default-features = false, features = ["tls-ring"], optional = true }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"], optional = true }
 hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "mlkem", "aes", "hkdfsha2", "getrandom"], optional = true }
 # Feature-unify HPKE's newer AES implementation with key-schedule wiping.
 aes-gcm-hpke = { package = "aes-gcm", version = "0.11.1", features = ["zeroize"], optional = true }

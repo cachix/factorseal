@@ -5,6 +5,8 @@
 //! establish that a device belongs to the user. No transport credential is a
 //! reader/writer identity. Network discovery and enrollment are separate layers.
 mod authority;
+pub(crate) mod pairing;
+pub use pairing::{PairingInvitation, PairingRequest, PairingStatus};
 mod identity;
 pub use authority::{GroupCertificate, TransportBinding, VerifiedGroup};
 #[cfg(feature = "personal-sync-network")]

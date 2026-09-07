@@ -14,7 +14,7 @@ mod replicas;
 #[cfg(feature = "personal-sync")]
 mod sync;
 #[cfg(feature = "personal-sync")]
-pub(crate) use sync::PreparedPublication;
+pub(crate) use sync::{PersonalSyncState, PreparedPublication};
 
 const ENTRIES_KEY: &str = "entries";
 const LEGACY_HISTORY_KEY: &str = "history";

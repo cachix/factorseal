@@ -372,3 +372,195 @@ fn history_capacity_failure_keeps_the_previous_value_and_publication() {
     assert_eq!(a.read(&item.id).unwrap().unwrap().title, "Second");
     assert_eq!(a.prepare(), prepared);
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn pairing_survives_restart_and_pins_membership_before_publication() {
+    use super::pairing::PairingCommand as P;
+    let mut a = Device::new();
+    let mut b = Device::new();
+    let item = PersonalSecret::generic("Sync account".into(), "secret".into());
+    a.put(&item);
+    let SyncReply::Group(first) = a
+        .store
+        .personal_sync(SyncCommand::Pairing(P::Initialize {
+            endpoint: [1; 32],
+            name: "Laptop".into(),
+        }))
+        .unwrap()
+    else {
+        panic!()
+    };
+    let before = a.prepare();
+    let SyncReply::Invitation(invitation) = a
+        .store
+        .personal_sync(SyncCommand::Pairing(P::Invite))
+        .unwrap()
+    else {
+        panic!()
+    };
+    let SyncReply::PairingRequest(request) = b
+        .store
+        .personal_sync(SyncCommand::Pairing(P::Join {
+            invitation: invitation.clone(),
+            group: first.clone(),
+            endpoint: [2; 32],
+            name: "Phone".into(),
+        }))
+        .unwrap()
+    else {
+        panic!()
+    };
+    a.store
+        .personal_sync(SyncCommand::Pairing(P::Stage(request.clone())))
+        .unwrap();
+    a.restart();
+    b.restart();
+    let SyncReply::PairingStatus(status) =
+        b.store.personal_sync(SyncCommand::PairingStatus).unwrap()
+    else {
+        panic!()
+    };
+    assert!(status.joining);
+    assert_eq!(status.request.unwrap().id().unwrap(), request.id().unwrap());
+    assert!(
+        a.store
+            .personal_sync(SyncCommand::Pairing(P::Approve([0; 32])))
+            .is_err()
+    );
+    let SyncReply::Group(approved) = a
+        .store
+        .personal_sync(SyncCommand::Pairing(P::Approve(request.id().unwrap())))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(approved.membership().members().len(), 2);
+    assert!(
+        a.store
+            .personal_sync(SyncCommand::Pairing(P::Stage(request.clone())))
+            .is_err()
+    );
+    a.restart();
+    let SyncReply::Group(retry) = a
+        .store
+        .personal_sync(SyncCommand::Pairing(P::Approve(request.id().unwrap())))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(retry.digest().unwrap(), approved.digest().unwrap());
+    assert!(
+        b.store
+            .personal_sync(SyncCommand::Pairing(P::Accept(first.clone())))
+            .is_err()
+    );
+    b.store
+        .personal_sync(SyncCommand::Pairing(P::Accept(approved.clone())))
+        .unwrap();
+    b.restart();
+    assert!(
+        b.store
+            .personal_sync(SyncCommand::Configure(first.membership().clone()))
+            .is_err()
+    );
+    assert!(
+        b.store
+            .personal_sync(SyncCommand::Pairing(P::Accept(first)))
+            .is_err()
+    );
+    assert!(
+        b.store
+            .personal_sync(SyncCommand::Pairing(P::Invite))
+            .is_err()
+    );
+    let after = a.prepare();
+    assert_ne!(before, after);
+    assert!(
+        b.store
+            .personal_sync(SyncCommand::Receive(after))
+            .map(|reply| matches!(reply, SyncReply::Received(ReceiveOutcome::Applied)))
+            .unwrap()
+    );
+    assert_eq!(b.read(&item.id).unwrap(), Some(item));
+    let SyncReply::Group(pinned) = b.store.personal_sync(SyncCommand::Group).unwrap() else {
+        panic!()
+    };
+    assert_eq!(pinned.digest().unwrap(), approved.digest().unwrap());
+}
+
+#[test]
+fn pairing_requires_pending_capability_and_cancel_invalidates_it() {
+    use super::pairing::PairingCommand as P;
+    let a = Device::new();
+    let b = Device::new();
+    let c = Device::new();
+    let SyncReply::Group(group) = a
+        .store
+        .personal_sync(SyncCommand::Pairing(P::Initialize {
+            endpoint: [1; 32],
+            name: "Laptop".into(),
+        }))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(
+        b.store
+            .personal_sync(SyncCommand::Pairing(P::Accept(group.clone())))
+            .is_err()
+    );
+    let SyncReply::Invitation(invitation) = a
+        .store
+        .personal_sync(SyncCommand::Pairing(P::Invite))
+        .unwrap()
+    else {
+        panic!()
+    };
+    let join = |device: &Device, endpoint| {
+        let SyncReply::PairingRequest(request) = device
+            .store
+            .personal_sync(SyncCommand::Pairing(P::Join {
+                invitation: invitation.clone(),
+                group: group.clone(),
+                endpoint,
+                name: "Phone".into(),
+            }))
+            .unwrap()
+        else {
+            panic!()
+        };
+        request
+    };
+    let first = join(&b, [2; 32]);
+    let second = join(&c, [3; 32]);
+    a.store
+        .personal_sync(SyncCommand::Pairing(P::Stage(first.clone())))
+        .unwrap();
+    assert!(
+        a.store
+            .personal_sync(SyncCommand::Pairing(P::Stage(second)))
+            .is_err()
+    );
+    a.store
+        .personal_sync(SyncCommand::Pairing(P::Cancel))
+        .unwrap();
+    assert!(
+        a.store
+            .personal_sync(SyncCommand::Pairing(P::Approve(first.id().unwrap())))
+            .is_err()
+    );
+    assert!(
+        a.store
+            .personal_sync(SyncCommand::Pairing(P::Stage(first)))
+            .is_err()
+    );
+    b.store
+        .personal_sync(SyncCommand::Pairing(P::Cancel))
+        .unwrap();
+    assert!(
+        b.store
+            .personal_sync(SyncCommand::Pairing(P::Accept(group)))
+            .is_err()
+    );
+}

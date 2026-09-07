@@ -4,10 +4,16 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Add durable personal-device pairing management: compact QR invitations,
+  signed requests with matching verification codes, explicit exact-request
+  approval, cancellation and controller-pinned membership. Preserve pending
+  pairing across restarts and republish personal histories on enrollment.
+  Pairing network routing and the Devices UI remain pending.
+
 - Add an optional iroh ciphertext courier and controller-signed membership
   chains, with separate reader and storage-only endpoint authorization. Verify
   forwarding through a restarted storage node after the sender disconnects.
-  This is a host library; QR pairing, background integration and Devices UI
+  This is a host library; pairing network routing, background integration and Devices UI
   remain pending.
 
 - Use per-item Automerge documents for personal-secret replication. Preserve

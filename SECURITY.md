@@ -195,8 +195,10 @@ outside the separately built CLI key owner's dependency graph.
   incoming merge/conflict handling through lease-bound host-management APIs.
   The optional `personal-sync-network` library adds a keyless iroh courier and
   controller-signed transport membership. It starts no listener by default.
-  Initial trust, durable membership pinning, QR pairing, background integration,
-  peer application acknowledgements, and UI are still pending.
+  Pairing management now persists invitation/approval state and signed controller
+  pins, with compact QR tickets and exact-request approval through the trusted
+  host. Pairing network routing, background integration, peer application
+  acknowledgements and UI are still pending.
   See the [implemented boundary](security/personal-sync-wire.md) for bounds,
   experimental cryptography, retained metadata, and integration requirements.
 
