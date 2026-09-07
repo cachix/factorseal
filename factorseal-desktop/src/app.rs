@@ -148,7 +148,6 @@ enum PersonalPanel {
     #[default]
     Overview,
     NewItem,
-    Devices,
 }
 
 #[derive(Clone, Debug)]
@@ -537,6 +536,7 @@ fn category_documentation(
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum VaultSelection {
     PersonalSecrets,
+    Devices,
     Import,
     Export,
     Category(factorseal::DocumentKind),
@@ -2558,7 +2558,6 @@ impl DesktopView {
         let body = match self.personal_panel {
             PersonalPanel::Overview => Self::render_personal_overview(contents, &query, cx),
             PersonalPanel::NewItem => self.render_personal_new_item(cx),
-            PersonalPanel::Devices => self.render_devices(cx),
         };
         v_flex()
             .size_full()
@@ -2572,32 +2571,15 @@ impl DesktopView {
                     .gap_3()
                     .child(div().text_xl().font_semibold().child("Personal secrets"))
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("personal-devices")
-                                    .small()
-                                    .label(format!(
-                                        "Devices · {}",
-                                        self.devices
-                                            .devices
-                                            .iter()
-                                            .filter(|device| device.reader.is_some())
-                                            .count()
-                                    ))
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.show_personal_panel(PersonalPanel::Devices, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("new-personal-secret")
-                                    .small()
-                                    .primary()
-                                    .label("New item")
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.show_personal_panel(PersonalPanel::NewItem, cx);
-                                    })),
-                            ),
+                        h_flex().gap_2().child(
+                            Button::new("new-personal-secret")
+                                .small()
+                                .primary()
+                                .label("New item")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.show_personal_panel(PersonalPanel::NewItem, cx);
+                                })),
+                        ),
                     ),
             )
             .child(
@@ -2642,6 +2624,9 @@ impl DesktopView {
                 ),
             Some(VaultSelection::PersonalSecrets) => {
                 self.render_personal_secrets_detail(contents, cx)
+            }
+            Some(VaultSelection::Devices) => {
+                v_flex().size_full().p_6().child(self.render_devices(cx))
             }
             Some(VaultSelection::Import) => self.render_transfer_detail(true, cx),
             Some(VaultSelection::Export) => self.render_transfer_detail(false, cx),
@@ -2700,6 +2685,7 @@ impl DesktopView {
 
     fn render_vault_breadcrumb(&self, cx: &mut Context<Self>) -> Div {
         let title = match self.selected_vault_item.as_ref() {
+            Some(VaultSelection::Devices) => Some("Devices"),
             Some(VaultSelection::Import) => Some("Import"),
             Some(VaultSelection::Export) => Some("Export"),
             _ => None,
@@ -2737,9 +2723,9 @@ impl DesktopView {
     ) -> Div {
         let theme = cx.theme().clone();
         let corner = crate::appearance::rem_size(cx) * 0.75 - px(1.);
-        let transfer_selected = matches!(
+        let standalone_screen = matches!(
             self.selected_vault_item.as_ref(),
-            Some(VaultSelection::Import | VaultSelection::Export)
+            Some(VaultSelection::Import | VaultSelection::Export | VaultSelection::Devices)
         );
         h_flex()
             .w_full()
@@ -2750,7 +2736,7 @@ impl DesktopView {
             .border_color(theme.border)
             .overflow_hidden()
             .bg(theme.popover)
-            .when(!transfer_selected, |workspace| {
+            .when(!standalone_screen, |workspace| {
                 workspace.child(
                     div()
                         .w(rems(232. / 16.))
@@ -2787,7 +2773,30 @@ impl DesktopView {
     ) -> Div {
         let theme = cx.theme().clone();
         let (contents_error, error) = errors;
-        let header_title = self.render_vault_breadcrumb(cx);
+        let header_title = h_flex()
+            .items_center()
+            .gap_3()
+            .child(self.render_vault_breadcrumb(cx))
+            .when(
+                self.selected_vault_item != Some(VaultSelection::Devices),
+                |row| {
+                    row.child(
+                        Button::new("vault-devices")
+                            .small()
+                            .label(format!(
+                                "Devices · {}",
+                                self.devices
+                                    .devices
+                                    .iter()
+                                    .filter(|device| device.reader.is_some())
+                                    .count()
+                            ))
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.select_vault_item(VaultSelection::Devices, cx);
+                            })),
+                    )
+                },
+            );
         v_flex()
             .gap_5()
             .child(
