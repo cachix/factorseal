@@ -100,10 +100,6 @@ pub(crate) struct SettingsView {
     _subscriptions: Vec<Subscription>,
 }
 
-pub(crate) struct BackToVault;
-
-impl gpui::EventEmitter<BackToVault> for SettingsView {}
-
 fn values(settings: &DesktopSettings) -> [Value; 6] {
     [
         Value::Theme(settings.theme),
@@ -355,33 +351,22 @@ impl Render for SettingsView {
         v_flex()
             .w_full()
             .min_w_0()
-            .gap_5()
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .overflow_hidden()
+            .bg(theme.popover)
             .child(
                 h_flex()
                     .w_full()
-                    .items_end()
-                    .justify_between()
+                    .justify_start()
                     .flex_wrap()
-                    .gap_4()
+                    .px_6()
+                    .py_4()
+                    .border_b_1()
+                    .border_color(theme.border)
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .text_2xl()
-                            .font_semibold()
-                            .child(
-                                div()
-                                    .id("settings-vault-breadcrumb")
-                                    .cursor_pointer()
-                                    .hover(|style| style.text_color(theme.muted_foreground))
-                                    .child("Your vault")
-                                    .on_click(cx.listener(|_, _, _, cx| cx.emit(BackToVault))),
-                            )
-                            .child(div().text_color(theme.muted_foreground).child("←"))
-                            .child("Settings"),
-                    )
-                    .child(
-                        h_flex().id("settings-tabs").gap_2().children(
+                        h_flex().id("settings-tabs").flex_wrap().gap_2().children(
                             [
                                 (Section::Appearance, "Appearance"),
                                 (Section::Security, "Security"),
@@ -403,25 +388,18 @@ impl Render for SettingsView {
                     ),
             )
             .child(
-                div()
-                    .w_full()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme.border)
-                    .overflow_hidden()
-                    .bg(theme.popover)
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .min_w_0()
-                            .max_w(rems(820. / 16.))
-                            .gap_4()
-                            .p_6()
-                            .child(content)
-                            .when_some(self.error, |view, error| {
-                                view.child(div().text_color(theme.danger).child(error))
-                            }),
-                    ),
+                div().w_full().child(
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .max_w(rems(820. / 16.))
+                        .gap_4()
+                        .p_6()
+                        .child(content)
+                        .when_some(self.error, |view, error| {
+                            view.child(div().text_color(theme.danger).child(error))
+                        }),
+                ),
             )
     }
 }

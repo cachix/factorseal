@@ -787,13 +787,6 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
-        let settings_back = cx.subscribe(
-            &settings,
-            |view, _, _: &crate::settings_view::BackToVault, cx| {
-                view.settings_open = false;
-                cx.notify();
-            },
-        );
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -872,7 +865,7 @@ impl DesktopView {
             transfer_plaintext_confirmed: false,
             transfer_notice: None,
             system_integrations_expanded: false,
-            _subscriptions: vec![password_submit, vault_search_change, settings_back],
+            _subscriptions: vec![password_submit, vault_search_change],
         }
     }
 
@@ -3127,13 +3120,36 @@ impl Render for DesktopView {
                         h_flex()
                             .items_center()
                             .gap_2()
-                            .child(brand_mark(36., theme.foreground))
                             .child(
-                                div()
-                                    .text_size(rems(23. / 16.))
-                                    .font_semibold()
-                                    .child("FactorSeal"),
-                            ),
+                                h_flex()
+                                    .id("vault-home")
+                                    .items_center()
+                                    .gap_2()
+                                    .when(self.settings_open, |element| {
+                                        element
+                                            .cursor_pointer()
+                                            .hover(|style| style.text_color(theme.muted_foreground))
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.settings_open = false;
+                                                cx.notify();
+                                            }))
+                                    })
+                                    .child(brand_mark(36., theme.foreground))
+                                    .child(
+                                        div()
+                                            .text_size(rems(23. / 16.))
+                                            .font_semibold()
+                                            .child("FactorSeal"),
+                                    ),
+                            )
+                            .when(self.settings_open, |element| {
+                                element
+                                    .child(
+                                        gpui_component::Icon::new(IconName::ChevronRight)
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .child(div().text_lg().font_semibold().child("Settings"))
+                            }),
                     )
                     .child(
                         h_flex()
