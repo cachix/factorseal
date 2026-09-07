@@ -1,110 +1,145 @@
-# Experimental personal sync packet boundary
+# Experimental personal sync boundary
 
-Implemented behind the optional `personal-sync` feature, 2026-09-07. This is a
-library boundary, not an enabled background sync service. The architecture in
-[personal-sync-design.md](personal-sync-design.md) remains the integration plan.
-The format requires a separate protocol review before production deployment.
+Implemented behind the optional `personal-sync` feature. This connects the vault
+worker and ciphertext storage through trusted host-management APIs; it does not
+start networking or expose sync operations through application IPC.
 
-## Content and authority
+## Automerge and personal scope
 
-`PersonalUpdate` contains one current personal item or a deletion marker, plus
-its single-parent revision chain. It cannot carry arbitrary vault namespaces,
-device unlock factors, or installation roots. All chain entries must have the
-same item ID, unique revision IDs, and contiguous ancestry beginning at a root.
-The head must agree with the item's ID and presence/deletion. This is validation
-of one writer chain; it does not implement conflict resolution or establish
-that an author's claimed ancestry is already trusted by a receiver.
+Each stable personal item ID owns a separate Automerge document. Its root
+`value` is either the current encoded personal item or a null tombstone. An item
+is an atomic register: concurrent password edits must not silently mix fields.
+Automerge owns operation IDs, dependency tracking, head hashes, merge behavior,
+and conflict resolution. The old custom revision journal is read only during
+migration, to recover its final tombstones.
 
-Each `ReaderIdentity` has independent ML-KEM-768 and ML-DSA-65 seeds. Retained
-seeds and fresh content keys use locked, guarded allocations. Expanded keys and
-cryptographic intermediate values are temporary library-owned allocations;
-this does not claim all library intermediates are page-locked. Serialized
-outgoing plaintext is locked; decrypted bytes are zeroized on release.
-Reader identities currently have no persistence API. They are separate from
-future iroh transport credentials.
+`PersonalUpdate` carries an item ID and the complete set of native uncompressed
+Automerge changes for that item, encoded as base64 byte strings in JSON. Full
+closures make packets independently useful to a late reader through an offline
+courier. This is Automerge change replication, not its interactive per-peer
+sync-message protocol. Missing dependencies, duplicate changes, unsupported
+operations, and item-ID mismatches are rejected. Validation checks every
+historical operation, including superseded ones: exactly one root `value`
+assignment per change, containing a valid personal item or null. Other root
+properties, objects, messages, and extra change payloads are rejected. Automerge
+may encode choosing the current winner by deleting its losing operations. Such
+native resolutions are accepted only when the causal pre-state has multiple
+values and the post-state retains exactly one of them. Deletion of the entire
+register is rejected, including when disguised by a later write. Uncompressed change chunk type 1 is required before parsing; network
+inputs cannot invoke document/chunk decompression.
 
-`Membership::new` validates and sorts public keys, rejects duplicates, and binds
-them to a group and epoch. **It does not authenticate membership.** Its caller
-must supply keys authenticated by the future pairing/controller protocol.
-Accepting an arbitrary peer-supplied membership would defeat author and reader
-authorization. There is no controller, enrollment, or epoch persistence yet.
+Distinct concurrent values are retrieved using Automerge `get_all`, never its
+single-value default winner. Ordinary item reads and writes return a conflict.
+The host can display every candidate, including deletion, and explicitly choose
+one. Resolution compares the complete observed head set before assigning a new
+value. If a third edit arrived, the stale decision fails. A later Automerge
+change supersedes its dependencies; delayed ancestors cannot resurrect an item.
 
-## Envelope construction
+The outer installation document still projects current records on each commit.
+It now carries a separate encrypted replica catalog intact across projection.
+Local keys, membership, audit metadata, publication state and receipts stay
+outside those replica documents and never enter an outgoing update.
 
-The versioned suite is `mlkem768-hkdfsha256-aes256gcm-mldsa65-v1`:
+**Retained history includes old and deleted passwords.** Newly enrolled readers
+currently receive that history too. Automerge snapshot compaction does not erase
+it. There is no history-pruning or cryptographic-erasure claim. A future bounded
+rebootstrap/checkpoint protocol must account for offline peers and stale changes
+before any such pruning can be implemented.
 
-1. Generate a fresh 256-bit content key and random operation ID for each packet.
-2. Encrypt the personal update with AES-256-GCM and a fresh nonce. Associated
-   data binds the suite, group, epoch, membership digest, author, operation ID,
-   and exact sorted recipient list.
-3. Wrap that content key independently to every current reader, including the
-   author, using HPKE Base mode with ML-KEM-768, HKDF-SHA256, and AES-256-GCM.
-   Wrap associated data also binds the recipient, payload nonce, and ciphertext
-   digest. The HPKE info field uses a separate key-wrap domain.
-4. Sign a separate domain plus the entire encoded envelope body with ML-DSA-65.
-   The signature covers every recipient package and the encrypted payload.
-5. Address the resulting object by SHA-256 of its complete encoded ciphertext
-   packet. No plaintext-derived identifier is exposed as a storage address.
+## Keys, membership and packet encryption
+
+Reader identities use independent ML-KEM-768 and ML-DSA-65 seeds, root-wrapped
+with separate purpose labels bound to the local installation and vault IDs.
+Only wrapped seeds are persisted inside the authenticated encrypted local
+snapshot. Unwrapped seeds and fresh content keys use locked guarded allocations
+for each operation. Cryptographic library intermediates and Automerge's plaintext
+working memory are not all page-locked or explicitly wiped; transient owned
+serialization buffers are zeroized where supported.
+
+The trusted host must authenticate enrollment before calling
+`configure_personal_sync`. Public-key validation is not membership authority.
+The persisted membership requires this device's reader key, a stable group ID,
+and monotonically increasing epochs. Changing the membership clears an obsolete
+prepared packet and marks all current replica histories for republication.
+Controller signatures and QR enrollment are still pending. A transport identity
+is not a reader identity.
+
+The versioned suite is
+`automerge-mlkem768-hkdfsha256-aes256gcm-mldsa65-v1`. Previous experimental custom
+revision packets are rejected. Each packet:
+
+1. Encrypts the update with a fresh random AES-256-GCM content key and nonce.
+2. Binds suite, group, epoch, membership digest, author, random operation ID and
+   exact sorted recipient list as payload associated data.
+3. Wraps that key independently to every reader using ML-KEM-768 HPKE Base mode,
+   HKDF-SHA256 and AES-256-GCM. The wrap binds the payload context, recipient,
+   nonce and ciphertext digest under a separate domain.
+4. Signs the complete envelope body under a separate ML-DSA-65 domain.
+5. Uses SHA-256 of the full encoded ciphertext packet as its storage address.
 
 The implementation pins `hpke` 0.14.1. Its ML-KEM construction follows
 [draft-ietf-hpke-pq-04](https://datatracker.ietf.org/doc/html/draft-ietf-hpke-pq-04),
 an extension to [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html).
-See the [implementation's KEM documentation](https://docs.rs/hpke/0.14.1/hpke/kem/index.html).
-The PQ HPKE construction is draft-based; this format is experimental and makes
-no FIPS module-validation claim.
+The construction remains experimental and requires protocol review; this is not
+a FIPS module-validation claim.
 
-Encoding is compact JSON in the declared Rust struct field order, with standard
-base64 for byte vectors and JSON byte arrays for fixed-size identifiers.
-Verification requires exact re-encoding equality and rejects unknown fields,
-alternate whitespace/field order, unsupported suites, stale epochs, and any
-recipient-set mismatch. This is this protocol's canonical encoding, not JCS.
-The membership digest hashes a separate domain, group bytes, big-endian epoch,
-and the sorted encoded public-key list.
+Outer encoding is compact JSON in struct field order, with base64 byte vectors
+and JSON arrays for fixed-size identifiers. Public verification requires exact
+re-encoding equality, expected membership and recipient set, and a valid author
+signature. It needs no reader keys. Opening rechecks membership before decrypting
+and validating the Automerge payload. A signature alone does not prove valid
+changes or application. Members can edit personal content; signatures identify
+the packet issuer, not independent authorization for each historical change.
 
-Public verification authenticates a packet against the supplied current
-membership without any reader key. Opening rechecks that membership, unwraps
-the content key, authenticates/decrypts the payload, and validates its structure.
-A valid signature does not imply decryptability, valid revision ancestry, or
-successful application. A removed member retains access to previously received
-packets; checking a newer epoch cannot revoke plaintext or old keys already held.
+Storage nodes see group, epoch, author/member fingerprints, recipients, packet
+lengths and traffic patterns. Item IDs, change hashes, values and history remain
+inside encryption. No padding or metadata-hiding transport is implemented.
+Revocation cannot withdraw old plaintext, ciphertext or keys already received.
 
-Storage nodes see group/epoch, public member fingerprints, author, recipient
-count, packet lengths, and traffic patterns. Item IDs, titles, revisions, and
-values are inside the encrypted payload. There is no padding or metadata-hiding
-transport in this milestone.
+## Transactional publication and application
 
-## Durable ciphertext spool
+Local edits commit current records, Automerge history and pending item IDs in
+one signed encrypted transaction. Preparing a publication commits exact packet
+bytes plus their item ID and Automerge heads in that same local document before
+returning them to the host. The host writes and synchronizes the ciphertext spool
+before confirming possession to the worker. Only a matching prepared packet ID
+is accepted. The pending marker clears only if the item's current Automerge
+heads still equal the prepared heads. An intervening edit remains pending.
+Retries reuse the identical prepared bytes across restart; crashes before or
+after spool publication cannot lose a newer edit.
 
-`CiphertextSpool` uses a separate owner-private directory and process-exclusive
-file lock. `put` verifies public membership and signature before atomically
-writing a private file, syncing the file and the parent directory on Unix.
-An identical retry revalidates and syncs the existing object before returning
-the same address. A corrupt existing object fails instead of being replaced.
-Reads reverify signatures and ciphertext addresses against current membership.
-Inventory is sorted and paginated; entries are possession candidates until read
-and verified, not proof that their encrypted updates have been applied.
+Received packets are publicly verified and decrypted inside the lease-bound
+worker. Automerge merges their changes. Materialized records, the complete
+merged replica and receipt are committed together. Duplicate packet receipts
+are idempotent; re-encrypted or reordered Automerge changes are also idempotent.
+Concurrent candidates remain in Automerge, not a parallel conflict-value table.
 
-There are no reader keys in the spool. A can produce a packet for A, B, and C;
-B can durably store it with public membership alone, restart while locked, and
-forward the identical bytes to C after A goes offline. C can then decrypt using
-its own reader key. This path is covered by an in-process test, not a running
-network service or a mobile background-execution guarantee. Native filesystem
-durability and lifecycle acceptance, especially Windows, still require testing.
+`publish_personal_sync` and `apply_personal_sync` process bounded spool batches.
+After unlock the host can restart inventory from the beginning and replay safely.
+Stored ciphertext inventory is separate from the vault's counts of incorporated
+received packets and packets whose current values still conflict. Enrolled
+reader count is not a claim that all readers are online or up to date. These are
+local durable receipts; authenticated peer application acknowledgements remain
+future work. Sync activity does not refresh the unseal lease. Sealing drops the
+worker and its unwrapped keys while the independent ciphertext store can remain.
 
-Bounds: 16 readers, 4,096 revisions per update, 1 MiB encoded update, 2 MiB
-packet, 4,096 stored objects (including orphan temporary files), and at most 128
-inventory entries per page. Personal-item validation retains its own smaller
-content bound. The caller supplies a nonzero disk-byte quota. Orphan temporary
-files count against quota but never appear as delivered packets. Full stores
-fail without eviction; there is no cleanup/compaction or acknowledgement policy
-yet. Retrying byte-identical packets is idempotent; independently re-encrypting
-the same revision creates a new ciphertext object.
+The spool uses an owner-private directory, exclusive process lock, immutable
+content addresses, private atomic file publication, file synchronization and
+Unix parent-directory synchronization. Retries reverify and synchronize the
+existing object. Reads reverify both membership/signature and filename hash.
+A stale-epoch packet remains stored but is rejected by a current-epoch apply pass.
+Disk failures abort the pass; malformed packets never seal an otherwise healthy
+vault. Native filesystem/lifecycle acceptance is still required on each platform.
 
-## Remaining integration
+Bounds are 16 readers and distinct concurrent values, 4,096 changes per item,
+1 MiB encoded update/history, 2 MiB encrypted packet, 4,096 replica items,
+32 MiB encoded replica catalog, 16 MiB local sync state, 4,096 received receipts,
+4,096 spool objects and at most 128 entries per batch/page. Spool byte quota is
+caller-supplied. History/catalog limits reject edits before committing them.
+Orphan temporary files consume spool quota but are not advertised. No automatic
+eviction, receipt cleanup or history pruning is implemented.
 
-Persist reader seeds under the local vault's protection; authenticate membership
-and epoch changes; publish pending journal heads and recover publication after
-crashes; apply incoming revisions transactionally with replay/conflict handling;
-distinguish ciphertext receipts from applied acknowledgements; then connect the
-spool to the background process, iroh, QR pairing, and device status UI. None of
-those behaviors should be inferred from `VerifiedPacket` or a successful `put`.
+Next integration work is authenticated enrollment/controller updates, background
+iroh transport, QR pairing, management UI, peer application acknowledgements,
+and reviewed retention/rebootstrap. The architecture is described in
+[personal-sync-design.md](personal-sync-design.md).

@@ -186,19 +186,17 @@ outside the separately built CLI key owner's dependency graph.
 
 ## Honest limitations
 
-- Personal documents contain an encrypted, value-free local revision journal and
-  pending publication references committed with their current records. Deletion
-  markers survive removal of the corresponding record. The journal is bounded
-  at 100,000 revisions and 16 MiB; exhausting either bound rejects the mutation
-  without committing an item/outbox mismatch. Network replication, peer
-  acknowledgements, conflict resolution, and journal checkpoint/compaction are
-  not implemented yet. These pending references are not portable encrypted
-  packets and cannot be forwarded by a locked background process yet.
-  The optional `personal-sync` feature supplies experimental signed packet and
-  keyless ciphertext-spool primitives, but they are not wired into the running
-  vault. Reader-key persistence and authenticated membership/pairing are also
-  pending. See the [packet boundary](security/personal-sync-wire.md) for its
-  cryptographic construction, bounds, and remaining integration requirements.
+- Personal documents retain per-item Automerge histories inside their signed,
+  encrypted snapshots. Unlike the value-free audit log, this includes old and
+  deleted secret values, and newly enrolled readers currently receive that
+  retained history. There is no password-history pruning or cryptographic
+  erasure claim. The experimental `personal-sync` feature provides root-wrapped
+  reader keys, authenticated encrypted change packets, durable publication and
+  incoming merge/conflict handling through lease-bound host-management APIs.
+  It does not enable network replication: authenticated enrollment, QR pairing,
+  iroh/background integration, peer acknowledgements, and UI are still pending.
+  See the [implemented boundary](security/personal-sync-wire.md) for bounds,
+  experimental cryptography, retained metadata, and integration requirements.
 
 - An OR policy is bounded by its weakest unlock group. Biometric-only access
   has no independent recovery secret and can be lost after hardware reset,

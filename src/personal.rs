@@ -856,7 +856,10 @@ mod tests {
 }
 
 pub(crate) mod legacy;
-pub mod revision;
+#[cfg(feature = "vault-store")]
+pub(crate) mod legacy_revision;
+#[cfg(feature = "vault-store")]
+pub mod replica;
 #[cfg(feature = "personal-sync")]
 pub mod sync;
 

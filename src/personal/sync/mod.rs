@@ -8,9 +8,43 @@ mod identity;
 mod packet;
 mod spool;
 
+pub use crate::personal::replica::{PersonalUpdate, ReplicaHeads};
 pub use identity::{MemberId, MemberPublicKeys, Membership, ReaderIdentity};
-pub use packet::{PacketId, PersonalUpdate, VerifiedPacket};
+pub use packet::{PacketId, VerifiedPacket};
 pub use spool::CiphertextSpool;
+
+/// Result returned only after the receiving vault transaction is durable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReceiveOutcome {
+    Applied,
+    Duplicate,
+    Conflict,
+}
+
+/// Local publication/application status. It does not assert peer application.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SyncStatus {
+    /// Received ciphertext packets durably incorporated, including ancestors
+    /// superseded by a newer value or explicit resolution. Not peer receipts.
+    pub applied_packets: usize,
+    /// Received packets whose current values still require a user decision.
+    pub conflict_packets: usize,
+    pub readers: usize,
+    pub pending_publications: usize,
+    pub prepared_packet: Option<PacketId>,
+    pub conflicted_items: usize,
+}
+
+/// One bounded pass over stored ciphertext. Rejected includes stale-epoch
+/// packets; they remain stored, and never count as applied.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SyncApplyPage {
+    pub applied: usize,
+    pub duplicates: usize,
+    pub conflicts: usize,
+    pub rejected: usize,
+    pub next: Option<PacketId>,
+}
 
 #[cfg(feature = "fuzzing")]
 pub(crate) use packet::{fuzz, fuzz_seeds};
@@ -36,5 +70,17 @@ mod bytes {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
         let value = String::deserialize(deserializer)?;
         STANDARD.decode(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Competing Automerge register values and the heads a resolution must name.
+/// Contains plaintext; available only to the unlocked trusted management host.
+pub struct PersonalConflict {
+    pub heads: ReplicaHeads,
+    pub values: Vec<Option<crate::personal::PersonalSecret>>,
+}
+impl std::fmt::Debug for PersonalConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PersonalConflict([REDACTED])")
     }
 }

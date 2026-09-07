@@ -25,6 +25,8 @@ mod authorization;
 pub use authorization::{GrantAuthorization, GrantAuthorizationTarget};
 #[cfg(feature = "vault-store")]
 mod state;
+#[cfg(feature = "personal-sync")]
+mod sync;
 mod time;
 
 use time::{RequestTime, tighten};

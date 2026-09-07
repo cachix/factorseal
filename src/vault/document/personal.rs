@@ -7,11 +7,23 @@ use super::{
 };
 use crate::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret};
 
-const PERSONAL_REVISIONS: &str = "personal-revisions-v1";
 const PERSONAL_LAYOUT: &str = "personal-layout";
 const PERSONAL_ALIASES: &str = "personal-legacy-addresses";
 
 impl SecretDocument {
+    pub(super) fn ensure_personal_unconflicted(&self, address: &SecretAddress) -> VaultResult<()> {
+        if self.is_personal()
+            && let Some((id, _)) = address.as_local()
+            && let Some(replica) = self
+                .personal_replicas()?
+                .load(id, self.document.get_actor().to_bytes())?
+            && replica.values()?.len() > 1
+        {
+            return Err(VaultError::Conflict);
+        }
+        Ok(())
+    }
+
     pub(super) fn is_personal(&self) -> bool {
         self.kind == DocumentKind::LocalKeyring && self.partition == PERSONAL_SECRET_NAMESPACE
     }
@@ -41,12 +53,20 @@ impl SecretDocument {
     pub(crate) fn personal_title(
         &self,
         address: &SecretAddress,
-        now: u64,
+        _now: u64,
     ) -> VaultResult<Option<String>> {
         if !self.is_personal() {
             return Ok(None);
         }
-        match self.get(address, now)? {
+        // Titles remain available when the replicated register is conflicted.
+        let read = self
+            .records(&address.storage_key())?
+            .into_iter()
+            .next()
+            .map_or(SecretRead::Missing, |record| {
+                SecretRead::Value(record.value)
+            });
+        match read {
             SecretRead::Value(value) => {
                 let item = PersonalSecret::decode_current(&value)
                     .map_err(|_| VaultError::InvalidData("invalid personal item".into()))?;
@@ -63,56 +83,6 @@ impl SecretDocument {
             SecretRead::Missing | SecretRead::Expired => Ok(None),
             SecretRead::Conflict => Err(VaultError::Conflict),
         }
-    }
-
-    pub(super) fn personal_journal(
-        &self,
-    ) -> VaultResult<crate::personal::revision::RevisionJournal> {
-        match self
-            .document
-            .get(ROOT, PERSONAL_REVISIONS)
-            .map_err(automerge_error)?
-        {
-            Some((value, _)) => {
-                let bytes = value.into_bytes().map_err(|_| descriptor_mismatch())?;
-                crate::personal::revision::RevisionJournal::decode(&bytes).map_err(|_| {
-                    VaultError::InvalidData("invalid personal revision journal".into())
-                })
-            }
-            None => Ok(crate::personal::revision::RevisionJournal::default()),
-        }
-    }
-
-    pub(super) fn record_personal_revision(
-        &mut self,
-        address: &SecretAddress,
-        deleted: bool,
-    ) -> VaultResult<()> {
-        if !self.is_personal() {
-            return Ok(());
-        }
-        let (id, field) = address.as_local().ok_or_else(descriptor_mismatch)?;
-        if field.is_some() {
-            return Err(descriptor_mismatch());
-        }
-        let mut journal = self.personal_journal()?;
-        journal
-            .record(id, deleted)
-            .map_err(|_| VaultError::Protocol("personal revision journal is full".into()))?;
-        self.save_personal_journal(&journal)
-    }
-
-    fn save_personal_journal(
-        &mut self,
-        journal: &crate::personal::revision::RevisionJournal,
-    ) -> VaultResult<()> {
-        let encoded = journal
-            .encode()
-            .map_err(|_| VaultError::Protocol("personal revision journal is full".into()))?;
-        self.document
-            .put(ROOT, PERSONAL_REVISIONS, encoded.to_vec())
-            .map_err(automerge_error)?;
-        Ok(())
     }
 
     /// Rewrite the existing document in one generation, retaining record versions,
@@ -151,7 +121,7 @@ impl SecretDocument {
             let mut seen = HashSet::new();
             let mut aliases = Vec::new();
             let mut address_migrations = Vec::new();
-            let mut journal = crate::personal::revision::RevisionJournal::default();
+            let mut replicas = super::replicas::ReplicaCatalog::default();
             for (key, _, _) in &records {
                 document
                     .document
@@ -171,9 +141,12 @@ impl SecretDocument {
                 let new_address = SecretAddress::new(item.id.clone(), None)?;
                 address_migrations.push((record.address.clone(), new_address.clone()));
                 record.address = new_address;
-                journal.record(&item.id, false).map_err(|_| {
-                    VaultError::InvalidData("personal revision journal is full".into())
-                })?;
+                let mut replica = crate::personal::replica::PersonalReplica::new(
+                    &item.id,
+                    document.document.get_actor().to_bytes(),
+                )?;
+                replica.set(Some(&item), None)?;
+                replicas.store(&item.id, &mut replica, true)?;
                 record.value = item.encode().map_err(|_| {
                     VaultError::InvalidData("invalid migrated personal item".into())
                 })?;
@@ -190,7 +163,7 @@ impl SecretDocument {
                     )
                     .map_err(automerge_error)?;
             }
-            document.save_personal_journal(&journal)?;
+            document.save_personal_replicas(&replicas)?;
             let aliases = Zeroizing::new(
                 serde_json::to_vec(&aliases).map_err(|e| VaultError::InvalidData(e.to_string()))?,
             );
@@ -210,7 +183,12 @@ impl SecretDocument {
 
     pub(super) fn project_personal_metadata(&self, projection: &mut Self) -> VaultResult<()> {
         if self.is_personal() {
-            for key in [PERSONAL_LAYOUT, PERSONAL_ALIASES, PERSONAL_REVISIONS] {
+            for key in [
+                PERSONAL_LAYOUT,
+                PERSONAL_ALIASES,
+                "personal-automerge-v1",
+                "personal-sync-v1",
+            ] {
                 if let Some((value, _)) = self.document.get(ROOT, key).map_err(automerge_error)? {
                     let automerge::Value::Scalar(value) = value else {
                         return Err(descriptor_mismatch());
@@ -292,7 +270,7 @@ mod tests {
         )
         .unwrap();
         assert!(loaded.migrate_personal().unwrap().is_none());
-        assert_eq!(loaded.personal_journal().unwrap().pending().count(), 2);
+        assert_eq!(loaded.personal_replicas().unwrap().pending.len(), 2);
     }
 
     #[test]
@@ -312,7 +290,7 @@ mod tests {
             .put(&address, &first.encode().unwrap(), None, &context())
             .unwrap();
         assert_eq!(
-            document.personal_journal().unwrap().revisions().len(),
+            document.personal_replicas().unwrap().replicas.len(),
             1,
             "unchanged puts do not create revisions"
         );
@@ -336,14 +314,17 @@ mod tests {
         );
         assert!(document.delete(&address).unwrap().is_some());
         assert_eq!(document.addresses().unwrap().len(), 1);
-        let journal = document.personal_journal().unwrap();
-        assert_eq!(journal.pending().count(), 2);
-        assert!(
-            journal
-                .pending()
-                .any(|revision| revision.item_id == first.id && revision.deleted)
+        let replicas = document.personal_replicas().unwrap();
+        assert_eq!(replicas.pending.len(), 2);
+        assert_eq!(
+            replicas
+                .load(&first.id, b"reader")
+                .unwrap()
+                .unwrap()
+                .values()
+                .unwrap(),
+            vec![None]
         );
-        assert_eq!(journal.revisions().len(), 4);
         let snapshot = document.save();
         let loaded = SecretDocument::load(
             &snapshot,
@@ -353,8 +334,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            loaded.personal_journal().unwrap().encode().unwrap(),
-            journal.encode().unwrap()
+            &loaded.personal_replicas().unwrap().replicas,
+            &replicas.replicas
         );
     }
 
@@ -391,7 +372,7 @@ mod tests {
         );
         assert!(document.addresses().unwrap().is_empty());
         assert!(
-            document.personal_journal().unwrap().revisions().is_empty(),
+            document.personal_replicas().unwrap().replicas.is_empty(),
             "rejected batches must roll back the outbox too"
         );
         assert!(

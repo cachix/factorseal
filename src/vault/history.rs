@@ -86,6 +86,8 @@ pub enum HistoryOperation {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum ServiceReason {
+    /// Authenticated personal replication or trusted local sync management.
+    PersonalSync,
     /// Upgrade personal item addresses without a user edit.
     PersonalMigration,
     /// A grant was stored by the installation's own authorization path.

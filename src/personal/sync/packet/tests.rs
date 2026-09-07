@@ -1,14 +1,14 @@
 use super::*;
-use crate::personal::{revision::RevisionJournal, sync::CiphertextSpool};
+use crate::personal::{PersonalSecret, replica::PersonalReplica, sync::CiphertextSpool};
 
 fn update() -> PersonalUpdate {
     let item = PersonalSecret::generic(
         "Personal account".into(),
         "a secret that must stay encrypted".into(),
     );
-    let mut journal = RevisionJournal::default();
-    journal.record(&item.id, false).unwrap();
-    PersonalUpdate::new(journal.revisions().to_vec(), Some(item)).unwrap()
+    let mut replica = PersonalReplica::new(&item.id, b"test-author").unwrap();
+    replica.set(Some(&item), None).unwrap();
+    replica.update().unwrap()
 }
 
 fn membership(identities: &[&ReaderIdentity]) -> Membership {
@@ -35,8 +35,26 @@ fn three_devices_exchange_identical_ciphertext_through_a_keyless_courier() {
     assert!(
         !String::from_utf8_lossy(packet.as_bytes()).contains("a secret that must stay encrypted")
     );
-    assert_eq!(packet.open(&a, &group).unwrap().item(), update.item());
-    assert_eq!(packet.open(&b, &group).unwrap().item(), update.item());
+    assert_eq!(
+        packet
+            .open(&a, &group)
+            .unwrap()
+            .replica()
+            .unwrap()
+            .values()
+            .unwrap(),
+        update.replica().unwrap().values().unwrap()
+    );
+    assert_eq!(
+        packet
+            .open(&b, &group)
+            .unwrap()
+            .replica()
+            .unwrap()
+            .values()
+            .unwrap(),
+        update.replica().unwrap().values().unwrap()
+    );
     drop(a);
     drop(b); // Neither sender nor courier reader keys exist during storage/forwarding.
 
@@ -52,7 +70,16 @@ fn three_devices_exchange_identical_ciphertext_through_a_keyless_courier() {
     let spool = CiphertextSpool::open(&path, 4 * MAX_PACKET_BYTES as u64).unwrap();
     let delivered = spool.get(id, &group).unwrap();
     assert_eq!(delivered.as_bytes(), packet.as_bytes());
-    assert_eq!(delivered.open(&c, &group).unwrap().item(), update.item());
+    assert_eq!(
+        delivered
+            .open(&c, &group)
+            .unwrap()
+            .replica()
+            .unwrap()
+            .values()
+            .unwrap(),
+        update.replica().unwrap().values().unwrap()
+    );
 }
 
 #[test]
@@ -73,7 +100,16 @@ fn encryption_is_randomized_and_only_authorized_recipients_can_open() {
     assert!(VerifiedPacket::verify(first.as_bytes(), &next).is_err());
     let new_packet = a.seal_update(&update, &next).unwrap();
     assert!(new_packet.open(&b, &next).is_err());
-    assert_eq!(new_packet.open(&a, &next).unwrap().item(), update.item());
+    assert_eq!(
+        new_packet
+            .open(&a, &next)
+            .unwrap()
+            .replica()
+            .unwrap()
+            .values()
+            .unwrap(),
+        update.replica().unwrap().values().unwrap()
+    );
 }
 
 #[test]
@@ -116,25 +152,19 @@ fn every_signed_component_is_bound_and_noncanonical_encodings_are_rejected() {
 fn tombstones_round_trip_and_payload_identity_mismatches_fail() {
     let a = ReaderIdentity::generate().unwrap();
     let group = membership(&[&a]);
-    let mut journal = RevisionJournal::default();
     let item = PersonalSecret::generic("Deleted account".into(), "old value".into());
-    journal.record(&item.id, false).unwrap();
-    journal.record(&item.id, true).unwrap();
-    assert!(PersonalUpdate::new(journal.revisions().to_vec(), Some(item)).is_err());
-    let update = PersonalUpdate::new(journal.revisions().to_vec(), None).unwrap();
+    let mut replica = PersonalReplica::new(&item.id, b"writer").unwrap();
+    replica.set(Some(&item), None).unwrap();
+    replica.set(None, None).unwrap();
+    let update = replica.update().unwrap();
     let received = a
         .seal_update(&update, &group)
         .unwrap()
         .open(&a, &group)
         .unwrap();
-    assert!(received.item().is_none());
-    assert_eq!(received.revisions(), journal.revisions());
-    let mut malformed = update.revisions().to_vec();
-    malformed[1].parent = None;
-    assert!(PersonalUpdate::new(malformed, None).is_err());
-    assert!(PersonalUpdate::new(Vec::new(), None).is_err());
-    let unrelated = PersonalSecret::generic("Different item".into(), "value".into());
-    assert!(PersonalUpdate::new(vec![journal.revisions()[0].clone()], Some(unrelated)).is_err());
+    assert_eq!(received.replica().unwrap().values().unwrap(), vec![None]);
+    assert_eq!(received.replica().unwrap().heads(), replica.heads());
+    assert!(PersonalUpdate::new(item.id.clone(), Vec::new()).is_err());
 }
 
 #[test]

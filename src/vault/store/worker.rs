@@ -33,6 +33,10 @@ use super::{HistoryPage, StorePage};
 
 mod integrity;
 mod mutation;
+#[cfg(feature = "personal-sync")]
+mod sync;
+#[cfg(feature = "personal-sync")]
+pub(crate) use sync::{SyncCommand, SyncReply};
 
 const COMMAND_QUEUE: usize = 64;
 const MAX_COMMIT_CHAIN: usize = 1_000_000;
@@ -241,6 +245,11 @@ fn watch_shutdown(watched: &std::sync::Weak<WorkerStatus>) {
 }
 
 pub(super) enum Command {
+    #[cfg(feature = "personal-sync")]
+    PersonalSync {
+        action: SyncCommand,
+        response: mpsc::Sender<VaultResult<SyncReply>>,
+    },
     ExportRevision {
         response: mpsc::Sender<VaultResult<Option<[u8; 32]>>>,
     },
@@ -434,6 +443,11 @@ fn execute_command(
     status: &WorkerStatus,
 ) -> bool {
     match command {
+        #[cfg(feature = "personal-sync")]
+        Command::PersonalSync { action, response } => {
+            let result = runtime.block_on(worker.personal_sync(action));
+            send_result(response, result, status);
+        }
         Command::Get {
             scope,
             partition,
@@ -759,8 +773,14 @@ impl StoreWorker {
                 Some(personal_partition),
             )
             .await?
-            && let Some(mutation) = document.migrate_personal()?
         {
+            let mutation = match document.migrate_personal()? {
+                Some(mutation) => Some(mutation),
+                None => document.migrate_personal_replicas()?,
+            };
+            let Some(mutation) = mutation else {
+                return Ok(());
+            };
             let provenance = Provenance::service(ServiceReason::PersonalMigration);
             let context = self.context(&provenance, unix_time()?);
             self.commit_mutation(

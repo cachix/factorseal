@@ -10,6 +10,11 @@ use super::history::{
 use super::{DeviceKeyId, DocumentKind, SecretAddress, VaultError, VaultResult};
 
 mod personal;
+mod replicas;
+#[cfg(feature = "personal-sync")]
+mod sync;
+#[cfg(feature = "personal-sync")]
+pub(crate) use sync::PreparedPublication;
 
 const ENTRIES_KEY: &str = "entries";
 const LEGACY_HISTORY_KEY: &str = "history";
@@ -21,7 +26,7 @@ const PARTITION_KEY: &str = "partition";
 // the document. Version 2 added per-record value versions.
 const FORMAT_VERSION: u64 = 3;
 // Personal documents carry durable revision state that older projections must not drop.
-const PERSONAL_FORMAT_VERSION: u64 = 4;
+const PERSONAL_FORMAT_VERSION: u64 = 5;
 const LEGACY_FORMAT_VERSION: u64 = 2;
 const RECORD_VERSION: u8 = 2;
 
@@ -168,7 +173,7 @@ impl SecretDocument {
             || !(version == Some(FORMAT_VERSION)
                 || (kind == DocumentKind::LocalKeyring
                     && partition == crate::personal::PERSONAL_SECRET_NAMESPACE
-                    && version == Some(PERSONAL_FORMAT_VERSION)))
+                    && matches!(version, Some(4 | PERSONAL_FORMAT_VERSION))))
             || expected_partition.is_some_and(|expected| partition != expected)
         {
             return Err(descriptor_mismatch());
@@ -387,6 +392,7 @@ impl SecretDocument {
         address: &SecretAddress,
         now: u64,
     ) -> VaultResult<(SecretRead, Option<u64>)> {
+        self.ensure_personal_unconflicted(address)?;
         let records = self.records(&address.storage_key())?;
         if records.is_empty() {
             return Ok((SecretRead::Missing, None));
@@ -484,6 +490,18 @@ impl SecretDocument {
         evict_at: Option<u64>,
         context: &MutationContext<'_>,
     ) -> VaultResult<()> {
+        self.ensure_personal_unconflicted(address)?;
+        self.put_value_uncommitted(address, value, evict_at, context, true)
+    }
+
+    fn put_value_uncommitted(
+        &mut self,
+        address: &SecretAddress,
+        value: &[u8],
+        evict_at: Option<u64>,
+        context: &MutationContext<'_>,
+        record_revision: bool,
+    ) -> VaultResult<()> {
         self.validate_personal_put(address, value, evict_at)?;
         let key = address.storage_key();
         let existing = self.records(&key)?.into_iter().next();
@@ -515,8 +533,8 @@ impl SecretDocument {
         self.document
             .put(&self.entries, key, bytes.to_vec())
             .map_err(automerge_error)?;
-        if changed {
-            self.record_personal_revision(address, false)?;
+        if changed && record_revision {
+            self.record_personal_change(address, false)?;
         }
         if changed || self.kind.history_retention().record_unchanged {
             self.pending.push(PendingHistory {
@@ -563,6 +581,16 @@ impl SecretDocument {
         address: &SecretAddress,
         operation: HistoryOperation,
     ) -> VaultResult<bool> {
+        self.ensure_personal_unconflicted(address)?;
+        self.delete_value_uncommitted(address, operation, true)
+    }
+
+    fn delete_value_uncommitted(
+        &mut self,
+        address: &SecretAddress,
+        operation: HistoryOperation,
+        record_revision: bool,
+    ) -> VaultResult<bool> {
         let key = address.storage_key();
         let records = self.records(&key)?;
         let Some(existing) = records.into_iter().next() else {
@@ -571,7 +599,9 @@ impl SecretDocument {
         self.document
             .delete(&self.entries, key)
             .map_err(automerge_error)?;
-        self.record_personal_revision(address, true)?;
+        if record_revision {
+            self.record_personal_change(address, true)?;
+        }
         self.pending.push(PendingHistory {
             operation,
             address: address.clone(),

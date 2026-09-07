@@ -466,3 +466,120 @@ mod tests {
         }
     }
 }
+
+/// Reader seeds are root-wrapped separately from personal content. Copying or
+/// exporting items does not enroll a restored installation as this reader.
+#[cfg(feature = "personal-sync")]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WrappedReaderIdentity {
+    kem_left: WrappedKey,
+    kem_right: WrappedKey,
+    signing: WrappedKey,
+}
+
+#[cfg(feature = "personal-sync")]
+impl InstallationSecrets {
+    pub(crate) fn protect_reader(
+        &self,
+        installation: InstallationId,
+        vault: VaultId,
+        reader: &crate::personal::sync::ReaderIdentity,
+    ) -> VaultResult<WrappedReaderIdentity> {
+        Ok(WrappedReaderIdentity {
+            kem_left: wrap_key(
+                self.root_key(),
+                &installation_key_aad(installation, vault, b"personal-sync-kem-left-v1"),
+                reader.encryption_seed[..32].try_into().expect("seed half"),
+            )?,
+            kem_right: wrap_key(
+                self.root_key(),
+                &installation_key_aad(installation, vault, b"personal-sync-kem-right-v1"),
+                reader.encryption_seed[32..].try_into().expect("seed half"),
+            )?,
+            signing: wrap_key(
+                self.root_key(),
+                &installation_key_aad(installation, vault, b"personal-sync-signing-v1"),
+                &reader.signing_seed,
+            )?,
+        })
+    }
+    pub(crate) fn open_reader(
+        &self,
+        installation: InstallationId,
+        vault: VaultId,
+        wrapped: &WrappedReaderIdentity,
+    ) -> VaultResult<crate::personal::sync::ReaderIdentity> {
+        let left = unwrap_key(
+            self.root_key(),
+            &installation_key_aad(installation, vault, b"personal-sync-kem-left-v1"),
+            &wrapped.kem_left,
+            "reader seed",
+        )?;
+        let right = unwrap_key(
+            self.root_key(),
+            &installation_key_aad(installation, vault, b"personal-sync-kem-right-v1"),
+            &wrapped.kem_right,
+            "reader seed",
+        )?;
+        let signing = unwrap_key(
+            self.root_key(),
+            &installation_key_aad(installation, vault, b"personal-sync-signing-v1"),
+            &wrapped.signing,
+            "reader seed",
+        )?;
+        let mut kem = LockedKey::<64>::zeroed()?;
+        kem[..32].copy_from_slice(&left[..]);
+        kem[32..].copy_from_slice(&right[..]);
+        crate::personal::sync::ReaderIdentity::from_seeds(kem, signing)
+    }
+}
+
+#[cfg(all(test, feature = "personal-sync"))]
+mod reader_tests {
+    use super::*;
+    use crate::personal::sync::ReaderIdentity;
+    #[test]
+    fn personal_reader_seeds_are_root_and_purpose_bound() {
+        let installation = InstallationId::from_bytes([7; 16]);
+        let vault = VaultId::from_bytes([8; 16]);
+        let (keys, _) = InstallationSecrets::generate(
+            installation,
+            vault,
+            LockedKey::from_slice(&[10; 32]).unwrap(),
+            &[11; 32],
+        )
+        .unwrap();
+        let reader = ReaderIdentity::generate().unwrap();
+        let wrapped = keys.protect_reader(installation, vault, &reader).unwrap();
+        assert_eq!(
+            keys.open_reader(installation, vault, &wrapped)
+                .unwrap()
+                .public_keys(),
+            reader.public_keys()
+        );
+        assert!(
+            keys.open_reader(InstallationId::from_bytes([9; 16]), vault, &wrapped)
+                .is_err()
+        );
+        assert!(
+            keys.open_reader(installation, VaultId::from_bytes([9; 16]), &wrapped)
+                .is_err()
+        );
+        let mut swapped = wrapped.clone();
+        std::mem::swap(&mut swapped.kem_left, &mut swapped.kem_right);
+        assert!(keys.open_reader(installation, vault, &swapped).is_err());
+        let (other_root, _) = InstallationSecrets::generate(
+            installation,
+            vault,
+            LockedKey::from_slice(&[12; 32]).unwrap(),
+            &[11; 32],
+        )
+        .unwrap();
+        assert!(
+            other_root
+                .open_reader(installation, vault, &wrapped)
+                .is_err()
+        );
+    }
+}

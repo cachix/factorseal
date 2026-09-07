@@ -15,86 +15,24 @@ use super::{
 };
 use crate::{
     EncryptionAlgorithm, crypto,
-    personal::{PersonalSecret, revision::PersonalRevision},
+    personal::replica::PersonalUpdate,
     security::memory::{LockedKey, serialize_locked},
     vault::{VaultError, VaultResult, signature},
 };
 
 pub(super) const MAX_PACKET_BYTES: usize = 2 * 1024 * 1024;
 const MAX_UPDATE_BYTES: usize = 1024 * 1024;
-const SUITE: &str = "mlkem768-hkdfsha256-aes256gcm-mldsa65-v1";
+const SUITE: &str = "automerge-mlkem768-hkdfsha256-aes256gcm-mldsa65-v1";
 const PACKET_DOMAIN: &[u8] = b"factorseal/sync/packet/v1\0";
 const WRAP_DOMAIN: &[u8] = b"factorseal/sync/recipient-key/v1\0";
 
 /// Ciphertext content address; never a hash of a password or plaintext item.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PacketId(pub(super) [u8; 32]);
 
 impl std::fmt::Display for PacketId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&hex::encode(self.0))
-    }
-}
-
-/// One current personal value (or deletion), with its local causal chain.
-/// No generic namespace/address API exists on this payload.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PersonalUpdate {
-    revisions: Vec<PersonalRevision>,
-    item: Option<PersonalSecret>,
-}
-
-impl std::fmt::Debug for PersonalUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("PersonalUpdate([REDACTED])")
-    }
-}
-
-impl PersonalUpdate {
-    pub fn new(
-        revisions: Vec<PersonalRevision>,
-        item: Option<PersonalSecret>,
-    ) -> VaultResult<Self> {
-        let update = Self { revisions, item };
-        update.validate()?;
-        Ok(update)
-    }
-
-    #[must_use]
-    pub fn revisions(&self) -> &[PersonalRevision] {
-        &self.revisions
-    }
-
-    #[must_use]
-    pub const fn item(&self) -> Option<&PersonalSecret> {
-        self.item.as_ref()
-    }
-
-    fn validate(&self) -> VaultResult<()> {
-        let head = self.revisions.last().ok_or_else(invalid)?;
-        if self.revisions.len() > 4096 || head.item_id.is_empty() || head.item_id.len() > 1024 {
-            return Err(invalid());
-        }
-        let mut parent = None;
-        let mut ids = std::collections::BTreeSet::new();
-        for revision in &self.revisions {
-            if revision.item_id != head.item_id
-                || revision.parent != parent
-                || !ids.insert(revision.id)
-            {
-                return Err(invalid());
-            }
-            parent = Some(revision.id);
-        }
-        match &self.item {
-            Some(item) if !head.deleted && item.id == head.item_id => {
-                item.encode().map_err(|_| invalid())?;
-            }
-            None if head.deleted => {}
-            _ => return Err(invalid()),
-        }
-        Ok(())
     }
 }
 
@@ -384,10 +322,12 @@ pub(crate) fn fuzz(bytes: &[u8]) {
 pub(crate) fn fuzz_seeds() -> Vec<Vec<u8>> {
     let identity = ReaderIdentity::synthetic();
     let group = Membership::new([7; 16], 1, vec![identity.public_keys().clone()]).unwrap();
-    let item = PersonalSecret::generic("Synthetic".into(), "synthetic-value".into());
-    let mut journal = crate::personal::revision::RevisionJournal::default();
-    journal.record(&item.id, false).unwrap();
-    let update = PersonalUpdate::new(journal.revisions().to_vec(), Some(item)).unwrap();
+    let item =
+        crate::personal::PersonalSecret::generic("Synthetic".into(), "synthetic-value".into());
+    let mut replica =
+        crate::personal::replica::PersonalReplica::new(&item.id, b"synthetic").unwrap();
+    replica.set(Some(&item), None).unwrap();
+    let update = replica.update().unwrap();
     vec![
         identity
             .seal_update(&update, &group)

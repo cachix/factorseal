@@ -46,8 +46,8 @@ impl MemberPublicKeys {
 /// Unlocked content authority. Seeds remain in locked, guarded allocations;
 /// expanded cryptographic keys are temporary library-owned values.
 pub struct ReaderIdentity {
-    pub(super) encryption_seed: LockedKey<64>,
-    pub(super) signing_seed: LockedKey<32>,
+    pub(crate) encryption_seed: LockedKey<64>,
+    pub(crate) signing_seed: LockedKey<32>,
     public: MemberPublicKeys,
 }
 
@@ -66,7 +66,7 @@ impl ReaderIdentity {
         Self::from_seeds(encryption_seed, signing_seed)
     }
 
-    fn from_seeds(
+    pub(crate) fn from_seeds(
         encryption_seed: LockedKey<64>,
         signing_seed: LockedKey<32>,
     ) -> VaultResult<Self> {
@@ -99,7 +99,8 @@ impl ReaderIdentity {
 
 /// A caller-authenticated membership epoch. `new` checks its structure, not its
 /// authority: callers must authenticate enrollment before trusting these keys.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "MembershipWire", into = "MembershipWire")]
 pub struct Membership {
     pub(super) group: [u8; 16],
     pub(super) epoch: u64,
@@ -141,5 +142,46 @@ impl Membership {
             .iter()
             .find(|member| member.id() == id)
             .ok_or_else(invalid)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipWire {
+    group: [u8; 16],
+    epoch: u64,
+    members: Vec<MemberPublicKeys>,
+}
+impl From<Membership> for MembershipWire {
+    fn from(value: Membership) -> Self {
+        Self {
+            group: value.group,
+            epoch: value.epoch,
+            members: value.members,
+        }
+    }
+}
+impl TryFrom<MembershipWire> for Membership {
+    type Error = crate::vault::VaultError;
+    fn try_from(value: MembershipWire) -> Result<Self, Self::Error> {
+        Self::new(value.group, value.epoch, value.members)
+    }
+}
+impl Membership {
+    #[must_use]
+    pub const fn group(&self) -> [u8; 16] {
+        self.group
+    }
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    #[must_use]
+    pub fn members(&self) -> &[MemberPublicKeys] {
+        &self.members
+    }
+    #[must_use]
+    pub(crate) const fn digest(&self) -> [u8; 32] {
+        self.digest
     }
 }

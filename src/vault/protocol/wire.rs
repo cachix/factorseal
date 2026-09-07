@@ -15,7 +15,7 @@ use crate::vault::{
 };
 
 // Version 12 adds revision-bound permission pages and logical keyring transfers.
-pub(super) const PROTOCOL_VERSION: u8 = 13;
+pub(super) const PROTOCOL_VERSION: u8 = 14;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].

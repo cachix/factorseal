@@ -30,7 +30,7 @@ enabled. `--dev` can reduce local build time for a smoke run.
 | archive | Encrypted and plaintext archive JSON, KDF limits and base64 components |
 | transfer | Bitwarden JSON, 1Password/KeePass CSV and personal records |
 | bootstrap | Length-prefixed inherited-pipe messages and typed bootstrap JSON |
-| personal_sync | Canonical signed packets, HPKE recipient framing, membership public keys and personal update payloads |
+| personal_sync | Canonical signed packets, HPKE recipient framing, membership public keys and complete native Automerge personal histories |
 
 Seeds include valid synthetic metadata, documents, encrypted snapshots and
 signed commits, so mutation reaches validation past the outer codec. Archive

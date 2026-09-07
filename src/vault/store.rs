@@ -54,6 +54,8 @@ pub(crate) fn fuzz_commit_seed() -> Vec<u8> {
 mod database;
 mod migration;
 mod worker;
+#[cfg(feature = "personal-sync")]
+pub(crate) use worker::{SyncCommand, SyncReply};
 
 pub(crate) use worker::StoredSecret;
 use worker::{Command, SecretValues, WorkerControl, request};
@@ -350,6 +352,16 @@ impl VaultStore {
             address: address.cloned(),
             before_seq,
             limit,
+            response,
+        })
+    }
+}
+
+#[cfg(feature = "personal-sync")]
+impl VaultStore {
+    pub(crate) fn personal_sync(&self, action: SyncCommand) -> VaultResult<SyncReply> {
+        request(&self.control.sender, |response| Command::PersonalSync {
+            action,
             response,
         })
     }

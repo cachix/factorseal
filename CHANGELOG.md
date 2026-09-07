@@ -4,20 +4,19 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
-- Add experimental personal-sync packet encryption and a durable ciphertext
-  spool behind the optional `personal-sync` feature. Packets wrap a fresh content
-  key for each reader using ML-KEM HPKE and authenticate the complete envelope
-  with ML-DSA. Storage and forwarding need only public membership information.
-  Vault-worker integration, persistent reader keys, pairing, and transport are
-  still pending; this does not enable live device sync.
-- Move personal items into the core model and address them by stable IDs.
-  Migrate existing items and their history together on unlock, preserve colliding
-  source IDs, and display titles separately from storage addresses. Personal
-  documents now atomically retain local causal revisions, pending publication
-  metadata, and deletion markers without keeping superseded password values.
-  This is the local sync foundation; pairing and network replication are not
-  implemented yet. Personal documents use format v4 and native IPC uses v13;
-  update the service, CLI, and Desktop together.
+- Use per-item Automerge documents for personal-secret replication. Preserve
+  concurrent values and edit/delete conflicts, resolve against observed heads,
+  and retain Automerge history across local snapshot projection. This history
+  includes old secret values; pruning is not implemented. Upgrade stable-ID
+  records and legacy deletion markers without changing device-specific data.
+- Connect experimental encrypted sync packets to the vault worker: protect
+  reader seeds under the installation root, persist exact outgoing packets
+  before spool delivery, and atomically apply received Automerge changes with
+  durable receipts. Storage/forwarding needs no reader keys. Host-management
+  APIs enforce the unseal lease; pairing, iroh, and device-status UI are pending.
+  Personal documents use format v5 and native IPC uses v14; update the service,
+  CLI, and Desktop together. The old experimental revision-packet suite is
+  rejected; packets now carry native Automerge changes.
 - Keep Secret Service search metadata encrypted. Sealed searches return
   `IsLocked` immediately and require manual Desktop unlock before lookup.
 - Store root/index, signing, document, password-derived and archive keys in
@@ -32,7 +31,7 @@ All notable changes to FactorSeal will be documented in this file.
   `LockedBytes`. Large archives require a sufficient OS memory-lock quota.
 
 The current formats are metadata v8, database schema v5, snapshot envelope v7,
-protected commit v6, document v3 (personal documents v4), record v2, and native protocol v13. Database
+protected commit v6, document v3 (personal documents v5), record v2, and native protocol v14. Database
 schema v3 is authenticated and migrated transactionally after unseal: current
 document heads are projected into the new record/history envelope, document
 keys are rotated, and a compact current-format commit chain is signed before

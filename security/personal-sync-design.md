@@ -4,18 +4,15 @@ Status: proposed architecture, 2026-09-07. No runtime behavior is implemented by
 this document. This supersedes the proposal to require unlocked vaults for all
 sync. Wire formats and key distribution require a separate protocol review.
 
-Implementation progress: the core personal model, ID-based storage, transactional
-legacy migration, and local causal revision/publication journal are implemented.
-The existing reserved namespace is enforced in the core storage boundary; it
-remains a LocalKeyring document with a personal format version. Current item
-values and pending revision references share one signed encrypted generation.
-This local journal has single-parent writer chains. The experimental
-`personal-sync` feature now provides signed portable envelopes, per-reader
-content-key wrapping, and a separate durable ciphertext spool. See the
-[implemented packet boundary](personal-sync-wire.md). These primitives are not
-connected to the vault worker yet. Persistent reader identities, authenticated
-membership enrollment, the multi-parent conflict model, spool handoff,
-acknowledgements, and network replication below remain to be implemented.
+Implementation progress: stable personal IDs and migration are implemented.
+Personal edits now use per-item Automerge documents for causality, tombstones,
+and explicit conflict resolution. The former custom revision journal is only
+read during upgrade; it is not the replication engine. The experimental
+`personal-sync` feature connects protected reader keys, signed encrypted
+Automerge packets, crash-safe spool publication, incoming application, and
+local status to the vault worker. See the [implemented boundary](personal-sync-wire.md).
+Authenticated enrollment/controller signatures, iroh/background integration,
+QR pairing, peer application acknowledgements, and UI remain future work.
 
 ## Product contract
 
@@ -39,17 +36,14 @@ collection, not the credential's type.
 
 ## Constraints found in the current code
 
-- `factorseal-desktop/src/runtime.rs` defines the personal namespace and stores
-  items through generic `Put` using the title as the address. Imports use generic
-  archive entry operations. All these mutation paths need a shared core boundary.
-- `src/transfer/personal.rs` already gives structured items a UUID. Move the
-  model into a core personal module and retain compatibility re-exports for
-  transfer callers. Transfer formats must not own the storage domain model.
+- Personal items live in the core model and are addressed by stable IDs through
+  the reserved namespace. Generic writes/imports share that storage boundary.
 - `src/vault/envelope.rs` binds snapshots to local vault/document/device IDs.
   Their DEKs are wrapped by installation authority. Copying snapshots does not
   make another installation able to decrypt them.
-- `src/vault/document.rs` deliberately persists fresh projections of current
-  records. Its Automerge operation history is not a reusable replication log.
+- `src/vault/document.rs` projects the outer local record/management document.
+  Replicated per-item Automerge histories are separate encrypted fields that
+  survive projection intact. Local reader keys and membership never enter them.
 - `src/vault/store/worker/mutation.rs` commits protected local generations in
   one transaction. Preserve this crash-consistency boundary.
 - `src/bin/factorseal/desktop_worker.rs` and Desktop's lifeline terminate the
@@ -131,25 +125,30 @@ valid IDs; detect duplicate IDs and retain ambiguous legacy/imported records
 with explicit mappings rather than silently coalescing them. Titles become
 editable display metadata. Two different items may share a title.
 
-Each edit is a complete item revision with an ID and its known parent revisions.
-Use an item-level multi-value register: a causally later revision supersedes its
-parents; concurrent revisions remain visible conflicts. V1 does not merge
-password fields independently or choose a winner by wall-clock time. Resolving
-a conflict writes a revision naming all conflicting heads as parents.
+Each personal item has an Automerge document whose root `value` property is an
+atomic encoded personal item or a null tombstone. Automerge supplies operation
+IDs, dependencies, heads, merging and concurrency detection. There is no custom
+revision DAG. Different items merge independently; V1 deliberately keeps one
+item atomic so it cannot silently combine parts of two password edits.
 
-A delete is a revision with a tombstone. Concurrent edit/delete is a conflict,
-not an automatic resurrection or silent data loss. Unrelated item edits commute.
-Imports, generic legacy writes, clears, and any supported expiry must route
-through these rules or be rejected for personal scope. Remote apply must not
-emit a second local edit and cause replication loops.
+Concurrent distinct values from Automerge's `get_all` are explicit conflicts.
+Ordinary reads/writes reject an unresolved item; the trusted management host
+can inspect all values and resolve against the exact current Automerge heads.
+Assigning the chosen item/tombstone creates an Automerge change that supersedes
+all observed candidates. A stale decision is rejected if another head arrived.
+Null assignments preserve edit/delete conflicts; deleting the map property
+would have different CRDT semantics and is not used.
 
-Existing local history remains value-free. New encrypted revision payloads are
-temporary delivery/conflict state, not an unlimited password-history feature.
+Automerge history retains previous secret values, including deleted values.
+Local audit history remains value-free, but replication history does not. A new
+member currently receives retained history as well as current values. Password
+history deletion/cryptographic erasure is not promised. Storage limits fail
+closed until an explicit rebootstrap/checkpoint design is implemented.
 
 ## Crash-safe publishing and applying
 
 On a local edit, the worker creates the signed encrypted object and commits the
-local item, revision metadata, and durable outbox together in the vault database.
+local item, Automerge history, and pending publication marker together in the vault database.
 Bind outbox object digests and applied frontier into protected local state;
 unauthenticated SQL bookkeeping cannot become sync authority.
 
@@ -232,8 +231,9 @@ ciphertext and retained recipient keys.
 
 ## Retention, restore, and unavailable peers
 
-Keep unresolved conflict payloads and unacknowledged revisions. Compact resolved
-payloads only behind a signed checkpoint with coverage acknowledged as applied
+Keep Automerge history and unacknowledged ciphertext. A future history-pruning
+protocol must explicitly rebootstrap the Automerge documents, because ordinary
+Automerge snapshot compaction preserves their change history. Require a signed checkpoint with coverage acknowledged as applied
 by all active readers. The checkpoint retains current heads, deletion/causal
 summaries, and enough authenticated state to reject old operations. A locked
 storage node cannot create or semantically approve it.
@@ -273,7 +273,7 @@ showing names would require a plaintext cache.
 2. Specify canonical envelopes, recipient-encryption suite, membership chain,
    frontiers, checkpoint rules, and bounds. Review the crypto/profile changes
    before treating the wire protocol as stable.
-3. Implement the revision engine and protected atomic outbox/apply path. Test
+3. Use Automerge for the replicated item histories and protected atomic outbox/apply path. Test
    convergence under permutations, conflicts, delete/edit, replay, and crashes.
 4. Implement the ciphertext agent and storage contract using a local persistent
    test node, then iroh. Prove locked B can durably carry A's update to C after
