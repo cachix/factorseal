@@ -38,7 +38,7 @@ pub(crate) enum SyncCommand {
 pub(crate) enum SyncReply {
     Identity(MemberPublicKeys),
     Group(VerifiedGroup),
-    PairingStatus(crate::personal::sync::PairingStatus),
+    PairingStatus(Box<crate::personal::sync::PairingStatus>),
     Invitation(PairingInvitation),
     PairingRequest(PairingRequest),
     Membership(Membership),
@@ -78,8 +78,20 @@ impl StoreWorker {
         let vault = self.device.device_vault_id();
         let reply = match command {
             SyncCommand::PairingStatus => {
-                return Ok(SyncReply::PairingStatus(
+                return Ok(SyncReply::PairingStatus(Box::new(
                     crate::personal::sync::PairingStatus {
+                        target: state
+                            .pairing
+                            .joining
+                            .as_ref()
+                            .map(|(_, _, pinned)| pinned.verified())
+                            .transpose()?,
+                        introduction: state
+                            .pairing
+                            .introduction
+                            .as_ref()
+                            .map(crate::personal::sync::pairing::PinnedGroup::verified)
+                            .transpose()?,
                         invitation: state.pairing.invitation.clone().or_else(|| {
                             state
                                 .pairing
@@ -95,7 +107,7 @@ impl StoreWorker {
                             .or_else(|| state.pairing.staged.clone()),
                         joining: state.pairing.joining.is_some(),
                     },
-                ));
+                )));
             }
             SyncCommand::Group => {
                 return state
@@ -155,7 +167,10 @@ impl StoreWorker {
                 SyncReply::Identity(identity.public_keys().clone())
             }
             SyncCommand::Configure(membership) => {
-                if state.pairing.group.is_some() || state.pairing.joining.is_some() {
+                if state.pairing.group.is_some()
+                    || state.pairing.joining.is_some()
+                    || state.pairing.introduction.is_some()
+                {
                     return Err(VaultError::Protocol(
                         "signed membership is pinned; raw configuration is disabled".into(),
                     ));

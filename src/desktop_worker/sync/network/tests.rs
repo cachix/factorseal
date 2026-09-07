@@ -3,7 +3,7 @@ use crate::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret};
 use crate::vault::{Provenance, VaultStore};
 use crate::{DocumentKind, SecretAddress, UnsealLeasePolicy, Vault, VaultService};
 struct Device {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     service: Arc<VaultService>,
     inner: Arc<Inner>,
     task: tokio::task::JoinHandle<()>,
@@ -58,7 +58,7 @@ impl Device {
         });
         let task = tokio::spawn(Arc::clone(&inner).listen());
         Self {
-            _root: root,
+            root,
             service,
             inner,
             task,
@@ -71,6 +71,10 @@ impl Device {
         );
     }
     async fn pair(&self, other: &Self) {
+        let other_before = other
+            .inner
+            .group()
+            .map_or(1, |group| group.membership().members().len());
         let before = self
             .inner
             .group()
@@ -121,9 +125,23 @@ impl Device {
                 .unwrap()
         );
         assert_eq!(
-            self.inner.group().unwrap().membership().members().len(),
+            self.inner
+                .group()
+                .map_or(1, |group| group.membership().members().len()),
             before
         );
+        assert!(
+            self.inner
+                .action(Action::Approve(request.id().unwrap()))
+                .await
+                .is_err()
+        );
+        other
+            .inner
+            .action(Action::ApproveJoin(request.id().unwrap()))
+            .await
+            .unwrap();
+        self.inner.local().await.unwrap();
         self.inner
             .action(Action::Approve(request.id().unwrap()))
             .await
@@ -132,7 +150,7 @@ impl Device {
         assert!(!other.inner.view.lock().unwrap().state.joining);
         assert_eq!(
             other.service.personal_sync_status().unwrap().readers,
-            before + 1
+            before + other_before
         );
     }
 }
@@ -238,16 +256,25 @@ async fn stolen_request_cannot_be_staged_by_another_transport_endpoint() {
         .await
         .is_err()
     );
+    let introduction = a
+        .inner
+        .view
+        .lock()
+        .unwrap()
+        .state
+        .introduction
+        .clone()
+        .unwrap();
     assert!(
         rpc(
             &c.inner.endpoint,
             a.inner.endpoint.addr(),
-            Request::Update(PublicGroup::new(&a.inner.group().unwrap()).unwrap())
+            Request::Update(introduction)
         )
         .await
         .is_err()
     );
-    assert_eq!(a.service.personal_sync_status().unwrap().readers, 1);
+    assert_eq!(a.service.personal_sync_status().unwrap().readers, 0);
     a.inner.action(Action::Cancel).await.unwrap();
     assert!(b.inner.local().await.is_err());
 }
@@ -277,4 +304,86 @@ async fn stale_sealed_device_accepts_enrollment_from_new_peer_after_controller_d
     assert_eq!(public.verified().unwrap().membership().members().len(), 3);
     assert_eq!(b.inner.group().unwrap().membership().members().len(), 3);
     assert!(b.service.personal_sync_status().is_err());
+}
+
+#[tokio::test]
+async fn populated_groups_merge_from_non_founders_and_offline_peers_catch_up() {
+    let first = PersonalSecret::generic("Same title".into(), "First group's secret".into());
+    let second = PersonalSecret::generic("Same title".into(), "Second group's secret".into());
+    let a = Device::new(Some(&first)).await;
+    let b = Device::new(Some(&second)).await;
+    let c = Device::new(None).await;
+    let d = Device::new(None).await;
+    for one in [&a, &b, &c, &d] {
+        for two in [&a, &b, &c, &d] {
+            one.know(two);
+        }
+    }
+    a.pair(&c).await;
+    b.pair(&d).await;
+    c.inner.exchange().await;
+    c.inner.local().await.unwrap();
+    d.inner.exchange().await;
+    d.inner.local().await.unwrap();
+    a.service.seal().unwrap();
+    b.service.seal().unwrap();
+    // Neither approving device founded its original group.
+    c.pair(&d).await;
+    c.inner.exchange().await;
+    d.inner.exchange().await;
+    c.inner.local().await.unwrap();
+    d.inner.local().await.unwrap();
+    for device in [&c, &d] {
+        for item in [&first, &second] {
+            assert_eq!(
+                device
+                    .service
+                    .personal_sync_conflicts(&item.id)
+                    .unwrap()
+                    .values
+                    .iter()
+                    .map(Option::as_ref)
+                    .collect::<Vec<_>>(),
+                vec![Some(item)]
+            );
+        }
+    }
+    for device in [&a, &b] {
+        assert_eq!(
+            device.inner.group().unwrap().membership().members().len(),
+            4
+        );
+        assert!(device.service.personal_sync_status().is_err());
+        let public = device.inner.group().unwrap();
+        let path = device.root.path().join("vault");
+        let reopened = VaultService::open(
+            &path,
+            Vault::unseal_for_test(&path).unwrap(),
+            100,
+            UnsealLeasePolicy::default(),
+        )
+        .unwrap();
+        reopened.accept_personal_sync_group(public).unwrap();
+        assert_eq!(reopened.personal_sync_status().unwrap().readers, 4);
+        reopened.seal().unwrap();
+    }
+}
+#[tokio::test]
+async fn introduction_cancellation_keeps_membership_unconfigured_and_can_change_direction() {
+    let a = Device::new(None).await;
+    let b = Device::new(None).await;
+    a.know(&b);
+    b.know(&a);
+    a.inner.action(Action::Invite("A".into())).await.unwrap();
+    assert_eq!(a.service.personal_sync_status().unwrap().readers, 0);
+    a.inner.action(Action::Cancel).await.unwrap();
+    assert!(a.inner.group().is_none());
+    assert!(
+        a.service
+            .personal_sync_pairing_status()
+            .unwrap()
+            .introduction
+            .is_none()
+    );
+    b.pair(&a).await;
 }

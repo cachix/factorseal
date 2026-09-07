@@ -63,6 +63,13 @@ impl SecretDocument {
             return Err(VaultError::Protocol("personal sync state is full".into()));
         }
         self.document
+            .put(
+                ROOT,
+                super::FORMAT_VERSION_KEY,
+                super::PERSONAL_FORMAT_VERSION,
+            )
+            .map_err(automerge_error)?;
+        self.document
             .put(ROOT, "personal-layout", 1_u64)
             .map_err(automerge_error)?;
         self.document

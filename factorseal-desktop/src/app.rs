@@ -594,7 +594,7 @@ struct DesktopView {
     devices: factorseal::desktop_worker::sync::network::View,
     devices_busy: bool,
     devices_loaded: bool,
-    device_pairing: Option<bool>,
+    device_pairing: Option<devices::PairingScreen>,
     devices_notice: Option<String>,
     device_name: gpui::Entity<InputState>,
     pairing_ticket: gpui::Entity<SecretInputState>,
@@ -2793,14 +2793,7 @@ impl DesktopView {
                     row.child(
                         Button::new("vault-devices")
                             .small()
-                            .label(format!(
-                                "Devices · {}",
-                                self.devices
-                                    .devices
-                                    .iter()
-                                    .filter(|device| device.reader.is_some())
-                                    .count()
-                            ))
+                            .label("Devices")
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.select_vault_item(VaultSelection::Devices, cx);
                             })),

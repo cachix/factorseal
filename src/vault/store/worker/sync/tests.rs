@@ -469,11 +469,15 @@ fn pairing_survives_restart_and_pins_membership_before_publication() {
             .personal_sync(SyncCommand::Pairing(P::Accept(first)))
             .is_err()
     );
-    assert!(
-        b.store
-            .personal_sync(SyncCommand::Pairing(P::Invite))
-            .is_err()
-    );
+    let SyncReply::Invitation(member_invitation) = b
+        .store
+        .personal_sync(SyncCommand::Pairing(P::Invite))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(member_invitation.endpoint(), [2; 32]);
+    assert_eq!(member_invitation.controller(), approved.controller());
     let after = a.prepare();
     assert_ne!(before, after);
     assert!(
@@ -563,4 +567,116 @@ fn pairing_requires_pending_capability_and_cancel_invalidates_it() {
             .personal_sync(SyncCommand::Pairing(P::Accept(group)))
             .is_err()
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn bilateral_merge_approval_survives_restart_and_cancel_preserves_groups() {
+    use super::pairing::PairingCommand as P;
+    let mut a = Device::new();
+    let mut b = Device::new();
+    let initialize = |device: &Device, endpoint| {
+        let SyncReply::Group(group) = device
+            .store
+            .personal_sync(SyncCommand::Pairing(P::Initialize {
+                endpoint,
+                name: "Existing device".into(),
+            }))
+            .unwrap()
+        else {
+            panic!()
+        };
+        group
+    };
+    let ga = initialize(&a, [1; 32]);
+    let gb = initialize(&b, [2; 32]);
+    for cancel in [true, false] {
+        let SyncReply::Invitation(invitation) = a
+            .store
+            .personal_sync(SyncCommand::Pairing(P::Invite))
+            .unwrap()
+        else {
+            panic!()
+        };
+        let SyncReply::PairingRequest(request) = b
+            .store
+            .personal_sync(SyncCommand::Pairing(P::Join {
+                invitation,
+                group: ga.clone(),
+                endpoint: [2; 32],
+                name: "Existing device".into(),
+            }))
+            .unwrap()
+        else {
+            panic!()
+        };
+        let id = request.id().unwrap();
+        let code = request.verification_code().unwrap();
+        a.store
+            .personal_sync(SyncCommand::Pairing(P::Stage(request)))
+            .unwrap();
+        assert!(
+            a.store
+                .personal_sync(SyncCommand::Pairing(P::Approve(id)))
+                .is_err()
+        );
+        if cancel {
+            for device in [&a, &b] {
+                device
+                    .store
+                    .personal_sync(SyncCommand::Pairing(P::Cancel))
+                    .unwrap();
+            }
+            a.restart();
+            b.restart();
+            for (device, old) in [(&a, &ga), (&b, &gb)] {
+                let SyncReply::Group(group) =
+                    device.store.personal_sync(SyncCommand::Group).unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(group.digest().unwrap(), old.digest().unwrap());
+            }
+            continue;
+        }
+        assert!(
+            b.store
+                .personal_sync(SyncCommand::Pairing(P::ApproveJoin([0; 32])))
+                .is_err()
+        );
+        b.store
+            .personal_sync(SyncCommand::Pairing(P::ApproveJoin(id)))
+            .unwrap();
+        b.restart();
+        let SyncReply::PairingStatus(status) =
+            b.store.personal_sync(SyncCommand::PairingStatus).unwrap()
+        else {
+            panic!()
+        };
+        let approved_request = status.request.unwrap();
+        assert_eq!(approved_request.id().unwrap(), id);
+        assert_eq!(approved_request.verification_code().unwrap(), code);
+        assert!(!approved_request.needs_merge_approval());
+        a.store
+            .personal_sync(SyncCommand::Pairing(P::Stage(approved_request)))
+            .unwrap();
+        a.restart();
+        let SyncReply::Group(merged) = a
+            .store
+            .personal_sync(SyncCommand::Pairing(P::Approve(id)))
+            .unwrap()
+        else {
+            panic!()
+        };
+        b.store
+            .personal_sync(SyncCommand::Pairing(P::Accept(merged.clone())))
+            .unwrap();
+        b.restart();
+        let SyncReply::Group(restored) = b.store.personal_sync(SyncCommand::Group).unwrap() else {
+            panic!()
+        };
+        assert_eq!(restored.digest().unwrap(), merged.digest().unwrap());
+        ga.accept_extension(&restored).unwrap();
+        gb.accept_extension(&restored).unwrap();
+    }
 }

@@ -30,6 +30,10 @@ pub enum Command {
         name: String,
     },
     Invite,
+    Offer {
+        endpoint: [u8; 32],
+        name: String,
+    },
     Join {
         invitation: PairingInvitation,
         group: PublicGroup,
@@ -41,6 +45,7 @@ pub enum Command {
         peer: [u8; 32],
     },
     Approve([u8; 32]),
+    ApproveJoin([u8; 32]),
     Accept(PublicGroup),
     Cancel,
     Prepare,
@@ -50,6 +55,8 @@ pub enum Command {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct State {
     pub group: Option<PublicGroup>,
+    pub introduction: Option<PublicGroup>,
+    pub target: Option<PublicGroup>,
     pub invitation: Option<PairingInvitation>,
     pub request: Option<PairingRequest>,
     pub joining: bool,
@@ -77,6 +84,12 @@ impl Command {
                         .as_ref()
                         .map(PublicGroup::new)
                         .transpose()?,
+                    target: pairing.target.as_ref().map(PublicGroup::new).transpose()?,
+                    introduction: pairing
+                        .introduction
+                        .as_ref()
+                        .map(PublicGroup::new)
+                        .transpose()?,
                     invitation: pairing.invitation,
                     request: pairing.request,
                     joining: pairing.joining,
@@ -88,6 +101,10 @@ impl Command {
             Self::Initialize { endpoint, name } => {
                 service.initialize_personal_sync(endpoint, name)?
             }
+            Self::Offer { endpoint, name } => {
+                service.offer_personal_sync_connection(endpoint, name)?;
+                return Self::State.execute(service);
+            }
             Self::Invite => {
                 service.invite_personal_sync_device()?;
                 return Self::State.execute(service);
@@ -98,6 +115,14 @@ impl Command {
                 endpoint,
                 name,
             } => {
+                if service.personal_sync_group().is_err()
+                    && service
+                        .personal_sync_pairing_status()?
+                        .introduction
+                        .is_none()
+                {
+                    service.offer_personal_sync_connection(endpoint, name.clone())?;
+                }
                 service.request_personal_sync_pairing(
                     invitation,
                     group.verified()?,
@@ -109,6 +134,10 @@ impl Command {
             Self::Stage { request, peer } => {
                 service.stage_personal_sync_pairing(request, peer)?;
                 return Ok(Reply::Done);
+            }
+            Self::ApproveJoin(id) => {
+                service.approve_personal_sync_join(id)?;
+                return Self::State.execute(service);
             }
             Self::Approve(id) => service.approve_personal_sync_pairing(id)?,
             Self::Accept(group) => service.accept_personal_sync_group(group.verified()?)?,

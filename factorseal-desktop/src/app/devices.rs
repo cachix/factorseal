@@ -8,6 +8,12 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, StyledExt as _, button::ButtonVariants as _,
 };
+#[derive(Clone, Copy)]
+pub(super) enum PairingScreen {
+    Choose,
+    Show,
+    Paste,
+}
 impl DesktopView {
     pub(super) fn poll_devices(runtime: Arc<DesktopRuntime>, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| {
@@ -22,6 +28,12 @@ impl DesktopView {
                             if !matches!(view.snapshot, Snapshot::Unsealed { .. }) {
                                 devices.state.invitation = None;
                                 devices.state.request = None;
+                            }
+                            if view.devices.state.joining
+                                && !devices.state.joining
+                                && devices.state.group.is_some()
+                            {
+                                view.device_pairing = None;
                             }
                             view.devices = devices;
                             cx.notify();
@@ -47,6 +59,7 @@ impl DesktopView {
         cx.notify();
         let runtime = Arc::clone(&self.runtime);
         let refresh = matches!(action, Action::Refresh);
+        let approved = matches!(action, Action::Approve(_));
         cx.spawn(async move |view, cx| {
             let result = smol::unblock(move || {
                 let devices = runtime.sync_manager()?.action(action)?;
@@ -63,6 +76,9 @@ impl DesktopView {
                         if !matches!(view.snapshot, Snapshot::Unsealed { .. }) {
                             devices.state.invitation = None;
                             devices.state.request = None;
+                        }
+                        if approved {
+                            view.device_pairing = None;
                         }
                         view.devices = devices;
                     }
@@ -102,76 +118,157 @@ impl DesktopView {
                         })))))
     }
     #[allow(clippy::too_many_lines)]
-    fn render_device_pairing(&self, join: bool, cx: &mut Context<Self>) -> Div {
+    fn render_device_pairing(&self, screen: PairingScreen, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let state = &self.devices.state;
         let busy = self.devices_busy;
         let mut panel = v_flex().gap_4().w_full();
-        if join && !self.devices.devices.is_empty() {
-            panel = panel.child(div().child("This device already belongs to a sync group."))
-                .child(div().text_sm().text_color(theme.muted_foreground).child("To connect a new device, create an invitation here and paste its ticket on the new device. Joining two existing sync groups is not supported."));
-        }
-        if !join && state.invitation.is_none() && state.request.is_none() {
-            panel = panel.child(div().text_sm().child("Create a temporary ticket to connect another device. Personal secrets are shared only after you compare the verification codes and approve the device."))
-                .when(self.devices.devices.is_empty(), |panel| panel.child(div().text_sm().text_color(theme.muted_foreground).child("This starts a new sync group. If another device already has your group, close this screen and choose Join with a ticket instead.")))
-                .child(Button::new("create-device-invitation").primary().label(if busy { "Creating invitation…" } else { "Create invitation" }).disabled(busy)
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        let name = view.device_name.read(cx).value().trim().to_owned();
-                        view.device_action(Action::Invite(name), cx);
-                    })));
-        }
-        if let Some(invitation) = &state.invitation
-            && !state.joining
-            && !join
-        {
-            if let Ok(modules) = invitation.qr_modules() {
-                panel = panel.child(qr(modules));
-            }
-            panel=panel.child(div().text_sm().child("On the other device, open Devices → Join with a ticket and paste the copied ticket. You can also use an external QR reader. This app does not yet include a camera scanner. Tickets expire after five minutes. Close hides this screen; Cancel pairing revokes the ticket."))
-                .child(Button::new("copy-pairing-ticket").label("Copy ticket").on_click(cx.listener(|view,_,_,cx|{
-                    if let Some(invitation)=&view.devices.state.invitation && let Ok(ticket)=invitation.ticket() {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(ticket.to_string()));
-                    }
-                })));
-        }
+        let title = if state.request.is_some() {
+            "Review connection"
+        } else {
+            "Connect a device"
+        };
         if let Some(request) = &state.request {
-            panel=panel.child(div().child(format!("New device: {}",request.name())))
-                .child(div().text_xl().child(request.verification_code().unwrap_or_default()))
-                .child(div().text_sm().child(if state.joining {"Compare this code with the inviting device. Approve there only if both codes match."} else {"Compare this code on both devices before approving. Approved devices receive your personal secrets and retained history."}));
-            if !state.joining
-                && let Ok(id) = request.id()
-            {
-                panel = panel.child(
-                    Button::new("approve-device")
-                        .label("Codes match — approve device")
-                        .primary()
-                        .disabled(busy)
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.device_action(Action::Approve(id), cx);
-                        })),
-                );
+            let target = if state.joining {
+                state.target.as_ref()
+            } else {
+                state.group.as_ref().or(state.introduction.as_ref())
+            };
+            let origin = request.origin();
+            let target = target.and_then(|group| group.verified().ok());
+            if let (Ok(origin), Some(target)) = (origin, target) {
+                let mut devices = target.transports().to_vec();
+                if let Some(origin) = origin {
+                    devices.extend_from_slice(origin.transports());
+                } else {
+                    devices.push(factorseal::personal::sync::TransportBinding {
+                        endpoint: request.endpoint(),
+                        reader: None,
+                        name: request.name().into(),
+                    });
+                }
+                devices.sort_by_key(|device| device.endpoint);
+                devices.dedup_by_key(|device| device.endpoint);
+                panel = panel.child(div().font_semibold().child(format!("Connect these {} devices?", devices.len())))
+                    .child(div().text_sm().child("Personal secrets and retained history from both vaults will be shared with all reader devices below. Device-specific secrets stay local."));
+                let mut list = v_flex().rounded_lg().border_1().border_color(theme.border);
+                for device in devices {
+                    list = list.child(
+                        h_flex()
+                            .px_4()
+                            .py_2()
+                            .gap_2()
+                            .child(div().flex_1().child(device.name))
+                            .when(device.endpoint == self.devices.endpoint, |row| {
+                                row.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("This device"),
+                                )
+                            }),
+                    );
+                }
+                panel = panel
+                    .child(list)
+                    .child(
+                        div()
+                            .text_sm()
+                            .child("Compare this code on both devices before approving."),
+                    )
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_semibold()
+                            .child(request.verification_code().unwrap_or_default()),
+                    );
+                if let Ok(id) = request.id() {
+                    let waiting = !state.joining && request.needs_merge_approval();
+                    let approved_here = state.joining && !request.needs_merge_approval();
+                    panel = panel.child(
+                        Button::new("approve-connection")
+                            .primary()
+                            .label(if waiting {
+                                "Waiting for other device’s approval"
+                            } else if approved_here {
+                                "Approved here — waiting for other device"
+                            } else {
+                                "Codes match — connect these devices"
+                            })
+                            .disabled(busy || waiting || approved_here)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.device_action(
+                                    if view.devices.state.joining {
+                                        Action::ApproveJoin(id)
+                                    } else {
+                                        Action::Approve(id)
+                                    },
+                                    cx,
+                                );
+                            })),
+                    );
+                }
+            } else {
+                panel = panel.child(div().text_color(theme.danger).child(
+                    "Could not verify the devices in this connection. Cancel and try again.",
+                ));
             }
-        }
-        if join && self.devices.devices.is_empty() && !state.joining {
-            panel = panel
-                .child(div().text_sm().child("On the other device, choose Invite another device → Create invitation → Copy ticket. Paste it below."))
-                .child(div().text_sm().font_medium().child("Pairing ticket"))
-                .child(div().text_xs().text_color(theme.muted_foreground).child("Camera scanning isn’t available in this app yet. An external QR reader can copy the ticket for you."))
-                .child(self.pairing_ticket.clone())
-                .child(
-                    Button::new("join-device")
-                        .label("Use pairing ticket")
-                        .disabled(busy)
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            let ticket = zeroize::Zeroizing::new(
-                                view.pairing_ticket.read(cx).value().trim().to_string(),
-                            );
-                            let name = view.device_name.read(cx).value().trim().to_string();
-                            view.pairing_ticket.update(cx, SecretInputState::clear);
-                            let _ = window;
-                            view.device_action(Action::Join { ticket, name }, cx);
-                        })),
-                );
+        } else {
+            match screen {
+                PairingScreen::Choose => {
+                    panel = panel.child(div().text_sm().child("Start on either device. Connecting combines the personal secrets of every device you approve."))
+                        .child(Button::new("choose-show-code").primary().label("Show pairing code")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.device_pairing = Some(PairingScreen::Show);
+                                let name = view.device_name.read(cx).value().trim().to_owned();
+                                view.device_action(Action::Invite(name), cx);
+                            })))
+                        .child(Button::new("choose-paste-code").label("Paste pairing ticket")
+                            .on_click(cx.listener(|view, _, _, cx| { view.device_pairing = Some(PairingScreen::Paste); cx.notify(); })));
+                }
+                PairingScreen::Show => {
+                    if let Some(invitation) = &state.invitation {
+                        if let Ok(modules) = invitation.qr_modules() {
+                            panel = panel.child(qr(modules));
+                        }
+                        panel = panel.child(div().text_sm().child("On the other device, open Connect a device → Paste pairing ticket. This code expires after five minutes."))
+                            .child(Button::new("copy-pairing-ticket").label("Copy ticket").on_click(cx.listener(|view, _, _, cx| {
+                                if let Some(invitation) = &view.devices.state.invitation && let Ok(ticket) = invitation.ticket() {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(ticket.to_string()));
+                                }
+                            })));
+                    } else {
+                        panel = panel.child(
+                            Button::new("retry-pairing-code")
+                                .label(if busy {
+                                    "Creating code…"
+                                } else {
+                                    "Create pairing code"
+                                })
+                                .disabled(busy)
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    let name = view.device_name.read(cx).value().trim().to_owned();
+                                    view.device_action(Action::Invite(name), cx);
+                                })),
+                        );
+                    }
+                }
+                PairingScreen::Paste => {
+                    panel = panel.child(div().text_sm().child("Paste the ticket copied from the other device. You’ll review all affected devices before anything is connected."))
+                        .child(div().font_medium().child("Pairing ticket"))
+                        .child(self.pairing_ticket.clone())
+                        .child(Button::new("use-pairing-ticket").primary().label("Review connection").disabled(busy)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                let ticket = zeroize::Zeroizing::new(view.pairing_ticket.read(cx).value().trim().to_owned());
+                                let name = view.device_name.read(cx).value().trim().to_owned();
+                                view.pairing_ticket.update(cx, SecretInputState::clear);
+                                view.device_action(Action::Join { ticket, name }, cx);
+                            })));
+                }
+            }
+            panel = panel.child(div().text_xs().text_color(theme.muted_foreground).child(
+                "Camera scanning is not built in yet. An external QR reader can copy the ticket.",
+            ));
         }
         if let Some(error) = self.devices_notice.as_ref().or(self.devices.error.as_ref()) {
             panel = panel.child(
@@ -181,6 +278,17 @@ impl DesktopView {
                     .child(error.clone()),
             );
         }
+        let approved_here = state.joining
+            && state
+                .request
+                .as_ref()
+                .is_some_and(|request| !request.needs_merge_approval());
+        if approved_here {
+            panel =
+                panel.child(div().text_sm().text_color(theme.muted_foreground).child(
+                    "Your approval has been sent. Closing this screen does not withdraw it.",
+                ));
+        }
         v_flex()
             .size_full()
             .gap_4()
@@ -189,34 +297,35 @@ impl DesktopView {
                     .w_full()
                     .justify_between()
                     .items_center()
-                    .child(div().text_lg().font_semibold().child(if join {
-                        "Join with a ticket"
-                    } else {
-                        "Invite another device"
-                    }))
-                    .when(
-                        state.invitation.is_some() || state.request.is_some(),
-                        |header| {
-                            header.child(
-                                Button::new("cancel-device-pairing")
-                                    .label("Cancel pairing")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.device_action(Action::Cancel, cx);
-                                        view.device_pairing = None;
-                                        view.pairing_ticket.update(cx, SecretInputState::clear);
-                                        cx.notify();
-                                    })),
+                    .child(div().text_lg().font_semibold().child(title))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .when(
+                                state.invitation.is_some() || state.request.is_some(),
+                                |row| {
+                                    row.child(
+                                        Button::new("cancel-device-pairing")
+                                            .label("Cancel connection")
+                                            .disabled(busy || approved_here)
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.device_action(Action::Cancel, cx);
+                                                view.device_pairing = None;
+                                                view.pairing_ticket
+                                                    .update(cx, SecretInputState::clear);
+                                                cx.notify();
+                                            })),
+                                    )
+                                },
                             )
-                        },
-                    )
-                    .child(Button::new("close-device-pairing").label("Close").on_click(
-                        cx.listener(|view, _, _, cx| {
-                            view.device_pairing = None;
-                            view.pairing_ticket.update(cx, SecretInputState::clear);
-                            cx.notify();
-                        }),
-                    )),
+                            .child(Button::new("close-device-pairing").label("Close").on_click(
+                                cx.listener(|view, _, _, cx| {
+                                    view.device_pairing = None;
+                                    view.pairing_ticket.update(cx, SecretInputState::clear);
+                                    cx.notify();
+                                }),
+                            )),
+                    ),
             )
             .child(div().flex_1().min_h_0().child(panel.overflow_y_scrollbar()))
     }
@@ -231,11 +340,6 @@ impl DesktopView {
         }
         let busy = self.devices_busy;
         let state = &self.devices.state;
-        let can_invite = state.group.as_ref().is_none_or(|group| {
-            self.devices.devices.iter().any(|device| {
-                device.endpoint == self.devices.endpoint && device.reader == Some(group.controller)
-            })
-        });
         if self.devices.devices.is_empty()
             && !state.joining
             && crate::appearance::current(cx).device_name.is_none()
@@ -259,24 +363,21 @@ impl DesktopView {
             h_flex()
                 .gap_2()
                 .child(
-                    Button::new("invite-device")
-                        .label(if state.invitation.is_some() || state.request.is_some() {
-                            "View pairing"
-                        } else {
-                            "Invite another device"
-                        })
+                    Button::new("connect-device")
                         .primary()
-                        .disabled(!can_invite && !state.joining)
+                        .label(if state.request.is_some() || state.invitation.is_some() {
+                            "View connection"
+                        } else {
+                            "Connect a device"
+                        })
                         .on_click(cx.listener(|view, _, _, cx| {
-                            view.device_pairing = Some(view.devices.state.joining);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("open-join-device")
-                        .label("Join with a ticket")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.device_pairing = Some(true);
+                            view.device_pairing = Some(if view.devices.state.joining {
+                                PairingScreen::Paste
+                            } else if view.devices.state.invitation.is_some() {
+                                PairingScreen::Show
+                            } else {
+                                PairingScreen::Choose
+                            });
                             cx.notify();
                         })),
                 )
@@ -290,11 +391,19 @@ impl DesktopView {
                 ),
         );
         if self.devices.devices.is_empty() {
-            panel = panel.child(v_flex().gap_2().p_6().rounded_lg()
-                .border_1().border_color(theme.border)
-                .child(div().font_semibold().child("Connect your first device"))
-                .child(div().text_sm().text_color(theme.muted_foreground)
-                    .child("Pair another device to start syncing, or join using a ticket from an existing device.")));
+            panel =
+                panel.child(
+                    v_flex()
+                        .gap_2()
+                        .p_6()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border)
+                        .child(div().font_semibold().child("Connect your first device"))
+                        .child(div().text_sm().text_color(theme.muted_foreground).child(
+                            "Connect another device to start syncing your personal secrets.",
+                        )),
+                );
         } else {
             let mut table = v_flex()
                 .w_full()
@@ -324,43 +433,23 @@ impl DesktopView {
                         .border_t_1()
                         .border_color(theme.border)
                         .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(div().font_medium().child(device.name.clone()))
-                                        .when(local, |row| {
-                                            row.child(
-                                                div()
-                                                    .px_2()
-                                                    .py_1()
-                                                    .rounded_md()
-                                                    .bg(theme.secondary)
-                                                    .text_xs()
-                                                    .child("This device"),
-                                            )
-                                        }),
-                                )
-                                .when(
-                                    device.reader.is_some_and(|reader| {
-                                        state
-                                            .group
-                                            .as_ref()
-                                            .is_some_and(|group| group.controller == reader)
-                                    }),
-                                    |row| {
+                            v_flex().flex_1().min_w_0().gap_1().child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().font_medium().child(device.name.clone()))
+                                    .when(local, |row| {
                                         row.child(
                                             div()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_md()
+                                                .bg(theme.secondary)
                                                 .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("Manages pairing"),
+                                                .child("This device"),
                                         )
-                                    },
-                                ),
+                                    }),
+                            ),
                         )
                         .child(
                             div()
@@ -375,23 +464,19 @@ impl DesktopView {
                         ),
                 );
             }
-            panel = panel.child(table);
-        }
-        if !can_invite {
-            let owner = state
-                .group
-                .as_ref()
-                .and_then(|group| {
-                    self.devices
-                        .devices
-                        .iter()
-                        .find(|device| device.reader == Some(group.controller))
-                })
-                .map_or("the inviting device", |device| device.name.as_str());
-            panel = panel.child(
-                div()
-                    .text_sm()
-                    .child(format!("Add more devices from {owner}.")),
+            panel = panel.child(table).when(
+                self.devices
+                    .devices
+                    .iter()
+                    .all(|device| device.endpoint == self.devices.endpoint),
+                |panel| {
+                    panel.child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("No other devices connected."),
+                    )
+                },
             );
         }
         if let Some(error) = self.devices_notice.as_ref().or(self.devices.error.as_ref()) {

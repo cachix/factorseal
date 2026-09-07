@@ -38,6 +38,7 @@ pub enum Action {
         name: String,
     },
     Approve([u8; 32]),
+    ApproveJoin([u8; 32]),
     Cancel,
 }
 #[derive(Serialize, Deserialize)]
@@ -236,25 +237,18 @@ impl Inner {
         match action {
             Action::Refresh => {}
             Action::Invite(name) => {
-                let Reply::State(state) = self.host(Command::State).await? else {
-                    return Err("unexpected worker response".into());
-                };
-                if state.group.is_none() {
-                    let Reply::Group(group) = self
-                        .host(Command::Initialize {
-                            endpoint: *self.endpoint.id().as_bytes(),
-                            name,
-                        })
-                        .await?
-                    else {
-                        return Err("unexpected worker response".into());
-                    };
-                    self.install(group.verified().map_err(err)?)?;
-                }
-                self.host(Command::Invite).await?;
+                self.host(Command::Offer {
+                    endpoint: *self.endpoint.id().as_bytes(),
+                    name,
+                })
+                .await?;
             }
+
             Action::Join { ticket, name } => {
                 let invitation = PairingInvitation::from_ticket(&ticket).map_err(err)?;
+                if invitation.endpoint() == *self.endpoint.id().as_bytes() {
+                    return Err("This pairing code belongs to this device. Use the code from your other device.".into());
+                }
                 let peer = self.address(invitation.endpoint())?;
                 let Response::Group(group) = rpc(
                     &self.endpoint,
@@ -273,6 +267,9 @@ impl Inner {
                     name,
                 })
                 .await?;
+            }
+            Action::ApproveJoin(id) => {
+                self.host(Command::ApproveJoin(id)).await?;
             }
             Action::Approve(id) => {
                 let Reply::Group(group) = self.host(Command::Approve(id)).await? else {
@@ -303,7 +300,7 @@ impl Inner {
         if let Some(public) = &state.group {
             let worker = public.verified().map_err(err)?;
             if let Some(current) = self.group() {
-                if worker.membership().epoch() < current.membership().epoch() {
+                if worker.accept_extension(&current).is_ok() {
                     self.host(Command::Accept(PublicGroup::new(&current).map_err(err)?))
                         .await?;
                 } else {
@@ -483,11 +480,7 @@ impl Inner {
         let remote = *connection.remote_id().as_bytes();
         let (mut send, mut recv) = connection.accept_bi().await.map_err(err)?;
         let update = connection.alpn() == GROUP_ALPN;
-        let bytes = zeroize::Zeroizing::new(
-            recv.read_to_end(if update { FRAME } else { 16 * 1024 })
-                .await
-                .map_err(err)?,
-        );
+        let bytes = zeroize::Zeroizing::new(recv.read_to_end(FRAME).await.map_err(err)?);
         let request: Request = serde_json::from_slice(&bytes).map_err(err)?;
         if matches!(request, Request::Update(_)) != update {
             return Err("wrong membership protocol".into());
@@ -495,11 +488,8 @@ impl Inner {
         let response = match request {
             Request::Update(public) => {
                 let current = self.group().ok_or("sync is not configured")?;
-                if public.controller != current.controller() {
-                    return Err("unknown membership controller".into());
-                }
                 let incoming = public.verified().map_err(err)?;
-                let next = if incoming.membership().epoch() < current.membership().epoch() {
+                let next = if incoming.accept_extension(&current).is_ok() {
                     incoming.accept_extension(&current).map_err(err)?;
                     current
                 } else {
@@ -513,7 +503,18 @@ impl Inner {
                 Response::Group(PublicGroup::new(&next).map_err(err)?)
             }
             Request::Group(ticket) => {
-                let group = self.group().ok_or("sync is not configured")?;
+                let group = if let Some(group) = self.group() {
+                    group
+                } else {
+                    let Reply::State(state) = self.host(Command::State).await? else {
+                        return Err("unavailable".into());
+                    };
+                    state
+                        .introduction
+                        .ok_or("no introduction")?
+                        .verified()
+                        .map_err(err)?
+                };
                 if !group.permits(&remote) {
                     let Reply::State(state) = self.host(Command::State).await? else {
                         return Err("unavailable".into());

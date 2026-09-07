@@ -7,6 +7,9 @@ use sha2::{Digest as _, Sha256};
 
 const DOMAIN: &[u8] = b"factorseal/sync/group-certificate/v1\0";
 const MAX_EPOCHS: usize = 64;
+const MAX_MERGE_DEPTH: usize = 8;
+mod merge;
+pub use merge::MergeApproval;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +28,10 @@ struct Body {
     previous: Option<[u8; 32]>,
     transports: Vec<TransportBinding>,
     enrollment: Option<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merge: Option<MergeApproval>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +54,8 @@ impl GroupCertificate {
 #[derive(Clone)]
 pub struct VerifiedGroup {
     chain: Vec<GroupCertificate>,
+    ancestors: std::collections::BTreeSet<[u8; 32]>,
+    enrollments: std::collections::BTreeSet<[u8; 32]>,
 }
 impl std::fmt::Debug for VerifiedGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -57,6 +66,16 @@ impl std::fmt::Debug for VerifiedGroup {
 }
 impl VerifiedGroup {
     pub fn verify(chain: Vec<GroupCertificate>, trusted_controller: MemberId) -> VaultResult<Self> {
+        Self::verify_at_depth(chain, trusted_controller, 0)
+    }
+    fn verify_at_depth(
+        chain: Vec<GroupCertificate>,
+        trusted_controller: MemberId,
+        depth: usize,
+    ) -> VaultResult<Self> {
+        if depth > MAX_MERGE_DEPTH {
+            return Err(invalid());
+        }
         if chain.is_empty() || chain.len() > MAX_EPOCHS || encode(&chain)?.len() > 8 * 1024 * 1024 {
             return Err(invalid());
         }
@@ -66,9 +85,11 @@ impl VerifiedGroup {
         }
         let controller = first.membership.member(trusted_controller)?;
         let mut previous = None;
+        let mut ancestors = std::collections::BTreeSet::new();
+        let mut enrollments = std::collections::BTreeSet::new();
         for (index, certificate) in chain.iter().enumerate() {
             let body = &certificate.body;
-            if body.version != 1
+            if !matches!(body.version, 1 | 2)
                 || body.controller != trusted_controller
                 || body.previous != previous
                 || body.membership.group() != first.membership.group()
@@ -78,14 +99,48 @@ impl VerifiedGroup {
                 return Err(invalid());
             }
             validate_transports(&body.membership, &body.transports)?;
+            let signer = if body.version == 1 {
+                if body.signer.is_some() || body.merge.is_some() {
+                    return Err(invalid());
+                }
+                controller
+            } else {
+                let prior = index.checked_sub(1).ok_or_else(invalid)?;
+                chain[prior]
+                    .body
+                    .membership
+                    .member(body.signer.ok_or_else(invalid)?)?
+            };
             signature::verify(
-                &controller.signing,
+                &signer.signing,
                 &certificate.payload()?,
                 &certificate.signature,
             )?;
-            previous = Some(certificate.digest()?);
+            if let Some(approval) = &body.merge {
+                let prior = index.checked_sub(1).ok_or_else(invalid)?;
+                let target = Self {
+                    chain: chain[..=prior].to_vec(),
+                    ancestors: ancestors.clone(),
+                    enrollments: enrollments.clone(),
+                };
+                let source = approval.verify(&target, depth + 1)?;
+                ancestors.extend(&source.ancestors);
+                enrollments.extend(&source.enrollments);
+                let (members, transports) = merge::union(&target, &source)?;
+                if body.membership.members() != members || body.transports != transports {
+                    return Err(invalid());
+                }
+            }
+            let digest = certificate.digest()?;
+            ancestors.insert(digest);
+            enrollments.extend(body.enrollment);
+            previous = Some(digest);
         }
-        Ok(Self { chain })
+        Ok(Self {
+            chain,
+            ancestors,
+            enrollments,
+        })
     }
     pub fn decode(bytes: &[u8], trusted_controller: MemberId) -> VaultResult<Self> {
         if bytes.len() > 8 * 1024 * 1024 {
@@ -127,18 +182,14 @@ impl VerifiedGroup {
     /// A successor must extend our pinned chain. Even a controller-signed fork
     /// at the same epoch is rejected rather than selected by arrival order.
     pub fn accept_extension(&self, incoming: &Self) -> VaultResult<()> {
-        if incoming.controller() != self.controller()
-            || incoming.chain.len() < self.chain.len()
-            || incoming.chain[self.chain.len() - 1].digest()? != self.digest()?
-        {
-            return Err(invalid());
+        if incoming.ancestors.contains(&self.digest()?) {
+            Ok(())
+        } else {
+            Err(invalid())
         }
-        Ok(())
     }
     pub(crate) fn contains_enrollment(&self, request: [u8; 32]) -> bool {
-        self.chain
-            .iter()
-            .any(|certificate| certificate.body.enrollment == Some(request))
+        self.enrollments.contains(&request)
     }
     fn current(&self) -> &GroupCertificate {
         self.chain.last().expect("verified nonempty chain")
@@ -160,6 +211,8 @@ impl ReaderIdentity {
                 name,
             }],
             enrollment: None,
+            signer: None,
+            merge: None,
         };
         let certificate = self.sign_group(body)?;
         VerifiedGroup::verify(vec![certificate], self.public_keys().id())
@@ -171,12 +224,10 @@ impl ReaderIdentity {
         mut transports: Vec<TransportBinding>,
         enrollment: Option<[u8; 32]>,
     ) -> VaultResult<VerifiedGroup> {
-        if current.controller() != self.public_keys().id() {
-            return Err(invalid());
-        }
+        current.membership().member(self.public_keys().id())?;
         transports.sort_by_key(|binding| binding.endpoint);
         let body = Body {
-            version: 1,
+            version: 2,
             controller: current.controller(),
             membership: Membership::new(
                 current.membership().group(),
@@ -190,6 +241,8 @@ impl ReaderIdentity {
             previous: Some(current.digest()?),
             transports,
             enrollment,
+            signer: Some(self.public_keys().id()),
+            merge: None,
         };
         let mut chain = current.chain.clone();
         chain.push(self.sign_group(body)?);

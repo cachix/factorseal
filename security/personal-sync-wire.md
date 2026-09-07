@@ -140,20 +140,36 @@ caller-supplied. History/catalog limits reject edits before committing them.
 Orphan temporary files consume spool quota but are not advertised. No automatic
 eviction, receipt cleanup or history pruning is implemented.
 
-Next integration work is authenticated enrollment/controller updates, background
-iroh transport, QR pairing, management UI, peer application acknowledgements,
-and reviewed retention/rebootstrap. The architecture is described in
+Remaining work includes peer application acknowledgements and reviewed
+retention/rebootstrap. The architecture is described in
 [personal-sync-design.md](personal-sync-design.md).
 
 ## Signed groups and optional iroh courier
 
-`VerifiedGroup` verifies an ML-DSA-65 controller-signed certificate chain against
-an explicitly trusted controller fingerprint. Genesis starts at epoch 1; each
-successor names the preceding certificate hash and retains the controller key.
-A pinned chain accepts extensions, never rollbacks or signed forks. Chains are
-bounded to 64 epochs and 8 MiB. Controller transfer is not implemented. The host
-must persist its pin before activating an update; a verified chain received from
-a peer alone does not establish initial trust.
+`VerifiedGroup` verifies a signed certificate history rooted in an explicitly
+trusted genesis controller. Legacy version-1 certificates remain readable.
+Version-2 successors name a signer who must be a reader in the preceding
+membership. Every reader can approve connections; storage-only endpoints cannot.
+Genesis starts at epoch 1; successors retain their branch's group ID and root
+controller, name the preceding certificate hash, and advance its epoch.
+
+Combining disjoint groups includes a `MergeApproval`: the complete source chain,
+target head digest, source approving reader, and an ML-DSA-65 signature under
+`factorseal/sync/merge-approval/v1`. The target approving reader signs the resulting
+certificate. Validation requires the exact union of readers and endpoint bindings
+from both approved heads, not an arbitrary replacement membership. Source consent
+cannot be reused against a changed target. A device pinned to either original
+chain can verify the combined history without trusting an unknown root by fiat.
+A locally advanced/forked source cannot be silently replaced by an older approval.
+Chains are bounded to 64 epochs, 8 MiB, and eight nested merge proofs, with the
+existing combined reader/endpoint caps below. Overlapping divergent groups require
+reconciliation and are rejected; already-connected ancestry is detected separately.
+
+The host persists the accepted public pin before activating transport access.
+The old ciphertext is retained. Readers republish their complete known Automerge
+histories under the new membership; an offline reader's unique unsent history
+becomes available when it reconnects and unlocks. An old-epoch ciphertext copy
+alone does not let a storage-only node re-encrypt for new readers.
 
 Each current reader has exactly one named iroh endpoint binding. Additional
 bindings with no reader identity authorize ciphertext storage/forwarding only.
@@ -206,8 +222,7 @@ phone is required by the courier, and an iroh relay is not persistent storage.
 The lease-bound trusted host API now supports creating a signed group, issuing
 an invitation, preparing/staging a joining request, approving that exact request,
 accepting its signed response, cancelling pending pairing and restoring pending
-status. None of these methods is exposed through application IPC. Only the
-controller issues invitations and approves new readers. The worker never exports
+status. None of these methods is exposed through application IPC. Every enrolled reader can issue invitations and approve connections. The worker never exports
 reader seeds. Both pairing devices must be unlocked for their management steps;
 subsequent ciphertext forwarding does not require unlocking.
 
@@ -222,22 +237,32 @@ intermediates and deserializer allocations are not all wiped or page-locked.
 The joining worker verifies the offered chain against the scanned controller
 and exact certificate digest. It persists a request binding the invitation,
 joining endpoint, reader keys and device name, with an HMAC capability proof and
-an ML-DSA reader signature. The controller validates that request and binds the
+an ML-DSA reader signature. The inviting reader validates that request and binds the
 invitation to the first valid staged request. A different request is rejected
 until cancellation or invitation expiry. The transport host must pass iroh's
 authenticated endpoint ID into staging; a claimed endpoint from wire data is not
 sufficient.
 
-Both devices display the same 12-hex-digit verification code (48 bits) derived
-from the complete request. The host must obtain explicit user approval after
-comparison, then pass the full 32-byte request ID to approval. Staging alone
-changes no membership. Approval checks expiry, consumes the invitation and commits
-a signed successor containing the request digest before returning it. Retrying
-that approval after a restart returns the committed chain. The joining device
-requires its persisted invitation anchor, an extension containing its approved
-request digest, and its own current reader/endpoint binding before accepting.
-A delayed approved response remains acceptable after invitation expiry; expiry
-limits approval, not delivery of an already committed decision.
+Desktop introductions use temporary singleton candidate groups when no active
+membership exists. Showing a code or preparing a joining request persists the
+candidate and transcript, not active membership. Cancellation before approval
+clears that state. Existing memberships stay intact until a combined certificate
+is accepted. Legacy single-device enrollment APIs remain for existing callers.
+
+Both devices display the same 12-hex-digit code (48 bits), derived from the signed
+request excluding its later merge-consent attachment. The transcript includes the
+source membership and is immutable once staged. Both screens list the complete
+combined device set and disclose sharing personal secrets and retained history.
+The joining reader explicitly approves its exact source/target heads after code
+comparison. The inviter can commit only after receiving that signed approval and
+obtaining its own user's approval of the same request ID. Staging grants nothing.
+Once source approval has been sent it cannot be reliably withdrawn; the UI disables
+cancellation at that point. Closing only hides the screen. Committed results are
+retriable after restart and invitation expiry; expiry limits new approvals.
+
+Personal document format 6 protects the new durable state from older writers.
+Formats 4 and 5 remain readable and sync writes upgrade the format. Update both
+CLI and Desktop on every device before using combined memberships.
 
 Pending requests survive restart without generating a new randomized signature
 or verification code. Cancellation removes pending authorization. Existing members
@@ -250,15 +275,14 @@ ciphertext ALPN continues to reject unpaired endpoints.
 
 ## Desktop integration and actual status
 
-The Devices panel beside Personal secrets displays enrolled reader devices,
-connections reachable during the last exchange, local publication backlog and
-conflicted-item count. These are deliberately separate: reachability and stored
-ciphertext do not prove another vault has applied a change. The first device can
-invite additional readers; other devices direct users back to that inviter.
-The UI renders the QR entirely in memory and supports copying/pasting tickets.
-There is no built-in camera scanner or mobile app in this change; an external QR
-reader can supply a ticket to paste. Pending approval survives closing/reopening
-the app. The UI clears ticket and request displays when sealed.
+Devices is a dedicated screen beside “Your vault”. A single “Connect a device”
+flow offers Show pairing code and Paste pairing ticket, regardless of current
+membership. The review lists all affected devices. Pairing a device to itself is
+rejected explicitly. First-time naming defaults to the hostname and is saved in
+local Desktop preferences. Local membership count never claims peer application.
+There is no built-in camera scanner or mobile app; an external QR reader can
+supply a ticket. Pending review survives restart; capability displays clear when
+sealed. Close remains available above the scrollable pairing content.
 
 The Desktop process owns the transport seed, public membership cache and
 256-MiB ciphertext spool. Its courier continues while the key-owning worker is
@@ -280,8 +304,7 @@ Prepare/confirm commands are trusted-host operations: Desktop confirms publicati
 only after local spool fsync, never because a peer acknowledges a packet.
 
 Pairing uses ALPN `factorseal/personal-pairing/1`, pinned endpoint connections,
-16-KiB incoming request limits, and up to 12-MiB certificate responses/control
-frames. Unpaired group fetches require the live invitation capability; an
+12-MiB request/response frames, accommodating bounded source membership proofs. Unpaired group fetches require the live invitation capability; an
 approved request can retrieve its signed result after the inviter seals. The
 host supplies the actual iroh peer ID to staging. Sessions are limited to eight
 concurrent incoming connections, with 20-second server deadlines, eight-second
@@ -298,12 +321,9 @@ physical hardware prompts and Internet relay traversal require platform acceptan
 beyond the local iroh/vault integration tests.
 
 
-Membership catch-up has its own ALPN, `factorseal/personal-membership/1`, with a
-12-MiB frame bound. A new reader can present a controller-signed chain extension
-to a sealed peer that missed enrollment, even after the controller disconnects.
-The receiver must already have that controller pinned; it validates the chain
-and requires both the authenticated sender endpoint and its own endpoint in the
-resulting membership. Older peers receive the newer chain. Unknown initial
-controllers, signed forks and endpoints absent from the resulting membership
-are rejected. This route transports public authorization only and cannot enroll
-a device without a controller signature.
+Membership catch-up uses `factorseal/personal-membership/1` with a 12-MiB bound.
+A sealed peer accepts a linear extension or a verified bilateral merge descended
+from its pinned chain, even when the original approving devices are offline.
+Both the authenticated sender and local endpoint must occur in the result.
+Older peers receive the newer history. An unrelated root, a signed fork, missing
+source consent, or an endpoint absent from the result grants no access.

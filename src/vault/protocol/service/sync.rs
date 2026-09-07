@@ -169,6 +169,20 @@ impl VaultService {
             _ => Err(VaultError::WorkerUnavailable),
         }
     }
+    /// Create an introduction without changing active membership.
+    pub fn offer_personal_sync_connection(
+        &self,
+        endpoint: [u8; 32],
+        name: String,
+    ) -> VaultResult<PairingInvitation> {
+        match self.sync_command(SyncCommand::Pairing(PairingCommand::Offer {
+            endpoint,
+            name,
+        }))? {
+            SyncReply::Invitation(invitation) => Ok(invitation),
+            _ => Err(VaultError::WorkerUnavailable),
+        }
+    }
     /// Create/retrieve a five-minute invitation, persisted before display.
     pub fn invite_personal_sync_device(&self) -> VaultResult<PairingInvitation> {
         match self.sync_command(SyncCommand::Pairing(PairingCommand::Invite))? {
@@ -210,6 +224,13 @@ impl VaultService {
             _ => Err(VaultError::WorkerUnavailable),
         }
     }
+    /// Approve the joining group's exact, reviewed merge transcript.
+    pub fn approve_personal_sync_join(&self, expected: [u8; 32]) -> VaultResult<PairingRequest> {
+        match self.sync_command(SyncCommand::Pairing(PairingCommand::ApproveJoin(expected)))? {
+            SyncReply::PairingRequest(request) => Ok(request),
+            _ => Err(VaultError::WorkerUnavailable),
+        }
+    }
     /// Explicit user approval only, after comparing verification codes on both
     /// devices. Names the full reviewed request ID, never just a short code.
     pub fn approve_personal_sync_pairing(&self, expected: [u8; 32]) -> VaultResult<VerifiedGroup> {
@@ -235,7 +256,7 @@ impl VaultService {
 impl VaultService {
     pub fn personal_sync_pairing_status(&self) -> VaultResult<PairingStatus> {
         match self.sync_command(SyncCommand::PairingStatus)? {
-            SyncReply::PairingStatus(status) => Ok(status),
+            SyncReply::PairingStatus(status) => Ok(*status),
             _ => Err(VaultError::WorkerUnavailable),
         }
     }

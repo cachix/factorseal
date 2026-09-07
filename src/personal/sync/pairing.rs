@@ -30,11 +30,19 @@ impl std::fmt::Debug for PairingInvitation {
     }
 }
 impl PairingInvitation {
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn new(group: &VerifiedGroup, now: u64) -> VaultResult<Self> {
+        Self::for_reader(group, group.controller(), now)
+    }
+    pub(crate) fn for_reader(
+        group: &VerifiedGroup,
+        reader: MemberId,
+        now: u64,
+    ) -> VaultResult<Self> {
         let endpoint = group
             .transports()
             .iter()
-            .find(|binding| binding.reader == Some(group.controller()))
+            .find(|binding| binding.reader == Some(reader))
             .ok_or_else(invalid)?
             .endpoint;
         let mut secret = [0; 32];
@@ -96,9 +104,10 @@ impl PairingInvitation {
             || self.expires.saturating_sub(now) > 300
             || self.controller != group.controller()
             || self.group != group.digest()?
-            || !group.transports().iter().any(|binding| {
-                binding.endpoint == self.endpoint && binding.reader == Some(self.controller)
-            })
+            || !group
+                .transports()
+                .iter()
+                .any(|binding| binding.endpoint == self.endpoint && binding.reader.is_some())
         {
             return Err(invalid());
         }
@@ -115,15 +124,19 @@ struct RequestBody {
     endpoint: [u8; 32],
     reader: MemberPublicKeys,
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<PinnedGroup>,
 }
 /// Contains public keys, a capability proof and a reader signature; no secrets.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairingRequest {
-    body: RequestBody,
+    body: Box<RequestBody>,
     proof: [u8; 32],
     #[serde(with = "super::bytes")]
     signature: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    consent: Option<super::MergeApproval>,
 }
 impl std::fmt::Debug for PairingRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -134,7 +147,7 @@ impl std::fmt::Debug for PairingRequest {
 }
 impl PairingRequest {
     pub fn decode(bytes: &[u8]) -> VaultResult<Self> {
-        if bytes.len() > 16 * 1024 {
+        if bytes.len() > 8 * 1024 * 1024 {
             return Err(invalid());
         }
         let request: Self = serde_json::from_slice(bytes).map_err(|_| invalid())?;
@@ -145,7 +158,9 @@ impl PairingRequest {
         encode(self)
     }
     pub fn id(&self) -> VaultResult<[u8; 32]> {
-        Ok(Sha256::digest(encode(self)?).into())
+        let mut transcript = self.clone();
+        transcript.consent = None;
+        Ok(Sha256::digest(encode(&transcript)?).into())
     }
     /// Compare on both devices before approving this exact request ID.
     pub fn verification_code(&self) -> VaultResult<String> {
@@ -166,6 +181,30 @@ impl PairingRequest {
     }
     pub(crate) fn reader(&self) -> &MemberPublicKeys {
         &self.body.reader
+    }
+    pub fn origin(&self) -> VaultResult<Option<VerifiedGroup>> {
+        self.body
+            .origin
+            .as_ref()
+            .map(PinnedGroup::verified)
+            .transpose()
+    }
+    #[must_use]
+    pub fn needs_merge_approval(&self) -> bool {
+        self.body.origin.is_some() && self.consent.is_none()
+    }
+    pub(crate) fn merge_approval(
+        &self,
+        target: &VerifiedGroup,
+    ) -> VaultResult<Option<super::MergeApproval>> {
+        let Some(origin) = self.origin()? else {
+            return Ok(None);
+        };
+        let approval = self.consent.as_ref().ok_or_else(invalid)?;
+        if approval.source_group(target)?.digest()? != origin.digest()? {
+            return Err(invalid());
+        }
+        Ok(Some(approval.clone()))
     }
     fn payload(&self) -> VaultResult<Vec<u8>> {
         let mut bytes = DOMAIN.to_vec();
@@ -221,14 +260,16 @@ impl ReaderIdentity {
     ) -> VaultResult<PairingRequest> {
         invitation.check(group, now)?;
         let mut request = PairingRequest {
-            body: RequestBody {
+            body: Box::new(RequestBody {
                 invitation: invitation.digest()?,
                 endpoint,
                 reader: self.public_keys().clone(),
                 name,
-            },
+                origin: None,
+            }),
             proof: [0; 32],
             signature: Vec::new(),
+            consent: None,
         };
         let mut mac = Hmac::<Sha256>::new_from_slice(&invitation.secret).map_err(|_| invalid())?;
         mac.update(&request.payload()?);
@@ -236,6 +277,40 @@ impl ReaderIdentity {
         request.signature = signature::sign(&self.signing_seed, &request.signed_payload()?)?;
         request.validate()?;
         Ok(request)
+    }
+    pub(crate) fn request_group_pairing(
+        &self,
+        invitation: &PairingInvitation,
+        target: &VerifiedGroup,
+        source: &VerifiedGroup,
+        endpoint: [u8; 32],
+        name: String,
+        now: u64,
+    ) -> VaultResult<PairingRequest> {
+        if !source.transports().iter().any(|binding| {
+            binding.endpoint == endpoint && binding.reader == Some(self.public_keys().id())
+        }) {
+            return Err(invalid());
+        }
+        let mut request = self.request_pairing(invitation, target, endpoint, name, now)?;
+        request.body.origin = Some(PinnedGroup::new(source)?);
+        let mut mac = Hmac::<Sha256>::new_from_slice(&invitation.secret).map_err(|_| invalid())?;
+        mac.update(&request.payload()?);
+        request.proof = mac.finalize().into_bytes().into();
+        request.signature = signature::sign(&self.signing_seed, &request.signed_payload()?)?;
+        Ok(request)
+    }
+    pub(crate) fn approve_pairing_merge(
+        &self,
+        request: &mut PairingRequest,
+        target: &VerifiedGroup,
+    ) -> VaultResult<()> {
+        if request.reader() != self.public_keys() {
+            return Err(invalid());
+        }
+        let source = request.origin()?.ok_or_else(invalid)?;
+        request.consent = Some(self.approve_group_merge(&source, target)?);
+        Ok(())
     }
 }
 
@@ -260,6 +335,8 @@ impl PinnedGroup {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PairingState {
+    #[serde(default)]
+    pub introduction: Option<PinnedGroup>,
     pub group: Option<PinnedGroup>,
     pub invitation: Option<PairingInvitation>,
     pub staged: Option<PairingRequest>,
@@ -327,6 +404,8 @@ mod tests {
 /// Trusted management view of a pending pairing, available only while unlocked.
 #[derive(Debug)]
 pub struct PairingStatus {
+    pub introduction: Option<VerifiedGroup>,
+    pub target: Option<VerifiedGroup>,
     pub invitation: Option<PairingInvitation>,
     pub request: Option<PairingRequest>,
     pub joining: bool,

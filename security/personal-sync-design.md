@@ -253,8 +253,8 @@ with the current offline integrity limitation.
 
 ## User-visible status
 
-Place `Devices · 3` next to Personal secrets, with “3 paired devices, including
-this device.” List storage-only endpoints separately so a cloud mailbox is not
+Place Devices next to Your vault and open it as its own screen. Label the local
+member “This device”; membership count is not a count of synchronized peers. List storage-only endpoints separately so a cloud mailbox is not
 counted as a reader device. Keep paired count separate from connectivity.
 
 Track local publication, peer ciphertext possession, and peer application:
@@ -302,3 +302,20 @@ metadata exposure, and crypto profile when implementation lands.
 - [Android Doze and App Standby](https://developer.android.com/training/monitoring-device-state/doze-standby):
   idle/background network access is restricted. A phone is an opportunistic
   courier, not guaranteed always-on infrastructure.
+
+## Implemented bilateral connections
+
+The implementation now supports connections between disjoint existing groups,
+with explicit approval from a reader on each side. Showing a code creates only
+a durable introduction. A temporary singleton supplies the approval identity for
+an unconfigured device; it becomes active only when the connection is approved.
+Either side can show or paste the ticket. Every enrolled reader can authorize
+connections, rather than requiring the original founder to stay online.
+
+The source signs consent to both exact membership heads, and the target signs
+a successor carrying that proof and the exact union of both sets. Offline devices
+verify descent from their own pinned history. Concurrent membership changes or
+overlapping divergent histories fail closed and need fresh reconciliation.
+Source approval cannot be withdrawn after sending; cancellation is guaranteed
+only before approval. Device removal and conflict-reconciliation UI remain separate
+work. See personal-sync-wire.md for bounds and compatibility.

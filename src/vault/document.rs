@@ -26,7 +26,7 @@ const PARTITION_KEY: &str = "partition";
 // the document. Version 2 added per-record value versions.
 const FORMAT_VERSION: u64 = 3;
 // Personal documents carry durable revision state that older projections must not drop.
-const PERSONAL_FORMAT_VERSION: u64 = 5;
+const PERSONAL_FORMAT_VERSION: u64 = 6;
 const LEGACY_FORMAT_VERSION: u64 = 2;
 const RECORD_VERSION: u8 = 2;
 
@@ -173,7 +173,7 @@ impl SecretDocument {
             || !(version == Some(FORMAT_VERSION)
                 || (kind == DocumentKind::LocalKeyring
                     && partition == crate::personal::PERSONAL_SECRET_NAMESPACE
-                    && matches!(version, Some(4 | PERSONAL_FORMAT_VERSION))))
+                    && matches!(version, Some(4 | 5 | PERSONAL_FORMAT_VERSION))))
             || expected_partition.is_some_and(|expected| partition != expected)
         {
             return Err(descriptor_mismatch());
