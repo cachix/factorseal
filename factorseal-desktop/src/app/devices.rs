@@ -124,45 +124,37 @@ impl DesktopView {
         {
             return self.render_device_welcome(cx);
         }
-        let paired = self
-            .devices
-            .devices
-            .iter()
-            .filter(|device| device.reader.is_some())
-            .count();
         let mut panel = v_flex()
             .w_full()
-            .gap_6()
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(div().text_2xl().font_semibold().child("Your devices"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("Your personal secrets, wherever you need them."),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_3()
-                    .flex_wrap()
-                    .child(metric("Paired devices", paired, cx))
-                    .child(metric(
-                        "Other devices reachable",
-                        self.devices.reachable,
-                        cx,
-                    ))
-                    .child(metric("Changes to publish", state.pending, cx)),
-            )
+            .gap_5()
             .when(state.conflicts > 0, |panel| {
                 panel.child(div().p_3().rounded_lg().bg(theme.secondary).child(format!(
                     "{} items need conflict resolution",
                     state.conflicts
                 )))
             });
+        panel = panel.child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("invite-device")
+                        .label("Pair a device")
+                        .primary()
+                        .disabled(busy || state.joining || !can_invite)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            let name = view.device_name.read(cx).value().trim().to_string();
+                            view.device_action(Action::Invite(name), cx);
+                        })),
+                )
+                .child(
+                    Button::new("refresh-devices")
+                        .label("Sync now")
+                        .disabled(busy || self.devices.devices.is_empty())
+                        .on_click(
+                            cx.listener(|view, _, _, cx| view.device_action(Action::Refresh, cx)),
+                        ),
+                ),
+        );
         if self.devices.devices.is_empty() {
             panel = panel.child(v_flex().gap_2().p_6().rounded_lg()
                 .border_1().border_color(theme.border)
@@ -185,8 +177,7 @@ impl DesktopView {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(div().flex_1().child("DEVICE"))
-                        .child(div().w(gpui::rems(10.)).child("ACCESS"))
-                        .child(div().w(gpui::rems(6.)).child("LOCATION")),
+                        .child(div().w(gpui::rems(10.)).child("ACCESS")),
                 );
             for device in &self.devices.devices {
                 let local = device.endpoint == self.devices.endpoint;
@@ -203,7 +194,23 @@ impl DesktopView {
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
-                                .child(div().font_medium().child(device.name.clone()))
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(div().font_medium().child(device.name.clone()))
+                                        .when(local, |row| {
+                                            row.child(
+                                                div()
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .bg(theme.secondary)
+                                                    .text_xs()
+                                                    .child("This device"),
+                                            )
+                                        }),
+                                )
                                 .when(
                                     device.reader.is_some_and(|reader| {
                                         state
@@ -231,17 +238,6 @@ impl DesktopView {
                                 } else {
                                     "Encrypted storage"
                                 }),
-                        )
-                        .child(
-                            div().w(gpui::rems(6.)).child(
-                                div()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(theme.secondary)
-                                    .text_xs()
-                                    .child(if local { "This device" } else { "Remote" }),
-                            ),
                         ),
                 );
             }
@@ -264,28 +260,6 @@ impl DesktopView {
                     .child(format!("Add more devices from {owner}.")),
             );
         }
-        panel = panel.child(
-            h_flex()
-                .gap_2()
-                .child(
-                    Button::new("invite-device")
-                        .label("Pair a device")
-                        .primary()
-                        .disabled(busy || state.joining || !can_invite)
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            let name = view.device_name.read(cx).value().trim().to_string();
-                            view.device_action(Action::Invite(name), cx);
-                        })),
-                )
-                .child(
-                    Button::new("refresh-devices")
-                        .label("Sync now")
-                        .disabled(busy)
-                        .on_click(
-                            cx.listener(|view, _, _, cx| view.device_action(Action::Refresh, cx)),
-                        ),
-                ),
-        );
         if let Some(invitation) = &state.invitation
             && !state.joining
         {
@@ -347,26 +321,11 @@ impl DesktopView {
         if let Some(error) = self.devices_notice.as_ref().or(self.devices.error.as_ref()) {
             panel = panel.child(div().text_color(theme.danger).child(error.clone()));
         }
-        panel = panel.child(div().text_xs().text_color(theme.muted_foreground)
-            .child("Only personal secrets sync. Keep FactorSeal open to forward encrypted updates, even while sealed. Reachability reflects the last sync check."));
+        panel = panel.child(div().text_xs().text_color(theme.muted_foreground).child(
+            "Sync runs automatically while FactorSeal is open, including when the vault is sealed.",
+        ));
         div().flex_1().min_h_0().child(panel.overflow_y_scrollbar())
     }
-}
-fn metric(label: &'static str, value: usize, cx: &Context<DesktopView>) -> Div {
-    v_flex()
-        .flex_1()
-        .min_w(gpui::rems(9.))
-        .gap_1()
-        .p_4()
-        .rounded_lg()
-        .bg(cx.theme().secondary)
-        .child(div().text_2xl().font_semibold().child(value.to_string()))
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(label),
-        )
 }
 #[allow(clippy::cast_precision_loss)]
 fn qr(modules: Vec<Vec<bool>>) -> impl gpui::IntoElement {

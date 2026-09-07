@@ -2823,33 +2823,38 @@ impl DesktopView {
                             },
                         ),
                     ))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("import-vault")
-                                    .small()
-                                    .selected(
-                                        self.selected_vault_item.as_ref()
-                                            == Some(&VaultSelection::Import),
+                    .when(
+                        self.selected_vault_item != Some(VaultSelection::Devices),
+                        |header| {
+                            header.child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("import-vault")
+                                            .small()
+                                            .selected(
+                                                self.selected_vault_item.as_ref()
+                                                    == Some(&VaultSelection::Import),
+                                            )
+                                            .label("Import")
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.select_vault_item(VaultSelection::Import, cx);
+                                            })),
                                     )
-                                    .label("Import")
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.select_vault_item(VaultSelection::Import, cx);
-                                    })),
+                                    .child(
+                                        Button::new("export-vault")
+                                            .small()
+                                            .selected(
+                                                self.selected_vault_item.as_ref()
+                                                    == Some(&VaultSelection::Export),
+                                            )
+                                            .label("Export")
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.select_vault_item(VaultSelection::Export, cx);
+                                            })),
+                                    ),
                             )
-                            .child(
-                                Button::new("export-vault")
-                                    .small()
-                                    .selected(
-                                        self.selected_vault_item.as_ref()
-                                            == Some(&VaultSelection::Export),
-                                    )
-                                    .label("Export")
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.select_vault_item(VaultSelection::Export, cx);
-                                    })),
-                            ),
+                        },
                     ),
             )
             .child(self.render_vault_workspace(contents, browser_height, compact, cx))
