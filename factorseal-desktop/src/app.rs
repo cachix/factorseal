@@ -593,6 +593,7 @@ struct DesktopView {
     personal_error: Option<String>,
     devices: factorseal::desktop_worker::sync::network::View,
     devices_busy: bool,
+    devices_loaded: bool,
     devices_notice: Option<String>,
     device_name: gpui::Entity<InputState>,
     pairing_ticket: gpui::Entity<SecretInputState>,
@@ -869,8 +870,15 @@ impl DesktopView {
             personal_error: None,
             devices: factorseal::desktop_worker::sync::network::View::default(),
             devices_busy: false,
+            devices_loaded: false,
             devices_notice: None,
-            device_name: cx.new(|cx| InputState::new(window, cx).default_value("This device")),
+            device_name: cx.new(|cx| {
+                let name = crate::appearance::current(cx)
+                    .device_name
+                    .clone()
+                    .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+                InputState::new(window, cx).default_value(name)
+            }),
             pairing_ticket: cx
                 .new(|cx| SecretInputState::new(window, cx).placeholder("Paste pairing ticket")),
             transfer_format: TransferFormat::default(),
@@ -2806,14 +2814,15 @@ impl DesktopView {
                     .flex_wrap()
                     .justify_between()
                     .gap_4()
-                    .child(
-                        v_flex().gap_1().child(header_title).child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child("On this device. Available to authorized applications."),
+                    .child(v_flex().gap_1().child(header_title).child(
+                        div().text_sm().text_color(theme.muted_foreground).child(
+                            if self.selected_vault_item == Some(VaultSelection::Devices) {
+                                "Pair devices to sync your personal secrets."
+                            } else {
+                                "On this device. Available to authorized applications."
+                            },
                         ),
-                    )
+                    ))
                     .child(
                         h_flex()
                             .gap_2()

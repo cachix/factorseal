@@ -2819,6 +2819,7 @@ dependencies = [
  "factorseal",
  "fs2",
  "futures-util",
+ "gethostname",
  "gpui",
  "gpui-component",
  "gpui-component-assets",

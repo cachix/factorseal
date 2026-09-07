@@ -5,7 +5,9 @@ use super::{
 use factorseal::desktop_worker::sync::network::Action;
 use gpui::prelude::*;
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{ActiveTheme as _, Disableable as _, button::ButtonVariants as _};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, StyledExt as _, button::ButtonVariants as _,
+};
 impl DesktopView {
     pub(super) fn poll_devices(runtime: Arc<DesktopRuntime>, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| {
@@ -15,12 +17,16 @@ impl DesktopView {
                 let result = smol::unblock(move || runtime.sync_view()).await;
                 if view
                     .update(cx, |view, cx| {
+                        view.devices_loaded = true;
                         if let Ok(mut devices) = result {
                             if !matches!(view.snapshot, Snapshot::Unsealed { .. }) {
                                 devices.state.invitation = None;
                                 devices.state.request = None;
                             }
                             view.devices = devices;
+                            cx.notify();
+                        } else if let Err(error) = result {
+                            view.devices.error = Some(error);
                             cx.notify();
                         }
                     })
@@ -67,9 +73,43 @@ impl DesktopView {
         })
         .detach();
     }
+    fn render_device_welcome(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        v_flex().size_full().items_center().justify_center().child(
+            v_flex().w_full().max_w(gpui::rems(28.)).gap_5().p_6()
+                .child(v_flex().gap_2()
+                    .child(div().text_2xl().font_semibold().child("Name this device"))
+                    .child(div().text_sm().text_color(theme.muted_foreground)
+                        .child("Choose a name you’ll recognize when pairing and syncing your personal secrets.")))
+                .child(v_flex().gap_2()
+                    .child(div().text_sm().font_medium().child("Device name"))
+                    .child(Input::new(&self.device_name))
+                    .child(div().text_xs().text_color(theme.muted_foreground)
+                        .child("We’ve filled in your computer’s hostname. You can change it.")))
+                .when_some(self.devices_notice.clone(), |panel, error| {
+                    panel.child(div().text_sm().text_color(theme.danger).child(error))
+                })
+                .child(h_flex().justify_end().child(
+                    Button::new("save-device-name").primary().label("Continue")
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            let mut settings = crate::appearance::current(cx).clone();
+                            settings.device_name = Some(view.device_name.read(cx).value().trim().to_owned());
+                            match crate::appearance::update(settings, cx) {
+                                Ok(()) => view.devices_notice = None,
+                                Err(error) => view.devices_notice = Some(error.to_string()),
+                            }
+                            cx.notify();
+                        })))))
+    }
     #[allow(clippy::too_many_lines)]
     pub(super) fn render_devices(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
+        if !self.devices_loaded {
+            return div()
+                .p_6()
+                .text_color(theme.muted_foreground)
+                .child("Loading devices…");
+        }
         let busy = self.devices_busy;
         let state = &self.devices.state;
         let can_invite = state.group.as_ref().is_none_or(|group| {
@@ -77,26 +117,135 @@ impl DesktopView {
                 device.endpoint == self.devices.endpoint && device.reader == Some(group.controller)
             })
         });
-        let mut panel=v_flex().gap_3()
-            .child(div().text_lg().child("Your devices"))
-            .child(div().text_sm().text_color(theme.muted_foreground).child("Only personal secrets sync. Devices can store encrypted updates while sealed. Keep FactorSeal open to receive and forward them."))
-            .child(div().child(format!("{} paired devices · {} other devices reachable at last check",self.devices.devices.iter().filter(|device|device.reader.is_some()).count(),self.devices.reachable)))
-            .child(div().child(format!("{} changes waiting to publish · {} items need conflict resolution",state.pending,state.conflicts)));
-        for device in &self.devices.devices {
-            panel = panel.child(div().child(format!(
-                "{}{}{}",
-                device.name,
-                if device.endpoint == self.devices.endpoint {
-                    " (this device)"
-                } else {
-                    ""
-                },
-                if device.reader.is_none() {
-                    " · encrypted storage only"
-                } else {
-                    ""
-                }
-            )));
+        if self.devices.devices.is_empty()
+            && !state.joining
+            && crate::appearance::current(cx).device_name.is_none()
+            && self.devices.error.is_none()
+        {
+            return self.render_device_welcome(cx);
+        }
+        let paired = self
+            .devices
+            .devices
+            .iter()
+            .filter(|device| device.reader.is_some())
+            .count();
+        let mut panel = v_flex()
+            .w_full()
+            .gap_6()
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(div().text_2xl().font_semibold().child("Your devices"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("Your personal secrets, wherever you need them."),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .flex_wrap()
+                    .child(metric("Paired devices", paired, cx))
+                    .child(metric(
+                        "Other devices reachable",
+                        self.devices.reachable,
+                        cx,
+                    ))
+                    .child(metric("Changes to publish", state.pending, cx)),
+            )
+            .when(state.conflicts > 0, |panel| {
+                panel.child(div().p_3().rounded_lg().bg(theme.secondary).child(format!(
+                    "{} items need conflict resolution",
+                    state.conflicts
+                )))
+            });
+        if self.devices.devices.is_empty() {
+            panel = panel.child(v_flex().gap_2().p_6().rounded_lg()
+                .border_1().border_color(theme.border)
+                .child(div().font_semibold().child("Connect your first device"))
+                .child(div().text_sm().text_color(theme.muted_foreground)
+                    .child("Pair another device to start syncing, or join using a ticket from an existing device.")));
+        } else {
+            let mut table = v_flex()
+                .w_full()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .overflow_hidden()
+                .child(
+                    h_flex()
+                        .px_4()
+                        .py_3()
+                        .gap_3()
+                        .bg(theme.secondary)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(div().flex_1().child("DEVICE"))
+                        .child(div().w(gpui::rems(10.)).child("ACCESS"))
+                        .child(div().w(gpui::rems(6.)).child("LOCATION")),
+                );
+            for device in &self.devices.devices {
+                let local = device.endpoint == self.devices.endpoint;
+                table = table.child(
+                    h_flex()
+                        .px_4()
+                        .py_4()
+                        .gap_3()
+                        .items_center()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(div().font_medium().child(device.name.clone()))
+                                .when(
+                                    device.reader.is_some_and(|reader| {
+                                        state
+                                            .group
+                                            .as_ref()
+                                            .is_some_and(|group| group.controller == reader)
+                                    }),
+                                    |row| {
+                                        row.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("Manages pairing"),
+                                        )
+                                    },
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(gpui::rems(10.))
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(if device.reader.is_some() {
+                                    "Personal secrets"
+                                } else {
+                                    "Encrypted storage"
+                                }),
+                        )
+                        .child(
+                            div().w(gpui::rems(6.)).child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(theme.secondary)
+                                    .text_xs()
+                                    .child(if local { "This device" } else { "Remote" }),
+                            ),
+                        ),
+                );
+            }
+            panel = panel.child(table);
         }
         if !can_invite {
             let owner = state
@@ -115,11 +264,6 @@ impl DesktopView {
                     .child(format!("Add more devices from {owner}.")),
             );
         }
-        if self.devices.devices.is_empty() && !state.joining {
-            panel = panel
-                .child(div().text_sm().child("This device’s name"))
-                .child(Input::new(&self.device_name));
-        }
         panel = panel.child(
             h_flex()
                 .gap_2()
@@ -129,7 +273,7 @@ impl DesktopView {
                         .primary()
                         .disabled(busy || state.joining || !can_invite)
                         .on_click(cx.listener(|view, _, _, cx| {
-                            let name = view.device_name.read(cx).value().to_string();
+                            let name = view.device_name.read(cx).value().trim().to_string();
                             view.device_action(Action::Invite(name), cx);
                         })),
                 )
@@ -193,7 +337,7 @@ impl DesktopView {
                             let ticket = zeroize::Zeroizing::new(
                                 view.pairing_ticket.read(cx).value().trim().to_string(),
                             );
-                            let name = view.device_name.read(cx).value().to_string();
+                            let name = view.device_name.read(cx).value().trim().to_string();
                             view.pairing_ticket.update(cx, SecretInputState::clear);
                             let _ = window;
                             view.device_action(Action::Join { ticket, name }, cx);
@@ -203,8 +347,26 @@ impl DesktopView {
         if let Some(error) = self.devices_notice.as_ref().or(self.devices.error.as_ref()) {
             panel = panel.child(div().text_color(theme.danger).child(error.clone()));
         }
+        panel = panel.child(div().text_xs().text_color(theme.muted_foreground)
+            .child("Only personal secrets sync. Keep FactorSeal open to forward encrypted updates, even while sealed. Reachability reflects the last sync check."));
         div().flex_1().min_h_0().child(panel.overflow_y_scrollbar())
     }
+}
+fn metric(label: &'static str, value: usize, cx: &Context<DesktopView>) -> Div {
+    v_flex()
+        .flex_1()
+        .min_w(gpui::rems(9.))
+        .gap_1()
+        .p_4()
+        .rounded_lg()
+        .bg(cx.theme().secondary)
+        .child(div().text_2xl().font_semibold().child(value.to_string()))
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
 }
 #[allow(clippy::cast_precision_loss)]
 fn qr(modules: Vec<Vec<bool>>) -> impl gpui::IntoElement {

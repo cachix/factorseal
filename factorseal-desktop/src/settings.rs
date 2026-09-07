@@ -11,6 +11,7 @@ use crate::appearance::Choice;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct DesktopSettings {
+    pub(crate) device_name: Option<String>,
     pub(crate) theme: Choice,
     pub(crate) ui_scale: u16,
     pub(crate) text_size: Option<u16>,
@@ -24,6 +25,7 @@ pub(crate) struct DesktopSettings {
 impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
+            device_name: None,
             theme: Choice::default(),
             ui_scale: 100,
             text_size: None,
@@ -38,6 +40,12 @@ impl Default for DesktopSettings {
 
 impl DesktopSettings {
     pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            self.device_name.as_ref().is_none_or(|name| {
+                !name.trim().is_empty() && name.len() <= 80 && !name.chars().any(char::is_control)
+            }),
+            "Device name must contain 1–80 bytes and no control characters"
+        );
         ensure!(
             (80..=200).contains(&self.ui_scale),
             "UI scale is outside the supported range"
@@ -130,6 +138,7 @@ mod tests {
         .unwrap();
         assert_eq!(load(&path).unwrap().theme, Choice::GruvboxDark);
         let settings = DesktopSettings {
+            device_name: Some("My laptop".to_owned()),
             theme: Choice::Dracula,
             ui_scale: 150,
             text_size: Some(20),
