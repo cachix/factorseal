@@ -54,13 +54,18 @@ impl SecretDocument {
         &self,
         address: &SecretAddress,
         _now: u64,
-    ) -> VaultResult<Option<(String, String)>> {
+    ) -> VaultResult<Option<(String, String, u64)>> {
         if !self.is_personal() {
             return Ok(None);
         }
         // Display metadata remains available when the replicated register is conflicted.
-        let read = self
-            .records(&address.storage_key())?
+        let records = self.records(&address.storage_key())?;
+        let updated_at = records
+            .iter()
+            .map(|record| record.updated_at)
+            .max()
+            .unwrap_or(0);
+        let read = records
             .into_iter()
             .next()
             .map_or(SecretRead::Missing, |record| {
@@ -78,7 +83,7 @@ impl SecretDocument {
                     }
                     title.truncate(end);
                 }
-                Ok(Some((title, item.kind.label().to_owned())))
+                Ok(Some((title, item.kind.label().to_owned(), updated_at)))
             }
             SecretRead::Missing | SecretRead::Expired => Ok(None),
             SecretRead::Conflict => Err(VaultError::Conflict),
@@ -256,7 +261,7 @@ mod tests {
                     .personal_summary(&address, 10)
                     .unwrap()
                     .as_ref()
-                    .map(|(title, _)| title.as_str()),
+                    .map(|(title, _, _)| title.as_str()),
                 Some("Same title")
             );
             let SecretRead::Value(value) = document.get(&address, 10).unwrap() else {
@@ -317,7 +322,7 @@ mod tests {
                 .personal_summary(&address, 10)
                 .unwrap()
                 .as_ref()
-                .map(|(title, _)| title.as_str()),
+                .map(|(title, _, _)| title.as_str()),
             Some("Renamed")
         );
         assert!(document.delete(&address).unwrap().is_some());

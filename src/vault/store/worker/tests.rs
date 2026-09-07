@@ -72,6 +72,7 @@ fn personal_identity_migration_is_durable_and_preserves_history() {
         Some(expected.kind.label())
     );
     assert_eq!(page.items[0].address, new_address);
+    assert_eq!(page.items[0].updated_at, Some(TEST_NOW));
     let history = store
         .list_history(
             scope,

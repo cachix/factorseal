@@ -1,5 +1,6 @@
-//! Password entry without editor ropes, undo history, or plaintext render caches.
-//! Only masked text is passed to GPUI's renderer and text-query callbacks.
+//! Protected input without editor ropes or undo history.
+//! Masked by default. Ordinary personal fields can opt into visible text;
+//! secret fields never send plaintext to the renderer or text-query callbacks.
 
 use factorseal::security::LockedBytes;
 use gpui::{
@@ -10,6 +11,30 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, input::InputEvent};
 use std::ops::{Deref, Range};
 use zeroize::Zeroizing;
+
+fn rendered_text(value: &str, masked: bool) -> String {
+    if masked {
+        "•".repeat(value.chars().count())
+    } else {
+        value.to_owned()
+    }
+}
+
+fn queried_text(value: &str, masked: bool) -> String {
+    if masked {
+        "*".repeat(value.encode_utf16().count())
+    } else {
+        value.to_owned()
+    }
+}
+
+fn rendered_index(value: &str, index: usize, masked: bool) -> usize {
+    if masked {
+        value[..index].chars().count() * "•".len()
+    } else {
+        index
+    }
+}
 
 const MAX_BYTES: usize = 64 * 1024;
 
@@ -75,6 +100,7 @@ impl SecretBuffer {
 
 pub(crate) struct SecretInputState {
     secret: SecretBuffer,
+    masked: bool,
     focus: FocusHandle,
     placeholder: SharedString,
     selection: Range<usize>,
@@ -89,7 +115,17 @@ impl Focusable for SecretInputState {
     }
 }
 impl SecretInputState {
-    /// Multiline values remain masked and use the same locked storage.
+    pub(crate) fn masked(mut self, masked: bool) -> Self {
+        self.masked = masked;
+        self
+    }
+    pub(crate) fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        self.masked = masked;
+        self.last_layout = None;
+        self.marked = None;
+        cx.notify();
+    }
+    /// Allow multiline values in the same bounded, locked storage.
     pub(crate) fn multiline(mut self) -> Self {
         self.secret.multiline = true;
         self
@@ -97,6 +133,7 @@ impl SecretInputState {
     pub(crate) fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             secret: SecretBuffer::default(),
+            masked: true,
             focus: cx.focus_handle(),
             placeholder: "".into(),
             selection: 0..0,
@@ -147,7 +184,11 @@ impl SecretInputState {
         let Some((line, origin)) = &self.last_layout else {
             return self.secret.text.len();
         };
-        let index = line.closest_index_for_x(point.x - origin.x) / "•".len();
+        let index = line.closest_index_for_x(point.x - origin.x);
+        if !self.masked {
+            return index.min(self.secret.text.len());
+        }
+        let index = index / "•".len();
         self.secret
             .text
             .char_indices()
@@ -254,9 +295,8 @@ impl EntityInputHandler for SecretInputState {
         _: &mut Context<Self>,
     ) -> Option<String> {
         let range = self.range_byte_offset(range);
-        let range = self.secret.utf16_offset(range.start)..self.secret.utf16_offset(range.end);
-        *actual = Some(range.clone());
-        Some("*".repeat(range.len()))
+        *actual = Some(self.secret.utf16_offset(range.start)..self.secret.utf16_offset(range.end));
+        Some(queried_text(&self.secret.text[range], self.masked))
     }
     fn selected_text_range(
         &mut self,
@@ -352,7 +392,7 @@ impl Render for SecretInputState {
         let text: SharedString = if self.secret.text.is_empty() {
             self.placeholder.clone()
         } else {
-            "•".repeat(self.secret.text.chars().count()).into()
+            rendered_text(&self.secret.text, self.masked).into()
         };
         let color = if self.secret.text.is_empty() {
             cx.theme().muted_foreground
@@ -399,10 +439,10 @@ impl Render for SecretInputState {
                     move |bounds, line, window, cx| {
                         let input = entity.read(cx);
                         let focus = input.focus.clone();
-                        let masked_index =
-                            |index| input.secret.text[..index].chars().count() * "•".len();
-                        let selection =
-                            masked_index(input.selection.start)..masked_index(input.selection.end);
+                        let display_index =
+                            |index| rendered_index(&input.secret.text, index, input.masked);
+                        let selection = display_index(input.selection.start)
+                            ..display_index(input.selection.end);
                         let caret = line.x_for_index(if input.reversed {
                             selection.start
                         } else {
@@ -468,6 +508,17 @@ impl Render for SecretInputState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_and_masked_fields_preserve_unicode_positions_without_leaking_secrets() {
+        let value = "aé🔑";
+        assert_eq!(rendered_text(value, false), value);
+        assert_eq!(queried_text(value, false), value);
+        assert_eq!(rendered_index(value, 3, false), 3);
+        assert_eq!(rendered_text(value, true), "•••");
+        assert_eq!(queried_text(value, true), "****");
+        assert_eq!(rendered_index(value, 3, true), 6);
+    }
 
     #[test]
     fn multiline_personal_values_use_the_bounded_secret_buffer() {

@@ -57,6 +57,7 @@ impl VaultArchive {
         for entry in &mut entries {
             entry.metadata.display_name = None;
             entry.metadata.display_type = None;
+            entry.metadata.updated_at = None;
         }
         Self {
             format: FORMAT.to_owned(),
@@ -433,6 +434,7 @@ mod tests {
                 metadata: VaultEntryMetadata {
                     display_name: None,
                     display_type: None,
+                    updated_at: None,
                     document_kind: DocumentKind::LocalKeyring,
                     partition: b"factorseal/personal-secrets/v1".to_vec(),
                     address: SecretAddress::new("example", None).unwrap(),
@@ -501,6 +503,7 @@ mod tests {
         let metadata = |address| VaultEntryMetadata {
             display_name: None,
             display_type: None,
+            updated_at: None,
             document_kind: DocumentKind::LinuxSecretService,
             partition: NAMESPACE.to_vec(),
             address,

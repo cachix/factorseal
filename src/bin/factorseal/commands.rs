@@ -350,6 +350,7 @@ fn import_personal_secrets(
             metadata: VaultEntryMetadata {
                 display_name: None,
                 display_type: None,
+                updated_at: None,
                 document_kind: DocumentKind::LocalKeyring,
                 partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
                 address: factorseal::SecretAddress::new(secret.id.clone(), None)?,

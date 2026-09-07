@@ -283,6 +283,26 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    pub(crate) fn read_personal_item(
+        &self,
+        metadata: &VaultMetadata,
+        entry: &VaultEntryMetadata,
+    ) -> Result<PersonalSecret, String> {
+        if !is_personal_entry(entry) {
+            return Err("This is not a personal item.".into());
+        }
+        let request = VaultRequest::new(VaultAction::ExportVaultEntry {
+            entry: entry.clone(),
+        })
+        .map_err(|error| error.to_string())?;
+        match self.request_live(metadata, &request)? {
+            VaultResponseBody::VaultEntrySecret { value, .. } => {
+                PersonalSecret::decode_current(value.expose()).map_err(|error| error.to_string())
+            }
+            _ => Err("Could not read the personal item.".into()),
+        }
+    }
+
     pub(crate) fn put_personal_secret(
         &self,
         secret: &PersonalSecret,
@@ -374,6 +394,7 @@ impl DesktopRuntime {
             let entry = VaultEntryMetadata {
                 display_name: None,
                 display_type: None,
+                updated_at: None,
                 document_kind: DocumentKind::LocalKeyring,
                 partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
                 address: SecretAddress::new(secret.id.clone(), None)
@@ -1080,6 +1101,7 @@ mod tests {
         let first = VaultEntryMetadata {
             display_name: None,
             display_type: None,
+            updated_at: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"alpha".to_vec(),
             address: SecretAddress::secret_spec(first).unwrap(),
@@ -1087,6 +1109,7 @@ mod tests {
         let second = VaultEntryMetadata {
             display_name: None,
             display_type: None,
+            updated_at: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"beta".to_vec(),
             address: SecretAddress::secret_spec(second).unwrap(),
@@ -1125,6 +1148,7 @@ mod tests {
         let entry = VaultEntryMetadata {
             display_name: None,
             display_type: None,
+            updated_at: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"project".to_vec(),
             address: SecretAddress::secret_spec(

@@ -1022,6 +1022,9 @@ pub struct VaultEntryMetadata {
     /// Display-only personal item type, derived from encrypted content during inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_type: Option<String>,
+    /// Last personal-item modification time, in Unix seconds, derived during inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
     pub document_kind: DocumentKind,
     #[serde(with = "base64_bytes")]
     pub partition: Vec<u8>,
