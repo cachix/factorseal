@@ -130,6 +130,9 @@ pub(crate) struct DesktopRuntime {
     events: smol::channel::Sender<Snapshot>,
     lifeline: Mutex<Option<std::process::ChildStdin>>,
     unlock_in_progress: AtomicBool,
+    sync_output: Mutex<Option<std::process::ChildStdout>>,
+    sync_io: Mutex<()>,
+    sync_manager: Mutex<Option<Arc<factorseal::desktop_worker::sync::network::Manager>>>,
 }
 
 impl DesktopRuntime {
@@ -142,6 +145,9 @@ impl DesktopRuntime {
                 events,
                 lifeline: Mutex::new(None),
                 unlock_in_progress: AtomicBool::new(false),
+                sync_output: Mutex::new(None),
+                sync_io: Mutex::new(()),
+                sync_manager: Mutex::new(None),
             }),
             receiver,
         )
@@ -527,6 +533,7 @@ impl DesktopRuntime {
             operation,
             password: WireSecret::from_locked(password),
             hosts_secret_service: self.config.secret_service,
+            sync_control: true,
         };
         factorseal::desktop_worker::send(
             worker
@@ -589,6 +596,10 @@ impl DesktopRuntime {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             })?;
+        let control_install = self
+            .sync_io
+            .lock()
+            .map_err(|_| "sync control lock unavailable")?;
         self.lifeline
             .lock()
             .map_err(|_| "desktop worker lock unavailable".to_owned())?
@@ -599,6 +610,17 @@ impl DesktopRuntime {
                     .take()
                     .ok_or("worker input unavailable")?,
             );
+        self.sync_output
+            .lock()
+            .map_err(|_| "worker output lock unavailable")?
+            .replace(
+                worker
+                    .child
+                    .stdout
+                    .take()
+                    .ok_or("worker output unavailable")?,
+            );
+        drop(control_install);
         // Publish the inventory before requesting permissions. The UI starts
         // that request once it has applied this first unlocked snapshot.
         let client = native_client(&self.config, metadata);
@@ -922,6 +944,80 @@ pub(crate) fn lease_policy(idle_seconds: u64, maximum_seconds: u64) -> Result<Le
 
 pub(crate) fn explicit_or_default_root(root: Option<&Path>) -> Result<PathBuf, String> {
     root.map_or_else(default_root, |root| Ok(root.to_owned()))
+}
+
+impl DesktopRuntime {
+    pub(crate) fn sync_view(
+        self: &Arc<Self>,
+    ) -> Result<factorseal::desktop_worker::sync::network::View, String> {
+        if !self
+            .config
+            .root
+            .join("personal-sync/transport.key")
+            .is_file()
+            && !self
+                .config
+                .root
+                .join("personal-sync/membership.json")
+                .is_file()
+        {
+            return Ok(factorseal::desktop_worker::sync::network::View::default());
+        }
+        self.sync_manager().map(|manager| manager.view())
+    }
+    pub(crate) fn sync_manager(
+        self: &Arc<Self>,
+    ) -> Result<Arc<factorseal::desktop_worker::sync::network::Manager>, String> {
+        let mut manager = self
+            .sync_manager
+            .lock()
+            .map_err(|_| "sync lock unavailable")?;
+        if let Some(manager) = &*manager {
+            return Ok(Arc::clone(manager));
+        }
+        if !self.config.root.join(METADATA_FILE).is_file() {
+            return Err("Initialize your vault first".into());
+        }
+        let weak = Arc::downgrade(self);
+        let host = Arc::new(move |command| {
+            let runtime = weak.upgrade().ok_or("Desktop is closing")?;
+            runtime.sync_command(&command)
+        });
+        let created = Arc::new(factorseal::desktop_worker::sync::network::Manager::open(
+            &self.config.root.join("personal-sync"),
+            host,
+        )?);
+        *manager = Some(Arc::clone(&created));
+        Ok(created)
+    }
+    fn sync_command(
+        &self,
+        command: &factorseal::desktop_worker::sync::Command,
+    ) -> Result<factorseal::desktop_worker::sync::Reply, String> {
+        let _guard = self
+            .sync_io
+            .lock()
+            .map_err(|_| "sync control lock unavailable")?;
+        {
+            let mut pipe = self
+                .lifeline
+                .lock()
+                .map_err(|_| "worker lock unavailable")?;
+            let input = pipe
+                .as_mut()
+                .ok_or("Unlock the vault in this Desktop to manage devices")?;
+            factorseal::desktop_worker::sync::send(input, command)
+                .map_err(|error| error.to_string())?;
+        }
+        let mut output = self
+            .sync_output
+            .lock()
+            .map_err(|_| "worker output lock unavailable")?;
+        factorseal::desktop_worker::sync::receive::<Result<_, String>>(
+            output.as_mut().ok_or("Worker output unavailable")?,
+        )
+        .map_err(|error| error.to_string())?
+    }
 }
 
 #[cfg(test)]

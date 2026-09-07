@@ -80,7 +80,13 @@ impl StoreWorker {
             SyncCommand::PairingStatus => {
                 return Ok(SyncReply::PairingStatus(
                     crate::personal::sync::PairingStatus {
-                        invitation: state.pairing.invitation.clone(),
+                        invitation: state.pairing.invitation.clone().or_else(|| {
+                            state
+                                .pairing
+                                .joining
+                                .as_ref()
+                                .map(|(invitation, _, _)| invitation.clone())
+                        }),
                         request: state
                             .pairing
                             .joining

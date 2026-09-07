@@ -1,8 +1,9 @@
 # Experimental personal sync boundary
 
-Implemented behind the optional `personal-sync` feature. This connects the vault
-worker and ciphertext storage through trusted host-management APIs; it does not
-start networking or expose sync operations through application IPC.
+The `personal-sync` and `personal-sync-network` features connect the vault worker,
+Desktop pairing management and an iroh ciphertext courier. Desktop starts
+networking when pairing begins, or resumes an existing transport identity on
+startup. Sync management remains absent from application IPC.
 
 ## Automerge and personal scope
 
@@ -61,8 +62,8 @@ The trusted host must authenticate enrollment before calling
 The persisted membership requires this device's reader key, a stable group ID,
 and monotonically increasing epochs. Changing the membership clears an obsolete
 prepared packet and marks all current replica histories for republication.
-Controller signatures and QR enrollment are still pending. A transport identity
-is not a reader identity.
+Desktop enrollment instead uses the pinned controller-signed chain described
+below. A transport identity is not a reader identity.
 
 The versioned suite is
 `automerge-mlkem768-hkdfsha256-aes256gcm-mldsa65-v1`. Previous experimental custom
@@ -165,8 +166,8 @@ queues all existing personal histories for publication to the new recipients.
 
 `personal-sync-network` adds an iroh 1.1 courier library using ALPN
 `factorseal/personal-sync/1`. The embedding host supplies the endpoint and owns
-its secret, lifetime, connection limits and address discovery. No listener starts
-by default. The courier owns only public authorization and the ciphertext spool;
+its secret, lifetime, connection limits and address discovery. The standalone library starts no listener by itself; Desktop owns one after
+sync setup. The courier owns only public authorization and the ciphertext spool;
 it accepts neither an unlocked vault nor reader keys. Configure production
 endpoint discovery/relays explicitly; tests use iroh's Minimal preset with local
 addresses and no public relay/discovery dependency.
@@ -194,9 +195,9 @@ application, online-device count, or convergence. A group update is synchronized
 with spool operations and invalidates stale requests, but cannot retract bytes
 already released before that update.
 
-Pairing network routing, persistent transport credentials, automatic membership
-distribution, background process/control IPC, peer application receipts, and the
-Devices UI remain integration work. No continuously unlocked
+Desktop now owns pairing routes, transport credentials, membership distribution,
+the courier and private worker control. Peer application receipts, a conflict-resolution chooser, storage-node
+setup UI, controller transfer and device removal UI remain unimplemented. No continuously unlocked
 phone is required by the courier, and an iroh relay is not persistent storage.
 
 
@@ -242,6 +243,67 @@ Pending requests survive restart without generating a new randomized signature
 or verification code. Cancellation removes pending authorization. Existing members
 accept only extensions of their pinned chain; unknown initial chains, rollback,
 forks and unapproved initial responses are rejected. The approval API requires a
-trusted host: enforcing the actual user interaction and fetching/sending pairing
-messages over iroh are still UI/background-host integration work. The ciphertext
-courier itself does not accept unpaired connections or perform enrollment.
+trusted host. Desktop now displays the comparison code and requires an explicit
+approval click. Its separate pairing ALPN carries invitations and requests; the
+ciphertext ALPN continues to reject unpaired endpoints.
+
+
+## Desktop integration and actual status
+
+The Devices panel beside Personal secrets displays enrolled reader devices,
+connections reachable during the last exchange, local publication backlog and
+conflicted-item count. These are deliberately separate: reachability and stored
+ciphertext do not prove another vault has applied a change. The first device can
+invite additional readers; other devices direct users back to that inviter.
+The UI renders the QR entirely in memory and supports copying/pasting tickets.
+There is no built-in camera scanner or mobile app in this change; an external QR
+reader can supply a ticket to paste. Pending approval survives closing/reopening
+the app. The UI clears ticket and request displays when sealed.
+
+The Desktop process owns the transport seed, public membership cache and
+256-MiB ciphertext spool. Its courier continues while the key-owning worker is
+sealed or gone, provided Desktop remains open (including in the tray). Quitting
+Desktop stops networking; no OS daemon or cloud mailbox is installed. Networking
+starts on the first pairing action and resumes on startup only when a transport
+identity exists. It uses iroh's N0 discovery/relay preset. An exclusive spool
+lock serializes ownership before the endpoint key is loaded or generated.
+A missing key for an existing membership fails instead of silently changing the
+endpoint identity. The authenticated vault pin remains the enrollment authority;
+the external public cache grants no reader keys.
+
+Inherited stdin/stdout pipes carry bounded management frames. Desktop serializes
+requests; a separate pipe reader continues watching EOF while management work
+runs, preserving the parent-death watchdog. Bootstrap explicitly requests sync
+support, so a CLI built without it fails before unsealing. Install CLI and
+Desktop together. The ordinary native application protocol is unchanged.
+Prepare/confirm commands are trusted-host operations: Desktop confirms publication
+only after local spool fsync, never because a peer acknowledges a packet.
+
+Pairing uses ALPN `factorseal/personal-pairing/1`, pinned endpoint connections,
+16-KiB incoming request limits, and up to 12-MiB certificate responses/control
+frames. Unpaired group fetches require the live invitation capability; an
+approved request can retrieve its signed result after the inviter seals. The
+host supplies the actual iroh peer ID to staging. Sessions are limited to eight
+concurrent incoming connections, with 20-second server deadlines, eight-second
+outgoing deadlines, one incoming bidirectional stream and no unidirectional
+streams. Group changes are checked against the current pin before activation.
+
+Background passes publish and apply bounded batches, periodically exchange public
+membership and pull missing ciphertext from enrolled peers. Already stored valid
+packets are not downloaded again. Application uses a rotating inventory cursor
+so a full page cannot permanently hide later packets. Sync management does not
+refresh the unseal lease. Explicit “Sync now” also refreshes Desktop's inventory.
+Packet possession still is not a remote applied receipt. Native UI interaction,
+physical hardware prompts and Internet relay traversal require platform acceptance
+beyond the local iroh/vault integration tests.
+
+
+Membership catch-up has its own ALPN, `factorseal/personal-membership/1`, with a
+12-MiB frame bound. A new reader can present a controller-signed chain extension
+to a sealed peer that missed enrollment, even after the controller disconnects.
+The receiver must already have that controller pinned; it validates the chain
+and requires both the authenticated sender endpoint and its own endpoint in the
+resulting membership. Older peers receive the newer chain. Unknown initial
+controllers, signed forks and endpoints absent from the resulting membership
+are rejected. This route transports public authorization only and cannot enroll
+a device without a controller signature.

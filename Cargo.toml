@@ -18,7 +18,7 @@ exclude = ["fuzz"]
 
 [features]
 fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "personal-sync", "dep:secret-service-protocol", "hardwareseal/fuzzing"]
-default = ["vault", "cli", "hardware", "secretspec-provider"]
+default = ["vault", "cli", "hardware", "secretspec-provider", "personal-sync-network"]
 vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token"]
 vault-store = [
     "personal",

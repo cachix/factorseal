@@ -1,4 +1,5 @@
 use crate::secret_input::SecretInputState;
+mod devices;
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
@@ -147,6 +148,7 @@ enum PersonalPanel {
     #[default]
     Overview,
     NewItem,
+    Devices,
 }
 
 #[derive(Clone, Debug)]
@@ -589,6 +591,11 @@ struct DesktopView {
     selected_vault_item: Option<VaultSelection>,
     personal_panel: PersonalPanel,
     personal_error: Option<String>,
+    devices: factorseal::desktop_worker::sync::network::View,
+    devices_busy: bool,
+    devices_notice: Option<String>,
+    device_name: gpui::Entity<InputState>,
+    pairing_ticket: gpui::Entity<SecretInputState>,
     transfer_format: TransferFormat,
     transfer_busy: bool,
     transfer_replace_existing: bool,
@@ -786,6 +793,7 @@ impl DesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::poll_devices(Arc::clone(&runtime), cx);
         let settings = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
         let selected_group = snapshot
             .metadata()
@@ -859,6 +867,12 @@ impl DesktopView {
             selected_vault_item: None,
             personal_panel: PersonalPanel::Overview,
             personal_error: None,
+            devices: factorseal::desktop_worker::sync::network::View::default(),
+            devices_busy: false,
+            devices_notice: None,
+            device_name: cx.new(|cx| InputState::new(window, cx).default_value("This device")),
+            pairing_ticket: cx
+                .new(|cx| SecretInputState::new(window, cx).placeholder("Paste pairing ticket")),
             transfer_format: TransferFormat::default(),
             transfer_busy: false,
             transfer_replace_existing: false,
@@ -946,6 +960,10 @@ impl DesktopView {
     fn apply_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
         if !matches!(snapshot, Snapshot::Unsealed { .. }) {
             self.clear_secret_inputs(cx);
+            self.pairing_ticket.update(cx, SecretInputState::clear);
+            self.devices.state.invitation = None;
+            self.devices.state.request = None;
+            self.devices_notice = None;
         }
         if self.selected_group.is_none() {
             self.selected_group = snapshot
@@ -2540,6 +2558,7 @@ impl DesktopView {
         let body = match self.personal_panel {
             PersonalPanel::Overview => Self::render_personal_overview(contents, &query, cx),
             PersonalPanel::NewItem => self.render_personal_new_item(cx),
+            PersonalPanel::Devices => self.render_devices(cx),
         };
         v_flex()
             .size_full()
@@ -2553,13 +2572,32 @@ impl DesktopView {
                     .gap_3()
                     .child(div().text_xl().font_semibold().child("Personal secrets"))
                     .child(
-                        Button::new("new-personal-secret")
-                            .small()
-                            .primary()
-                            .label("New item")
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.show_personal_panel(PersonalPanel::NewItem, cx);
-                            })),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("personal-devices")
+                                    .small()
+                                    .label(format!(
+                                        "Devices · {}",
+                                        self.devices
+                                            .devices
+                                            .iter()
+                                            .filter(|device| device.reader.is_some())
+                                            .count()
+                                    ))
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.show_personal_panel(PersonalPanel::Devices, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("new-personal-secret")
+                                    .small()
+                                    .primary()
+                                    .label("New item")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.show_personal_panel(PersonalPanel::NewItem, cx);
+                                    })),
+                            ),
                     ),
             )
             .child(

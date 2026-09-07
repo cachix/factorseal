@@ -331,3 +331,19 @@ pub struct PairingStatus {
     pub request: Option<PairingRequest>,
     pub joining: bool,
 }
+
+#[cfg(feature = "personal-sync-network")]
+impl PairingInvitation {
+    /// QR modules without a quiet zone, for in-memory UI drawing.
+    pub fn qr_modules(&self) -> VaultResult<Vec<Vec<bool>>> {
+        let ticket = self.ticket()?;
+        let code = qrcode::QrCode::new(ticket.as_bytes()).map_err(|_| invalid())?;
+        Ok((0..code.width())
+            .map(|y| {
+                (0..code.width())
+                    .map(|x| code[(x, y)] == qrcode::Color::Dark)
+                    .collect()
+            })
+            .collect())
+    }
+}

@@ -240,3 +240,18 @@ impl VaultService {
         }
     }
 }
+
+impl VaultService {
+    /// Trusted inherited-pipe host only: persist exact bytes before returning.
+    /// Confirm only after the independent ciphertext spool has fsynced them.
+    pub fn prepare_personal_sync_publication(&self) -> VaultResult<Option<Vec<u8>>> {
+        match self.sync_command(SyncCommand::Prepare)? {
+            SyncReply::Prepared(packet) => Ok(packet.map(|(bytes, _)| bytes)),
+            _ => Err(VaultError::WorkerUnavailable),
+        }
+    }
+    /// Trusted host durable-storage receipt, never a network acknowledgement.
+    pub fn confirm_personal_sync_publication(&self, id: PacketId) -> VaultResult<()> {
+        self.sync_command(SyncCommand::Stored(id)).map(|_| ())
+    }
+}

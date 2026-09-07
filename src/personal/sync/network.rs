@@ -83,6 +83,12 @@ impl CiphertextCourier {
         .await
         .map_err(|_| invalid())?
     }
+    /// Dispatch a connection accepted by the host's ALPN router.
+    pub async fn serve_peer(&self, connection: &Connection) -> VaultResult<()> {
+        tokio::time::timeout(TIMEOUT, self.serve_connection(connection))
+            .await
+            .map_err(|_| invalid())?
+    }
     async fn serve_connection(&self, connection: &Connection) -> VaultResult<()> {
         if connection.alpn() != ALPN {
             return Err(invalid());
@@ -179,6 +185,20 @@ impl CiphertextCourier {
         let mut rejected = 0;
         for id in ids {
             self.authorize(&remote, Some(group))?;
+            let courier = self.clone();
+            let present = tokio::task::spawn_blocking(move || {
+                let state = courier.state.lock().map_err(|_| invalid())?;
+                if state.group.digest()? != group {
+                    return Err(invalid());
+                }
+                Ok(state.spool.get(id, state.group.membership()).is_ok())
+            })
+            .await
+            .map_err(|_| invalid())??;
+            if present {
+                stored += 1;
+                continue;
+            }
             let Response::Packet(bytes) = rpc(
                 endpoint,
                 peer.clone(),

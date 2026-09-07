@@ -65,7 +65,7 @@ fn encode(value: &impl serde::Serialize) -> VaultResult<Vec<u8>> {
     serde_json::to_vec(value).map_err(|_| invalid())
 }
 
-mod bytes {
+pub(crate) mod bytes {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use serde::{Deserialize as _, Deserializer, Serializer};
 

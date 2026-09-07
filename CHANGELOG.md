@@ -4,17 +4,23 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Connect Desktop's Devices panel to iroh pairing and encrypted sync. Show QR
+  tickets, comparison codes, explicit approval/cancellation, enrolled devices,
+  reachability and publication/conflict counts. Keep forwarding while sealed
+  while Desktop remains open. Use inherited private control pipes for enrollment
+  and vault publication/application; ordinary application IPC is unchanged.
+  Install the CLI and Desktop together.
+
 - Add durable personal-device pairing management: compact QR invitations,
   signed requests with matching verification codes, explicit exact-request
   approval, cancellation and controller-pinned membership. Preserve pending
   pairing across restarts and republish personal histories on enrollment.
-  Pairing network routing and the Devices UI remain pending.
+  Desktop supplies the pairing route and Devices UI.
 
 - Add an optional iroh ciphertext courier and controller-signed membership
   chains, with separate reader and storage-only endpoint authorization. Verify
   forwarding through a restarted storage node after the sender disconnects.
-  This is a host library; pairing network routing, background integration and Devices UI
-  remain pending.
+  Desktop owns the background transport after sync setup.
 
 - Use per-item Automerge documents for personal-secret replication. Preserve
   concurrent values and edit/delete conflicts, resolve against observed heads,
@@ -25,7 +31,7 @@ All notable changes to FactorSeal will be documented in this file.
   reader seeds under the installation root, persist exact outgoing packets
   before spool delivery, and atomically apply received Automerge changes with
   durable receipts. Storage/forwarding needs no reader keys. Host-management
-  APIs enforce the unseal lease; pairing and device-status UI are pending.
+  APIs enforce the unseal lease; Desktop presents pairing and device status.
   Personal documents use format v5 and native IPC uses v14; update the service,
   CLI, and Desktop together. The old experimental revision-packet suite is
   rejected; packets now carry native Automerge changes.

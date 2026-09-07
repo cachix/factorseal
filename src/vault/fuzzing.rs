@@ -90,6 +90,8 @@ pub fn transfer(bytes: &[u8]) {
 
 pub fn bootstrap(bytes: &[u8]) {
     let _ = crate::desktop_worker::receive::<crate::desktop_worker::Bootstrap>(&mut &*bytes);
+    let _ =
+        crate::desktop_worker::sync::receive::<crate::desktop_worker::sync::Command>(&mut &*bytes);
 }
 
 pub fn secret_service(bytes: &[u8]) {
@@ -137,10 +139,15 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         },
         password: WireSecret::new(b"synthetic".to_vec()).unwrap(),
         hosts_secret_service: false,
+        sync_control: true,
     };
     let mut frame = Vec::new();
     crate::desktop_worker::send(&mut frame, &bootstrap).unwrap();
+    let mut control = Vec::new();
+    crate::desktop_worker::sync::send(&mut control, &crate::desktop_worker::sync::Command::State)
+        .unwrap();
     let mut seeds = vec![
+        ("bootstrap", control),
         ("metadata", seal::fuzz_metadata_seed()),
         ("bootstrap", frame),
         ("document", records),

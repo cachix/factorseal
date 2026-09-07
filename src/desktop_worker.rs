@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
+#[cfg(feature = "personal-sync")]
+pub mod sync;
+
 const MAX_BOOTSTRAP_BYTES: usize = 128 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -19,6 +22,8 @@ pub struct Bootstrap {
     /// adapter grant; the worker then leaves the session bus to it.
     #[serde(default)]
     pub hosts_secret_service: bool,
+    #[serde(default)]
+    pub sync_control: bool,
 }
 
 #[derive(Serialize, Deserialize)]

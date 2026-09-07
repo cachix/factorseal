@@ -194,11 +194,12 @@ outside the separately built CLI key owner's dependency graph.
   reader keys, authenticated encrypted change packets, durable publication and
   incoming merge/conflict handling through lease-bound host-management APIs.
   The optional `personal-sync-network` library adds a keyless iroh courier and
-  controller-signed transport membership. It starts no listener by default.
-  Pairing management now persists invitation/approval state and signed controller
-  pins, with compact QR tickets and exact-request approval through the trusted
-  host. Pairing network routing, background integration, peer application
-  acknowledgements and UI are still pending.
+  controller-signed transport membership. Desktop now offers QR/ticket pairing
+  and explicit code approval through inherited private worker pipes. Its courier
+  continues while sealed if Desktop remains open; it starts after sync setup.
+  Paired counts and reachability do not claim remote application. Mobile camera
+  integration, peer application receipts, a conflict-resolution chooser,
+  controller transfer and removal UI remain unimplemented.
   See the [implemented boundary](security/personal-sync-wire.md) for bounds,
   experimental cryptography, retained metadata, and integration requirements.
 
