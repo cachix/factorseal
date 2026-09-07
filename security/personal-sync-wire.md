@@ -143,3 +143,57 @@ Next integration work is authenticated enrollment/controller updates, background
 iroh transport, QR pairing, management UI, peer application acknowledgements,
 and reviewed retention/rebootstrap. The architecture is described in
 [personal-sync-design.md](personal-sync-design.md).
+
+## Signed groups and optional iroh courier
+
+`VerifiedGroup` verifies an ML-DSA-65 controller-signed certificate chain against
+an explicitly trusted controller fingerprint. Genesis starts at epoch 1; each
+successor names the preceding certificate hash and retains the controller key.
+A pinned chain accepts extensions, never rollbacks or signed forks. Chains are
+bounded to 64 epochs and 8 MiB. Controller transfer is not implemented. The host
+must persist its pin before activating an update; a verified chain received from
+a peer alone does not establish initial trust.
+
+Each current reader has exactly one named iroh endpoint binding. Additional
+bindings with no reader identity authorize ciphertext storage/forwarding only.
+They add no encryption recipient. At most 16 readers and 32 transport endpoints
+are allowed. These certificates are currently separate from the vault worker's
+trusted `configure_personal_sync` API: a host must install the same authorized
+membership there. Automatic enrollment and durable certificate pinning in the
+worker are not yet connected.
+
+`personal-sync-network` adds an iroh 1.1 courier library using ALPN
+`factorseal/personal-sync/1`. The embedding host supplies the endpoint and owns
+its secret, lifetime, connection limits and address discovery. No listener starts
+by default. The courier owns only public authorization and the ciphertext spool;
+it accepts neither an unlocked vault nor reader keys. Configure production
+endpoint discovery/relays explicitly; tests use iroh's Minimal preset with local
+addresses and no public relay/discovery dependency.
+
+The trusted local host can use `with_spool` on a blocking worker to serialize
+vault publication/application with network storage. Its callback receives the
+current public membership and must not reenter the courier. The courier retains
+neither the callback nor any key-owning vault handle.
+
+Each connection serves one bounded inventory/get request. Both the authenticated
+iroh peer identity and current signed group digest must match. Packet signatures
+are rechecked at read and durable receipt. Inventory pages contain at most 128
+packet IDs; frames are limited to 3 MiB, requests to 20 seconds, and one pull page
+to one minute. Disk operations use blocking workers outside the async executor.
+Hosts should serve serially or impose a session limit; iroh transport-level
+resource limits must also be configured by the eventual background host.
+
+Pull is idempotent and restartable by packet-ID cursor. Each device pulls from
+its peers independently. A storage-only node can retain a sender's packets and
+later forward them when that sender is offline. Inventory includes old epochs;
+fetch rejects packets no longer authorized by the current membership. Such
+packets still consume spool quota until an explicit future cleanup policy.
+Counters report ciphertext possession (including duplicates), never peer vault
+application, online-device count, or convergence. A group update is synchronized
+with spool operations and invalidates stale requests, but cannot retract bytes
+already released before that update.
+
+QR invitations, user approval, persistent transport credentials, automatic
+membership distribution, background process/control IPC, peer application
+receipts, and the Devices UI remain integration work. No continuously unlocked
+phone is required by the courier, and an iroh relay is not persistent storage.

@@ -4,6 +4,12 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Add an optional iroh ciphertext courier and controller-signed membership
+  chains, with separate reader and storage-only endpoint authorization. Verify
+  forwarding through a restarted storage node after the sender disconnects.
+  This is a host library; QR pairing, background integration and Devices UI
+  remain pending.
+
 - Use per-item Automerge documents for personal-secret replication. Preserve
   concurrent values and edit/delete conflicts, resolve against observed heads,
   and retain Automerge history across local snapshot projection. This history
@@ -13,7 +19,7 @@ All notable changes to FactorSeal will be documented in this file.
   reader seeds under the installation root, persist exact outgoing packets
   before spool delivery, and atomically apply received Automerge changes with
   durable receipts. Storage/forwarding needs no reader keys. Host-management
-  APIs enforce the unseal lease; pairing, iroh, and device-status UI are pending.
+  APIs enforce the unseal lease; pairing and device-status UI are pending.
   Personal documents use format v5 and native IPC uses v14; update the service,
   CLI, and Desktop together. The old experimental revision-packet suite is
   rejected; packets now carry native Automerge changes.

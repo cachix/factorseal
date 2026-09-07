@@ -4,7 +4,11 @@
 //! a trusted membership controller. Validation of public keys alone does not
 //! establish that a device belongs to the user. No transport credential is a
 //! reader/writer identity. Network discovery and enrollment are separate layers.
+mod authority;
 mod identity;
+pub use authority::{GroupCertificate, TransportBinding, VerifiedGroup};
+#[cfg(feature = "personal-sync-network")]
+pub mod network;
 mod packet;
 mod spool;
 

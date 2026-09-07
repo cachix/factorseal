@@ -193,8 +193,10 @@ outside the separately built CLI key owner's dependency graph.
   erasure claim. The experimental `personal-sync` feature provides root-wrapped
   reader keys, authenticated encrypted change packets, durable publication and
   incoming merge/conflict handling through lease-bound host-management APIs.
-  It does not enable network replication: authenticated enrollment, QR pairing,
-  iroh/background integration, peer acknowledgements, and UI are still pending.
+  The optional `personal-sync-network` library adds a keyless iroh courier and
+  controller-signed transport membership. It starts no listener by default.
+  Initial trust, durable membership pinning, QR pairing, background integration,
+  peer application acknowledgements, and UI are still pending.
   See the [implemented boundary](security/personal-sync-wire.md) for bounds,
   experimental cryptography, retained metadata, and integration requirements.
 

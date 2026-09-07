@@ -302,6 +302,7 @@ pub(crate) fn fuzz(bytes: &[u8]) {
         )
         .unwrap()
     });
+    let _ = super::VerifiedGroup::decode(bytes, group.members()[0].id());
     if let Ok(packet) = VerifiedPacket::verify(bytes, group) {
         assert_eq!(packet.as_bytes(), bytes);
         let _ = packet.open(&ReaderIdentity::synthetic(), group);
@@ -329,6 +330,11 @@ pub(crate) fn fuzz_seeds() -> Vec<Vec<u8>> {
     replica.set(Some(&item), None).unwrap();
     let update = replica.update().unwrap();
     vec![
+        identity
+            .create_group([1; 32], "Synthetic".into())
+            .unwrap()
+            .encode()
+            .unwrap(),
         identity
             .seal_update(&update, &group)
             .unwrap()
