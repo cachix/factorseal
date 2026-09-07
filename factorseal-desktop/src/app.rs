@@ -879,10 +879,7 @@ impl DesktopView {
             window,
             |view, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
-                    view.personal_detail.clear();
-                    view.selected_vault_item =
-                        selection_for_search(view.selected_vault_item.as_ref());
-                    cx.notify();
+                    view.on_vault_search_changed(cx);
                 }
             },
         );
@@ -996,6 +993,15 @@ impl DesktopView {
         cx.notify();
     }
 
+    fn on_vault_search_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
+        self.personal_detail.clear();
+        self.selected_vault_item = selection_for_search(self.selected_vault_item.as_ref());
+        cx.notify();
+    }
+
     fn clear_secret_inputs(&mut self, cx: &mut Context<Self>) {
         self.personal_detail.clear();
         self.copied_personal_field = None;
@@ -1061,6 +1067,9 @@ impl DesktopView {
     }
 
     fn select_vault_item(&mut self, selection: VaultSelection, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
         self.clear_secret_inputs(cx);
         if matches!(selection, VaultSelection::Import | VaultSelection::Export) {
             self.transfer_notice = None;
@@ -1080,12 +1089,18 @@ impl DesktopView {
     }
 
     fn show_vault_browser(&mut self, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
         self.clear_secret_inputs(cx);
         self.selected_vault_item = None;
         cx.notify();
     }
 
     fn select_transfer_format(&mut self, format: TransferFormat, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
         if self.transfer_busy {
             return;
         }
@@ -1261,6 +1276,9 @@ impl DesktopView {
     }
 
     fn show_personal_panel(&mut self, panel: PersonalPanel, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
         self.clear_secret_inputs(cx);
         self.personal_panel = panel;
         self.personal_error = None;
@@ -1415,6 +1433,7 @@ impl DesktopView {
     }
 
     fn seal(&mut self, cx: &mut Context<Self>) {
+        self.flush_personal_changes(cx);
         let Snapshot::Unsealed {
             metadata,
             idle_deadline,
@@ -3216,6 +3235,7 @@ impl DesktopView {
                 if matches!(&view.selected_vault_item, Some(VaultSelection::Entry(entry)) if is_personal_secret(entry)) {
                     view.show_personal_panel(PersonalPanel::Overview, cx);
                 }
+                if view.personal_detail.has_pending_changes() { return; }
                 view.settings_open = true;
                 cx.notify();
             }))
@@ -3551,6 +3571,7 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
 }
 
 fn close_desktop(_: &CloseDesktop, cx: &mut App) {
+    flush_desktop_personal_changes(cx);
     let handle = cx.global::<DesktopWindow>().handle;
     let Some(handle) = handle else {
         return;
@@ -3576,7 +3597,22 @@ fn toggle_desktop(_: &ToggleDesktop, cx: &mut App) {
     }
 }
 
+fn flush_desktop_personal_changes(cx: &mut App) {
+    let holder = cx
+        .try_global::<DesktopWindow>()
+        .map(|desktop| Arc::clone(&desktop.view));
+    if let Some(holder) = holder
+        && let Ok(holder) = holder.lock()
+        && let Some(view) = holder.as_ref()
+    {
+        view.update(cx, |view, cx| {
+            view.flush_personal_changes(cx);
+        });
+    }
+}
+
 fn seal_vault(_: &SealVault, cx: &mut App) {
+    flush_desktop_personal_changes(cx);
     if let Some(runtime) = cx.try_global::<RuntimeGlobal>()
         && let Err(error) = runtime.0.seal()
     {
@@ -3586,6 +3622,7 @@ fn seal_vault(_: &SealVault, cx: &mut App) {
 }
 
 fn quit(_: &Quit, cx: &mut App) {
+    flush_desktop_personal_changes(cx);
     cx.global_mut::<DesktopStatus>().quitting = true;
     if let Some(runtime) = cx.try_global::<RuntimeGlobal>() {
         let _ = runtime.0.seal();

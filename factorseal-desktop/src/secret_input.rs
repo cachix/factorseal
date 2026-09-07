@@ -131,6 +131,9 @@ impl SecretInputState {
         self
     }
     pub(crate) fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::empty(cx)
+    }
+    fn empty(cx: &mut Context<Self>) -> Self {
         Self {
             secret: SecretBuffer::default(),
             masked: true,
@@ -141,6 +144,14 @@ impl SecretInputState {
             reversed: false,
             last_layout: None,
         }
+    }
+    pub(crate) fn from_value(value: &str, masked: bool, cx: &mut Context<Self>) -> Self {
+        let mut input = Self::empty(cx).multiline().masked(masked);
+        if !input.secret.replace(0..0, value) {
+            input.secret.allocation_failed = true;
+        }
+        input.selection = input.secret.text.len()..input.secret.text.len();
+        input
     }
     pub(crate) fn placeholder(mut self, value: &'static str) -> Self {
         self.placeholder = value.into();
