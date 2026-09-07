@@ -1826,4 +1826,19 @@ mod import_tests {
             "repeat import must address the same items"
         );
     }
+
+    #[test]
+    fn oversized_personal_item_fails_before_any_import_writes() {
+        let client = ImportClient(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let source = serde_json::to_vec(&serde_json::json!({"items":[
+            {"name":"Small", "login":{"password":"small"}},
+            {"name":"Large", "login":{"password":"x".repeat(512 * 1024)}}
+        ]}))
+        .unwrap();
+        assert!(
+            import_personal_secrets(&client, TransferFormat::BitwardenJson, &source, false)
+                .is_err()
+        );
+        assert!(client.0.lock().unwrap().is_empty());
+    }
 }

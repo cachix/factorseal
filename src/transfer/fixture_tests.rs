@@ -1,15 +1,15 @@
 use super::*;
 
-fn round_trip(format: TransferFormat, secrets: &[PersonalSecret]) -> Zeroizing<Vec<u8>> {
-    let exported = export_manager(format, secrets).unwrap();
-    assert_eq!(import_manager(format, &exported).unwrap(), secrets);
+fn round_trip(format: TransferFormat, secrets: &[LegacySecret]) -> Zeroizing<Vec<u8>> {
+    let exported = export_legacy_manager(format, secrets).unwrap();
+    assert_eq!(import_legacy_manager(format, &exported).unwrap(), secrets);
     exported
 }
 
 #[test]
 fn bitwarden_upstream_fixture() {
     let bytes = include_bytes!("../../tests/fixtures/transfer/keepassxc/bitwarden_export.json");
-    let secrets = import_manager(TransferFormat::BitwardenJson, bytes).unwrap();
+    let secrets = import_legacy_manager(TransferFormat::BitwardenJson, bytes).unwrap();
     assert_eq!(secrets.len(), 4);
     assert_eq!(secrets[0].kind, PersonalSecretKind::SecureNote);
     assert_eq!(secrets[0].folder.as_deref(), Some("My Folder"));
@@ -28,14 +28,14 @@ fn bitwarden_upstream_fixture() {
         " 1 North Calle Cesar Chavez "
     );
     for format in [TransferFormat::OnePasswordCsv, TransferFormat::KeePassCsv] {
-        assert!(export_manager(format, &secrets).is_err());
+        assert!(export_legacy_manager(format, &secrets).is_err());
     }
 }
 
 #[test]
 fn onepassword8_documented_columns_fixture() {
     let bytes = include_bytes!("../../tests/fixtures/transfer/onepassword8.csv");
-    let secrets = import_manager(TransferFormat::OnePasswordCsv, bytes).unwrap();
+    let secrets = import_legacy_manager(TransferFormat::OnePasswordCsv, bytes).unwrap();
     assert_eq!(secrets.len(), 3);
     assert_eq!(secrets[0].title, "Example, personal");
     assert_eq!(secrets[0].username.as_deref(), Some("zoë@example.com"));
@@ -57,7 +57,7 @@ fn onepassword8_documented_columns_fixture() {
 #[test]
 fn keepass_official_sample_fixture() {
     let bytes = include_bytes!("../../tests/fixtures/transfer/keepass-official.csv");
-    let secrets = import_manager(TransferFormat::KeePassCsv, bytes).unwrap();
+    let secrets = import_legacy_manager(TransferFormat::KeePassCsv, bytes).unwrap();
     assert_eq!(secrets.len(), 4);
     assert_eq!(secrets[0].title, "Sample Entry Title");
     assert_eq!(secrets[0].username.as_deref(), Some("Greg"));
@@ -79,7 +79,7 @@ fn keepass_official_sample_fixture() {
 #[test]
 fn older_factorseal_keepass_csv_preserves_literal_backslashes() {
     let bytes = b"Account,Login Name,Password,Web Site,Comments\nExample,user,\"a\\b,c\",,\"quoted \"\"note\"\"\"\n";
-    let secrets = import_manager(TransferFormat::KeePassCsv, bytes).unwrap();
+    let secrets = import_legacy_manager(TransferFormat::KeePassCsv, bytes).unwrap();
     assert_eq!(secrets[0].password.as_deref(), Some("a\\b,c"));
     assert_eq!(secrets[0].notes.as_deref(), Some("quoted \"note\""));
     round_trip(TransferFormat::KeePassCsv, &secrets);

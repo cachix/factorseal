@@ -279,20 +279,13 @@ impl DesktopRuntime {
 
     pub(crate) fn put_personal_secret(
         &self,
-        name: String,
-        value: &Zeroizing<Vec<u8>>,
+        secret: &PersonalSecret,
     ) -> Result<VaultContents, String> {
         let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
-        let secret = PersonalSecret::generic(
-            name.clone(),
-            std::str::from_utf8(value)
-                .map_err(|_| "personal secret value is not valid UTF-8".to_owned())?
-                .to_owned(),
-        );
         let encoded = secret.encode().map_err(|error| error.to_string())?;
         let request = VaultRequest::new(VaultAction::Put {
             namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
-            address: WireSecretAddress::new(name, None),
+            address: WireSecretAddress::new(secret.title.clone(), None),
             value: WireSecret::new(encoded.to_vec()).map_err(|e| e.to_string())?,
             evict_at: None,
         })

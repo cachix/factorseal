@@ -227,6 +227,36 @@ metadata the selected format cannot preserve; use an encrypted FactorSeal
 archive for a lossless backup. Duplicate imported titles receive stable,
 collision-free suffixes.
 
+### Personal item types and migration
+
+Personal items use a versioned record with a stable ID, category, ordered sections,
+and typed fields. Templates cover logins, secure notes, cards, identities, SSH
+keys, API credentials, passports, bank accounts, documents, and generic secrets.
+Fields have independent IDs and labels, so repeated labels and multiple passwords
+are supported. The desktop creation form offers templates and custom fields;
+values use masked, locked-memory input, including multiline values.
+
+Existing v1 records and UTF-8 secret values migrate on read; subsequent writes use
+v2. Native encrypted archives retain all sections, fields, and source metadata.
+Unknown CSV columns become concealed custom fields. Bitwarden custom-field types
+and linked-field IDs are preserved. Unmapped Bitwarden properties are retained in
+encrypted source metadata and prevent exports to formats that would discard them.
+
+Import 1Password's richer export with:
+
+```console
+$ factorseal import account.1pux --format 1password-1pux
+```
+
+1PUX v3 imports preserve sections, typed values, source metadata (including password
+history), and files. Files are currently stored as separate document items; source
+metadata retains their document IDs. The importer never extracts ZIP paths to disk,
+limits expanded archives to 128 MiB, and rejects missing referenced files. Each
+encoded personal item is limited to 512 KiB to fit the vault protocol. An oversized
+item fails preparation before any imported items are written. 1PUX is import-only;
+use an encrypted FactorSeal archive to back up these richer records. Preserving
+passkey or other unrecognized source data does not make it usable for authentication.
+
 ## How it works
 
 Once unsealed, clients send requests over authenticated native IPC to the

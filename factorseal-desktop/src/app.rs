@@ -27,7 +27,10 @@ use crate::runtime::{
     VaultContents,
 };
 use crate::{branding, theming};
-use factorseal::transfer::{TransferFormat, read_transfer_file, write_private_file};
+use factorseal::transfer::{
+    PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
+    TransferFormat, read_transfer_file, write_private_file,
+};
 
 actions!(
     factorseal_desktop,
@@ -554,6 +557,14 @@ fn selection_for_search(selection: Option<&VaultSelection>) -> Option<VaultSelec
     }
 }
 
+struct PersonalDraftField {
+    section: String,
+    id: String,
+    label: gpui::Entity<InputState>,
+    field_type: PersonalFieldType,
+    value: gpui::Entity<SecretInputState>,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 struct DesktopView {
     settings_open: bool,
@@ -569,7 +580,8 @@ struct DesktopView {
     password_confirmation: gpui::Entity<SecretInputState>,
     vault_search: gpui::Entity<InputState>,
     personal_name: gpui::Entity<InputState>,
-    personal_value: gpui::Entity<SecretInputState>,
+    personal_kind: PersonalSecretKind,
+    personal_fields: Vec<PersonalDraftField>,
     archive_passphrase: gpui::Entity<SecretInputState>,
     archive_passphrase_confirmation: gpui::Entity<SecretInputState>,
     setup_method: SetupMethod,
@@ -799,8 +811,7 @@ impl DesktopView {
                 .placeholder("Name")
                 .clean_on_escape()
         });
-        let personal_value =
-            cx.new(|cx| SecretInputState::new(window, cx).placeholder("Secret value"));
+        let personal_fields = Self::personal_draft(PersonalSecretKind::Generic, window, cx);
         let archive_passphrase =
             cx.new(|cx| SecretInputState::new(window, cx).placeholder("Archive passphrase"));
         let archive_passphrase_confirmation = cx
@@ -846,7 +857,8 @@ impl DesktopView {
             password_confirmation,
             vault_search,
             personal_name,
-            personal_value,
+            personal_kind: PersonalSecretKind::Generic,
+            personal_fields,
             archive_passphrase,
             archive_passphrase_confirmation,
             setup_method: SetupMethod::default(),
@@ -928,11 +940,13 @@ impl DesktopView {
         for input in [
             &self.password,
             &self.password_confirmation,
-            &self.personal_value,
             &self.archive_passphrase,
             &self.archive_passphrase_confirmation,
         ] {
             input.update(cx, SecretInputState::clear);
+        }
+        for field in &self.personal_fields {
+            field.value.update(cx, SecretInputState::clear);
         }
     }
 
@@ -956,6 +970,11 @@ impl DesktopView {
         self.clear_secret_inputs(cx);
         if matches!(selection, VaultSelection::Import | VaultSelection::Export) {
             self.transfer_notice = None;
+        }
+        if matches!(selection, VaultSelection::Export)
+            && self.transfer_format == TransferFormat::OnePasswordPux
+        {
+            self.transfer_format = TransferFormat::FactorSeal;
         }
         self.selected_vault_item = Some(selection);
         cx.notify();
@@ -1152,14 +1171,29 @@ impl DesktopView {
 
     fn save_personal_secret(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.personal_name.read(cx).value().trim().to_owned();
-        let value = Zeroizing::new(self.personal_value.read(cx).value().as_bytes().to_vec());
+        if self
+            .personal_fields
+            .iter()
+            .any(|field| field.value.read(cx).allocation_failed())
+        {
+            self.personal_error = Some(
+                "A field could not allocate secure memory. Re-enter that value before saving."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
         if name.is_empty() {
             self.personal_error = Some("Give this secret a name.".to_owned());
             cx.notify();
             return;
         }
-        if value.is_empty() {
-            self.personal_error = Some("Enter a secret value.".to_owned());
+        if self
+            .personal_fields
+            .iter()
+            .all(|field| field.value.read(cx).value().is_empty())
+        {
+            self.personal_error = Some("Enter at least one field value.".to_owned());
             cx.notify();
             return;
         }
@@ -1177,7 +1211,33 @@ impl DesktopView {
             cx.notify();
             return;
         }
-        match self.runtime.put_personal_secret(name, &value) {
+        let mut item = PersonalSecret::new(self.personal_kind, name);
+        for field in &self.personal_fields {
+            if !item
+                .sections
+                .iter()
+                .any(|section| section.id == field.section)
+            {
+                item.sections.push(PersonalSection {
+                    id: field.section.clone(),
+                    label: field.section.clone(),
+                    fields: Vec::new(),
+                });
+            }
+            let value = field.value.read(cx).value();
+            item.sections
+                .iter_mut()
+                .find(|section| section.id == field.section)
+                .unwrap()
+                .fields
+                .push(PersonalField::new(
+                    field.id.clone(),
+                    field.label.read(cx).value().to_string(),
+                    field.field_type.clone(),
+                    value.to_string(),
+                ));
+        }
+        match self.runtime.put_personal_secret(&item) {
             Ok(updated_contents) => {
                 if let Snapshot::Unsealed {
                     contents,
@@ -1190,7 +1250,9 @@ impl DesktopView {
                 }
                 self.personal_name
                     .update(cx, |input, cx| input.set_value("", window, cx));
-                self.personal_value.update(cx, SecretInputState::clear);
+                for field in &self.personal_fields {
+                    field.value.update(cx, SecretInputState::clear);
+                }
                 self.personal_panel = PersonalPanel::Overview;
                 self.personal_error = None;
                 self.selected_vault_item = Some(VaultSelection::PersonalSecrets);
@@ -2157,6 +2219,32 @@ impl DesktopView {
         Self::render_entry_rows(&entries, has_any, query, cx)
     }
 
+    fn personal_draft(
+        kind: PersonalSecretKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<PersonalDraftField> {
+        let template = PersonalSecret::template(kind, String::new());
+        template
+            .sections
+            .iter()
+            .flat_map(|section| {
+                section
+                    .fields
+                    .iter()
+                    .map(|field| (section.id.clone(), field))
+            })
+            .map(|(section, field)| PersonalDraftField {
+                section,
+                id: field.id.clone(),
+                field_type: field.field_type.clone(),
+                label: cx.new(|cx| InputState::new(window, cx).default_value(field.label.clone())),
+                value: cx.new(|cx| SecretInputState::new(window, cx).multiline()),
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn render_personal_new_item(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         v_flex()
@@ -2167,11 +2255,99 @@ impl DesktopView {
             .border_color(theme.border)
             .bg(theme.popover)
             .child(div().font_semibold().child("New personal secret"))
+            .child(
+                h_flex().flex_wrap().gap_2().children(
+                    PersonalSecretKind::ALL
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, kind)| {
+                            Button::new(("personal-category", index))
+                                .label(kind.label())
+                                .selected(self.personal_kind == kind)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    // Switching templates is disabled while any values have been entered.
+                                    view.personal_kind = kind;
+                                    view.personal_fields = Self::personal_draft(kind, window, cx);
+                                    cx.notify();
+                                }))
+                                .disabled(
+                                    self.personal_fields
+                                        .iter()
+                                        .any(|field| !field.value.read(cx).value().is_empty()),
+                                )
+                        }),
+                ),
+            )
             .child(field_label(
                 "Name",
                 Input::new(&self.personal_name).bg(theming::input_background(cx)),
             ))
-            .child(field_label("Secret value", self.personal_value.clone()))
+            .children(
+                self.personal_fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, field)| {
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Input::new(&field.label).bg(theming::input_background(cx)),
+                                    )
+                                    .child(
+                                        Button::new(("personal-field-type", index))
+                                            .label(field.field_type.label())
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                let field = &mut view.personal_fields[index];
+                                                field.field_type = match field.field_type {
+                                                    PersonalFieldType::Concealed => {
+                                                        PersonalFieldType::Text
+                                                    }
+                                                    PersonalFieldType::Text => {
+                                                        PersonalFieldType::Url
+                                                    }
+                                                    PersonalFieldType::Url => {
+                                                        PersonalFieldType::Email
+                                                    }
+                                                    PersonalFieldType::Email => {
+                                                        PersonalFieldType::Phone
+                                                    }
+                                                    PersonalFieldType::Phone => {
+                                                        PersonalFieldType::Date
+                                                    }
+                                                    PersonalFieldType::Date => {
+                                                        PersonalFieldType::Totp
+                                                    }
+                                                    PersonalFieldType::Totp => {
+                                                        PersonalFieldType::Multiline
+                                                    }
+                                                    _ => PersonalFieldType::Concealed,
+                                                };
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            .child(field.value.clone())
+                    }),
+            )
+            .child(
+                Button::new("add-personal-field")
+                    .label("Add custom field")
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        let index = view.personal_fields.len();
+                        view.personal_fields.push(PersonalDraftField {
+                            section: "custom".into(),
+                            id: format!("custom-{index}"),
+                            label: cx.new(|cx| {
+                                InputState::new(window, cx).default_value("Custom field")
+                            }),
+                            field_type: PersonalFieldType::Concealed,
+                            value: cx.new(|cx| SecretInputState::new(window, cx).multiline()),
+                        });
+                        cx.notify();
+                    })),
+            )
             .when_some(self.personal_error.clone(), |panel, error| {
                 panel.child(error_banner(error, theme.danger))
             })
@@ -2234,23 +2410,23 @@ impl DesktopView {
                     });
                 })
         };
-        let mut form =
-            v_flex().w_full().min_w_0().gap_5().child(
-                h_flex().gap_2().flex_wrap().children(
-                    TransferFormat::ALL
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, candidate)| {
-                            Button::new(("transfer-format", index))
-                                .selected(format == candidate)
-                                .disabled(self.transfer_busy)
-                                .label(candidate.label())
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.select_transfer_format(candidate, cx);
-                                }))
-                        }),
-                ),
-            );
+        let mut form = v_flex().w_full().min_w_0().gap_5().child(
+            h_flex().gap_2().flex_wrap().children(
+                TransferFormat::ALL
+                    .into_iter()
+                    .filter(|candidate| is_import || *candidate != TransferFormat::OnePasswordPux)
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        Button::new(("transfer-format", index))
+                            .selected(format == candidate)
+                            .disabled(self.transfer_busy)
+                            .label(candidate.label())
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.select_transfer_format(candidate, cx);
+                            }))
+                    }),
+            ),
+        );
         if format.is_native() {
             form = form.child(
                 v_flex()
@@ -2299,7 +2475,7 @@ impl DesktopView {
                             .whitespace_normal()
                             .text_color(theme.muted_foreground)
                             .child(if is_import {
-                                "Only Personal secrets are imported. Login fields, URLs, one-time-password seeds, notes, and supported metadata are mapped into FactorSeal."
+                                "Personal items retain typed fields and sections. Unknown source data is kept with the encrypted item. 1PUX files are imported as separate document items."
                             } else {
                                 "Only Personal secrets are exported. Password-manager interchange files are plaintext and are not protected by FactorSeal after they are written."
                             }),

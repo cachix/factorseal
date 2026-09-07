@@ -25,6 +25,7 @@ impl Deref for LockedText {
 struct SecretBuffer {
     text: LockedText,
     allocation_failed: bool,
+    multiline: bool,
 }
 impl SecretBuffer {
     fn replace(&mut self, range: Range<usize>, text: &str) -> bool {
@@ -41,7 +42,7 @@ impl SecretBuffer {
             || !self.text.is_char_boundary(range.start)
             || !self.text.is_char_boundary(range.end)
             || self.text.len() - range.len() + text.len() > MAX_BYTES
-            || text.contains(['\n', '\r'])
+            || (!self.multiline && text.contains(['\n', '\r']))
         {
             return false;
         }
@@ -88,6 +89,11 @@ impl Focusable for SecretInputState {
     }
 }
 impl SecretInputState {
+    /// Multiline values remain masked and use the same locked storage.
+    pub(crate) fn multiline(mut self) -> Self {
+        self.secret.multiline = true;
+        self
+    }
     pub(crate) fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             secret: SecretBuffer::default(),
@@ -110,8 +116,14 @@ impl SecretInputState {
             self.secret.text.to_string()
         })
     }
+    pub(crate) fn allocation_failed(&self) -> bool {
+        self.secret.allocation_failed
+    }
     pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
-        self.secret = SecretBuffer::default();
+        self.secret = SecretBuffer {
+            multiline: self.secret.multiline,
+            ..SecretBuffer::default()
+        };
         self.selection = 0..0;
         self.reversed = false;
         self.last_layout = None;
@@ -152,6 +164,13 @@ impl SecretInputState {
         };
         match key {
             "escape" => self.clear(cx),
+            "enter" if self.secret.multiline => {
+                let range = self.selection.clone();
+                if self.secret.replace(range.clone(), "\n") {
+                    self.selection = range.start + 1..range.start + 1;
+                    cx.notify();
+                }
+            }
             "enter" => cx.emit(InputEvent::PressEnter {
                 secondary: false,
                 shift: modifiers.shift,
@@ -449,6 +468,19 @@ impl Render for SecretInputState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiline_personal_values_use_the_bounded_secret_buffer() {
+        let mut secret = SecretBuffer {
+            multiline: true,
+            ..SecretBuffer::default()
+        };
+        assert!(secret.replace(0..0, "-----BEGIN KEY-----\nsecret\n-----END KEY-----\n"));
+        assert!(secret.text.ends_with("-----END KEY-----\n"));
+        assert!(!secret.replace(0..0, &"x".repeat(MAX_BYTES)));
+        assert!(secret.replace(0..secret.text.len(), ""));
+        assert!(secret.text.is_empty());
+    }
     #[test]
     fn failed_lock_keeps_previous_edit_and_reports_failure_until_recovery() {
         let mut secret = SecretBuffer::default();
