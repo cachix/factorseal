@@ -17,7 +17,7 @@ resolver = "2"
 exclude = ["fuzz"]
 
 [features]
-fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "dep:secret-service-protocol", "hardwareseal/fuzzing"]
+fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "personal-sync", "dep:secret-service-protocol", "hardwareseal/fuzzing"]
 default = ["vault", "cli", "hardware", "secretspec-provider"]
 vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token"]
 vault-store = [
@@ -66,6 +66,7 @@ cli = [
 ]
 diagnostics = ["dep:directories", "transfer"]
 personal = ["dep:anyhow", "dep:uuid"]
+personal-sync = ["vault-store", "key-protection", "dep:hpke", "dep:aes-gcm-hpke", "dep:tempfile"]
 transfer = ["personal", "dep:csv", "dep:tempfile", "dep:nt-token", "dep:zip"]
 secretspec-provider = [
     "dep:async-trait",
@@ -120,6 +121,9 @@ fs2 = { version = "0.4.3", optional = true }
 hardwareseal = { version = "0.1.0", path = "crates/hardwareseal", features = ["apple"], optional = true }
 hex = "0.4.3"
 hmac = { version = "0.12.1", optional = true }
+hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "mlkem", "aes", "hkdfsha2", "getrandom"], optional = true }
+# Feature-unify HPKE's newer AES implementation with key-schedule wiping.
+aes-gcm-hpke = { package = "aes-gcm", version = "0.11.1", features = ["zeroize"], optional = true }
 ml-dsa = { version = "0.1.1", features = ["zeroize"], optional = true }
 percent-encoding = { version = "2.3.2", optional = true }
 polyval = { version = "0.6.2", features = ["zeroize"], optional = true }

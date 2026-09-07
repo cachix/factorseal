@@ -19,7 +19,7 @@ use std::path::Path;
 use std::ptr;
 
 use nt_token::OwnedToken;
-#[cfg(feature = "transfer")]
+#[cfg(any(feature = "transfer", feature = "personal-sync"))]
 use std::{
     fs::File,
     os::windows::io::{AsRawHandle, FromRawHandle},
@@ -70,7 +70,7 @@ fn current_user_sid() -> io::Result<String> {
 }
 
 /// Create the final private ACL before writing any secret bytes.
-#[cfg(feature = "transfer")]
+#[cfg(any(feature = "transfer", feature = "personal-sync"))]
 pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
     use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows::Win32::Storage::FileSystem::{
@@ -114,7 +114,7 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
 }
 
 /// Validate the same handle used to read the factor, including its owner.
-#[cfg(feature = "transfer")]
+#[cfg(any(feature = "transfer", feature = "personal-sync"))]
 pub(crate) fn validate_private_file(file: &File) -> io::Result<()> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Security::Authorization::GetSecurityInfo;
@@ -532,7 +532,7 @@ mod tests {
         assert!(validate_owner_only_directory(&inherited).is_err());
     }
 
-    #[cfg(feature = "transfer")]
+    #[cfg(any(feature = "transfer", feature = "personal-sync"))]
     #[test]
     fn exports_remain_private_in_shared_directories_and_after_replacement() {
         use crate::security::{read_private_file, write_private_file};

@@ -857,6 +857,8 @@ mod tests {
 
 pub(crate) mod legacy;
 pub mod revision;
+#[cfg(feature = "personal-sync")]
+pub mod sync;
 
 /// Legacy namespace reserved for personal items.
 pub const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";

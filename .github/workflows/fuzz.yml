@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [metadata, protocol, document, history, envelope, commit_chain, secret_service, archive, transfer, bootstrap]
+        target: [metadata, protocol, document, history, envelope, commit_chain, secret_service, archive, transfer, bootstrap, personal_sync]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly

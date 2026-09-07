@@ -9,9 +9,13 @@ legacy migration, and local causal revision/publication journal are implemented.
 The existing reserved namespace is enforced in the core storage boundary; it
 remains a LocalKeyring document with a personal format version. Current item
 values and pending revision references share one signed encrypted generation.
-This local journal has single-parent writer chains. It does not yet implement
-the multi-parent conflict model, signed portable envelopes, recipient key
-distribution, spool handoff, acknowledgements, or network replication below.
+This local journal has single-parent writer chains. The experimental
+`personal-sync` feature now provides signed portable envelopes, per-reader
+content-key wrapping, and a separate durable ciphertext spool. See the
+[implemented packet boundary](personal-sync-wire.md). These primitives are not
+connected to the vault worker yet. Persistent reader identities, authenticated
+membership enrollment, the multi-parent conflict model, spool handoff,
+acknowledgements, and network replication below remain to be implemented.
 
 ## Product contract
 

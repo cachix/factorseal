@@ -28,9 +28,9 @@ mod password;
 #[cfg(feature = "key-protection")]
 pub use password::validate_new_password;
 
-#[cfg(feature = "transfer")]
+#[cfg(any(feature = "transfer", feature = "personal-sync"))]
 mod files;
-#[cfg(feature = "transfer")]
+#[cfg(any(feature = "transfer", feature = "personal-sync"))]
 pub use files::{read_private_file, read_regular_file, write_private_file};
 
 #[cfg(all(windows, any(feature = "transfer", feature = "key-protection")))]

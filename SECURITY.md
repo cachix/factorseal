@@ -194,6 +194,11 @@ outside the separately built CLI key owner's dependency graph.
   acknowledgements, conflict resolution, and journal checkpoint/compaction are
   not implemented yet. These pending references are not portable encrypted
   packets and cannot be forwarded by a locked background process yet.
+  The optional `personal-sync` feature supplies experimental signed packet and
+  keyless ciphertext-spool primitives, but they are not wired into the running
+  vault. Reader-key persistence and authenticated membership/pairing are also
+  pending. See the [packet boundary](security/personal-sync-wire.md) for its
+  cryptographic construction, bounds, and remaining integration requirements.
 
 - An OR policy is bounded by its weakest unlock group. Biometric-only access
   has no independent recovery secret and can be lost after hardware reset,

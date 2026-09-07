@@ -4,6 +4,12 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Add experimental personal-sync packet encryption and a durable ciphertext
+  spool behind the optional `personal-sync` feature. Packets wrap a fresh content
+  key for each reader using ML-KEM HPKE and authenticate the complete envelope
+  with ML-DSA. Storage and forwarding need only public membership information.
+  Vault-worker integration, persistent reader keys, pairing, and transport are
+  still pending; this does not enable live device sync.
 - Move personal items into the core model and address them by stable IDs.
   Migrate existing items and their history together on unlock, preserve colliding
   source IDs, and display titles separately from storage addresses. Personal

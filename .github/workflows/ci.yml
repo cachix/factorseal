@@ -57,7 +57,7 @@ jobs:
           '
       - name: Check the feature combinations packagers and embedders build
         run: |
-          for features in vault-client key-protection vault-store vault-store,key-protection vault-client,hardware hardware cli vault vault,cli,hardware; do
+          for features in vault-client key-protection vault-store vault-store,key-protection personal-sync vault-client,hardware hardware cli vault vault,cli,hardware; do
             devenv shell -- cargo check --no-default-features --features "$features"
           done
       - name: Lint packaged shell scripts

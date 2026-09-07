@@ -4,6 +4,10 @@ use super::*;
 
 pub const MAX_INPUT: usize = 1024 * 1024;
 
+pub fn personal_sync(bytes: &[u8]) {
+    crate::personal::sync::fuzz(bytes);
+}
+
 pub fn metadata(bytes: &[u8]) {
     if bytes.len() <= MAX_INPUT {
         seal::fuzz_metadata(bytes);
@@ -165,6 +169,11 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             .into_iter()
             .map(|bytes| ("envelope", bytes)),
     );
+    seeds.extend(
+        crate::personal::sync::fuzz_seeds()
+            .into_iter()
+            .map(|bytes| ("personal_sync", bytes)),
+    );
     seeds
 }
 
@@ -198,6 +207,7 @@ mod tests {
                 "transfer" => transfer(&bytes),
                 "metadata" => metadata(&bytes),
                 "bootstrap" => bootstrap(&bytes),
+                "personal_sync" => personal_sync(&bytes),
                 _ => unreachable!(),
             }
         }

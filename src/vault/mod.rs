@@ -27,7 +27,7 @@ mod seal;
 ))]
 mod secret_service_data;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
-mod signature;
+pub(crate) mod signature;
 #[cfg(feature = "vault-store")]
 mod store;
 #[cfg(all(
