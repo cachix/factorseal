@@ -418,6 +418,9 @@ pub enum VaultError {
     #[error("invalid vault protocol message: {0}")]
     Protocol(String),
 
+    #[error("Incorrect password. Please try again.")]
+    PasswordRejected,
+
     #[error("vault protection operation failed: {0}")]
     Protection(String),
 }

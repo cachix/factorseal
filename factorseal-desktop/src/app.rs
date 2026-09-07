@@ -327,7 +327,11 @@ fn vault_entry_label(entry: &factorseal::VaultEntryMetadata) -> (String, String)
     if is_personal_secret(entry) {
         return (
             entry.display_name.as_deref().unwrap_or(item).to_owned(),
-            field.map_or_else(|| "Personal secret".to_owned(), ToOwned::to_owned),
+            entry
+                .display_type
+                .as_deref()
+                .unwrap_or("Personal secret")
+                .to_owned(),
         );
     }
     if entry.document_kind == factorseal::DocumentKind::LinuxSecretService {
@@ -396,17 +400,20 @@ fn permission_matches_search(permission: &factorseal::Permission, query: &str) -
 }
 
 fn vault_entry_details(entry: &factorseal::VaultEntryMetadata) -> Vec<(&'static str, String)> {
-    let mut details = vec![
-        (
+    if is_personal_secret(entry) {
+        return vec![(
             "Type",
-            if is_personal_secret(entry) {
-                "Personal secret".to_owned()
-            } else {
-                vault_category_label(entry.document_kind).to_owned()
-            },
-        ),
+            entry
+                .display_type
+                .as_deref()
+                .unwrap_or("Personal secret")
+                .to_owned(),
+        )];
+    }
+    let mut details = vec![
+        ("Type", vault_category_label(entry.document_kind).to_owned()),
         (
-            "Partition",
+            "Namespace",
             String::from_utf8_lossy(&entry.partition).into_owned(),
         ),
     ];
@@ -3689,6 +3696,31 @@ mod tests {
         category_documentation, category_guidance, hardware_backend_label, password_strength_error,
         secret_spec_address_label,
     };
+
+    #[test]
+    fn personal_inventory_shows_and_searches_item_types() {
+        for kind in super::PersonalSecretKind::ALL {
+            let entry = factorseal::VaultEntryMetadata {
+                display_name: Some("Example".into()),
+                display_type: Some(kind.label().into()),
+                document_kind: DocumentKind::LocalKeyring,
+                partition: super::PERSONAL_SECRET_NAMESPACE.to_vec(),
+                address: factorseal::SecretAddress::new("internal-id", None).unwrap(),
+            };
+            assert_eq!(
+                super::vault_entry_label(&entry),
+                ("Example".into(), kind.label().into())
+            );
+            assert!(super::entry_matches_search(
+                &entry,
+                &kind.label().to_lowercase()
+            ));
+            assert_eq!(
+                super::vault_entry_details(&entry),
+                vec![("Type", kind.label().into())]
+            );
+        }
+    }
 
     #[test]
     fn formats_hardware_backend_names_for_people() {

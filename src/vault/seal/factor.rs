@@ -242,7 +242,7 @@ pub(super) fn unprotect_with_factor(
             &factor_aad(installation_id, b"vault-root-key"),
             vault_root_key_payload,
         )
-        .map_err(|_| factor_incorrect_error(protection.factor.kind()))
+        .map_err(|_| VaultError::PasswordRejected)
     })?;
     crate::timing::result("password_factor", "decode_root_key", || {
         decode_key::<KEY_BYTES>(&vault_root_key, "vault root key")
@@ -345,13 +345,6 @@ fn factor_aad(installation_id: InstallationId, purpose: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(feature = "key-protection")]
-fn factor_incorrect_error(kind: NestedFactorKind) -> VaultError {
-    VaultError::Protection(format!(
-        "the {kind} factor is incorrect or vault metadata was modified"
-    ))
-}
-
-#[cfg(feature = "key-protection")]
 fn factor_empty_error(kind: NestedFactorKind) -> VaultError {
     VaultError::Protection(format!("the {kind} factor must not be empty"))
 }
@@ -435,7 +428,7 @@ mod tests {
                 &payload,
                 UnsealFactor::Password(b"wrong factor"),
             ),
-            Err(VaultError::Protection(_))
+            Err(VaultError::PasswordRejected)
         ));
         assert!(matches!(
             unprotect_with_factor(
@@ -444,7 +437,7 @@ mod tests {
                 &payload,
                 UnsealFactor::Password(b"correct horse"),
             ),
-            Err(VaultError::Protection(_))
+            Err(VaultError::PasswordRejected)
         ));
     }
 

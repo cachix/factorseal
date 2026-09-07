@@ -1019,6 +1019,9 @@ pub struct VaultEntryMetadata {
     /// Display-only personal title, decrypted during inventory. Never used for addressing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Display-only personal item type, derived from encrypted content during inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_type: Option<String>,
     pub document_kind: DocumentKind,
     #[serde(with = "base64_bytes")]
     pub partition: Vec<u8>,

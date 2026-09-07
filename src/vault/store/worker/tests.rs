@@ -67,6 +67,10 @@ fn personal_identity_migration_is_durable_and_preserves_history() {
     );
     let page = store.list_vault_entries(None, 8, TEST_NOW).unwrap();
     assert_eq!(page.items[0].display_name.as_deref(), Some("Old title"));
+    assert_eq!(
+        page.items[0].display_type.as_deref(),
+        Some(expected.kind.label())
+    );
     assert_eq!(page.items[0].address, new_address);
     let history = store
         .list_history(

@@ -373,6 +373,7 @@ impl DesktopRuntime {
             let value = secret.encode().map_err(|error| error.to_string())?;
             let entry = VaultEntryMetadata {
                 display_name: None,
+                display_type: None,
                 document_kind: DocumentKind::LocalKeyring,
                 partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
                 address: SecretAddress::new(secret.id.clone(), None)
@@ -1078,12 +1079,14 @@ mod tests {
         let second = SecretSpecAddress::convention("beta", "production", "DATABASE_URL").unwrap();
         let first = VaultEntryMetadata {
             display_name: None,
+            display_type: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"alpha".to_vec(),
             address: SecretAddress::secret_spec(first).unwrap(),
         };
         let second = VaultEntryMetadata {
             display_name: None,
+            display_type: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"beta".to_vec(),
             address: SecretAddress::secret_spec(second).unwrap(),
@@ -1121,6 +1124,7 @@ mod tests {
     fn initial_inventory_does_not_wait_for_permissions() {
         let entry = VaultEntryMetadata {
             display_name: None,
+            display_type: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"project".to_vec(),
             address: SecretAddress::secret_spec(

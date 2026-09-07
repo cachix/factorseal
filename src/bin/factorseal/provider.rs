@@ -404,6 +404,7 @@ fn map_vault_error(error: &VaultError) -> RpcError {
         | VaultError::HardwareUnavailable
         | VaultError::HardwarePolicyUnsupported
         | VaultError::NativeAuthorization(_)
+        | VaultError::PasswordRejected
         | VaultError::Protection(_) => ErrorKind::OperationFailed,
     })
 }

@@ -50,15 +50,15 @@ impl SecretDocument {
         Ok(())
     }
 
-    pub(crate) fn personal_title(
+    pub(crate) fn personal_summary(
         &self,
         address: &SecretAddress,
         _now: u64,
-    ) -> VaultResult<Option<String>> {
+    ) -> VaultResult<Option<(String, String)>> {
         if !self.is_personal() {
             return Ok(None);
         }
-        // Titles remain available when the replicated register is conflicted.
+        // Display metadata remains available when the replicated register is conflicted.
         let read = self
             .records(&address.storage_key())?
             .into_iter()
@@ -78,7 +78,7 @@ impl SecretDocument {
                     }
                     title.truncate(end);
                 }
-                Ok(Some(title))
+                Ok(Some((title, item.kind.label().to_owned())))
             }
             SecretRead::Missing | SecretRead::Expired => Ok(None),
             SecretRead::Conflict => Err(VaultError::Conflict),
@@ -252,7 +252,11 @@ mod tests {
         assert_ne!(addresses[0].1, addresses[1].1);
         for (_, address) in addresses {
             assert_eq!(
-                document.personal_title(&address, 10).unwrap().as_deref(),
+                document
+                    .personal_summary(&address, 10)
+                    .unwrap()
+                    .as_ref()
+                    .map(|(title, _)| title.as_str()),
                 Some("Same title")
             );
             let SecretRead::Value(value) = document.get(&address, 10).unwrap() else {
@@ -309,7 +313,11 @@ mod tests {
             .unwrap();
         assert_eq!(document.addresses().unwrap().len(), 2);
         assert_eq!(
-            document.personal_title(&address, 10).unwrap().as_deref(),
+            document
+                .personal_summary(&address, 10)
+                .unwrap()
+                .as_ref()
+                .map(|(title, _)| title.as_str()),
             Some("Renamed")
         );
         assert!(document.delete(&address).unwrap().is_some());

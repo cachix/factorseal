@@ -799,8 +799,10 @@ fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
     let manager = caller();
     service.authorize_permission_manager(&manager, 100).unwrap();
     let mut item = PersonalSecret::generic("Original title".into(), "secret".into());
+    item.kind = crate::personal::PersonalSecretKind::Login;
     let source = VaultEntryMetadata {
         display_name: Some("untrusted title".into()),
+        display_type: Some("untrusted type".into()),
         document_kind: DocumentKind::LocalKeyring,
         partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
         address: SecretAddress::new("legacy title address", None).unwrap(),
@@ -844,6 +846,7 @@ fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
         Some((item.id.as_str(), None))
     );
     assert_eq!(entries[0].display_name.as_deref(), Some("Renamed"));
+    assert_eq!(entries[0].display_type.as_deref(), Some(item.kind.label()));
     let response = service.handle(
         &manager,
         VaultRequest::new(VaultAction::ExportVaultEntry {
@@ -877,6 +880,7 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
     service.authorize_permission_manager(&manager, 100).unwrap();
     let source = VaultEntryMetadata {
         display_name: None,
+        display_type: None,
         document_kind: DocumentKind::LocalKeyring,
         partition: b"portable-entry-test".to_vec(),
         address: SecretAddress::new("source", None).unwrap(),
@@ -2264,6 +2268,7 @@ fn export_obeys_record_delivery_expiry() {
     let before = revision();
     let entry = VaultEntryMetadata {
         display_name: None,
+        display_type: None,
         document_kind: DocumentKind::LocalKeyring,
         partition: b"audit".to_vec(),
         address: SecretAddress::new("token", None).unwrap(),

@@ -541,6 +541,7 @@ fn response_error_with_interaction(
         | VaultError::HardwareUnavailable
         | VaultError::HardwarePolicyUnsupported
         | VaultError::NativeAuthorization(_)
+        | VaultError::PasswordRejected
         | VaultError::Protection(_) => VaultResponseErrorCode::Internal,
     };
     let message = match code {

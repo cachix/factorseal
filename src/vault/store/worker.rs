@@ -1034,10 +1034,15 @@ impl StoreWorker {
                 {
                     continue;
                 }
+                let summary = document.personal_summary(&address, now)?;
+                let (display_name, display_type) = summary
+                    .map(|(title, kind)| (Some(title), Some(kind)))
+                    .unwrap_or_default();
                 entries.push((
                     self.vault_entry_cursor(document_kind, document_id, &storage_key),
                     VaultEntryMetadata {
-                        display_name: document.personal_title(&address, now)?,
+                        display_name,
+                        display_type,
                         document_kind,
                         partition: partition.clone(),
                         address,
