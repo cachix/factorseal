@@ -192,12 +192,14 @@ impl VaultService {
         Ok(())
     }
 
+    #[cfg(any(feature = "vault", all(test, feature = "hardware")))]
     pub(crate) fn is_seal_complete(&self) -> bool {
         self.state.is_seal_complete()
     }
 
     /// Native desktop agents own their process and terminate if a wedged
     /// operation prevents timely key teardown. Library embedders do not opt in.
+    #[cfg(feature = "vault")]
     pub(crate) fn enable_emergency_exit(&self) {
         self.state.enable_emergency_exit();
     }

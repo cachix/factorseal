@@ -126,6 +126,7 @@ impl VaultStore {
         self.control.deadline()
     }
 
+    #[cfg(feature = "vault")]
     pub(crate) fn enable_emergency_exit(&self) {
         self.control.enable_emergency_exit();
     }
@@ -136,6 +137,7 @@ impl VaultStore {
     }
 
     #[must_use]
+    #[cfg(any(feature = "vault", all(test, feature = "hardware")))]
     pub(crate) fn is_shutdown_complete(&self) -> bool {
         self.control.is_shutdown_complete()
     }

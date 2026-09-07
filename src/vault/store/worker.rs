@@ -205,6 +205,7 @@ impl WorkerControl {
             .map_err(|_| VaultError::WorkerUnavailable)
     }
 
+    #[cfg(feature = "vault")]
     pub(super) fn enable_emergency_exit(&self) {
         self.status.emergency_exit.store(true, Ordering::Release);
     }
@@ -213,6 +214,7 @@ impl WorkerControl {
         self.status.is_sealed()
     }
 
+    #[cfg(any(feature = "vault", all(test, feature = "hardware")))]
     pub(super) fn is_shutdown_complete(&self) -> bool {
         self.status.shutdown_complete.load(Ordering::Acquire)
     }
