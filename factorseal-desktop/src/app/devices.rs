@@ -55,6 +55,7 @@ impl DesktopView {
             return;
         }
         self.devices_busy = true;
+        self.devices_syncing = matches!(action, Action::Refresh);
         self.devices_notice = None;
         cx.notify();
         let runtime = Arc::clone(&self.runtime);
@@ -68,6 +69,7 @@ impl DesktopView {
             .await;
             let _ = view.update(cx, |view, cx| {
                 view.devices_busy = false;
+                view.devices_syncing = false;
                 match result {
                     Ok((mut devices, snapshot)) => {
                         if let Some(snapshot) = snapshot {
@@ -383,7 +385,12 @@ impl DesktopView {
                 )
                 .child(
                     Button::new("refresh-devices")
-                        .label("Sync now")
+                        .label(if self.devices_syncing {
+                            "Syncing…"
+                        } else {
+                            "Sync now"
+                        })
+                        .loading(self.devices_syncing)
                         .disabled(busy || self.devices.devices.is_empty())
                         .on_click(
                             cx.listener(|view, _, _, cx| view.device_action(Action::Refresh, cx)),
@@ -474,7 +481,7 @@ impl DesktopView {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("No other devices connected."),
+                            .child("No other devices paired yet."),
                     )
                 },
             );
