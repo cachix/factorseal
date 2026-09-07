@@ -120,7 +120,7 @@ pub(crate) fn apply(theme: &mut Theme) {
     theme.sidebar_accent_foreground = color(ink);
     theme.sidebar_border = color(border);
     theme.sidebar_primary = color(ink);
-    theme.scrollbar_mode = ScrollbarMode::Always;
+    theme.scrollbar_mode = ScrollbarMode::Scrolling;
     theme.scrollbar = color(canvas).opacity(definition.scrollbar_opacity);
     theme.scrollbar_thumb = color(quiet).opacity(definition.scrollbar_thumb_opacity);
     theme.scrollbar_thumb_hover = color(quiet).opacity(definition.scrollbar_thumb_hover_opacity);
