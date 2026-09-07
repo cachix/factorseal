@@ -51,7 +51,12 @@ pub struct VaultArchive {
 
 impl VaultArchive {
     #[must_use]
-    pub fn new(created_at: u64, entries: Vec<VaultArchiveEntry>) -> Self {
+    pub fn new(created_at: u64, mut entries: Vec<VaultArchiveEntry>) -> Self {
+        // Display labels are derived from encrypted item content on inventory;
+        // keep the portable archive metadata compatible with existing readers.
+        for entry in &mut entries {
+            entry.metadata.display_name = None;
+        }
         Self {
             format: FORMAT.to_owned(),
             version: VERSION,
@@ -425,6 +430,7 @@ mod tests {
             42,
             vec![VaultArchiveEntry {
                 metadata: VaultEntryMetadata {
+                    display_name: None,
                     document_kind: DocumentKind::LocalKeyring,
                     partition: b"factorseal/personal-secrets/v1".to_vec(),
                     address: SecretAddress::new("example", None).unwrap(),
@@ -491,6 +497,7 @@ mod tests {
         let mut index = Index::default();
         index.items.push(item.clone());
         let metadata = |address| VaultEntryMetadata {
+            display_name: None,
             document_kind: DocumentKind::LinuxSecretService,
             partition: NAMESPACE.to_vec(),
             address,

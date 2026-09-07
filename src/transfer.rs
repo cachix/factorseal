@@ -2,14 +2,50 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
-use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 mod onepux;
-mod personal;
-pub use personal::{PersonalField, PersonalFieldType, PersonalSecret, PersonalSection};
+pub use crate::personal::{
+    PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
+};
+use crate::personal::{
+    legacy::{LegacyField, LegacyFieldSection, LegacySecret},
+    zeroize_json_strings,
+};
 
 pub fn import_manager(format: TransferFormat, bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
+    let mut items = import_manager_items(format, bytes)?;
+    // An export can contain repeated source IDs. Preserve each record, with
+    // deterministic replacement identities so retrying the import is idempotent.
+    let mut reserved: HashSet<String> = items.iter().map(|item| item.id.clone()).collect();
+    let mut seen = HashSet::new();
+    for item in &mut items {
+        if seen.insert(item.id.clone()) && item.has_storage_id() {
+            continue;
+        }
+        let original = item.id.clone();
+        let mut occurrence = 2_u64;
+        loop {
+            use sha2::{Digest as _, Sha256};
+            let mut digest = Sha256::new();
+            digest.update(b"factorseal/duplicate-import-id/v1\0");
+            digest.update(original.as_bytes());
+            digest.update(occurrence.to_be_bytes());
+            let candidate = format!("duplicate-{}", hex::encode(digest.finalize()));
+            if reserved.insert(candidate.clone()) {
+                item.id = candidate;
+                break;
+            }
+            occurrence += 1;
+        }
+    }
+    Ok(items)
+}
+
+fn import_manager_items(
+    format: TransferFormat,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<PersonalSecret>> {
     if bytes.len() > MAX_MANAGER_FILE_BYTES {
         bail!("password-manager export is larger than 128 MiB");
     }
@@ -194,20 +230,11 @@ pub fn personal_import_names(secrets: &[PersonalSecret]) -> Vec<String> {
 #[path = "transfer/fixture_tests.rs"]
 mod fixture_tests;
 
-const PERSONAL_FORMAT: &str = "factorseal-personal-secret";
-const PERSONAL_VERSION: u16 = 1;
 const MAX_MANAGER_FILE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_MANAGER_ITEMS: usize = 100_000;
 const MAX_TRANSFER_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 struct SensitiveJson(serde_json::Value);
-
-#[derive(Deserialize)]
-struct PersonalHeader<'a> {
-    #[serde(borrow)]
-    format: Option<&'a str>,
-    version: Option<u16>,
-}
 
 impl std::ops::Deref for SensitiveJson {
     type Target = serde_json::Value;
@@ -220,23 +247,6 @@ impl std::ops::Deref for SensitiveJson {
 impl Drop for SensitiveJson {
     fn drop(&mut self) {
         zeroize_json_strings(&mut self.0);
-    }
-}
-
-fn zeroize_json_strings(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::String(value) => value.zeroize(),
-        serde_json::Value::Array(values) => {
-            for value in values {
-                zeroize_json_strings(value);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for value in values.values_mut() {
-                zeroize_json_strings(value);
-            }
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
 
@@ -283,173 +293,6 @@ impl TransferFormat {
     #[must_use]
     pub const fn is_native(self) -> bool {
         matches!(self, Self::FactorSeal)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PersonalSecretKind {
-    Login,
-    SecureNote,
-    Card,
-    Identity,
-    SshKey,
-    ApiCredential,
-    Passport,
-    BankAccount,
-    Document,
-    #[default]
-    Generic,
-}
-
-#[derive(Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct LegacyField {
-    pub(crate) name: String,
-    pub(crate) value: String,
-    #[serde(default, skip_serializing_if = "LegacyFieldSection::is_custom")]
-    section: LegacyFieldSection,
-    #[serde(default)]
-    field_type: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    linked_id: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum LegacyFieldSection {
-    #[default]
-    Custom,
-    Card,
-    Identity,
-}
-
-impl LegacyFieldSection {
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    const fn is_custom(&self) -> bool {
-        matches!(self, Self::Custom)
-    }
-}
-
-impl Drop for LegacyField {
-    fn drop(&mut self) {
-        self.name.zeroize();
-        self.value.zeroize();
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacySecret {
-    format: String,
-    version: u16,
-    kind: PersonalSecretKind,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) username: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) password: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) urls: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) totp: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) notes: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) custom_fields: Vec<LegacyField>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) folder: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) tags: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) favorite: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) archived: bool,
-}
-
-impl LegacySecret {
-    #[must_use]
-    pub fn generic(title: String, value: String) -> Self {
-        Self {
-            format: PERSONAL_FORMAT.to_owned(),
-            version: PERSONAL_VERSION,
-            kind: PersonalSecretKind::Generic,
-            title,
-            username: None,
-            password: nonempty(value),
-            urls: Vec::new(),
-            totp: None,
-            notes: None,
-            custom_fields: Vec::new(),
-            folder: None,
-            tags: Vec::new(),
-            favorite: false,
-            archived: false,
-        }
-    }
-
-    pub fn encode(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        serde_json::to_vec(self)
-            .map(Zeroizing::new)
-            .context("could not encode personal secret")
-    }
-
-    pub fn decode(title: &str, bytes: &[u8]) -> anyhow::Result<Self> {
-        if let Ok(header) = serde_json::from_slice::<PersonalHeader<'_>>(bytes)
-            && header.format == Some(PERSONAL_FORMAT)
-        {
-            if header.version != Some(PERSONAL_VERSION) {
-                bail!("unsupported FactorSeal personal-secret version");
-            }
-            let secret: Self = serde_json::from_slice(bytes)
-                .context("invalid FactorSeal personal-secret record")?;
-            if !secret.is_supported() {
-                bail!("unsupported FactorSeal personal-secret version");
-            }
-            return Ok(secret);
-        }
-        Ok(Self::generic(
-            title.to_owned(),
-            std::str::from_utf8(bytes)
-                .context("legacy personal secret is not UTF-8")?
-                .to_owned(),
-        ))
-    }
-
-    fn is_supported(&self) -> bool {
-        self.format == PERSONAL_FORMAT && self.version == PERSONAL_VERSION
-    }
-
-    fn new(kind: PersonalSecretKind, title: String) -> Self {
-        Self {
-            format: PERSONAL_FORMAT.to_owned(),
-            version: PERSONAL_VERSION,
-            kind,
-            title,
-            username: None,
-            password: None,
-            urls: Vec::new(),
-            totp: None,
-            notes: None,
-            custom_fields: Vec::new(),
-            folder: None,
-            tags: Vec::new(),
-            favorite: false,
-            archived: false,
-        }
-    }
-}
-
-impl Drop for LegacySecret {
-    fn drop(&mut self) {
-        self.title.zeroize();
-        self.username.zeroize();
-        self.password.zeroize();
-        self.urls.zeroize();
-        self.totp.zeroize();
-        self.notes.zeroize();
-        self.folder.zeroize();
-        self.tags.zeroize();
     }
 }
 
@@ -1036,14 +879,25 @@ fn parse_bool(value: &str) -> bool {
     )
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
-const fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_source_ids_are_preserved_and_repeatable() {
+        let bytes = br#"{"items":[
+            {"id":"repeated","type":1,"name":"Same title","login":{"password":"first"}},
+            {"id":"repeated","type":1,"name":"Same title","login":{"password":"second"}}
+        ]}"#;
+        let first = import_manager(TransferFormat::BitwardenJson, bytes).unwrap();
+        let second = import_manager(TransferFormat::BitwardenJson, bytes).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0].id, first[1].id);
+        assert_eq!(first[0].title, first[1].title);
+        assert_eq!(first[0].sections[0].fields[0].text(), Some("first"));
+        assert_eq!(first[1].sections[0].fields[0].text(), Some("second"));
+    }
 
     #[test]
     fn structured_personal_secret_round_trips_and_legacy_is_supported() {

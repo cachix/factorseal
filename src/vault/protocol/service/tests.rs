@@ -792,6 +792,76 @@ fn vault_inventory_is_value_free_paginated_and_permission_manager_only() {
 }
 
 #[test]
+fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
+    use crate::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret};
+
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let manager = caller();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    let mut item = PersonalSecret::generic("Original title".into(), "secret".into());
+    let source = VaultEntryMetadata {
+        display_name: Some("untrusted title".into()),
+        document_kind: DocumentKind::LocalKeyring,
+        partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
+        address: SecretAddress::new("legacy title address", None).unwrap(),
+    };
+    for (title, replace, expected) in [
+        ("Original title", false, VaultEntryImportStatus::Added),
+        ("Renamed", false, VaultEntryImportStatus::KeptExisting),
+        ("Renamed", true, VaultEntryImportStatus::Replaced),
+    ] {
+        item.title = title.into();
+        let response = service.handle(
+            &manager,
+            VaultRequest::new(VaultAction::ImportVaultEntry {
+                entry: source.clone(),
+                value: WireSecret::new(item.encode().unwrap().to_vec()).unwrap(),
+                evict_at: None,
+                replace_existing: replace,
+            })
+            .unwrap(),
+            101,
+        );
+        assert!(
+            matches!(response.result, Ok(VaultResponseBody::VaultEntryImported { status }) if status == expected)
+        );
+    }
+    let response = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListVaultEntries {
+            cursor: None,
+            limit: 8,
+        })
+        .unwrap(),
+        102,
+    );
+    let VaultResponseBody::VaultEntries { entries, .. } = response.result.unwrap() else {
+        panic!()
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].address.as_local(),
+        Some((item.id.as_str(), None))
+    );
+    assert_eq!(entries[0].display_name.as_deref(), Some("Renamed"));
+    let response = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ExportVaultEntry {
+            entry: entries[0].clone(),
+        })
+        .unwrap(),
+        103,
+    );
+    let VaultResponseBody::VaultEntrySecret { value, .. } = response.result.unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        PersonalSecret::decode_current(value.expose()).unwrap(),
+        item
+    );
+}
+
+#[test]
 fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
     let (_directory, service) = service(100, UnsealLeasePolicy::default());
     let manager = caller();
@@ -806,8 +876,9 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
         .unwrap();
     service.authorize_permission_manager(&manager, 100).unwrap();
     let source = VaultEntryMetadata {
+        display_name: None,
         document_kind: DocumentKind::LocalKeyring,
-        partition: b"factorseal/personal-secrets/v1".to_vec(),
+        partition: b"portable-entry-test".to_vec(),
         address: SecretAddress::new("source", None).unwrap(),
     };
     assert!(matches!(
@@ -2192,6 +2263,7 @@ fn export_obeys_record_delivery_expiry() {
     };
     let before = revision();
     let entry = VaultEntryMetadata {
+        display_name: None,
         document_kind: DocumentKind::LocalKeyring,
         partition: b"audit".to_vec(),
         address: SecretAddress::new("token", None).unwrap(),

@@ -21,6 +21,7 @@ fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "dep:sec
 default = ["vault", "cli", "hardware", "secretspec-provider"]
 vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token"]
 vault-store = [
+    "personal",
     "dep:aes",
     "dep:aes-gcm",
     "dep:automerge",
@@ -64,7 +65,8 @@ cli = [
     "transfer",
 ]
 diagnostics = ["dep:directories", "transfer"]
-transfer = ["dep:anyhow", "dep:csv", "dep:tempfile", "dep:uuid", "dep:nt-token", "dep:zip"]
+personal = ["dep:anyhow", "dep:uuid"]
+transfer = ["personal", "dep:csv", "dep:tempfile", "dep:nt-token", "dep:zip"]
 secretspec-provider = [
     "dep:async-trait",
     "dep:percent-encoding",

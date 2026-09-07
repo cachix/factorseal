@@ -86,6 +86,8 @@ pub enum HistoryOperation {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum ServiceReason {
+    /// Upgrade personal item addresses without a user edit.
+    PersonalMigration,
     /// A grant was stored by the installation's own authorization path.
     GrantStorage,
     /// A record's eviction deadline passed.
@@ -327,6 +329,15 @@ impl HistoryLog {
 
     pub(crate) fn serialize(&self) -> VaultResult<Vec<u8>> {
         serde_json::to_vec(self).map_err(|error| VaultError::InvalidData(error.to_string()))
+    }
+
+    /// Preserve per-item history when its storage identity is migrated.
+    pub(crate) fn migrate_addresses(&mut self, mappings: &[(SecretAddress, SecretAddress)]) {
+        for entry in &mut self.entries {
+            if let Some((_, new)) = mappings.iter().find(|(old, _)| old == &entry.address) {
+                entry.address.clone_from(new);
+            }
+        }
     }
 
     /// Recorded changes, oldest first.

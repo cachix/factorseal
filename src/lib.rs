@@ -27,6 +27,9 @@ mod timing;
 #[cfg(feature = "vault-client")]
 pub mod keyring;
 
+#[cfg(feature = "personal")]
+pub mod personal;
+
 #[cfg(feature = "transfer")]
 pub mod transfer;
 

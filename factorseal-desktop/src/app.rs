@@ -325,7 +325,7 @@ fn vault_entry_label(entry: &factorseal::VaultEntryMetadata) -> (String, String)
     };
     if is_personal_secret(entry) {
         return (
-            item.to_owned(),
+            entry.display_name.as_deref().unwrap_or(item).to_owned(),
             field.map_or_else(|| "Personal secret".to_owned(), ToOwned::to_owned),
         );
     }
@@ -1187,20 +1187,6 @@ impl DesktopView {
             .all(|field| field.value.read(cx).value().is_empty())
         {
             self.personal_error = Some("Enter at least one field value.".to_owned());
-            cx.notify();
-            return;
-        }
-        if let Snapshot::Unsealed { contents, .. } = &self.snapshot
-            && contents.entries.iter().any(|entry| {
-                is_personal_secret(entry)
-                    && entry
-                        .address
-                        .as_local()
-                        .is_some_and(|(item, _)| item == name)
-            })
-        {
-            self.personal_error =
-                Some("A personal secret with this name already exists.".to_owned());
             cx.notify();
             return;
         }
@@ -3079,6 +3065,20 @@ fn vault_browser_height(window: &Window, compact: bool, cx: &App) -> gpui::Pixel
     }
 }
 
+impl DesktopView {
+    fn body_max_width(&self) -> f32 {
+        if self.settings_open {
+            1200.
+        } else {
+            match &self.snapshot {
+                Snapshot::Unsealed { .. } => 1200.,
+                Snapshot::Uninitialized { .. } => 520.,
+                _ => 440.,
+            }
+        }
+    }
+}
+
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dialog_layer = Root::render_dialog_layer(window, cx);
@@ -3087,15 +3087,7 @@ impl Render for DesktopView {
         let header_status = self.render_header_status(cx);
         let unsealed = !self.settings_open && matches!(self.snapshot, Snapshot::Unsealed { .. });
         let compact = window.viewport_size().width < px(800.) * crate::appearance::scale(cx);
-        let body_max_width = if self.settings_open {
-            1200.
-        } else {
-            match &self.snapshot {
-                Snapshot::Unsealed { .. } => 1200.,
-                Snapshot::Uninitialized { .. } => 520.,
-                _ => 440.,
-            }
-        };
+        let body_max_width = self.body_max_width();
         let browser_height = vault_browser_height(window, compact, cx);
         v_flex()
             .size_full()

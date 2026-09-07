@@ -9,6 +9,8 @@ use super::history::{
 };
 use super::{DeviceKeyId, DocumentKind, SecretAddress, VaultError, VaultResult};
 
+mod personal;
+
 const ENTRIES_KEY: &str = "entries";
 const LEGACY_HISTORY_KEY: &str = "history";
 const LEGACY_NEXT_SEQ_KEY: &str = "next-seq";
@@ -18,6 +20,8 @@ const PARTITION_KEY: &str = "partition";
 // Version 3 holds only current records; history lives in its own log beside
 // the document. Version 2 added per-record value versions.
 const FORMAT_VERSION: u64 = 3;
+// Personal documents carry durable revision state that older projections must not drop.
+const PERSONAL_FORMAT_VERSION: u64 = 4;
 const LEGACY_FORMAT_VERSION: u64 = 2;
 const RECORD_VERSION: u8 = 2;
 
@@ -44,6 +48,7 @@ pub(crate) enum SecretRead {
 /// Plaintext of one generation, zeroized once the worker has encrypted it,
 /// with the changes that generation makes for the history log.
 pub(crate) struct DocumentMutation {
+    pub(crate) address_migrations: Vec<(SecretAddress, SecretAddress)>,
     pub(crate) snapshot: Zeroizing<Vec<u8>>,
     pub(crate) partition: Vec<u8>,
     pub(crate) history: Vec<PendingHistory>,
@@ -109,7 +114,17 @@ impl SecretDocument {
             .put(ROOT, FORMAT_KEY, kind.as_str())
             .map_err(automerge_error)?;
         document
-            .put(ROOT, FORMAT_VERSION_KEY, FORMAT_VERSION)
+            .put(
+                ROOT,
+                FORMAT_VERSION_KEY,
+                if kind == DocumentKind::LocalKeyring
+                    && partition == crate::personal::PERSONAL_SECRET_NAMESPACE
+                {
+                    PERSONAL_FORMAT_VERSION
+                } else {
+                    FORMAT_VERSION
+                },
+            )
             .map_err(automerge_error)?;
         document
             .put(ROOT, PARTITION_KEY, partition.to_vec())
@@ -150,7 +165,10 @@ impl SecretDocument {
             return Err(descriptor_mismatch());
         };
         if format.as_deref() != Some(kind.as_str())
-            || version != Some(FORMAT_VERSION)
+            || !(version == Some(FORMAT_VERSION)
+                || (kind == DocumentKind::LocalKeyring
+                    && partition == crate::personal::PERSONAL_SECRET_NAMESPACE
+                    && version == Some(PERSONAL_FORMAT_VERSION)))
             || expected_partition.is_some_and(|expected| partition != expected)
         {
             return Err(descriptor_mismatch());
@@ -466,6 +484,7 @@ impl SecretDocument {
         evict_at: Option<u64>,
         context: &MutationContext<'_>,
     ) -> VaultResult<()> {
+        self.validate_personal_put(address, value, evict_at)?;
         let key = address.storage_key();
         let existing = self.records(&key)?.into_iter().next();
         let changed = existing
@@ -496,6 +515,9 @@ impl SecretDocument {
         self.document
             .put(&self.entries, key, bytes.to_vec())
             .map_err(automerge_error)?;
+        if changed {
+            self.record_personal_revision(address, false)?;
+        }
         if changed || self.kind.history_retention().record_unchanged {
             self.pending.push(PendingHistory {
                 operation: HistoryOperation::Put { changed },
@@ -549,6 +571,7 @@ impl SecretDocument {
         self.document
             .delete(&self.entries, key)
             .map_err(automerge_error)?;
+        self.record_personal_revision(address, true)?;
         self.pending.push(PendingHistory {
             operation,
             address: address.clone(),
@@ -630,6 +653,7 @@ impl SecretDocument {
         *self = projection;
         let snapshot = Zeroizing::new(self.document.save());
         Ok(DocumentMutation {
+            address_migrations: Vec::new(),
             snapshot,
             partition: self.partition.clone(),
             history,
@@ -646,6 +670,7 @@ impl SecretDocument {
     fn project(&self) -> VaultResult<(Self, Option<u64>)> {
         let actor_id = self.document.get_actor().to_bytes().to_vec();
         let mut projection = Self::new(&actor_id, self.kind, &self.partition)?;
+        self.project_personal_metadata(&mut projection)?;
         let mut next_eviction: Option<u64> = None;
         let mut keys: Vec<String> = self.document.keys(&self.entries).collect();
         keys.sort_unstable();

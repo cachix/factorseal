@@ -186,6 +186,15 @@ outside the separately built CLI key owner's dependency graph.
 
 ## Honest limitations
 
+- Personal documents contain an encrypted, value-free local revision journal and
+  pending publication references committed with their current records. Deletion
+  markers survive removal of the corresponding record. The journal is bounded
+  at 100,000 revisions and 16 MiB; exhausting either bound rejects the mutation
+  without committing an item/outbox mismatch. Network replication, peer
+  acknowledgements, conflict resolution, and journal checkpoint/compaction are
+  not implemented yet. These pending references are not portable encrypted
+  packets and cannot be forwarded by a locked background process yet.
+
 - An OR policy is bounded by its weakest unlock group. Biometric-only access
   has no independent recovery secret and can be lost after hardware reset,
   biometric enrollment changes, or platform-key invalidation.

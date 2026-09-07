@@ -272,8 +272,8 @@ impl VaultService {
                 });
             }
             VaultAction::ImportVaultEntry {
-                entry,
-                value,
+                mut entry,
+                mut value,
                 evict_at,
                 replace_existing,
             } => {
@@ -293,6 +293,28 @@ impl VaultService {
                     clock.check(valid_until.get())?;
                     state.touch(now, monotonic_now)?;
                     return Ok(VaultResponseBody::VaultEntryImported { status });
+                }
+                if entry.document_kind == DocumentKind::LocalKeyring
+                    && entry.partition == crate::personal::PERSONAL_SECRET_NAMESPACE
+                {
+                    let (title, field) = entry
+                        .address
+                        .as_local()
+                        .ok_or_else(|| VaultError::Protocol("invalid personal address".into()))?;
+                    if field.is_some() || evict_at.is_some() {
+                        return Err(VaultError::Protocol(
+                            "personal items cannot have fields or expiry".into(),
+                        )
+                        .into());
+                    }
+                    let item = crate::personal::PersonalSecret::decode(title, value.expose())
+                        .map_err(|_| VaultError::Protocol("invalid personal item".into()))?;
+                    entry.address = crate::vault::SecretAddress::new(item.id.clone(), None)?;
+                    value = super::WireSecret::new(
+                        item.encode()
+                            .map_err(|_| VaultError::Protocol("invalid personal item".into()))?
+                            .to_vec(),
+                    )?;
                 }
                 let existing = state.store().get_at(
                     entry.document_kind,

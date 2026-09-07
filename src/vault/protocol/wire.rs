@@ -15,7 +15,7 @@ use crate::vault::{
 };
 
 // Version 12 adds revision-bound permission pages and logical keyring transfers.
-pub(super) const PROTOCOL_VERSION: u8 = 12;
+pub(super) const PROTOCOL_VERSION: u8 = 13;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -1016,6 +1016,9 @@ pub enum VaultResponseBody {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultEntryMetadata {
+    /// Display-only personal title, decrypted during inventory. Never used for addressing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub document_kind: DocumentKind,
     #[serde(with = "base64_bytes")]
     pub partition: Vec<u8>,

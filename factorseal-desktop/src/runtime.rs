@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use factorseal::transfer::{PersonalSecret, TransferFormat, export_manager, import_manager};
 
 const METADATA_FILE: &str = "factorseal.json";
-pub(crate) const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";
+pub(crate) use factorseal::personal::PERSONAL_SECRET_NAMESPACE;
 const CLI_EXECUTABLE_ENV: &str = "FACTORSEAL_CLI_EXECUTABLE";
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const DEFAULT_SOCKET: &str = "factorseal.sock";
@@ -285,7 +285,7 @@ impl DesktopRuntime {
         let encoded = secret.encode().map_err(|error| error.to_string())?;
         let request = VaultRequest::new(VaultAction::Put {
             namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
-            address: WireSecretAddress::new(secret.title.clone(), None),
+            address: WireSecretAddress::new(secret.id.clone(), None),
             value: WireSecret::new(encoded.to_vec()).map_err(|e| e.to_string())?,
             evict_at: None,
         })
@@ -361,14 +361,15 @@ impl DesktopRuntime {
         replace_existing: bool,
     ) -> Result<(TransferSummary, VaultContents), String> {
         let secrets = import_manager(format, bytes).map_err(|error| error.to_string())?;
-        let names = factorseal::transfer::personal_import_names(&secrets);
+
         let mut prepared = Vec::with_capacity(secrets.len());
-        for (secret, address_name) in secrets.into_iter().zip(names) {
+        for secret in secrets {
             let value = secret.encode().map_err(|error| error.to_string())?;
             let entry = VaultEntryMetadata {
+                display_name: None,
                 document_kind: DocumentKind::LocalKeyring,
                 partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
-                address: SecretAddress::new(address_name, None)
+                address: SecretAddress::new(secret.id.clone(), None)
                     .map_err(|error| error.to_string())?,
             };
             prepared.push((
@@ -980,11 +981,13 @@ mod tests {
         let first = SecretSpecAddress::convention("alpha", "default", "TOKEN").unwrap();
         let second = SecretSpecAddress::convention("beta", "production", "DATABASE_URL").unwrap();
         let first = VaultEntryMetadata {
+            display_name: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"alpha".to_vec(),
             address: SecretAddress::secret_spec(first).unwrap(),
         };
         let second = VaultEntryMetadata {
+            display_name: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"beta".to_vec(),
             address: SecretAddress::secret_spec(second).unwrap(),
@@ -1021,6 +1024,7 @@ mod tests {
     #[test]
     fn initial_inventory_does_not_wait_for_permissions() {
         let entry = VaultEntryMetadata {
+            display_name: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"project".to_vec(),
             address: SecretAddress::secret_spec(

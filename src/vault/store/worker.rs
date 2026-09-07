@@ -730,6 +730,7 @@ impl StoreWorker {
             if purge_result.is_ok() { "ok" } else { "error" },
         );
         purge_result?;
+        Box::pin(worker.migrate_personal_document()).await?;
         // A database written before compaction existed still carries its whole
         // history; shrink it once here so the next unseal is fast.
         let compact_started = Instant::now();
@@ -746,6 +747,32 @@ impl StoreWorker {
         );
         compact_result?;
         Ok(worker)
+    }
+
+    async fn migrate_personal_document(&mut self) -> VaultResult<()> {
+        let personal_partition = crate::personal::PERSONAL_SECRET_NAMESPACE;
+        let personal_id = self.document_id(DocumentKind::LocalKeyring, personal_partition);
+        if let Some(LoadedDocument { mut document, head }) = self
+            .load_document(
+                personal_id,
+                DocumentKind::LocalKeyring,
+                Some(personal_partition),
+            )
+            .await?
+            && let Some(mutation) = document.migrate_personal()?
+        {
+            let provenance = Provenance::service(ServiceReason::PersonalMigration);
+            let context = self.context(&provenance, unix_time()?);
+            self.commit_mutation(
+                personal_id,
+                DocumentKind::LocalKeyring,
+                Some(head),
+                mutation,
+                &context,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn get(
@@ -988,6 +1015,7 @@ impl StoreWorker {
                 entries.push((
                     self.vault_entry_cursor(document_kind, document_id, &storage_key),
                     VaultEntryMetadata {
+                        display_name: document.personal_title(&address, now)?,
                         document_kind,
                         partition: partition.clone(),
                         address,

@@ -1,6 +1,14 @@
 //! Versioned personal items, independent of password-manager transfer formats.
-use super::*;
+#[cfg(feature = "transfer")]
+use anyhow::anyhow;
+use anyhow::{Context as _, bail};
+#[cfg(feature = "transfer")]
+use legacy::LegacyField;
+use legacy::{LegacyFieldSection, LegacySecret};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::HashSet;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -304,6 +312,23 @@ impl PersonalSecret {
         Self::from_legacy(LegacySecret::decode(title, bytes)?)
     }
 
+    /// Decode the current storage format without interpreting malformed data as a legacy password.
+    pub fn decode_current(bytes: &[u8]) -> anyhow::Result<Self> {
+        if bytes.len() > 512 * 1024 {
+            bail!("personal item exceeds the 512 KiB storage limit");
+        }
+        let item: Self = serde_json::from_slice(bytes).context("invalid personal item")?;
+        item.validate()?;
+        if !item.has_storage_id() {
+            bail!("personal item ID cannot be used as a storage address");
+        }
+        Ok(item)
+    }
+
+    pub(crate) fn has_storage_id(&self) -> bool {
+        !self.id.is_empty() && self.id.len() <= 1024 && !self.id.chars().any(char::is_control)
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         if self.format != PERSONAL_FORMAT || self.version != 2 || self.id.is_empty() {
             bail!("invalid personal-item format, version or ID");
@@ -345,7 +370,7 @@ impl PersonalSecret {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn from_legacy(mut old: LegacySecret) -> anyhow::Result<Self> {
+    pub(crate) fn from_legacy(mut old: LegacySecret) -> anyhow::Result<Self> {
         let bytes = old.encode()?;
         let mut item = Self::new(old.kind, std::mem::take(&mut old.title));
         item.id = format!("legacy-{}", hex::encode(Sha256::digest(&*bytes)));
@@ -460,7 +485,8 @@ impl PersonalSecret {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn to_legacy(&self) -> anyhow::Result<LegacySecret> {
+    #[cfg(feature = "transfer")]
+    pub(crate) fn to_legacy(&self) -> anyhow::Result<LegacySecret> {
         self.validate()?;
         let loss = || {
             anyhow!(
@@ -623,9 +649,10 @@ fn section_id(kind: PersonalSecretKind) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "transfer"))]
 mod tests {
     use super::*;
+    use crate::transfer::{TransferFormat, export_manager, import_manager};
 
     #[test]
     fn rejects_oversized_items_and_redacts_debug_output() {
@@ -806,16 +833,16 @@ mod tests {
         for (format, bytes) in [
             (
                 TransferFormat::BitwardenJson,
-                include_bytes!("../../tests/fixtures/transfer/keepassxc/bitwarden_export.json")
+                include_bytes!("../tests/fixtures/transfer/keepassxc/bitwarden_export.json")
                     .as_slice(),
             ),
             (
                 TransferFormat::OnePasswordCsv,
-                include_bytes!("../../tests/fixtures/transfer/onepassword8.csv").as_slice(),
+                include_bytes!("../tests/fixtures/transfer/onepassword8.csv").as_slice(),
             ),
             (
                 TransferFormat::KeePassCsv,
-                include_bytes!("../../tests/fixtures/transfer/keepass-official.csv").as_slice(),
+                include_bytes!("../tests/fixtures/transfer/keepass-official.csv").as_slice(),
             ),
         ] {
             for item in import_manager(format, bytes).unwrap() {
@@ -826,4 +853,56 @@ mod tests {
             }
         }
     }
+}
+
+pub(crate) mod legacy;
+pub mod revision;
+
+/// Legacy namespace reserved for personal items.
+pub const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";
+
+const PERSONAL_FORMAT: &str = "factorseal-personal-secret";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PersonalSecretKind {
+    Login,
+    SecureNote,
+    Card,
+    Identity,
+    SshKey,
+    ApiCredential,
+    Passport,
+    BankAccount,
+    Document,
+    #[default]
+    Generic,
+}
+
+#[derive(Deserialize)]
+struct PersonalHeader<'a> {
+    #[serde(borrow)]
+    format: Option<&'a str>,
+    version: Option<u16>,
+}
+
+pub(crate) fn zeroize_json_strings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(value) => value.zeroize(),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                zeroize_json_strings(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                zeroize_json_strings(value);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn nonempty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
 }

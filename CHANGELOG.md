@@ -4,6 +4,14 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Move personal items into the core model and address them by stable IDs.
+  Migrate existing items and their history together on unlock, preserve colliding
+  source IDs, and display titles separately from storage addresses. Personal
+  documents now atomically retain local causal revisions, pending publication
+  metadata, and deletion markers without keeping superseded password values.
+  This is the local sync foundation; pairing and network replication are not
+  implemented yet. Personal documents use format v4 and native IPC uses v13;
+  update the service, CLI, and Desktop together.
 - Keep Secret Service search metadata encrypted. Sealed searches return
   `IsLocked` immediately and require manual Desktop unlock before lookup.
 - Store root/index, signing, document, password-derived and archive keys in
@@ -18,7 +26,7 @@ All notable changes to FactorSeal will be documented in this file.
   `LockedBytes`. Large archives require a sufficient OS memory-lock quota.
 
 The current formats are metadata v8, database schema v5, snapshot envelope v7,
-protected commit v6, document v3, record v2, and native protocol v12. Database
+protected commit v6, document v3 (personal documents v4), record v2, and native protocol v13. Database
 schema v3 is authenticated and migrated transactionally after unseal: current
 document heads are projected into the new record/history envelope, document
 keys are rotated, and a compact current-format commit chain is signed before

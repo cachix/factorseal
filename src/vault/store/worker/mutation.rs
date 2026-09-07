@@ -216,6 +216,7 @@ impl StoreWorker {
             ));
         }
         let DocumentMutation {
+            address_migrations,
             snapshot,
             partition,
             history: pending,
@@ -232,6 +233,7 @@ impl StoreWorker {
             )?,
             None => HistoryLog::new(scope, &partition),
         };
+        history.migrate_addresses(&address_migrations);
         history.record(
             pending,
             context.now,
