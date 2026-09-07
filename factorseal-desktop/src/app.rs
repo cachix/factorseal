@@ -2787,73 +2787,61 @@ impl DesktopView {
         let (contents_error, error) = errors;
         let header_title = h_flex()
             .items_center()
+            .flex_wrap()
             .gap_3()
             .child(self.render_vault_breadcrumb(cx))
             .when(
                 self.selected_vault_item != Some(VaultSelection::Devices),
                 |row| {
                     row.child(
-                        Button::new("vault-devices")
-                            .small()
-                            .label("Devices")
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.select_vault_item(VaultSelection::Devices, cx);
-                            })),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("vault-devices")
+                                    .small()
+                                    .label("Devices")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.select_vault_item(VaultSelection::Devices, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("import-vault")
+                                    .small()
+                                    .label("Import")
+                                    .selected(
+                                        self.selected_vault_item.as_ref()
+                                            == Some(&VaultSelection::Import),
+                                    )
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.select_vault_item(VaultSelection::Import, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("export-vault")
+                                    .small()
+                                    .label("Export")
+                                    .selected(
+                                        self.selected_vault_item.as_ref()
+                                            == Some(&VaultSelection::Export),
+                                    )
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.select_vault_item(VaultSelection::Export, cx);
+                                    })),
+                            ),
                     )
                 },
             );
         v_flex()
             .gap_5()
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_end()
-                    .flex_wrap()
-                    .justify_between()
-                    .gap_4()
-                    .child(v_flex().gap_1().child(header_title).child(
-                        div().text_sm().text_color(theme.muted_foreground).child(
-                            if self.selected_vault_item == Some(VaultSelection::Devices) {
-                                "Pair devices to sync your personal secrets."
-                            } else {
-                                "On this device. Available to authorized applications."
-                            },
-                        ),
-                    ))
-                    .when(
-                        self.selected_vault_item != Some(VaultSelection::Devices),
-                        |header| {
-                            header.child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("import-vault")
-                                            .small()
-                                            .selected(
-                                                self.selected_vault_item.as_ref()
-                                                    == Some(&VaultSelection::Import),
-                                            )
-                                            .label("Import")
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.select_vault_item(VaultSelection::Import, cx);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("export-vault")
-                                            .small()
-                                            .selected(
-                                                self.selected_vault_item.as_ref()
-                                                    == Some(&VaultSelection::Export),
-                                            )
-                                            .label("Export")
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.select_vault_item(VaultSelection::Export, cx);
-                                            })),
-                                    ),
-                            )
-                        },
-                    ),
-            )
+            .child(v_flex().gap_1().child(header_title).child(
+                div().text_sm().text_color(theme.muted_foreground).child(
+                    if self.selected_vault_item == Some(VaultSelection::Devices) {
+                        "Pair devices to sync your personal secrets."
+                    } else {
+                        "On this device. Available to authorized applications."
+                    },
+                ),
+            ))
             .child(self.render_vault_workspace(contents, browser_height, compact, cx))
             .when_some(contents_error.map(str::to_owned), |element, error| {
                 element.child(

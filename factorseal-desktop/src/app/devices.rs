@@ -383,18 +383,26 @@ impl DesktopView {
                             cx.notify();
                         })),
                 )
-                .child(
-                    Button::new("refresh-devices")
-                        .label(if self.devices_syncing {
-                            "Syncing…"
-                        } else {
-                            "Sync now"
-                        })
-                        .loading(self.devices_syncing)
-                        .disabled(busy || self.devices.devices.is_empty())
-                        .on_click(
-                            cx.listener(|view, _, _, cx| view.device_action(Action::Refresh, cx)),
-                        ),
+                .when(
+                    self.devices
+                        .devices
+                        .iter()
+                        .any(|device| device.endpoint != self.devices.endpoint),
+                    |row| {
+                        row.child(
+                            Button::new("refresh-devices")
+                                .label(if self.devices_syncing {
+                                    "Syncing…"
+                                } else {
+                                    "Sync now"
+                                })
+                                .loading(self.devices_syncing)
+                                .disabled(busy)
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.device_action(Action::Refresh, cx);
+                                })),
+                        )
+                    },
                 ),
         );
         if self.devices.devices.is_empty() {
@@ -471,20 +479,7 @@ impl DesktopView {
                         ),
                 );
             }
-            panel = panel.child(table).when(
-                self.devices
-                    .devices
-                    .iter()
-                    .all(|device| device.endpoint == self.devices.endpoint),
-                |panel| {
-                    panel.child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("No other devices paired yet."),
-                    )
-                },
-            );
+            panel = panel.child(table);
         }
         if let Some(error) = self.devices_notice.as_ref().or(self.devices.error.as_ref()) {
             panel = panel.child(div().text_color(theme.danger).child(error.clone()));
