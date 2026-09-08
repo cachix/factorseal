@@ -25,6 +25,6 @@
   };
 
   enterTest = ''
-    cargo test --workspace --all-targets --all-features
+    bash scripts/test-with-dbus.sh cargo test --workspace --all-targets --all-features
   '';
 }

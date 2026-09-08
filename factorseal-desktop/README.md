@@ -104,9 +104,17 @@ not implement biometric policy. macOS and Windows expose biometric-only,
 password-and-biometric, and password-or-biometric policies in addition to
 password-only setup.
 
-## Import and export
+## Transfer credentials and back up the vault
 
-The global Import and Export views support four formats:
+The vault has two entry points:
+
+- **Transfer credentials** imports or exports Personal credentials. It defaults
+  to **Encrypted transfer**, with passphrase or post-quantum key encryption.
+  Other managers' file formats are available in this flow.
+- **Back up vault** creates or restores an encrypted FactorSeal backup. The
+  backup format is selected automatically; this flow has no format picker.
+
+The underlying formats are:
 
 - `.factorseal`: a versioned, lossless archive encrypted with a separate
   passphrase using Argon2id and AES-256-GCM. It includes durable entries and
@@ -119,9 +127,32 @@ The global Import and Export views support four formats:
   folders/tags where supported, and custom fields are mapped into FactorSeal's
   versioned personal-secret record. Legacy FactorSeal name/value records remain
   readable and exportable.
+- Credential Exchange (age encrypted): CXF 1.0 JSON in a standard age v1
+  encrypted file. Choose **Passphrase** or **Post-quantum key**. The key mode
+  uses ML-KEM-768 + X25519, accepts a public recipient file for export and a
+  private, unencrypted identity file for import, and interoperates with age
+  1.3+. Generate the keys with `age-keygen -pq`; classical/SSH keys and mixed
+  key files are rejected. Both modes retain age's standard 128-bit file key.
+  This exports Personal secrets; complete vault
+  backups still use `.factorseal`. Login/API fields and TOTP credentials have
+  standard representations; other text fields use custom sections. Unsupported
+  source data from other formats and newly created structured fields block export;
+  imported CXF metadata is retained on re-export. Other managers need CXF
+  support and may require a separate age decryption step. This file workflow
+  does not implement the OS credential picker or CXP.
+- 1Password 1PUX: import-only, including rich source metadata and attachments.
 
-Imports keep existing entries by default; the user can explicitly choose to
-replace matching names or addresses. Password-manager exports require an
+Import results count source items containing data preserved without full
+functional support. Keep the old vault and verify important credentials before
+depending on the new vault. Passkey source data is retained for backup; it does
+not enable passkey authentication. CXF file references require an attachment
+transport and are rejected before any items are imported.
+
+Imports show a preview after authenticating and validating the complete input.
+Canceling the preview performs no vault writes. Imports keep existing entries
+by default; the user can explicitly choose to replace matching addresses.
+Records commit individually. If interrupted, retry the same file while keeping
+existing entries to retain completed writes. Plaintext password-manager exports require an
 explicit plaintext warning acknowledgement and are written with user-only file
 permissions before writing on Unix and Windows. New vault passwords and archive
 passphrases share the library strength policy; legacy unlock/decrypt remains
