@@ -1,5 +1,11 @@
 use std::time::{Duration, Instant};
 
+#[cfg(all(
+    feature = "vault",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+mod ssh_tests;
+
 #[test]
 fn result_delivery_is_bounded_by_both_grant_and_record_expiry() {
     for (grant_expiry, record_expiry) in [(200, 150), (150, 200)] {
@@ -1138,6 +1144,8 @@ fn revoking_an_expired_permission_cleans_the_registry() {
     let permission = |id: &str, expires_at: Option<u64>| Permission {
         id: id.to_owned(),
         operation: PermissionOperation::Get,
+        key_fingerprint: None,
+        ssh_destination: None,
         principal: PermissionPrincipal::from(&principal),
         application: VaultApplicationContext::new(Some("demo".to_owned()), None, None, None)
             .unwrap(),
@@ -2463,3 +2471,6 @@ fn checked_mutations_reject_stale_state_without_partial_writes() {
     };
     assert_eq!(value.expose(), b"updated");
 }
+
+#[cfg(all(feature = "vault", any(target_os = "linux", target_os = "macos")))]
+mod ssh_forwarding;

@@ -23,6 +23,11 @@ mod approvals;
 #[cfg(feature = "vault-store")]
 mod authorization;
 pub use authorization::{GrantAuthorization, GrantAuthorizationTarget};
+#[cfg(all(
+    feature = "vault",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+mod ssh;
 #[cfg(feature = "vault-store")]
 mod state;
 #[cfg(feature = "personal-sync")]

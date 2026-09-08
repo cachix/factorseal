@@ -458,6 +458,80 @@ impl DesktopRuntime {
         })
     }
 
+    pub(crate) fn wait_permissions(
+        &self,
+        metadata: &VaultMetadata,
+        revision: Option<u64>,
+    ) -> Result<(u64, Vec<factorseal::Permission>), String> {
+        factorseal::read_permission_pages(
+            |action| {
+                let request = VaultRequest::new(action)?;
+                self.request_live(metadata, &request)
+                    .map_err(factorseal::VaultError::Protocol)
+            },
+            revision,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn approve_permission(
+        &self,
+        metadata: &VaultMetadata,
+        permission: &factorseal::Permission,
+        duration_seconds: u64,
+        group: UnlockGroup,
+        password: Zeroizing<Vec<u8>>,
+    ) -> Result<(), String> {
+        if !self.load_permissions(metadata)?.contains(permission) {
+            return Err("Permission changed or expired. Review the current request.".into());
+        }
+        let factorseal::PermissionState::Pending { challenge, .. } = permission.state else {
+            return Err("Permission is already granted.".into());
+        };
+        let password = LockedBytes::from_zeroizing(password).map_err(|error| error.to_string())?;
+        let mut worker = self.spawn_worker(
+            factorseal::desktop_worker::Operation::SignPermission {
+                id: permission.id.clone(),
+                challenge,
+                duration_seconds: Some(duration_seconds),
+                group,
+            },
+            password,
+        )?;
+        let signature: Result<Vec<u8>, String> = factorseal::desktop_worker::receive(
+            worker
+                .child
+                .stdout
+                .as_mut()
+                .ok_or("worker output unavailable")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let signature = signature?;
+        worker.wait()?;
+        self.change_permission(
+            metadata,
+            VaultAction::ApprovePermission {
+                id: permission.id.clone(),
+                signature,
+                duration_seconds: Some(duration_seconds),
+            },
+            factorseal::PermissionChange::Granted,
+        )
+    }
+
+    pub(crate) fn change_permission(
+        &self,
+        metadata: &VaultMetadata,
+        action: VaultAction,
+        expected: factorseal::PermissionChange,
+    ) -> Result<(), String> {
+        let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
+        match self.request_live(metadata, &request)? {
+            VaultResponseBody::PermissionChanged { status } if status == expected => Ok(()),
+            _ => Err("Unexpected permission response.".into()),
+        }
+    }
+
     fn request_live(
         &self,
         metadata: &VaultMetadata,
@@ -550,12 +624,16 @@ impl DesktopRuntime {
             child,
             exit_reported: false,
         };
+        let signing = matches!(
+            operation,
+            factorseal::desktop_worker::Operation::SignPermission { .. }
+        );
         let bootstrap = factorseal::desktop_worker::Bootstrap {
             desktop_executable: desktop,
             operation,
             password: WireSecret::from_locked(password),
-            hosts_secret_service: self.config.secret_service,
-            sync_control: true,
+            hosts_secret_service: !signing && self.config.secret_service,
+            sync_control: !signing,
         };
         factorseal::desktop_worker::send(
             worker

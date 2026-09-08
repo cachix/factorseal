@@ -79,6 +79,8 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
+    /// Print the SSH agent socket path for SSH_AUTH_SOCK (the vault must be unsealed to use it).
+    SshAgentSocket,
     /// Show the local diagnostics directory or export reports for sharing.
     Diagnostics {
         /// Write recent logs and crash reports to a private JSON file.
@@ -312,6 +314,7 @@ pub(super) enum Command {
 impl Command {
     pub(super) fn diagnostic_name(&self) -> &'static str {
         match self {
+            Self::SshAgentSocket => "ssh_agent_socket",
             Self::Completions { .. } => "completions",
             Self::Diagnostics { .. } => "diagnostics",
             Self::DesktopWorker => "desktop_worker",

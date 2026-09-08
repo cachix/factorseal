@@ -54,6 +54,27 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
             "desktop executable must be an absolute regular file".to_owned(),
         ));
     }
+    if let Operation::SignPermission {
+        id,
+        challenge,
+        duration_seconds,
+        group,
+    } = &operation
+    {
+        watch_parent(Arc::new(Mutex::new(Weak::<VaultService>::new())))?;
+        let unsealed = Vault::unseal_with_unlock_group(
+            root,
+            group,
+            UnlockCredentials::with_password(password.expose()),
+        )?;
+        drop(password);
+        let signature = unsealed.sign_permission_challenge(id, challenge, *duration_seconds)?;
+        drop(unsealed);
+        send(&mut std::io::stdout(), &Ok::<_, String>(signature))
+            .map_err(|e| CliError::DesktopLaunch(e.to_string()))?;
+        *reported = true;
+        return Ok(());
+    }
     let owner = Arc::new(Mutex::new(Weak::<VaultService>::new()));
     timing::result("desktop_worker", "watch_parent", || {
         watch_parent(Arc::clone(&owner))
@@ -73,6 +94,7 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
         || identify_hosts(&desktop_executable),
         || {
             let unlocked = match operation {
+                Operation::SignPermission { .. } => unreachable!("permission signer handled above"),
                 Operation::Initialize { policy } => (
                     Vault::prepare_with_unlock_policy_and_profile(
                         root,

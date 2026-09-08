@@ -31,6 +31,8 @@ pub(super) struct ApprovalCandidate {
     namespace: Vec<u8>,
     permission: GrantPermission,
     operation: PermissionOperation,
+    key_fingerprint: Option<String>,
+    ssh_destination: Option<super::super::SshDestination>,
 }
 
 struct ApprovalRecord {
@@ -59,6 +61,31 @@ pub(super) struct PendingApprovals {
 }
 
 impl ApprovalCandidate {
+    #[cfg(all(
+        feature = "vault",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
+    pub(super) fn ssh(
+        caller: &CallerIdentity,
+        fingerprint: String,
+        title: String,
+        destination: Option<super::super::SshDestination>,
+    ) -> VaultResult<Self> {
+        Ok(Self {
+            caller: caller.clone(),
+            application: VaultApplicationContext::new(None, None, None, Some(title))?,
+            scope: DocumentKind::Authorization,
+            namespace: crate::vault::ssh_agent::grant_namespace(
+                &fingerprint,
+                destination.as_ref(),
+            )?,
+            permission: GrantPermission::SshSign,
+            operation: PermissionOperation::SshSign,
+            key_fingerprint: Some(fingerprint),
+            ssh_destination: destination,
+        })
+    }
+
     pub(super) fn for_request(
         caller: &CallerIdentity,
         application: Option<&VaultApplicationContext>,
@@ -124,6 +151,8 @@ impl ApprovalCandidate {
             namespace: namespace.to_vec(),
             permission,
             operation,
+            key_fingerprint: None,
+            ssh_destination: None,
         })
     }
 }
@@ -207,6 +236,7 @@ impl PendingApprovals {
             record.caller.fingerprint() == fingerprint
                 && record.summary.application == candidate.application
                 && record.namespace == candidate.namespace
+                && record.scope == candidate.scope
                 && record.permission == candidate.permission
         }) {
             let PermissionState::Pending { expires_at, .. } = existing.summary.state else {
@@ -245,6 +275,8 @@ impl PendingApprovals {
         let summary = Permission {
             id: id.clone(),
             operation: candidate.operation,
+            key_fingerprint: candidate.key_fingerprint,
+            ssh_destination: candidate.ssh_destination,
             principal: PermissionPrincipal::from(&candidate.caller),
             application: candidate.application,
             state: PermissionState::Pending {
@@ -349,12 +381,24 @@ impl PendingApprovals {
         let grant_expires_at = grant_duration_seconds
             .map(|duration| now.checked_add(duration).ok_or(VaultError::Expired))
             .transpose()?;
-        let project = record
-            .summary
-            .application
-            .project
-            .as_deref()
-            .ok_or_else(|| VaultError::Protocol("permission has no project".to_owned()))?;
+        let target = if record.permission == GrantPermission::SshSign {
+            GrantTarget::Namespace {
+                scope: record.scope,
+                namespace: &record.namespace,
+            }
+        } else {
+            let project = record
+                .summary
+                .application
+                .project
+                .as_deref()
+                .ok_or_else(|| VaultError::Protocol("permission has no project".to_owned()))?;
+            GrantTarget::Project {
+                scope: record.scope,
+                namespace: &record.namespace,
+                project,
+            }
+        };
         let mut permission = record.summary.clone();
         permission.state = PermissionState::Granted {
             granted_at: now,
@@ -363,11 +407,7 @@ impl PendingApprovals {
         promote_permission(
             store,
             &record.caller,
-            GrantTarget::Project {
-                scope: record.scope,
-                namespace: &record.namespace,
-                project,
-            },
+            target,
             record.permission,
             permission,
             now,
@@ -409,6 +449,8 @@ mod tests {
             namespace: project.into_bytes(),
             permission: GrantPermission::Get,
             operation: PermissionOperation::Get,
+            key_fingerprint: None,
+            ssh_destination: None,
         }
     }
 

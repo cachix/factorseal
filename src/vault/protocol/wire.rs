@@ -14,8 +14,8 @@ use crate::vault::{
     DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
 };
 
-// Version 12 adds revision-bound permission pages and logical keyring transfers.
-pub(super) const PROTOCOL_VERSION: u8 = 14;
+// Version 16 binds SSH signing permissions to verified destinations and forwarding paths.
+pub(super) const PROTOCOL_VERSION: u8 = 16;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -1076,11 +1076,26 @@ fn validate_transfer_entry(entry: &VaultEntryMetadata) -> VaultResult<()> {
 pub struct Permission {
     pub id: String,
     pub operation: PermissionOperation,
+    /// Service-derived SSH public-key fingerprint, when authorizing signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_fingerprint: Option<String>,
+    /// Verified SSH authentication destination. Absent for unrestricted signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_destination: Option<SshDestination>,
     /// Transport-authenticated identity used as the grant principal.
     pub principal: PermissionPrincipal,
     /// Caller-declared display and audit context; never grant authority.
     pub application: VaultApplicationContext,
     pub state: PermissionState,
+}
+
+/// Host-key identities in forwarding order, ending with the destination host.
+/// Names from the connecting application are never used as authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshDestination {
+    pub user: String,
+    pub host_keys: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1144,6 +1159,7 @@ pub enum PermissionOperation {
     Put,
     Delete,
     Clear,
+    SshSign,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

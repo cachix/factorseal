@@ -322,7 +322,45 @@ pub(crate) mod unix_socket {
 
     /// Poll one nonblocking Unix listener until shutdown, lifecycle policy, or
     /// lease expiry asks the platform server to stop.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn accept_until_sealed(
+        service: &VaultService,
+        listener: &UnixListener,
+        ssh_listener: &UnixListener,
+        stopping: &AtomicBool,
+        socket_path: &Path,
+        poll_interval: Duration,
+        poll_lifecycle: impl FnMut() -> VaultResult<bool>,
+        authenticate: impl Fn(&UnixStream) -> VaultResult<CallerIdentity> + Sync,
+    ) -> VaultResult<()> {
+        std::thread::scope(|scope| {
+            let authenticate = &authenticate;
+            let ssh = scope.spawn(|| {
+                let result =
+                    crate::vault::ssh_agent::serve(service, ssh_listener, stopping, authenticate);
+                if result.is_err() {
+                    stopping.store(true, Ordering::Release);
+                }
+                result
+            });
+            let served = accept_native_until_sealed(
+                service,
+                listener,
+                stopping,
+                socket_path,
+                poll_interval,
+                poll_lifecycle,
+                authenticate,
+            );
+            stopping.store(true, Ordering::Release);
+            let ssh = ssh
+                .join()
+                .map_err(|_| VaultError::Protocol("SSH agent thread panicked".into()))?;
+            served.and(ssh)
+        })
+    }
+
+    fn accept_native_until_sealed(
         service: &VaultService,
         listener: &UnixListener,
         stopping: &AtomicBool,
