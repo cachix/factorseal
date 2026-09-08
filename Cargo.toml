@@ -260,4 +260,9 @@ gpui-ce = { git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a
 gpui_ce_macros = { git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe" }
 gpui_ce_platform = { git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe" }
 # Upstream replaces unmaintained proc-macro-error2 with proc-macro-error3.
+# Keep the workspace crates on the same source: Nix's Cargo vendor directory
+# cannot contain registry and Git copies with identical names and versions.
+i18n-config = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-embed = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-embed-impl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
 i18n-embed-fl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }

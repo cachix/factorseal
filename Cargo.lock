@@ -205,7 +205,7 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "hpke",
- "i18n-embed 0.16.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "i18n-embed",
  "i18n-embed-fl",
  "lazy_static",
  "ml-kem",
@@ -3016,15 +3016,6 @@ dependencies = [
 
 [[package]]
 name = "find-crate"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59a98bbaacea1c0eb6a0876280051b892eb73594fd90cf3b20e9c817029c57d2"
-dependencies = [
- "toml 0.5.11",
-]
-
-[[package]]
-name = "find-crate"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93b8e09277be3b89fccfc23ddbcbf496c6890f0cbaeefcdbe76aa747ec38cdd2"
@@ -4929,20 +4920,6 @@ dependencies = [
 [[package]]
 name = "i18n-config"
 version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e06b90c8a0d252e203c94344b21e35a30f3a3a85dc7db5af8f8df9f3e0c63ef"
-dependencies = [
- "basic-toml",
- "log",
- "serde",
- "serde_derive",
- "thiserror 1.0.69",
- "unic-langid",
-]
-
-[[package]]
-name = "i18n-config"
-version = "0.4.8"
 source = "git+https://github.com/kellpossible/cargo-i18n.git?rev=9dcd77dbc62717f232815377838a2dc37f8f7f6a#9dcd77dbc62717f232815377838a2dc37f8f7f6a"
 dependencies = [
  "basic-toml",
@@ -4956,32 +4933,13 @@ dependencies = [
 [[package]]
 name = "i18n-embed"
 version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a217bbb075dcaefb292efa78897fc0678245ca67f265d12c351e42268fcb0305"
-dependencies = [
- "arc-swap",
- "fluent",
- "fluent-langneg",
- "fluent-syntax",
- "i18n-embed-impl 0.8.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "intl-memoizer",
- "log",
- "parking_lot",
- "rust-embed",
- "thiserror 1.0.69",
- "unic-langid",
-]
-
-[[package]]
-name = "i18n-embed"
-version = "0.16.0"
 source = "git+https://github.com/kellpossible/cargo-i18n.git?rev=9dcd77dbc62717f232815377838a2dc37f8f7f6a#9dcd77dbc62717f232815377838a2dc37f8f7f6a"
 dependencies = [
  "arc-swap",
  "fluent",
  "fluent-langneg",
  "fluent-syntax",
- "i18n-embed-impl 0.8.4 (git+https://github.com/kellpossible/cargo-i18n.git?rev=9dcd77dbc62717f232815377838a2dc37f8f7f6a)",
+ "i18n-embed-impl",
  "intl-memoizer",
  "log",
  "parking_lot",
@@ -4996,11 +4954,11 @@ name = "i18n-embed-fl"
 version = "0.10.1"
 source = "git+https://github.com/kellpossible/cargo-i18n.git?rev=9dcd77dbc62717f232815377838a2dc37f8f7f6a#9dcd77dbc62717f232815377838a2dc37f8f7f6a"
 dependencies = [
- "find-crate 0.7.1",
+ "find-crate",
  "fluent",
  "fluent-syntax",
- "i18n-config 0.4.8 (git+https://github.com/kellpossible/cargo-i18n.git?rev=9dcd77dbc62717f232815377838a2dc37f8f7f6a)",
- "i18n-embed 0.16.0 (git+https://github.com/kellpossible/cargo-i18n.git?rev=9dcd77dbc62717f232815377838a2dc37f8f7f6a)",
+ "i18n-config",
+ "i18n-embed",
  "proc-macro-error3",
  "proc-macro2",
  "quote",
@@ -5012,23 +4970,10 @@ dependencies = [
 [[package]]
 name = "i18n-embed-impl"
 version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f2cc0e0523d1fe6fc2c6f66e5038624ea8091b3e7748b5e8e0c84b1698db6c2"
-dependencies = [
- "find-crate 0.6.3",
- "i18n-config 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "i18n-embed-impl"
-version = "0.8.4"
 source = "git+https://github.com/kellpossible/cargo-i18n.git?rev=9dcd77dbc62717f232815377838a2dc37f8f7f6a#9dcd77dbc62717f232815377838a2dc37f8f7f6a"
 dependencies = [
- "find-crate 0.7.1",
- "i18n-config 0.4.8 (git+https://github.com/kellpossible/cargo-i18n.git?rev=9dcd77dbc62717f232815377838a2dc37f8f7f6a)",
+ "find-crate",
+ "i18n-config",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -10907,15 +10852,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
-]
-
-[[package]]
-name = "toml"
-version = "0.5.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4f7f0dd8d50a853a531c426359045b1998f04219d88799810762cd4ad314234"
-dependencies = [
- "serde",
 ]
 
 [[package]]
