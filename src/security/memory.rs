@@ -351,22 +351,34 @@ mod platform {
         let _gate = WORKING_SET
             .lock()
             .map_err(|_| io::Error::other("working-set lock poisoned"))?;
-        match unsafe { VirtualLock(ptr.cast(), size) } {
-            Ok(()) => return Ok(()),
-            Err(error) if error.code() != ERROR_WORKING_SET_QUOTA.to_hresult() => {
-                return Err(io::Error::other(error));
+        // The ungated first attempt of another thread can consume headroom
+        // this thread just added, so grow and retry a bounded number of times
+        // under the gate instead of treating one failed retry as final.
+        for _ in 0..8 {
+            match unsafe { VirtualLock(ptr.cast(), size) } {
+                Ok(()) => return Ok(()),
+                Err(error) if error.code() != ERROR_WORKING_SET_QUOTA.to_hresult() => {
+                    return Err(io::Error::other(error));
+                }
+                Err(_) => {}
             }
-            Err(_) => {}
+            grow_working_set(size)?;
         }
+        Err(io::Error::other(
+            "locked-memory quota stays exhausted after growing the working set",
+        ))
+    }
+    /// Raise the working-set minimum by `size` plus a modest allowance.
+    ///
+    /// VirtualLock's quota is the working-set minimum minus OS overhead. Freed
+    /// mappings are still wiped and VirtualUnlocked; this setting records
+    /// capacity, not additional pinned secret pages.
+    fn grow_working_set(size: usize) -> io::Result<()> {
         let (mut minimum, mut maximum) = (0, 0);
         unsafe {
             GetProcessWorkingSetSize(GetCurrentProcess(), &raw mut minimum, &raw mut maximum)
         }
         .map_err(io::Error::other)?;
-        // VirtualLock's quota is the working-set minimum minus OS overhead.
-        // Grow on actual exhaustion, retaining a modest allowance for that
-        // overhead. Freed mappings are still wiped and VirtualUnlocked; this
-        // setting records capacity, not additional pinned secret pages.
         let increased = minimum
             .checked_add(size)
             .and_then(|n| n.checked_add(1024 * 1024))
@@ -377,9 +389,7 @@ mod platform {
                 .ok_or_else(|| io::Error::other("working-set quota overflow"))?,
         );
         unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), increased, maximum) }
-            .map_err(io::Error::other)?;
-        // Locking remains mandatory, including after a successful quota change.
-        unsafe { VirtualLock(ptr.cast(), size) }.map_err(io::Error::other)
+            .map_err(io::Error::other)
     }
     pub(super) fn unlock(ptr: *mut u8, size: usize) {
         // SAFETY: caller has wiped the owned page and no references remain.
