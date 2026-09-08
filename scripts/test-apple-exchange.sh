@@ -46,7 +46,7 @@ export FACTORSEAL_TEST_APPLE_CXF_OUTPUT="$results_dir/apple-roundtrip.json"
     fi
 } 2>&1 | tee "$results_dir/environment.log"
 
-xcrun swift test --package-path platform/apple 2>&1 | tee "$results_dir/swift-tests.log"
+xcrun swift test --package-path platform/apple -Xswiftc -warnings-as-errors 2>&1 | tee "$results_dir/swift-tests.log"
 if [[ ! -s $FACTORSEAL_TEST_APPLE_CXF_OUTPUT ]]; then
     echo "Swift did not produce the required synthetic CXF roundtrip artifact." >&2
     exit 1

@@ -8,33 +8,46 @@ import Foundation
 public typealias ExchangeCallback = @convention(c) (UInt32, UnsafePointer<UInt8>?, Int) -> Void
 
 @MainActor
+protocol ExchangeTransport {
+    func receive(_ activity: NSUserActivity) async throws -> Data
+    func export(cxf: Data, anchor: NSWindow, extensionIdentifier: String) async throws
+}
+
+extension CredentialExchange: ExchangeTransport {}
+
+@MainActor
 final class Bridge: NSObject, NSApplicationDelegate {
     static var installed: Bridge?
-    let original: any NSApplicationDelegate
-    let callback: ExchangeCallback
-    let exchange = CredentialExchange()
+    // Immutable retained reference. NSObject's nonisolated selector queries
+    // only inspect/return this target; actual AppKit delegate calls remain on
+    // the main actor. No mutable exchange state is exposed through it.
+    nonisolated(unsafe) let original: any NSApplicationDelegate
+    let callback: (UInt32, Data) -> Void
+    let exchange: any ExchangeTransport
     var unlocked = false
     var busy = false
     var pending: NSUserActivity?
     var generation: UInt64 = 0
     var operation: Task<Void, Never>?
 
-    init(original: any NSApplicationDelegate, callback: @escaping ExchangeCallback) {
+    init(original: any NSApplicationDelegate, exchange: any ExchangeTransport = CredentialExchange(),
+         callback: @escaping (UInt32, Data) -> Void) {
         self.original = original
+        self.exchange = exchange
         self.callback = callback
     }
 
     // Preserve GPUI's delegate behavior for every unrelated AppKit event.
-    override func responds(to selector: Selector!) -> Bool {
+    override nonisolated func responds(to selector: Selector!) -> Bool {
         super.responds(to: selector) || original.responds(to: selector)
     }
 
-    override func forwardingTarget(for selector: Selector!) -> Any? {
+    override nonisolated func forwardingTarget(for selector: Selector!) -> Any? {
         original.responds(to: selector) ? original : super.forwardingTarget(for: selector)
     }
 
     func emit(_ kind: UInt32, _ data: Data = Data()) {
-        data.withUnsafeBytes { callback(kind, $0.bindMemory(to: UInt8.self).baseAddress, data.count) }
+        callback(kind, data)
     }
 
     func application(_ application: NSApplication, continue activity: NSUserActivity,
@@ -130,7 +143,9 @@ public func install(_ callback: @escaping ExchangeCallback) -> Bool {
     guard Thread.isMainThread, Bridge.installed == nil,
           Bundle.main.object(forInfoDictionaryKey: "FactorSealExperimentalCredentialExchange") as? Bool == true,
           let original = NSApplication.shared.delegate else { return false }
-    let bridge = Bridge(original: original, callback: callback)
+    let bridge = Bridge(original: original) { kind, data in
+        data.withUnsafeBytes { callback(kind, $0.bindMemory(to: UInt8.self).baseAddress, data.count) }
+    }
     Bridge.installed = bridge
     NSApplication.shared.delegate = bridge
     return true

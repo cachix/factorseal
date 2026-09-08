@@ -3745,10 +3745,12 @@ impl Render for DesktopView {
 }
 
 fn forget_desktop_window(handle: AnyWindowHandle, cx: &mut App) -> bool {
-    let desktop = cx.global_mut::<DesktopWindow>();
-    if desktop.handle != Some(handle) {
+    if cx.global::<DesktopWindow>().handle != Some(handle) {
         return false;
     }
+    #[cfg(feature = "apple-credential-exchange")]
+    system_transfer::cancel(cx);
+    let desktop = cx.global_mut::<DesktopWindow>();
     desktop.handle = None;
     desktop.visible = false;
     if let Ok(mut view) = desktop.view.lock() {
@@ -3897,6 +3899,8 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
 }
 
 fn close_desktop(_: &CloseDesktop, cx: &mut App) {
+    #[cfg(feature = "apple-credential-exchange")]
+    system_transfer::cancel(cx);
     flush_desktop_personal_changes(cx);
     let handle = cx.global::<DesktopWindow>().handle;
     let Some(handle) = handle else {

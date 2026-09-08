@@ -21,7 +21,14 @@ fn main() {
             "--scratch-path",
         ])
         .arg(&scratch)
-        .args(["-c", "release", "--product", "FactorSealAppleBridge"])
+        .args([
+            "-c",
+            "release",
+            "--product",
+            "FactorSealAppleBridge",
+            "-Xswiftc",
+            "-warnings-as-errors",
+        ])
         .status()
         .expect("Apple credential exchange requires full Xcode 26+");
     assert!(

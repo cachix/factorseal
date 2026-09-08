@@ -7,6 +7,14 @@ pub(super) struct State {
     generation: u64,
 }
 
+pub(super) fn cancel(cx: &mut App) {
+    let holder = Arc::clone(&cx.global::<DesktopWindow>().view);
+    let view = holder.lock().ok().and_then(|view| view.clone());
+    if let Some(view) = view {
+        view.update(cx, |view, _| view.cancel_system_transfer());
+    }
+}
+
 pub(super) fn setup(cx: &mut App) {
     let Some(receiver) = apple_exchange::install() else {
         return;
@@ -129,6 +137,13 @@ impl DesktopView {
         let generation = self.system_transfer.generation;
         if !self.system_transfer_current(generation) {
             apple_exchange::finish();
+            return;
+        }
+        if !self.flush_personal_changes(cx) {
+            self.cancel_system_transfer();
+            self.transfer_notice = Some(TransferNotice::Error(
+                "Finish saving the current credential, then retry the system transfer.".into(),
+            ));
             return;
         }
         let Snapshot::Unsealed { metadata, .. } = &self.snapshot else {

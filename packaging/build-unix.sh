@@ -119,7 +119,8 @@ else
         /usr/libexec/PlistBuddy -c 'Add :LSMinimumSystemVersion string 26.0' "$app/Info.plist"
         /usr/libexec/PlistBuddy -c 'Add :FactorSealExperimentalCredentialExchange bool true' "$app/Info.plist"
         /usr/libexec/PlistBuddy -c 'Add :NSUserActivityTypes array' "$app/Info.plist"
-        /usr/libexec/PlistBuddy -c 'Add :NSUserActivityTypes:0 string ASCredentialExchangeActivityType' "$app/Info.plist"
+        activity_type=$(xcrun swift -e 'import AuthenticationServices; print(ASCredentialExchangeActivity)')
+        /usr/libexec/PlistBuddy -c "Add :NSUserActivityTypes:0 string $activity_type" "$app/Info.plist"
         sh packaging/macos/build-credential-extension.sh "${app%/Contents}"
     fi
 
