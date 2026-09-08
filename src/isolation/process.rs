@@ -44,7 +44,10 @@ pub fn helper_executable(host: &Path, name: &str) -> io::Result<PathBuf> {
     let path = std::env::var_os("FACTORSEAL_TEST_HELPER_DIR").map_or(path.clone(), |directory| {
         PathBuf::from(directory).join(path.file_name().expect("helper filename"))
     });
-    let metadata = std::fs::symlink_metadata(&path)?;
+    // Follow symlinks: packaged installs such as Nix profiles expose the
+    // helper beside the host through a link farm. The target still has to
+    // be a regular file rather than a FIFO or device.
+    let metadata = std::fs::metadata(&path)?;
     if !metadata.file_type().is_file() {
         return Err(io::Error::other(
             "helper must be an installed regular executable",
