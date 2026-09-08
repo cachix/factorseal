@@ -578,6 +578,11 @@ the original provider request remains within its deadline. Approval completes
 that request without exposing permission-management APIs to SecretSpec; a later
 approval remains useful when the caller retries after its deadline.
 
+With the headless agent, SecretSpec writes use these signed project permissions.
+With Desktop, each write uses the secure input dialog described below. The
+provider checks the host's input capability before choosing the flow; cancelling
+or failing a desktop dialog ends the write.
+
 Granting requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal
 prompts for the permission lifetime; Enter accepts the app-requested default (or one

@@ -218,6 +218,31 @@ impl FactorsealProvider {
     }
 
     #[cfg(target_os = "linux")]
+    async fn supports_desktop_input(&self, context: &RequestContext) -> RpcResult<bool> {
+        #[cfg(test)]
+        if self.test_input {
+            return Ok(true);
+        }
+        let query = async {
+            let connection = zbus::Connection::session().await?;
+            let service = zbus::Proxy::new(
+                &connection,
+                "org.freedesktop.secrets",
+                "/org/freedesktop/secrets",
+                "org.freedesktop.Secret.Service",
+            )
+            .await?;
+            service.get_property::<bool>("SupportsSecureInput").await
+        };
+        tokio::select! {
+            () = context.cancellation.cancelled() => Err(RpcError::new(ErrorKind::Cancelled)),
+            result = tokio::time::timeout_at(context.deadline, query) => result
+                .map_err(|_| RpcError::new(ErrorKind::DeadlineExceeded))?
+                .map_err(|_| RpcError::interaction_required(None)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     async fn edit_secret(
         &self,
         context: &RequestContext,
@@ -298,7 +323,7 @@ impl FactorsealProvider {
         check_request_live(context)?;
         let project = self.project()?.to_owned();
         #[cfg(target_os = "linux")]
-        {
+        if self.supports_desktop_input(context).await? {
             let initial = WireSecret::new(value.expose().as_bytes().to_vec())
                 .map_err(|error| map_vault_error(&error))?;
             let value = self.edit_secret(context, &address, initial).await?;
@@ -313,26 +338,25 @@ impl FactorsealProvider {
                     evict_at,
                 })
                 .await?;
-            matches!(response, VaultResponseBody::Stored)
+            return matches!(response, VaultResponseBody::Stored)
                 .then_some(())
-                .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
+                .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed));
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let response = self
-                .request(context, || {
-                    Ok(VaultAction::PutCache {
-                        project: project.clone(),
-                        address: address.clone(),
-                        value: WireSecret::new(value.expose().as_bytes().to_vec())?,
-                        evict_at,
-                    })
+        // Headless hosts and other platforms require a signed project grant.
+        // A failed or cancelled desktop dialog never reaches this path.
+        let response = self
+            .request(context, || {
+                Ok(VaultAction::PutCache {
+                    project: project.clone(),
+                    address: address.clone(),
+                    value: WireSecret::new(value.expose().as_bytes().to_vec())?,
+                    evict_at,
                 })
-                .await?;
-            matches!(response, VaultResponseBody::Stored)
-                .then_some(())
-                .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
-        }
+            })
+            .await?;
+        matches!(response, VaultResponseBody::Stored)
+            .then_some(())
+            .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
     }
 
     async fn wait_for_permission(
@@ -653,10 +677,7 @@ fn unix_time_ms() -> RpcResult<u64> {
 
 pub(super) fn serve(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
     let provider = FactorsealProvider::new(root, socket)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .map_err(|error| CliError::ProviderProtocol(error.to_string()))?;
+    let runtime = provider_runtime()?;
     runtime
         .block_on(serve_provider(
             tokio::io::stdin(),
@@ -664,6 +685,14 @@ pub(super) fn serve(root: &Path, socket: Option<&Path>) -> Result<(), CliError> 
             provider,
             ServerConfig::default(),
         ))
+        .map_err(|error| CliError::ProviderProtocol(error.to_string()))
+}
+
+fn provider_runtime() -> Result<tokio::runtime::Runtime, CliError> {
+    // Linux provider requests use zbus's Tokio sockets as well as timers.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .map_err(|error| CliError::ProviderProtocol(error.to_string()))
 }
 
