@@ -112,13 +112,13 @@ struct Deadline<'a> {
     until: Instant,
 }
 
+/// Block until the bytes arrive: tests assert on frames, never on elapsed time.
 #[cfg(all(test, any(unix, windows), feature = "personal-sync-network"))]
 pub(super) fn read_exact_for_test(stream: &mut Channel, bytes: &mut [u8]) -> io::Result<()> {
-    Deadline {
-        stream,
-        until: Instant::now() + Duration::from_secs(5),
-    }
-    .read_exact(bytes)
+    stream.set_nonblocking(false)?;
+    let result = stream.read_exact(bytes);
+    stream.set_nonblocking(true)?;
+    result
 }
 #[cfg(all(any(unix, windows), feature = "personal-sync-network"))]
 impl Read for Deadline<'_> {

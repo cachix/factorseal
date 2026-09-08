@@ -196,6 +196,9 @@ mod native {
     pub struct ProcessManager {
         owner: Arc<Mutex<process::Owner>>,
         shared: Arc<Shared>,
+        /// Joined on drop, so shutdown completes once the control thread has
+        /// observed the helper's exit and failed every pending request.
+        listener: Mutex<Option<std::thread::JoinHandle<()>>>,
         sequence: AtomicU64,
         action_gate: Mutex<()>,
     }
@@ -237,7 +240,7 @@ mod native {
             let (ready, received) = mpsc::sync_channel(1);
             let reader_shared = Arc::clone(&shared);
             let reader_owner = Arc::clone(&owner);
-            std::thread::Builder::new()
+            let listener = std::thread::Builder::new()
                 .name("factorseal-network-control".into())
                 .spawn(move || {
                     let result = listen(&mut channel, &reader_shared, &host, &ready);
@@ -272,6 +275,7 @@ mod native {
             Ok(Self {
                 owner,
                 shared,
+                listener: Mutex::new(Some(listener)),
                 sequence: AtomicU64::new(1),
                 action_gate: Mutex::new(()),
             })
@@ -339,6 +343,9 @@ mod native {
             self.shared.live.store(false, Ordering::Release);
             if let Ok(mut owner) = self.owner.lock() {
                 owner.stop();
+            }
+            if let Some(listener) = self.listener.lock().ok().and_then(|mut slot| slot.take()) {
+                let _ = listener.join();
             }
         }
     }
@@ -688,11 +695,17 @@ mod native {
             )
             .unwrap();
             manager.owner.lock().unwrap().stop();
-            let until = std::time::Instant::now() + Duration::from_secs(5);
-            while manager.shared.live.load(Ordering::Acquire) {
-                assert!(std::time::Instant::now() < until, "exit was not observed");
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            // The control thread ends once it observes the helper's exit, and
+            // it records the failure before it does.
+            manager
+                .listener
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .join()
+                .unwrap();
+            assert!(!manager.shared.live.load(Ordering::Acquire));
             let first = manager.view().error.unwrap();
             assert_ne!(first, "network helper is unavailable");
             assert_eq!(manager.view().error.as_deref(), Some(first.as_str()));

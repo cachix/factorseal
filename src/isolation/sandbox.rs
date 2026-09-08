@@ -421,7 +421,6 @@ mod tests {
     use std::{
         path::PathBuf,
         process::{Command, Stdio},
-        time::{Duration, Instant},
     };
 
     #[test]
@@ -462,19 +461,8 @@ mod tests {
             .stdin(Stdio::null())
             .spawn()
             .unwrap();
-        let until = Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                assert!(status.success(), "sandbox probe failed: {status}");
-                break;
-            }
-            if Instant::now() >= until {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!("sandbox probe timed out");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let status = child.wait().unwrap();
+        assert!(status.success(), "sandbox probe failed: {status}");
     }
 
     #[test]
@@ -514,6 +502,7 @@ mod tests {
             }
             #[cfg(feature = "personal-sync-network")]
             "network" => {
+                use std::time::Duration;
                 network(&spool).unwrap();
                 let path = spool.join("packet");
                 std::fs::write(&path, b"ciphertext").unwrap();
