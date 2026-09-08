@@ -14,7 +14,7 @@ pub(super) struct PersonalDetail {
 
 struct PersonalValueInput {
     input: gpui::Entity<SecretInputState>,
-    revision: u64,
+    edited: bool,
     dirty: bool,
     error: Option<String>,
 }
@@ -199,50 +199,75 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) {
         let input = cx.new(|cx| SecretInputState::from_value(value, masked, cx));
-        let subscription = cx.subscribe(&input, move |view, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                view.schedule_personal_save(index, cx);
-            }
-        });
+        let subscription =
+            cx.subscribe(&input, move |view, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => view.mark_personal_field_changed(index, cx),
+                InputEvent::Blur
+                | InputEvent::PressEnter {
+                    secondary: false,
+                    shift: false,
+                } => view.save_personal_field(index, cx),
+                _ => {}
+            });
         self.personal_detail.subscriptions.push(subscription);
         self.personal_detail.inputs.insert(
             index,
             PersonalValueInput {
                 input,
-                revision: 0,
+                edited: false,
                 dirty: false,
                 error: None,
             },
         );
     }
 
-    fn schedule_personal_save(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn mark_personal_field_changed(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(input) = self.personal_detail.inputs.get_mut(&index) else {
             return;
         };
-        input.revision = input.revision.wrapping_add(1);
+        input.edited = true;
         input.dirty = true;
         input.error = None;
-        let revision = input.revision;
-        let generation = self.personal_detail.generation;
         self.copied_personal_field = None;
         cx.notify();
-        cx.spawn(async move |view, cx| {
-            smol::Timer::after(std::time::Duration::from_millis(500)).await;
-            let _ = view.update(cx, |view, cx| {
-                if view.personal_detail.generation == generation
-                    && view
-                        .personal_detail
-                        .inputs
-                        .get(&index)
-                        .is_some_and(|input| input.dirty && input.revision == revision)
-                    && matches!(view.snapshot, Snapshot::Unsealed { .. })
-                {
-                    view.save_personal_field(index, cx);
-                }
-            });
+    }
+
+    fn can_generate_saved_field(&self, index: usize) -> bool {
+        self.personal_detail.item.as_ref().is_some_and(|item| {
+            item.sections
+                .iter()
+                .flat_map(|section| &section.fields)
+                .nth(index)
+                .is_some_and(|field| {
+                    personal_actions::can_generate_value(item.kind, &field.field_type, &field.id)
+                })
         })
-        .detach();
+    }
+
+    fn generate_saved_passphrase(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_generate_saved_field(index) {
+            return;
+        }
+        let Some(input) = self.personal_detail.inputs.get(&index) else {
+            return;
+        };
+        if let Ok(passphrase) = personal_actions::generate_passphrase() {
+            input.input.update(cx, |input, cx| {
+                input.set_value(&passphrase, window, cx);
+                input.focus(window, cx);
+            });
+            self.mark_personal_field_changed(index, cx);
+        } else {
+            if let Some(input) = self.personal_detail.inputs.get_mut(&index) {
+                input.error = Some("Could not generate a passphrase. Please try again.".into());
+            }
+            cx.notify();
+        }
     }
 
     pub(super) fn flush_personal_changes(&mut self, cx: &mut Context<Self>) -> bool {
@@ -265,6 +290,9 @@ impl DesktopView {
         let Some(input) = self.personal_detail.inputs.get(&index) else {
             return;
         };
+        if !input.dirty {
+            return;
+        }
         let Some(item) = &self.personal_detail.item else {
             return;
         };
@@ -362,6 +390,11 @@ impl DesktopView {
                                 view.copy_saved_personal_field(index, cx);
                             })),
                     )
+                    .when(self.can_generate_saved_field(index), |row| {
+                        row.child(Button::new(("generate-saved-passphrase", index)).small().label("Generate")
+                            .tooltip("Generate a 12-word BIP-39 passphrase; save with Enter or by leaving the field")
+                            .on_click(cx.listener(move |view, _, window, cx| view.generate_saved_passphrase(index, window, cx))))
+                    })
                     .when(secret, |row| {
                         row.child(
                             Button::new(("reveal-personal-field", index))
@@ -389,7 +422,7 @@ impl DesktopView {
                         )
                     }),
             )
-            .when(input.revision > 0 || input.error.is_some(), |row| {
+            .when(input.edited || input.error.is_some(), |row| {
                 row.child(
                     div()
                         .text_xs()
@@ -400,14 +433,14 @@ impl DesktopView {
                         })
                         .child(input.error.clone().unwrap_or_else(|| {
                             if input.dirty {
-                                "Saving…".into()
+                                "Unsaved changes".into()
                             } else {
                                 "Saved".into()
                             }
                         })),
                 )
             })
-            .when(input.error.is_some(), |row| {
+            .when(input.dirty && input.error.is_some(), |row| {
                 row.child(
                     Button::new(("retry-personal-save", index))
                         .small()
