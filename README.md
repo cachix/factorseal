@@ -272,7 +272,9 @@ the file uses the open [age v1 encryption format](https://age-encryption.org/v1)
 No plaintext intermediary file is created. A standard age implementation can
 decrypt the file independently of FactorSeal, although destination managers
 may require that decryption step and must support CXF JSON import. This does
-not implement CXP or Apple's system credential-transfer interface.
+not implement CXP. An opt-in [macOS 26 desktop integration](platform/apple/README.md)
+adds Apple's system credential-transfer interface and a bundled credential-provider
+extension. It remains experimental pending live Apple Passwords acceptance.
 
 CXF exports cover Personal secrets. Logins and API credentials use standard
 credential fields, verification-code seeds use standard TOTP credentials,

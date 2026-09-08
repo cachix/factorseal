@@ -94,7 +94,7 @@ impl DesktopView {
                     self.cancel_system_transfer();
                     self.transfer_notice = match event {
                         Event::Exported => Some(TransferNotice::Success("Credentials delivered to the destination app. Verify important logins there before removing the source.".into())),
-                        Event::Failed => Some(TransferNotice::Error("System transfer could not complete. The destination may have cancelled, or the SDK may not support all supplied data. Use an encrypted CXF file to retain the complete source.".into())),
+                        Event::Failed => Some(TransferNotice::Error("System transfer could not complete. The destination may have cancelled, or some credential data may not be supported. Use an encrypted CXF file to retain the complete source.".into())),
                         _ => None,
                     };
                 }
