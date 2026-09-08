@@ -2,6 +2,7 @@ use crate::secret_input::SecretInputState;
 #[cfg(target_os = "linux")]
 mod access;
 mod devices;
+mod permissions;
 mod personal_actions;
 mod personal_detail;
 mod personal_templates;
@@ -447,6 +448,8 @@ fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static s
 fn permission_matches_search(permission: &factorseal::Permission, query: &str) -> bool {
     [
         Some(permission.principal.application_id.as_str()),
+        permission.key_fingerprint.as_deref(),
+        permission.application.reason.as_deref(),
         permission.application.project.as_deref(),
         permission.application.profile.as_deref(),
         permission.application.base_dir.as_deref(),
@@ -517,6 +520,7 @@ fn permission_operation_label(operation: factorseal::PermissionOperation) -> &'s
         factorseal::PermissionOperation::Put => "Write",
         factorseal::PermissionOperation::Delete => "Delete",
         factorseal::PermissionOperation::Clear => "Clear",
+        factorseal::PermissionOperation::SshSign => "Sign with SSH key",
     }
 }
 
@@ -656,6 +660,9 @@ struct DesktopView {
     settings: gpui::Entity<crate::settings_view::SettingsView>,
     runtime: Arc<DesktopRuntime>,
     snapshot: Snapshot,
+    permission_form: Option<permissions::ApprovalForm>,
+    permission_busy: bool,
+    permission_error: Option<String>,
     selected_group: Option<factorseal::UnlockGroup>,
     password: gpui::Entity<SecretInputState>,
     password_confirmation: gpui::Entity<SecretInputState>,
@@ -939,6 +946,9 @@ impl DesktopView {
             runtime,
             snapshot,
             selected_group,
+            permission_form: None,
+            permission_busy: false,
+            permission_error: None,
             password,
             password_confirmation,
             vault_search,
@@ -1052,6 +1062,7 @@ impl DesktopView {
     }
 
     fn clear_secret_inputs(&mut self, cx: &mut Context<Self>) {
+        self.clear_permission_form(cx);
         self.personal_detail.clear();
         self.copied_personal_field = None;
         for input in [
@@ -3178,101 +3189,9 @@ impl DesktopView {
                     .child(Self::render_detail_rows(vault_entry_details(entry), cx))
             }
             Some(VaultSelection::Permission(permission)) => {
-                let application = permission
-                    .application
-                    .project
-                    .as_deref()
-                    .unwrap_or(&permission.principal.application_id)
-                    .to_owned();
-                let state = match permission.state {
-                    factorseal::PermissionState::Pending { .. } => "Pending",
-                    factorseal::PermissionState::Granted { .. } => "Granted",
-                };
-                let mut details = vec![
-                    (
-                        "Access via",
-                        permission_access_type(permission.scope).to_owned(),
-                    ),
-                    (
-                        "Operation",
-                        permission_operation_label(permission.operation).to_owned(),
-                    ),
-                    ("State", state.to_owned()),
-                    (
-                        "Application ID",
-                        permission.principal.application_id.clone(),
-                    ),
-                ];
-                if let Some(project) = &permission.application.project {
-                    details.push(("Project", project.clone()));
-                }
-                for (label, value) in [
-                    ("Profile", &permission.application.profile),
-                    ("Request", &permission.application.reason),
-                ] {
-                    if let Some(value) = value {
-                        details.push((label, value.clone()));
-                    }
-                }
-                details.push((
-                    "Executable digest",
-                    hex_digest(&permission.principal.executable_digest),
-                ));
-                details.push((
-                    "Project folder",
-                    permission
-                        .application
-                        .base_dir
-                        .clone()
-                        .unwrap_or_else(|| "No project folder recorded".to_owned()),
-                ));
-                details.push(("Grant ID", permission.id.clone()));
-                v_flex()
-                    .size_full()
-                    .gap_4()
-                    .p_6()
-                    .child(div().text_xl().font_semibold().child(application))
-                    .child(Self::render_detail_rows(details, cx))
-                    .when(
-                        matches!(
-                            permission.state,
-                            factorseal::PermissionState::Granted { .. }
-                        ),
-                        |element| {
-                            let permission = permission.clone();
-                            element.child(
-                                Button::new("revoke-access-grant")
-                                    .label("Revoke access")
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.revoke_access(permission.id.clone(), cx);
-                                    })),
-                            )
-                        },
-                    )
+                self.render_permission_detail(permission, cx)
             }
         }
-    }
-
-    fn revoke_access(&mut self, id: String, cx: &mut Context<Self>) {
-        let Some(metadata) = self.snapshot.metadata().cloned() else {
-            return;
-        };
-        let runtime = Arc::clone(&self.runtime);
-        cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || runtime.revoke_permission(&metadata, id)).await;
-            let _ = this.update(cx, |view, cx| {
-                match result {
-                    Ok(()) => view.selected_vault_item = None,
-                    Err(message) => {
-                        if let Snapshot::Unsealed { error, .. } = &mut view.snapshot {
-                            *error = Some(message);
-                        }
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn vault_page_title(&self) -> Option<&'static str> {
@@ -3844,50 +3763,49 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
 }
 
 fn load_deferred_permissions(snapshot: &Snapshot, cx: &mut App) {
-    let Snapshot::Unsealed {
-        metadata, contents, ..
-    } = snapshot
-    else {
+    let Snapshot::Unsealed { metadata, .. } = snapshot else {
         return;
     };
-    if !contents.permissions_loading {
-        return;
-    }
     let metadata = metadata.clone();
     let generation = cx.global::<DesktopWindow>().refresh_generation;
     let runtime = Arc::clone(&cx.global::<RuntimeGlobal>().0);
     cx.spawn(async move |cx| {
-        let started = std::time::Instant::now();
-        let result = smol::unblock(move || runtime.load_permissions(&metadata)).await;
-        cx.update(|cx| {
-            let desktop = cx.global_mut::<DesktopWindow>();
-            // A seal, another unlock, or a refresh supersedes this request.
-            if desktop.refresh_generation != generation {
-                return;
+        let mut revision = None;
+        loop {
+            let runtime = Arc::clone(&runtime);
+            let metadata = metadata.clone();
+            let result = smol::unblock(move || runtime.wait_permissions(&metadata, revision)).await;
+            let failed = result.is_err();
+            if let Ok((next_revision, _)) = &result {
+                revision = Some(*next_revision);
             }
-            if let Snapshot::Unsealed { contents, .. } = &mut desktop.snapshot {
-                contents.complete_permissions(result.clone());
+            let result = result.map(|(_, permissions)| permissions);
+            let current = cx.update(|cx| {
+                let desktop = cx.global_mut::<DesktopWindow>();
+                if desktop.refresh_generation != generation {
+                    return false;
+                }
+                if let Snapshot::Unsealed { contents, .. } = &mut desktop.snapshot {
+                    contents.permissions_loading = true;
+                    contents.complete_permissions(result.clone());
+                } else {
+                    return false;
+                }
+                let view_holder = Arc::clone(&desktop.view);
+                if let Ok(holder) = view_holder.lock()
+                    && let Some(view) = holder.as_ref()
+                {
+                    view.update(cx, |view, cx| view.update_permissions(result, cx));
+                }
+                true
+            });
+            if !current {
+                break;
             }
-            let view_holder = Arc::clone(&desktop.view);
-            if let Ok(holder) = view_holder.lock()
-                && let Some(view) = holder.as_ref()
-            {
-                view.update(cx, |view, cx| {
-                    // Patch only permissions, retaining edits and selection
-                    // made since the first unlocked snapshot was displayed.
-                    if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot {
-                        contents.complete_permissions(result.clone());
-                        cx.notify();
-                    }
-                });
+            if failed {
+                smol::Timer::after(std::time::Duration::from_secs(2)).await;
             }
-            crate::timing::record(
-                "desktop_inventory",
-                "permissions_ready",
-                started,
-                if result.is_ok() { "ok" } else { "error" },
-            );
-        });
+        }
     })
     .detach();
 }
@@ -4227,7 +4145,7 @@ pub(crate) fn setup(
     #[cfg(target_os = "linux")]
     access::setup(access_requests, cx);
     #[cfg(not(target_os = "linux"))]
-    let _ = access_requests;
+    drop(access_requests);
     if !background {
         cx.activate(true);
     }

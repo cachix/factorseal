@@ -29,6 +29,13 @@ pub struct Bootstrap {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum Operation {
+    /// Short-lived factor confirmation for one immutable permission challenge.
+    SignPermission {
+        id: String,
+        challenge: [u8; 32],
+        duration_seconds: Option<u64>,
+        group: UnlockGroup,
+    },
     /// Authenticate and sign approvals without opening or serving the database.
     SignPermissions {
         group: UnlockGroup,

@@ -191,6 +191,27 @@ fn run(cli: Cli) -> Result<(), CliError> {
         askpass: cli.askpass.as_deref(),
     };
     match cli.command {
+        Command::SshAgentSocket => {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                let socket = socket
+                    .map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), std::path::Path::to_owned);
+                println!("{}", socket.with_extension("ssh.sock").display());
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let pipe = socket.map_or_else(
+                    || {
+                        factorseal::Vault::inspect(&root).map(|metadata| {
+                            factorseal::default_windows_pipe_name(metadata.installation_id())
+                        })
+                    },
+                    |path| Ok(path.to_string_lossy().into_owned()),
+                )?;
+                println!("{pipe}-ssh");
+            }
+            Ok(())
+        }
         Command::Diagnostics { .. } => unreachable!("diagnostics handled before vault access"),
         Command::DesktopWorker => desktop_worker::run(&root, socket),
         Command::SignPermission {

@@ -1171,6 +1171,8 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
         id: attack.to_owned(),
         scope: None,
         operation: PermissionOperation::Get,
+        key_fingerprint: None,
+        ssh_destination: None,
         principal: PermissionPrincipal::from(&caller),
         application: VaultApplicationContext::new(
             Some(attack.to_owned()),
@@ -1206,6 +1208,7 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
     assert!(!PromptText(&long).to_string().contains("[truncated]"));
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<(), CliError> {
     let project = approval.application.project.as_deref().unwrap_or("unknown");
     let profile = approval.application.profile.as_deref().unwrap_or("default");
@@ -1268,12 +1271,35 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
         )
     })
     .and_then(|()| {
-        writeln!(
-            output,
-            "  declared: {project}/{profile}  base directory: {base_dir}"
-        )
+        if let Some(fingerprint) = &approval.key_fingerprint {
+            writeln!(output, "  SSH key fingerprint: {}", PromptText(fingerprint))
+        } else {
+            writeln!(
+                output,
+                "  declared: {project}/{profile}  base directory: {base_dir}"
+            )
+        }
     })
     .and_then(|()| writeln!(output, "  reason: {reason}"))
+    .and_then(|()| {
+        if let Some(destination) = &approval.ssh_destination {
+            writeln!(output, "  SSH user: {}", PromptText(&destination.user))?;
+            for (index, host) in destination.host_keys.iter().enumerate() {
+                writeln!(
+                    output,
+                    "  host {} (forwarding order): {}",
+                    index + 1,
+                    PromptText(host)
+                )?;
+            }
+        } else if approval.operation == factorseal::PermissionOperation::SshSign {
+            writeln!(
+                output,
+                "  UNRESTRICTED SIGNING: this executable can sign arbitrary data with this key"
+            )?;
+        }
+        Ok(())
+    })
     .and_then(|()| {
         if let Some(duration) = approval.application.requested_permission_duration_seconds {
             writeln!(
