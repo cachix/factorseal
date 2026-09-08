@@ -124,6 +124,11 @@ instance. On Linux, the Desktop package registers D-Bus activation for
 `org.freedesktop.secrets`. Desktop keeps answering while sealed, but credential
 searches open a compact access dialog and resume after approval and authentication. Native
 socket and SecretSpec clients also require Desktop to be unsealed first.
+Request parsing and personal sync run in separate confined helper processes
+installed beside the CLI. On Linux the sync helper requires Landlock ABI 3, so
+personal sync needs kernel 6.2 or later; distributions such as Debian 12 and
+Ubuntu 22.04 ship older kernels and cannot run it. The parser helper works on
+every supported kernel.
 Sealing removes the native service endpoint and all unwrapped vault keys.
 
 If the vault does not exist yet, `factorseal agent` stays alive, logs the

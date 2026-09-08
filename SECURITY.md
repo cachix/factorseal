@@ -245,6 +245,11 @@ outside the separately built CLI key owner's dependency graph.
   `/proc/<pid>/exe` link. The current systemd user unit therefore cannot use
   filesystem mount-namespace hardening. A verified IPC sandbox/application
   identity or different broker design is required to close that isolation gap.
+- The Linux personal sync helper hard-requires fully enforced Landlock ABI 3
+  (kernel 6.2 or later) and refuses to start otherwise; there is no weaker
+  fallback confinement. Kernels older than that, including Debian 12 and
+  Ubuntu 22.04 stock kernels, cannot run personal sync. The parser helper
+  relies on seccomp only and has no such requirement.
 - Executable identity is resolved after the connection is accepted, and no
   supported platform reports the image a peer had at connect time. A same-user
   process can therefore connect, queue its request, and only then execute a
