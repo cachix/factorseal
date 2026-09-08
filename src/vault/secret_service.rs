@@ -680,6 +680,7 @@ pub(super) enum SecretServiceError {
     AccessDenied(String),
     Cancelled(String),
     TimedOut(String),
+    #[cfg(feature = "key-protection")]
     NotSupported(String),
 }
 

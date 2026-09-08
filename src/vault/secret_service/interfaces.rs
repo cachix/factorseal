@@ -262,10 +262,11 @@ impl Service {
             .await
     }
 
-    #[cfg(feature = "key-protection")]
+    // zbus's generated property dispatcher still references a getter removed
+    // by method-level cfg. Keep this getter and report disabled capabilities.
     #[zbus(property)]
     fn supports_secure_input(&self) -> bool {
-        self.shared.prompter.supports_input()
+        cfg!(feature = "key-protection") && self.shared.prompter.supports_input()
     }
 
     #[cfg(feature = "key-protection")]
