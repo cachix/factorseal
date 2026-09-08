@@ -58,6 +58,9 @@ if [[ ! -s $FACTORSEAL_TEST_APPLE_CXF_OUTPUT ]]; then
     exit 1
 fi
 [[ -s $FACTORSEAL_TEST_APPLE_NATIVE_OUTPUT ]]
+# The full Rust suite includes the fixture-producing test. Preserve the exact
+# input used by Swift, including its generated account/item IDs, in artifacts.
+unset FACTORSEAL_TEST_APPLE_NATIVE_CXF
 cargo test --locked --no-default-features --features transfer --lib transfer:: \
     2>&1 | tee "$results_dir/rust-transfer-tests.log"
 cargo test --locked --no-default-features --features transfer --lib \
