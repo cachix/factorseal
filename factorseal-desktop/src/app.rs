@@ -970,13 +970,7 @@ impl DesktopView {
             devices_loaded: false,
             device_pairing: None,
             devices_notice: None,
-            device_name: cx.new(|cx| {
-                let name = crate::appearance::current(cx)
-                    .device_name
-                    .clone()
-                    .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
-                InputState::new(window, cx).default_value(name)
-            }),
+            device_name: Self::device_name_input(window, cx),
             pairing_ticket: cx
                 .new(|cx| SecretInputState::new(window, cx).placeholder("Paste pairing ticket")),
             transfer_format: TransferFormat::default(),
@@ -990,6 +984,16 @@ impl DesktopView {
             system_integrations_expanded: false,
             _subscriptions: vec![password_submit, vault_search_change],
         }
+    }
+
+    fn device_name_input(window: &mut Window, cx: &mut Context<Self>) -> gpui::Entity<InputState> {
+        cx.new(|cx| {
+            let name = crate::appearance::current(cx)
+                .device_name
+                .clone()
+                .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+            InputState::new(window, cx).default_value(name)
+        })
     }
 
     fn choose_setup_method(
