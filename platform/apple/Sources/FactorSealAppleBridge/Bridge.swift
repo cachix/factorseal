@@ -115,7 +115,7 @@ final class Bridge: NSObject, NSApplicationDelegate {
                 if projection.omittedExtensions > 0 {
                     let alert = NSAlert()
                     alert.messageText = "Review system transfer"
-                    alert.informativeText = "Apple's transfer format will omit FactorSeal-specific organization and field metadata (including folder, archived state, item kind, and field settings). Credential values remain checked for preservation. Use an encrypted CXF file to retain all metadata."
+                    alert.informativeText = "Apple's transfer format will omit FactorSeal-specific organization and field metadata (including folder, archived state, item kind, and field settings). Your credential values will be retained. Use an encrypted CXF file to retain all metadata."
                     alert.addButton(withTitle: "Continue")
                     alert.addButton(withTitle: "Cancel")
                     guard await alert.beginSheetModal(for: anchor) == .alertFirstButtonReturn else {
