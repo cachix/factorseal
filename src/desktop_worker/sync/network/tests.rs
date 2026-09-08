@@ -55,6 +55,7 @@ impl Device {
             view: Mutex::new(View::default()),
             gate: tokio::sync::Mutex::new(()),
             refresh: tokio::sync::Notify::new(),
+            progress: tokio::sync::watch::Sender::new(Progress::default()),
             peers: Mutex::new(std::collections::BTreeMap::default()),
         });
         let task = tokio::spawn(Arc::clone(&inner).listen());
@@ -163,41 +164,47 @@ impl Drop for Device {
 }
 
 #[test]
-fn refresh_acknowledges_and_coalesces_while_background_work_is_busy() {
+fn refresh_returns_only_after_a_pass_that_began_after_the_request() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let device = runtime.block_on(Device::new(None));
     let inner = Arc::clone(&device.inner);
-    // Hold the background work gate beyond the response deadline used by this
-    // test. Refresh must return without waiting for that work or any peers.
+    runtime.spawn(Arc::clone(&inner).poll());
+    // Holding the gate stops any new background pass from starting, so a
+    // refresh that returned before the gate is released would report a pass
+    // count at or below the one observed here.
     let guard = runtime.block_on(inner.gate.lock());
-    let manager = Manager {
+    let mut progress = inner.progress.subscribe();
+    let before = *progress.borrow();
+    let manager = Arc::new(Manager {
         runtime: Some(runtime),
         inner: Arc::clone(&inner),
-    };
-    let (sent, received) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        for _ in 0..3 {
-            let view = manager.action(Action::Refresh).unwrap();
-            assert_eq!(view.endpoint, *manager.inner.endpoint.id().as_bytes());
-        }
-        sent.send(()).unwrap();
-        manager
     });
-    let response = received.recv_timeout(Duration::from_secs(2));
+    let workers: Vec<_> = (0..3)
+        .map(|_| {
+            let manager = Arc::clone(&manager);
+            std::thread::spawn(move || {
+                let view = manager.action(Action::Refresh).unwrap();
+                let completed = manager.inner.progress.borrow().completed;
+                (view, completed)
+            })
+        })
+        .collect();
+    manager
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(progress.wait_for(|progress| progress.requested >= before.requested + 3))
+        .unwrap();
     drop(guard);
-    let manager = worker.join().unwrap();
-    response.expect("refresh waited for background work");
-    manager.runtime.as_ref().unwrap().block_on(async {
-        tokio::time::timeout(Duration::from_secs(1), inner.refresh.notified())
-            .await
-            .expect("refresh did not wake the background loop");
+    for worker in workers {
+        let (view, completed) = worker.join().unwrap();
+        assert_eq!(view.endpoint, *inner.endpoint.id().as_bytes());
+        assert!(view.error.is_none(), "{:?}", view.error);
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), inner.refresh.notified())
-                .await
-                .is_err(),
-            "repeated refreshes queued extra work"
+            completed > before.started,
+            "refresh returned before a pass that began after the request completed"
         );
-    });
+    }
 }
 
 #[tokio::test]

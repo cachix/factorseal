@@ -90,8 +90,17 @@ struct Inner {
     view: Mutex<View>,
     gate: tokio::sync::Mutex<()>,
     refresh: tokio::sync::Notify,
+    progress: tokio::sync::watch::Sender<Progress>,
     #[cfg(test)]
     peers: Mutex<std::collections::BTreeMap<[u8; 32], EndpointAddr>>,
+}
+/// Counters of background passes, so a refresh can wait for one that began
+/// after it was requested instead of returning the view of an older pass.
+#[derive(Clone, Copy, Default)]
+struct Progress {
+    requested: u64,
+    started: u64,
+    completed: u64,
 }
 pub struct Manager {
     runtime: Option<tokio::runtime::Runtime>,
@@ -148,6 +157,7 @@ impl Manager {
             view: Mutex::new(View::default()),
             gate: tokio::sync::Mutex::new(()),
             refresh: tokio::sync::Notify::new(),
+            progress: tokio::sync::watch::Sender::new(Progress::default()),
             #[cfg(test)]
             peers: Mutex::new(std::collections::BTreeMap::default()),
         });
@@ -252,11 +262,22 @@ impl Inner {
         Ok(())
     }
     async fn action(&self, action: Action) -> Result<(), String> {
-        // Refresh acknowledges scheduling, independently of peer delays or
-        // ongoing local work. Notify coalesces repeated clicks into one pass.
+        // Refresh schedules one background pass and returns once a pass that
+        // began after this request has completed, so the caller's view holds
+        // the pulled packets and the desktop spinner covers the wait. Notify
+        // coalesces repeated clicks into one pass; every waiter sees it.
         if matches!(action, Action::Refresh) {
+            let mut progress = self.progress.subscribe();
+            let target = progress.borrow().started.saturating_add(1);
+            self.progress
+                .send_modify(|progress| progress.requested += 1);
             self.refresh.notify_one();
-            return Ok(());
+            progress
+                .wait_for(|progress| progress.completed >= target)
+                .await
+                .map_err(|_| "sync is closing".to_owned())?;
+            let error = self.view.lock().map_err(err)?.error.clone();
+            return error.map_or(Ok(()), Err);
         }
         let _guard = self.gate.lock().await;
         match action {
@@ -400,6 +421,7 @@ impl Inner {
         loop {
             {
                 let _guard = self.gate.lock().await;
+                self.progress.send_modify(|progress| progress.started += 1);
                 if let Err(error) = self.local().await {
                     let mut view = self.view.lock().expect("sync view");
                     // Clear capability/approval material immediately when sealed.
@@ -409,6 +431,8 @@ impl Inner {
                 }
             }
             self.exchange().await;
+            self.progress
+                .send_modify(|progress| progress.completed += 1);
             tokio::select! {
                 () = self.refresh.notified() => {},
                 () = tokio::time::sleep(Duration::from_secs(5)) => {},
