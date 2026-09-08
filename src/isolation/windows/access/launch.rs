@@ -11,8 +11,8 @@ use windows::Win32::{
     Foundation::{ERROR_SUCCESS, HANDLE},
     Security::{
         Authorization::{
-            ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-            SE_FILE_OBJECT, SetSecurityInfo,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+            GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
         },
         DACL_SECURITY_INFORMATION, FreeSid, GetSecurityDescriptorDacl,
         Isolation::DeriveAppContainerSidFromAppContainerName,
@@ -23,7 +23,7 @@ use windows::Win32::{
         BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, FILE_ATTRIBUTE_DIRECTORY,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        GetFileInformationByHandle, READ_CONTROL, WRITE_DAC,
+        GetFileInformationByHandle, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     },
 };
 use windows::core::HSTRING;
@@ -163,30 +163,19 @@ fn protect(path: &Path, user: &str, package: &Sid) -> io::Result<bool> {
             "sandbox paths cannot contain reparse points or hardlinks",
         ));
     }
-    let mut owner = PSID::default();
-    let mut descriptor = PSECURITY_DESCRIPTOR::default();
-    let result = unsafe {
-        GetSecurityInfo(
-            handle,
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            Some(&raw mut owner),
-            None,
-            None,
-            None,
-            Some(&raw mut descriptor),
-        )
-    };
-    if result != ERROR_SUCCESS {
-        return Err(io::Error::from_raw_os_error(result.0.cast_signed()));
+    if owner_of(handle)? != user {
+        // A spool root or lock file created under an elevated token defaults
+        // its owner to the Administrators group. Ownership is what makes the
+        // DACL below the user's own, so take it back before rewriting grants.
+        // Anything the user has no WRITE_OWNER access to still fails here.
+        take_ownership(path, user)?;
+        if owner_of(handle)? != user {
+            return Err(io::Error::other(
+                "sandbox path is not owned by the current user",
+            ));
+        }
     }
-    let _descriptor = Local(descriptor.0);
-    if owner.0.is_null() || string(owner)? != user {
-        return Err(io::Error::other(
-            "sandbox path is not owned by the current user",
-        ));
-    }
-    let rights = "0x001301bf";
+    let rights = crate::security::windows::HELPER_RIGHTS;
     let inherit = if directory { "OICI" } else { "" };
     let sddl = HSTRING::from(format!(
         "D:P(A;{inherit};FA;;;{user})(A;{inherit};{rights};;;{})",
@@ -230,4 +219,58 @@ fn protect(path: &Path, user: &str, package: &Sid) -> io::Result<bool> {
         return Err(io::Error::from_raw_os_error(status.0.cast_signed()));
     }
     Ok(directory)
+}
+
+/// String SID of the object's current owner, read through the validated handle.
+fn owner_of(handle: HANDLE) -> io::Result<String> {
+    let mut owner = PSID::default();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    let result = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&raw mut owner),
+            None,
+            None,
+            None,
+            Some(&raw mut descriptor),
+        )
+    };
+    if result != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(result.0.cast_signed()));
+    }
+    let _descriptor = Local(descriptor.0);
+    if owner.0.is_null() {
+        return Err(io::Error::other("sandbox path has no owner"));
+    }
+    string(owner)
+}
+
+/// Make `user` the owner of `path`. Succeeds only where the caller already
+/// holds WRITE_OWNER access, such as an object its own elevated token created.
+fn take_ownership(path: &Path, user: &str) -> io::Result<()> {
+    let file = OpenOptions::new()
+        .access_mode(WRITE_OWNER.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)?;
+    let mut sid = PSID::default();
+    unsafe { ConvertStringSidToSidW(&HSTRING::from(user), &raw mut sid) }.map_err(error)?;
+    let _sid = Local(sid.0);
+    let status = unsafe {
+        SetSecurityInfo(
+            HANDLE(file.as_raw_handle()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(sid),
+            None,
+            None,
+            None,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status.0.cast_signed()));
+    }
+    Ok(())
 }
