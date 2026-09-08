@@ -3883,7 +3883,7 @@ pub(crate) fn setup(
     #[cfg(target_os = "linux")]
     access::setup(access_requests, cx);
     #[cfg(not(target_os = "linux"))]
-    let _ = access_requests;
+    drop(access_requests);
     if !background {
         cx.activate(true);
     }

@@ -56,7 +56,7 @@ pub fn disable_core_dumps() -> std::io::Result<()> {
     {
         use ::windows::Win32::Foundation::ERROR_NOT_FOUND;
         use ::windows::Win32::System::ErrorReporting::{
-            WER_FAULT_REPORTING_FLAG_NOHEAP, WerGetFlags, WerSetFlags,
+            WER_FAULT_REPORTING, WER_FAULT_REPORTING_FLAG_NOHEAP, WerGetFlags, WerSetFlags,
         };
         // SAFETY: sets a documented flag for the calling process; no pointers.
         #[allow(unsafe_code)]
@@ -69,7 +69,7 @@ pub fn disable_core_dumps() -> std::io::Result<()> {
                 Err(error)
                     if error.code() == ::windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) =>
                 {
-                    Default::default()
+                    WER_FAULT_REPORTING::default()
                 }
                 Err(error) => return Err(std::io::Error::other(error)),
             };
