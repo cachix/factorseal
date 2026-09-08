@@ -3,7 +3,7 @@ import AuthenticationServices
 import Foundation
 
 /// In-memory system transport. The containing app must have a signed credential
-/// provider extension and receive ASCredentialExchangeActivityType activities.
+/// provider extension and receive ASCredentialExchangeActivity activities.
 @MainActor
 public final class CredentialExchange {
     public enum Failure: Error {
@@ -31,7 +31,7 @@ public final class CredentialExchange {
     /// preview. Receiving a token never commits records or removes source data.
     public func receive(_ activity: NSUserActivity) async throws -> Data {
         guard !exchanging else { throw Failure.exchangeInProgress }
-        guard activity.activityType == ASCredentialExchangeActivityType,
+        guard activity.activityType == ASCredentialExchangeActivity,
               let token = activity.userInfo?[ASCredentialImportToken] as? UUID
         else { throw Failure.invalidImportActivity }
         exchanging = true
