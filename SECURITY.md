@@ -60,7 +60,7 @@ requirements and independently wrapped groups are OR alternatives. Password
 groups use memory-hard Argon2id by default. The opt-in FIPS profile instead
 uses PBKDF2-HMAC-SHA-256 with 600,000 iterations. Both encrypt the installation
 root with AES-256-GCM before one hardware key per group wraps it. The root
-derives the document-index key and authenticates the wrapped signing seed and
+derives the document-index key and authenticates the wrapped signing capability and
 each generation's independently wrapped DEK.
 Biometric groups gate their hardware keys with the platform biometric policy;
 biometric-only groups do not contain a password layer. Password files are
@@ -81,9 +81,12 @@ Software keyring and DPAPI-only fallbacks are rejected.
 
 Each biometric HardwareSeal unseal performs a native authorization ceremony.
 Factorseal then holds only the installation root and document-index key for its
-independently bounded idle and absolute lease. A document DEK and exportable
-signing seed are root-unwrapped into zeroizing memory only for the operation
-that needs them. Native cancellation, denial, unavailable UI, locked session,
+independently bounded idle and absolute lease. Document DEKs and signing
+capabilities are root-unwrapped into zeroizing memory only for an operation.
+For new macOS 26+ vaults, this capability is an opaque Secure Enclave ML-DSA-65
+reference; the private signing key stays in the enclave. Other platforms and
+existing vaults retain software signing seeds.
+Native cancellation, denial, unavailable UI, locked session,
 and invalidated credentials remain distinct vault errors; unavailable hardware
 and unsupported policy are distinct as well. None is treated as a prompt
 success or silently downgraded.
@@ -287,9 +290,10 @@ outside the separately built CLI key owner's dependency graph.
   support, TPM binding, timeout/cancellation behavior, the application-owned
   prompt window, and the supported Windows Hello prompt before the release
   gate can pass.
-- The current ML-DSA-65 signing seed is root-wrapped and exists in
-  zeroizing vault memory only while signing. Signing is not yet performed by a
-  non-exportable platform primitive. The retained installation root still has
+- Software ML-DSA-65 signing seeds are root-wrapped and exist in zeroizing
+  vault memory only while signing. New macOS 26+ vaults instead use a
+  non-exportable enclave key through a root-wrapped reference. Existing
+  identities are not rotated on upgrade. The retained installation root still has
   authority to unwrap every local document during an active lease, so code
   execution in the unsealed process remains outside this protection.
 - Hardware binding cannot prevent an already authorized or compromised client

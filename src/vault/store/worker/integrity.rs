@@ -401,9 +401,9 @@ impl StoreWorker {
         &self,
         documents: &[DocumentRow],
     ) -> VaultResult<Vec<ProtectedCommit>> {
-        let signing_seed = self
+        let signer = self
             .secrets
-            .signing_seed(self.device.installation_id(), self.device.device_vault_id())?;
+            .signer(self.device.installation_id(), self.device.device_vault_id());
         let mut previous_commit_id = None;
         let mut commits = Vec::with_capacity(documents.len());
         for document in documents {
@@ -441,7 +441,7 @@ impl StoreWorker {
                     next_eviction: document.next_eviction,
                     device_key_id: self.device.device_key_id(),
                 },
-                &signing_seed,
+                &signer,
             )?;
             previous_commit_id = Some(commit.commit_id);
             commits.push(commit);

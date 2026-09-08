@@ -45,7 +45,7 @@ pub(crate) fn fuzz_commit_seed() -> Vec<u8> {
                 next_eviction: None,
                 device_key_id: super::DeviceKeyId::for_public_key(&key),
             },
-            &[0; 32],
+            &super::signature::SoftwareSigner(&[0; 32]),
         )
         .unwrap(),
     )

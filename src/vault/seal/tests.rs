@@ -224,7 +224,10 @@ fn prepared_vault_metadata_is_published_atomically_on_completion() {
         UnlockCredentials::with_password(TEST_PASSWORD),
         VaultCryptoProfile::Default,
         &TestProtectorFactory,
-        true,
+        CreationMode {
+            pending: true,
+            native_signing: false,
+        },
     )
     .unwrap();
 
@@ -405,6 +408,7 @@ fn mobile_vault_rejects_a_backend_from_another_platform() {
             created_at: 1_700_000_000,
             platform: VaultPlatform::Ios,
             cryptographic_profile: VaultCryptoProfile::Default,
+            native_signing: false,
         },
         UnlockPolicy::new([group.clone()]).unwrap(),
         &[SlotProtector {
@@ -600,6 +604,7 @@ fn every_platform_requires_a_nested_factor_and_hardware() {
                 created_at: 1_700_000_000,
                 platform,
                 cryptographic_profile: VaultCryptoProfile::Default,
+                native_signing: false,
             },
             UnlockPolicy::new([group.clone()]).unwrap(),
             &[SlotProtector {

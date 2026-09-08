@@ -228,7 +228,7 @@ fn hex(bytes: &[u8]) -> String {
     )
 }
 
-fn hardware_error(error: SecurityError) -> Error {
+pub(super) fn hardware_error(error: SecurityError) -> Error {
     match error.code() {
         ERR_SEC_USER_CANCELED => Error::Authorization(AuthorizationError::Cancelled),
         ERR_SEC_AUTH_FAILED => Error::Authorization(AuthorizationError::Denied),

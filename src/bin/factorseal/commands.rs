@@ -45,6 +45,7 @@ struct Status<'a> {
     actor_id: String,
     platform: &'a str,
     hardware_backend: &'a str,
+    signing_backend: &'a str,
     cryptographic_profile: &'a str,
     unlock_policy: Vec<String>,
     preferred_unlock_group: String,
@@ -180,6 +181,7 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
         actor_id: hex::encode(device.actor_id()),
         platform: device.platform(),
         hardware_backend: device.hardware_backend(),
+        signing_backend: device.signing_backend(),
         cryptographic_profile: device.cryptographic_profile().as_str(),
         unlock_policy: device
             .unlock_policy()

@@ -32,12 +32,18 @@ With its platform feature disabled, `Protector::open` returns
 `Error::NotAvailable` on that platform.
 
 Apple does not expose general symmetric encryption in the Secure Enclave. The
-Data Protection Keychain is therefore the correct native primitive: a
+default protector uses the Data Protection Keychain: a
 device-only item is released only after the configured Secure Enclave-backed
 authentication ceremony. Opening the protector first requires successful
 transient Secure Enclave P-256 key creation, rejecting software-only Macs and
 simulators. That capability probe is not used to wrap the secret; the payload
 is stored by the Data Protection Keychain under the configured access policy.
+With the `apple` feature, `apple_pq::MlDsa65Key` also exposes non-exportable
+macOS 26+ signing. `apple_pq::wrapping::MlKem768WrappingKey` is an opt-in
+ML-KEM-768/HKDF-SHA-256/AES-256-GCM wrapping prototype; it does not change the
+default protector. These APIs require Xcode 26+ to build and reject unsupported
+OS/hardware without a software fallback. See the
+[design and acceptance requirements](../../security/macos-crypto-and-isolation.md).
 Each `seal` writes its own keychain item and returns an envelope naming that
 item, so re-sealing under a label never destroys or silently repoints the
 previous secret, and `delete` removes every generation stored under the label.

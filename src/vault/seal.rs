@@ -75,6 +75,12 @@ use protectors::{
 };
 
 const KEY_BYTES: usize = 32;
+#[cfg(feature = "key-protection")]
+#[derive(Clone, Copy)]
+struct CreationMode {
+    pending: bool,
+    native_signing: bool,
+}
 #[cfg(all(test, feature = "key-protection"))]
 const TEST_PASSWORD: &[u8] = b"opal nebula lantern saffron velocity";
 
@@ -104,6 +110,7 @@ pub struct VaultMetadata {
     actor_id: Vec<u8>,
     platform: VaultPlatform,
     hardware_backend: String,
+    enclave_signing: bool,
     cryptographic_profile: VaultCryptoProfile,
     unlock_policy: UnlockPolicy,
     preferred_unlock_group: UnlockGroup,
@@ -140,6 +147,17 @@ impl VaultMetadata {
     #[must_use]
     pub fn hardware_backend(&self) -> &str {
         &self.hardware_backend
+    }
+
+    /// Provider selected by the persisted signing capability. Reopening a vault
+    /// never changes this identity merely because the OS gained new APIs.
+    #[must_use]
+    pub const fn signing_backend(&self) -> &'static str {
+        if self.enclave_signing {
+            "secure-enclave-mldsa65"
+        } else {
+            "software-mldsa65"
+        }
     }
 
     /// Persisted algorithm profile selected when this vault was created.
@@ -211,13 +229,15 @@ impl UnsealedVault {
         challenge: &[u8; 32],
         duration_seconds: Option<u64>,
     ) -> VaultResult<Vec<u8>> {
-        let signing_seed = self
+        use super::signature::SigningProvider as _;
+        let signer = self
             .secrets
-            .signing_seed(self.public.installation_id(), self.public.device_vault_id())?;
-        super::signature::sign(
-            &signing_seed,
-            &super::signature::permission_payload(id, challenge, duration_seconds),
-        )
+            .signer(self.public.installation_id(), self.public.device_vault_id());
+        signer.sign(&super::signature::permission_payload(
+            id,
+            challenge,
+            duration_seconds,
+        ))
     }
 
     #[allow(dead_code)]
@@ -353,13 +373,17 @@ impl Vault {
         cryptographic_profile: VaultCryptoProfile,
     ) -> VaultResult<UnsealedVault> {
         validate_native_unlock_policy(policy)?;
-        Self::create_with_key_protector_policy_and_profile(
+        Self::create_with_key_protector_policy_mode(
             root,
             current_platform()?,
             policy,
             credentials,
             cryptographic_profile,
             &PlatformProtectorFactory,
+            CreationMode {
+                pending: false,
+                native_signing: true,
+            },
         )
     }
 
@@ -398,7 +422,10 @@ impl Vault {
             credentials,
             cryptographic_profile,
             &PlatformProtectorFactory,
-            true,
+            CreationMode {
+                pending: true,
+                native_signing: true,
+            },
         )
     }
 
@@ -454,7 +481,10 @@ impl Vault {
             credentials,
             cryptographic_profile,
             factory,
-            false,
+            CreationMode {
+                pending: false,
+                native_signing: false,
+            },
         )
     }
 
@@ -466,7 +496,7 @@ impl Vault {
         credentials: UnlockCredentials<'_>,
         cryptographic_profile: VaultCryptoProfile,
         factory: &dyn KeyProtectorFactory,
-        pending: bool,
+        mode: CreationMode,
     ) -> VaultResult<UnsealedVault> {
         let root = root.as_ref();
         policy.validate()?;
@@ -511,11 +541,12 @@ impl Vault {
                     created_at: unix_time()?,
                     platform,
                     cryptographic_profile,
+                    native_signing: mode.native_signing,
                 },
                 policy.clone(),
                 &slot_protectors,
                 credentials,
-                pending,
+                mode.pending,
             )
         })();
 
@@ -695,6 +726,7 @@ impl Vault {
                 created_at: 1_700_000_000,
                 platform: VaultPlatform::Test,
                 cryptographic_profile: VaultCryptoProfile::Default,
+                native_signing: false,
             },
             policy,
             &[SlotProtector {
