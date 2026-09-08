@@ -13,6 +13,7 @@
 #![allow(unsafe_code)]
 
 use std::ffi::c_void;
+use std::fmt::Write as _;
 use std::io;
 use std::mem::size_of;
 use std::path::Path;
@@ -69,6 +70,15 @@ fn current_user_sid() -> io::Result<String> {
     })
 }
 
+// A helper-created spool file belongs to both its user and its own restricted
+// package identity. Full-trust vault owners keep the user-only policy.
+fn app_container_sid() -> io::Result<Option<String>> {
+    #[cfg(feature = "helper-isolation")]
+    return crate::isolation::windows::current_app_sid();
+    #[cfg(not(feature = "helper-isolation"))]
+    Ok(None)
+}
+
 /// Create the final private ACL before writing any secret bytes.
 #[cfg(any(feature = "transfer", feature = "personal-sync"))]
 pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
@@ -77,7 +87,11 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
         CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
     };
     let sid = current_user_sid()?;
-    let sddl = HSTRING::from(format!("O:{sid}D:P(A;;FA;;;{sid})"));
+    let mut sddl = format!("O:{sid}D:P(A;;FA;;;{sid})");
+    if let Some(package) = app_container_sid()? {
+        write!(sddl, "(A;;FA;;;{package})").expect("format into String");
+    }
+    let sddl = HSTRING::from(sddl);
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     // SAFETY: live output pointer; LocalMemory releases the allocated descriptor.
     unsafe {
@@ -145,9 +159,10 @@ pub(crate) fn validate_private_file(file: &File) -> io::Result<()> {
             "file must be owned by the current user and have a private ACL",
         ));
     }
+    let package = app_container_sid()?;
     if granted_trustees(dacl)?
         .iter()
-        .any(|trustee| trustee != &sid)
+        .any(|trustee| trustee != &sid && package.as_ref() != Some(trustee))
     {
         return Err(io::Error::other("file grants access to another account"));
     }
@@ -187,7 +202,11 @@ fn status_io_error(status: WIN32_ERROR) -> io::Error {
 /// `fs::create_dir`.
 #[cfg(feature = "key-protection")]
 pub(crate) fn create_owner_only_directory(root: &Path) -> io::Result<()> {
-    let sddl = HSTRING::from(owner_only_sddl(&current_user_sid()?).as_str());
+    let mut sddl = owner_only_sddl(&current_user_sid()?);
+    if let Some(package) = app_container_sid()? {
+        write!(sddl, "(A;OICI;FA;;;{package})").expect("format into String");
+    }
+    let sddl = HSTRING::from(sddl);
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     // SAFETY: `sddl` is a NUL-terminated wide string for the duration of the
     // call, and `descriptor` receives a `LocalAlloc` buffer owned by the guard
@@ -310,8 +329,9 @@ fn validate_directory_descriptor(
             ),
         ));
     }
+    let package = app_container_sid()?;
     for trustee in granted_trustees(dacl)? {
-        if trustee != user_sid {
+        if trustee != user_sid && package.as_ref() != Some(&trustee) {
             return Err(permission_error(
                 path,
                 &format!(

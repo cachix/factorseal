@@ -39,7 +39,7 @@ mod store;
     any(feature = "vault", feature = "vault-client"),
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
-mod transport;
+pub(crate) mod transport;
 
 #[cfg(all(feature = "vault", target_os = "linux"))]
 mod linux;

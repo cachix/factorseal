@@ -21,7 +21,7 @@ const GROUP_ALPN: &[u8] = b"factorseal/personal-membership/1";
 const PAIR_ALPN: &[u8] = b"factorseal/personal-pairing/1";
 const FRAME: usize = 12 * 1024 * 1024;
 type Host = dyn Fn(Command) -> Result<Reply, String> + Send + Sync;
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct View {
     pub devices: Vec<crate::personal::sync::TransportBinding>,
     pub endpoint: [u8; 32],
@@ -30,16 +30,34 @@ pub struct View {
     pub last_exchange: Option<u64>,
     pub error: Option<String>,
 }
+#[derive(Serialize, Deserialize)]
 pub enum Action {
     Refresh,
     Invite(String),
     Join {
+        #[serde(with = "ticket_string")]
         ticket: zeroize::Zeroizing<String>,
         name: String,
     },
     Approve([u8; 32]),
     ApproveJoin([u8; 32]),
     Cancel,
+}
+
+mod ticket_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+    pub(super) fn serialize<S: Serializer>(
+        value: &Zeroizing<String>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(value)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Zeroizing<String>, D::Error> {
+        String::deserialize(deserializer).map(Zeroizing::new)
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct Ticket(String);
@@ -71,6 +89,7 @@ struct Inner {
     apply_cursor: Mutex<Option<crate::personal::sync::PacketId>>,
     view: Mutex<View>,
     gate: tokio::sync::Mutex<()>,
+    refresh: tokio::sync::Notify,
     #[cfg(test)]
     peers: Mutex<std::collections::BTreeMap<[u8; 32], EndpointAddr>>,
 }
@@ -128,6 +147,7 @@ impl Manager {
             apply_cursor: Mutex::new(None),
             view: Mutex::new(View::default()),
             gate: tokio::sync::Mutex::new(()),
+            refresh: tokio::sync::Notify::new(),
             #[cfg(test)]
             peers: Mutex::new(std::collections::BTreeMap::default()),
         });
@@ -165,7 +185,6 @@ impl Manager {
             .as_ref()
             .ok_or("sync is closing")?
             .block_on(async {
-                let _guard = self.inner.gate.lock().await;
                 self.inner.action(action).await?;
                 Ok(self.view())
             })
@@ -233,7 +252,13 @@ impl Inner {
         Ok(())
     }
     async fn action(&self, action: Action) -> Result<(), String> {
-        let refresh = matches!(action, Action::Refresh);
+        // Refresh acknowledges scheduling, independently of peer delays or
+        // ongoing local work. Notify coalesces repeated clicks into one pass.
+        if matches!(action, Action::Refresh) {
+            self.refresh.notify_one();
+            return Ok(());
+        }
+        let _guard = self.gate.lock().await;
         match action {
             Action::Refresh => {}
             Action::Invite(name) => {
@@ -282,10 +307,6 @@ impl Inner {
             }
         }
         self.local().await?;
-        if refresh {
-            self.exchange().await;
-            self.local().await?;
-        }
         Ok(())
     }
     async fn local(&self) -> Result<(), String> {
@@ -388,7 +409,10 @@ impl Inner {
                 }
             }
             self.exchange().await;
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::select! {
+                () = self.refresh.notified() => {},
+                () = tokio::time::sleep(Duration::from_secs(5)) => {},
+            }
         }
     }
     async fn exchange(&self) {

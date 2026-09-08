@@ -56,26 +56,31 @@ pub fn disable_core_dumps() -> std::io::Result<()> {
     {
         use ::windows::Win32::Foundation::ERROR_NOT_FOUND;
         use ::windows::Win32::System::ErrorReporting::{
-            WER_FAULT_REPORTING, WER_FAULT_REPORTING_FLAG_NOHEAP, WerGetFlags, WerSetFlags,
+            WER_FAULT_REPORTING_FLAG_NOHEAP, WerGetFlags, WerSetFlags,
         };
         // SAFETY: sets a documented flag for the calling process; no pointers.
         #[allow(unsafe_code)]
         unsafe {
-            let flags = match WerGetFlags(::windows::Win32::System::Threading::GetCurrentProcess())
-            {
+            let process = ::windows::Win32::System::Threading::GetCurrentProcess();
+            let flags = match WerGetFlags(process) {
                 Ok(flags) => flags,
-                // A fresh process may have no WER settings yet. Still require
-                // WerSetFlags to succeed before accepting the process policy.
+                // Fresh processes can have no WER record yet. Initialize the
+                // policy and require readback rather than skipping protection.
                 Err(error)
                     if error.code() == ::windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) =>
                 {
-                    WER_FAULT_REPORTING::default()
+                    WER_FAULT_REPORTING_FLAG_NOHEAP
                 }
                 Err(error) => return Err(std::io::Error::other(error)),
             };
-            WerSetFlags(flags | WER_FAULT_REPORTING_FLAG_NOHEAP)
+            WerSetFlags(flags | WER_FAULT_REPORTING_FLAG_NOHEAP).map_err(std::io::Error::other)?;
+            let applied = WerGetFlags(process).map_err(std::io::Error::other)?;
+            if applied.0 & WER_FAULT_REPORTING_FLAG_NOHEAP.0 == 0 {
+                return Err(std::io::Error::other(
+                    "Windows heap-dump suppression was not applied",
+                ));
+            }
         }
-        .map_err(std::io::Error::other)?;
     }
     Ok(())
 }

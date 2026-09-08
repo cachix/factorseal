@@ -290,7 +290,7 @@ pub(crate) mod unix_socket {
         IPC_FRAME_IO_TIMEOUT, IoBudget, MAX_ACTIVE_CONNECTIONS, path_io_error, read_frame,
         unix_time, write_frame,
     };
-    use crate::vault::{CallerIdentity, VaultError, VaultRequest, VaultResult, VaultService};
+    use crate::vault::{CallerIdentity, VaultError, VaultResult, VaultService};
 
     struct ActiveConnection<'a>(&'a AtomicUsize);
 
@@ -437,7 +437,7 @@ pub(crate) mod unix_socket {
         let caller =
             crate::timing::result("vault_ipc", "authenticate_caller", || authenticate(stream))?;
         let bytes = read_frame(stream, IoBudget::new(IPC_FRAME_IO_TIMEOUT))?;
-        let request = VaultRequest::decode(&bytes)?;
+        let request = crate::isolation::parser::parse(&bytes)?;
         let started = std::time::Instant::now();
         let response = service.handle(&caller, request, unix_time()?);
         crate::timing::record_result("vault_ipc", "handle_request", started, &response.result);

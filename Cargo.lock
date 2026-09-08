@@ -1378,6 +1378,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ciborium"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42e69ffd6f0917f5c029256a24d0161db17cea3997d185db0d35926308770f0e"
+dependencies = [
+ "ciborium-io",
+ "ciborium-ll",
+ "serde",
+]
+
+[[package]]
+name = "ciborium-io"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05afea1e0a06c9be33d539b876f1ce3692f4afea2cb41f740e7743225ed1c757"
+
+[[package]]
+name = "ciborium-ll"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
+dependencies = [
+ "ciborium-io",
+ "half",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2867,6 +2894,7 @@ dependencies = [
  "bcrypt-pbkdf",
  "block2 0.6.2",
  "blowfish",
+ "ciborium",
  "clap",
  "clap_complete",
  "clap_complete_nushell",
@@ -2886,6 +2914,7 @@ dependencies = [
  "hpke",
  "interprocess",
  "iroh",
+ "landlock",
  "libc",
  "ml-dsa",
  "nix",
@@ -2898,6 +2927,7 @@ dependencies = [
  "polyval 0.6.2",
  "qrcode",
  "rpassword",
+ "seccompiler",
  "secret-service-protocol",
  "secretspec-ipc",
  "serde",
@@ -5732,6 +5762,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6598,8 +6639,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39da9cad5f23aa43401f09497d3b280e51b5feba115d9ffbf38ca35d6ff95e96"
+source = "git+https://github.com/domenkozar/net-tools.git?rev=0b252c90a768cae2aacba8d304e1de5a4ed062db#0b252c90a768cae2aacba8d304e1de5a4ed062db"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -6621,7 +6661,6 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-system-configuration",
  "pin-project-lite",
- "serde",
  "socket2",
  "time",
  "tokio",
@@ -6630,7 +6669,6 @@ dependencies = [
  "web-sys",
  "windows 0.62.2",
  "windows-result 0.4.1",
- "wmi",
 ]
 
 [[package]]
@@ -9227,6 +9265,15 @@ dependencies = [
  "hybrid-array",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -12654,21 +12701,6 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
-
-[[package]]
-name = "wmi"
-version = "0.18.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c81b85c57a57500e56669586496bf2abd5cf082b9d32995251185d105208b64"
-dependencies = [
- "chrono",
- "futures",
- "log",
- "serde",
- "thiserror 2.0.20",
- "windows 0.62.2",
- "windows-core 0.62.2",
-]
 
 [[package]]
 name = "wnaf"

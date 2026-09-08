@@ -33,6 +33,8 @@ profile=${3:-}
 }
 
 script_dir=$(CDPATH='' cd -P "$(dirname "$0")" && pwd)
+runtime_entitlements="$script_dir/FactorsealRuntime.entitlements"
+/usr/bin/plutil -lint "$runtime_entitlements" >/dev/null
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/factorseal-signing.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 
@@ -140,6 +142,21 @@ esac
 
 sign_nested() {
     nested_code=$1
+    runtime_code=false
+    case "$nested_code" in *.app|*.xpc|*.appex) runtime_code=true ;; esac
+    if [ -f "$nested_code" ] && /usr/bin/file -b "$nested_code" | /usr/bin/grep -q 'executable'; then
+        runtime_code=true
+    fi
+    if [ "$runtime_code" = true ]; then
+        /usr/bin/codesign \
+            --force \
+            --sign "$signing_identity" \
+            --entitlements "$runtime_entitlements" \
+            --options runtime \
+            "$timestamp" \
+            "$nested_code"
+        return
+    fi
     /usr/bin/codesign \
         --force \
         --sign "$signing_identity" \
@@ -169,6 +186,7 @@ done
     done
 
 if [ -n "$profile" ]; then
+    /usr/libexec/PlistBuddy -c "Merge '$runtime_entitlements'" "$entitlements"
     /usr/bin/codesign \
         --force \
         --sign "$signing_identity" \
@@ -182,6 +200,7 @@ else
         --force \
         --sign "$signing_identity" \
         --identifier "$bundle_id" \
+        --entitlements "$runtime_entitlements" \
         --options runtime \
         "$timestamp" \
         "$app"

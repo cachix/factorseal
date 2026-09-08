@@ -17,16 +17,70 @@ jobs:
         os: [macos-latest, windows-latest]
     env:
       RUST_TEST_THREADS: 1
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-latest' && 'pwsh' || 'bash' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: Build isolated parser and network helpers
+        id: helpers
+        run: cargo build -p factorseal --all-features --bin factorseal-parser --bin factorseal-network
       - name: Verify native memory, process and private-file protections
         run: |
-          cargo test -p factorseal --lib --all-features security::
-      - name: Verify Windows accounts and both pipe authentication directions
-        if: runner.os == 'Windows'
+          cargo test -p factorseal --lib --all-features security:: 2>&1 | ${{ runner.os == 'Windows' && 'Tee-Object -FilePath' || 'tee' }} "${{ runner.temp }}/factorseal-memory.log"
+      - name: Verify helper confinement and private protocol
+        id: isolation
+        if: ${{ !cancelled() && steps.helpers.outcome == 'success' }}
+        run: |
+          cargo test -p factorseal --lib --all-features isolation:: 2>&1 | ${{ runner.os == 'Windows' && 'Tee-Object -FilePath' || 'tee' }} "${{ runner.temp }}/factorseal-isolation.log"
+      - name: Verify Windows wire bounds and native vault transport
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.helpers.outcome == 'success' }}
         shell: pwsh
-        run: ./acceptance/windows-security.ps1
+        run: |
+          foreach ($test in @('direct_service_requests_obey_the_wire_size_bound', 'list_requests_are_bounded_and_maximum_pages_fit_the_wire_limit', 'pending_permissions_fit_transport', 'history_capacity_failure_keeps_the_previous_value_and_publication', 'onepassword8_documented_columns_fixture', 'native_transport_round_trips_and_seals')) {
+            cargo test -p factorseal --lib --all-features $test -- --nocapture 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/factorseal-windows-regressions.log" -Append
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Verify sealed courier delivery after sender exit
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        timeout-minutes: 8
+        run: |
+          cargo test -p factorseal --lib --all-features helpers_pair_and_deliver_through_a_sealed_courier_after_sender_exit -- --ignored --nocapture 2>&1 | ${{ runner.os == 'Windows' && 'Tee-Object -FilePath' || 'tee' }} "${{ runner.temp }}/factorseal-courier.log"
+      - name: Report macOS helper sandbox denials
+        if: failure() && runner.os == 'macOS'
+        run: |
+          sudo /usr/bin/log show --last 10m --style compact --predicate 'process == "factorseal-network" OR ((process == "kernel" OR process == "sandboxd") AND eventMessage CONTAINS "factorseal-net")' | tail -n 150
+          python3 scripts/report-helper-crashes.py
+      - name: Locate macOS network runtime crash
+        if: failure() && runner.os == 'macOS' && steps.helpers.outcome == 'success'
+        run: |
+          cargo test -p factorseal --lib --all-features --no-run --message-format=json > "$RUNNER_TEMP/factorseal-test-artifacts.jsonl"
+          python3 scripts/debug_network_sandbox.py "$RUNNER_TEMP/factorseal-test-artifacts.jsonl"
+      - name: Verify Windows accounts and both pipe authentication directions
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.helpers.outcome == 'success' }}
+        shell: pwsh
+        run: ./acceptance/windows-security.ps1 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/factorseal-windows-accounts.log"
+      - name: Report Windows helper DLL dependencies
+        if: failure() && runner.os == 'Windows' && steps.helpers.outcome == 'success'
+        shell: pwsh
+        run: |
+          $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin was not found' }
+          $binaries = @('target/debug/factorseal-parser.exe', 'target/debug/factorseal-network.exe')
+          $binaries += @(Get-ChildItem target/debug/deps/factorseal-*.exe -File | ForEach-Object FullName)
+          foreach ($binary in $binaries) {
+            & $dumpbin /dependents $binary
+            if ($LASTEXITCODE -ne 0) { throw 'helper import inspection failed' }
+          }
+      - name: Preserve native test output before cache upload
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-test-output-${{ runner.os }}
+          path: ${{ runner.temp }}/factorseal-*.log
+          if-no-files-found: ignore
+          retention-days: 3

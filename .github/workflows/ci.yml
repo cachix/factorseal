@@ -52,6 +52,7 @@ jobs:
         run: devenv shell -- cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run tests
         run: |
+          devenv shell -- cargo build -p factorseal --all-features --bins
           devenv shell -- sh -c '
             set -eu
             dbus_config="$PWD/tests/dbus-session.conf"
@@ -78,6 +79,8 @@ jobs:
           packaging/build-unix.sh linux
           tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/share/systemd/user/factorseal.service$'
           tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/bin/factorseal$'
+          tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/bin/factorseal-parser$'
+          tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/bin/factorseal-network$'
           tar -tzf dist/factorseal-*-linux-*.tar.gz | grep '/run-acceptance.sh$'
       - uses: actions/upload-artifact@v4
         with:
@@ -99,12 +102,14 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --workspace --all-targets --all-features
+        run: |
+          cargo build -p factorseal --all-features --bins
+          cargo test --workspace --all-targets --all-features
       - name: Check lightweight client authentication build
         run: cargo clippy --no-default-features --features vault-client -- -D warnings
       - name: Build and inspect locally signed macOS package
         run: |
-          plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist packaging/macos/Factorseal.entitlements.in
+          plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist packaging/macos/Factorseal.entitlements.in packaging/macos/FactorsealRuntime.entitlements
           env \
             -u FACTORSEAL_MACOS_SIGNING_IDENTITY \
             -u FACTORSEAL_MACOS_PROVISIONING_PROFILE \
@@ -120,10 +125,22 @@ jobs:
           test ! -e "$app/Contents/embedded.provisionprofile"
           entitlements=$(mktemp)
           codesign -d --entitlements - --xml "$app" >"$entitlements" 2>/dev/null || true
+          test "$(plutil -extract 'com\.apple\.security\.hardened-process\.dyld-ro' raw -o - "$entitlements")" = true
           if grep -Eq 'application-identifier|keychain-access-groups' "$entitlements"; then
             echo "local package unexpectedly contains Team-only Keychain entitlements" >&2
             exit 1
           fi
+          for helper in factorseal-parser factorseal-network; do
+            codesign -d --entitlements - --xml "$app/Contents/MacOS/$helper" >"$entitlements" 2>/dev/null
+            test "$(plutil -extract 'com\.apple\.security\.hardened-process\.dyld-ro' raw -o - "$entitlements")" = true
+            test "$(plutil -extract 'com\.apple\.security\.hardened-process\.hardened-heap' raw -o - "$entitlements")" = true
+            if grep -Eq 'application-identifier|keychain-access-groups' "$entitlements"; then
+              echo "helper unexpectedly contains Team-only Keychain entitlements" >&2
+              exit 1
+            fi
+          done
+          "$app/Contents/MacOS/factorseal" --version
+          FACTORSEAL_TEST_HELPER_DIR="$app/Contents/MacOS" cargo test -p factorseal --lib --all-features installed_
           while IFS= read -r candidate; do
             file -b "$candidate" | grep -q 'Mach-O' || continue
             if otool -l "$candidate" | grep -F '/nix/store/'; then
@@ -148,7 +165,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --workspace --all-targets --all-features
+        run: |
+          cargo build -p factorseal --all-features --bins
+          cargo test --workspace --all-targets --all-features
       - name: Check lightweight client authentication build
         run: cargo clippy --no-default-features --features vault-client -- -D warnings
       - name: Parse Windows helpers and acceptance runner
@@ -167,6 +186,8 @@ jobs:
           $entries = [System.IO.Compression.ZipFile]::OpenRead($archive.FullName)
           try {
             if (-not ($entries.Entries.FullName -match 'factorseal.exe$')) { throw 'Factorseal executable missing from package' }
+            if (-not ($entries.Entries.FullName -match 'factorseal-parser.exe$')) { throw 'Parser helper missing from package' }
+            if (-not ($entries.Entries.FullName -match 'factorseal-network.exe$')) { throw 'Network helper missing from package' }
             if (-not ($entries.Entries.FullName -match 'factorseal-task.xml.in$')) { throw 'task template missing from package' }
             if (-not ($entries.Entries.FullName -match 'install-factorseal-task.ps1$')) { throw 'task installer missing from package' }
             if (-not ($entries.Entries.FullName -match 'factorseal-askpass.cmd$')) { throw 'askpass wrapper missing from package' }

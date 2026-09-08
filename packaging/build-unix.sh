@@ -61,8 +61,8 @@ if [ "$platform" = macos ]; then
 fi
 
 cargo build --locked --release --no-default-features \
-    --features vault,cli,hardware \
-    --bin factorseal
+    --features vault,cli,hardware,personal-sync-network \
+    --bin factorseal --bin factorseal-parser --bin factorseal-network
 target_dir=$(cargo metadata --locked --no-deps --format-version 1 |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 if [ -z "$target_dir" ]; then
@@ -78,6 +78,7 @@ chmod 0755 "$stage/$archive/run-acceptance.sh"
 if [ "$platform" = linux ]; then
     mkdir -p "$stage/$archive/bin" "$stage/$archive/share/systemd/user"
     cp "$target_dir/release/factorseal" "$stage/$archive/bin/"
+    cp "$target_dir/release/factorseal-parser" "$target_dir/release/factorseal-network" "$stage/$archive/bin/"
     cp packaging/linux/factorseal-start "$stage/$archive/bin/"
     # systemd needs an absolute ExecStart, so the unit is written for the
     # documented install prefix. Unpacking the tarball somewhere else means
@@ -93,6 +94,7 @@ else
     app="$stage/$archive/Factorseal.app/Contents"
     mkdir -p "$app/MacOS" "$app/Resources" "$stage/$archive/Library/LaunchAgents"
     cp "$target_dir/release/factorseal" "$app/MacOS/"
+    cp "$target_dir/release/factorseal-parser" "$target_dir/release/factorseal-network" "$app/MacOS/"
     cp packaging/macos/factorseal-askpass "$app/Resources/"
     sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Info.plist"
     cp packaging/macos/dev.factorseal.plist "$stage/$archive/Library/LaunchAgents/"

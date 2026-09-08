@@ -468,7 +468,7 @@ impl VaultRequest {
         Ok(())
     }
 
-    fn validate_fields(&self) -> VaultResult<()> {
+    pub(crate) fn validate_fields(&self) -> VaultResult<()> {
         if self.version != PROTOCOL_VERSION {
             return Err(VaultError::Protocol(
                 "unsupported request version".to_owned(),
