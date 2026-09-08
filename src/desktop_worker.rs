@@ -1,7 +1,6 @@
 //! Bounded bootstrap messages carried only over inherited private pipes.
 //! Factors are never command-line arguments, environment variables, or files.
 
-use crate::security::LockedBytes;
 use crate::{UnlockGroup, UnlockPolicy, WireSecret};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
@@ -55,25 +54,12 @@ pub enum Operation {
 pub fn send(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
     let bytes = crate::security::memory::serialize_locked(message, MAX_BOOTSTRAP_BYTES)
         .map_err(io::Error::other)?;
-    if bytes.is_empty() || bytes.len() > MAX_BOOTSTRAP_BYTES {
-        return Err(io::Error::other("invalid desktop worker message length"));
-    }
-    let length = u32::try_from(bytes.len()).map_err(io::Error::other)?;
-    writer.write_all(&length.to_be_bytes())?;
-    writer.write_all(&bytes)?;
-    writer.flush()
+    crate::security::frame::write(writer, &bytes, MAX_BOOTSTRAP_BYTES)
 }
 
 /// Read exactly one frame, leaving the pipe available as the parent lifeline.
 pub fn receive<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> io::Result<T> {
-    let mut length = [0; 4];
-    reader.read_exact(&mut length)?;
-    let length = u32::from_be_bytes(length) as usize;
-    if length == 0 || length > MAX_BOOTSTRAP_BYTES {
-        return Err(io::Error::other("invalid desktop worker message length"));
-    }
-    let mut bytes = LockedBytes::zeroed(length).map_err(io::Error::other)?;
-    reader.read_exact(&mut bytes)?;
+    let bytes = crate::security::frame::read(reader, MAX_BOOTSTRAP_BYTES)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 

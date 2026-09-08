@@ -4,35 +4,13 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::io::{self, Read, Write};
 
-/// Count first and serialize into an exactly sized locked allocation. Helpers
-/// never turn a size bound into an unbounded temporary Vec of secret values.
+/// Serialize into an exactly sized locked allocation. Helpers never turn a
+/// size bound into an unbounded temporary Vec of secret values.
 pub(super) fn encode(value: &impl Serialize, maximum: usize) -> io::Result<LockedBytes> {
-    struct Counter {
-        length: usize,
-        maximum: usize,
-    }
-    impl Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.length = self
-                .length
-                .checked_add(bytes.len())
-                .filter(|length| *length <= self.maximum)
-                .ok_or_else(|| io::Error::other("helper message exceeds size limit"))?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter { length: 0, maximum };
-    ciborium::ser::into_writer(value, &mut counter).map_err(io::Error::other)?;
-    let mut output = LockedBytes::zeroed(counter.length).map_err(io::Error::other)?;
-    let mut target = output.as_mut();
-    ciborium::ser::into_writer(value, &mut target).map_err(io::Error::other)?;
-    if !target.is_empty() {
-        return Err(io::Error::other("helper serialization changed length"));
-    }
-    Ok(output)
+    crate::security::memory::serialize_locked_with(maximum, |writer| {
+        ciborium::ser::into_writer(value, writer).map_err(io::Error::other)
+    })
+    .map_err(io::Error::other)
 }
 
 #[cfg(any(test, feature = "vault", feature = "personal-sync-network"))]
@@ -114,15 +92,7 @@ fn take<'a>(bytes: &mut &'a [u8], count: usize) -> io::Result<&'a [u8]> {
 }
 
 pub(super) fn read(reader: &mut impl Read, maximum: usize) -> io::Result<LockedBytes> {
-    let mut length = [0; 4];
-    reader.read_exact(&mut length)?;
-    let length = u32::from_be_bytes(length) as usize;
-    if length == 0 || length > maximum {
-        return Err(io::Error::other("invalid helper frame size"));
-    }
-    let mut bytes = LockedBytes::zeroed(length).map_err(io::Error::other)?;
-    reader.read_exact(&mut bytes)?;
-    Ok(bytes)
+    crate::security::frame::read(reader, maximum)
 }
 
 pub(super) fn send(
@@ -130,14 +100,7 @@ pub(super) fn send(
     value: &impl Serialize,
     maximum: usize,
 ) -> io::Result<()> {
-    let bytes = encode(value, maximum)?;
-    writer.write_all(
-        &u32::try_from(bytes.len())
-            .map_err(io::Error::other)?
-            .to_be_bytes(),
-    )?;
-    writer.write_all(&bytes)?;
-    writer.flush()
+    crate::security::frame::write(writer, &encode(value, maximum)?, maximum)
 }
 
 #[cfg(test)]

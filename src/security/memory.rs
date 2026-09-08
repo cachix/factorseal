@@ -429,11 +429,22 @@ mod platform {
     }
 }
 
-/// Serialize twice: count/bound first, then write directly to locked storage.
-/// The value must have stable serialized content between the two passes.
+/// Serialize a value as JSON into an exactly sized locked allocation.
 pub(crate) fn serialize_locked(
     value: &impl serde::Serialize,
     maximum: usize,
+) -> VaultResult<LockedBytes> {
+    serialize_locked_with(maximum, |writer| {
+        serde_json::to_writer(writer, value).map_err(io::Error::other)
+    })
+}
+
+/// Serialize twice: count/bound first, then write directly to locked storage.
+/// `serialize` must produce the same bytes on both passes, so no bounded
+/// message ever passes through an unbounded temporary Vec of secret values.
+pub(crate) fn serialize_locked_with(
+    maximum: usize,
+    serialize: impl Fn(&mut dyn io::Write) -> io::Result<()>,
 ) -> VaultResult<LockedBytes> {
     struct Counter {
         remaining: usize,
@@ -451,10 +462,10 @@ pub(crate) fn serialize_locked(
         }
     }
     let mut counter = Counter { remaining: maximum };
-    serde_json::to_writer(&mut counter, value).map_err(|e| VaultError::Protocol(e.to_string()))?;
+    serialize(&mut counter).map_err(|e| VaultError::Protocol(e.to_string()))?;
     let mut bytes = LockedBytes::zeroed(maximum - counter.remaining)?;
     let mut writer = bytes.as_mut();
-    serde_json::to_writer(&mut writer, value).map_err(|e| VaultError::Protocol(e.to_string()))?;
+    serialize(&mut writer).map_err(|e| VaultError::Protocol(e.to_string()))?;
     if !writer.is_empty() {
         return Err(VaultError::Protocol("serialized length changed".into()));
     }
