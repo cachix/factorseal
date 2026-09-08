@@ -29,6 +29,7 @@ final class Bridge: NSObject, NSApplicationDelegate {
     var pending: NSUserActivity?
     var generation: UInt64 = 0
     var operation: Task<Void, Never>?
+    var confirmation: NSAlert?
 
     init(original: any NSApplicationDelegate, exchange: any ExchangeTransport = CredentialExchange(),
          callback: @escaping (UInt32, Data) -> Void) {
@@ -100,6 +101,11 @@ final class Bridge: NSObject, NSApplicationDelegate {
         generation &+= 1
         operation?.cancel()
         operation = nil
+        if let alert = confirmation, let parent = alert.window.sheetParent {
+            parent.endSheet(alert.window, returnCode: .abort)
+            alert.window.orderOut(nil)
+        }
+        confirmation = nil
         pending = nil
         busy = false
     }
@@ -118,7 +124,10 @@ final class Bridge: NSObject, NSApplicationDelegate {
                     alert.informativeText = "Apple's transfer format will omit FactorSeal-specific organization and field metadata (including folder, archived state, item kind, and field settings). Your credential values will be retained. Use an encrypted CXF file to retain all metadata."
                     alert.addButton(withTitle: "Continue")
                     alert.addButton(withTitle: "Cancel")
-                    guard await alert.beginSheetModal(for: anchor) == .alertFirstButtonReturn else {
+                    confirmation = alert
+                    let decision = await alert.beginSheetModal(for: anchor)
+                    if confirmation === alert { confirmation = nil }
+                    guard decision == .alertFirstButtonReturn else {
                         if generation == epoch { emit(3) }
                         return
                     }

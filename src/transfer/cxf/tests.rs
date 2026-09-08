@@ -52,6 +52,34 @@ fn apple_sdk_roundtrip() {
     check_apple_roundtrip(&bytes);
 }
 
+#[test]
+#[ignore = "requires the native export output from scripts/test-apple-exchange.sh"]
+fn apple_native_sdk_roundtrip() {
+    let path = std::env::var_os("FACTORSEAL_TEST_APPLE_NATIVE_OUTPUT")
+        .expect("set FACTORSEAL_TEST_APPLE_NATIVE_OUTPUT to the Swift native export output");
+    let bytes = super::super::read_transfer_file(std::path::Path::new(&path)).unwrap();
+    let _: credential_exchange_format::Header = serde_json::from_slice(&bytes).unwrap();
+    let imported = import_json(&bytes).unwrap();
+    assert_eq!(imported.len(), 1);
+    let login = &imported[0];
+    assert_eq!(login.kind, PersonalSecretKind::Login);
+    assert_eq!(login.notes.as_deref(), Some("a note"));
+    assert!(login.favorite);
+    assert_eq!(login.tags, ["team"]);
+    let values: Vec<_> = login
+        .sections
+        .iter()
+        .flat_map(|section| &section.fields)
+        .filter_map(PersonalField::text)
+        .collect();
+    for expected in ["alice", "synthetic password", "https://example.org", "true"] {
+        assert!(
+            values.contains(&expected),
+            "synthetic native field was lost"
+        );
+    }
+}
+
 const HYBRID_KEY: &str = include_str!("../../../tests/fixtures/transfer/cxf/hybrid-key.txt");
 const HYBRID_RECIPIENT: &str =
     include_str!("../../../tests/fixtures/transfer/cxf/hybrid-recipient.txt");
@@ -300,6 +328,10 @@ fn native_fields_round_trip_through_independent_cxf_reader() {
     login.favorite = true;
     login.tags = vec!["team".into()];
     let encoded = export_json(std::slice::from_ref(&login)).unwrap();
+    if let Some(path) = std::env::var_os("FACTORSEAL_TEST_APPLE_NATIVE_CXF") {
+        // This test constructs only public synthetic credentials, never vault data.
+        std::fs::write(path, &encoded).unwrap();
+    }
     // Independent implementation maintained by Bitwarden. Synthetic data only:
     // these third-party types do not wipe secrets when dropped.
     let external: credential_exchange_format::Header = serde_json::from_slice(&encoded).unwrap();
