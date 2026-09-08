@@ -105,7 +105,7 @@ pub(super) fn create_with_protectors(
         native_signing,
     )?;
     let public_signing_key = secrets
-        .signer(installation_id, device_vault_id)
+        .signer(installation_id, device_vault_id)?
         .public_key()?;
     let device_key_id = DeviceKeyId::for_public_key(&public_signing_key);
     let actor_id = actor_id_for_public_key(&public_signing_key).to_vec();
@@ -214,7 +214,7 @@ pub(super) fn unseal_with_protectors(
     let public_signing_key =
         crate::timing::result("key_hierarchy", "derive_public_identity", || {
             secrets
-                .signer(stored.installation_id, stored.device_vault_id)
+                .signer(stored.installation_id, stored.device_vault_id)?
                 .public_key()
         })?;
     if public_signing_key != stored.public_signing_key

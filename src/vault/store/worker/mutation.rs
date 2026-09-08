@@ -255,7 +255,7 @@ impl StoreWorker {
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
         let signer = self
             .secrets
-            .signer(self.device.installation_id(), self.device.device_vault_id());
+            .signer(self.device.installation_id(), self.device.device_vault_id())?;
         let envelope_context = EnvelopeContext {
             vault_id: self.device.device_vault_id(),
             document_id,

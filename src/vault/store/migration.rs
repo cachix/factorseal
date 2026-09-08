@@ -205,7 +205,7 @@ async fn prepare_v5_rows(
     secrets: &InstallationSecrets,
     rows: Vec<LegacyDocumentRow>,
 ) -> VaultResult<Vec<MigratedRow>> {
-    let signer = secrets.signer(device.installation_id(), device.device_vault_id());
+    let signer = secrets.signer(device.installation_id(), device.device_vault_id())?;
     let mut previous_commit_id = None;
     let mut migrated = Vec::with_capacity(rows.len());
     for row in rows {

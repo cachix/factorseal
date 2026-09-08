@@ -232,7 +232,7 @@ impl UnsealedVault {
         use super::signature::SigningProvider as _;
         let signer = self
             .secrets
-            .signer(self.public.installation_id(), self.public.device_vault_id());
+            .signer(self.public.installation_id(), self.public.device_vault_id())?;
         signer.sign(&super::signature::permission_payload(
             id,
             challenge,

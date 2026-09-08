@@ -403,7 +403,7 @@ impl StoreWorker {
     ) -> VaultResult<Vec<ProtectedCommit>> {
         let signer = self
             .secrets
-            .signer(self.device.installation_id(), self.device.device_vault_id());
+            .signer(self.device.installation_id(), self.device.device_vault_id())?;
         let mut previous_commit_id = None;
         let mut commits = Vec::with_capacity(documents.len());
         for document in documents {

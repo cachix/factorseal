@@ -18,36 +18,32 @@ use super::{VaultError, VaultResult};
 
 const KEY_BYTES: usize = 32;
 
+/// The selected signing capability, authenticated once for one operation.
+///
+/// A software seed lives in a guarded locked allocation for the signer's
+/// lifetime, so an integrity rebuild or migration signs every document with
+/// one unwrap instead of re-authenticating the seed per document.
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
-struct InstallationSigner<'a> {
-    secrets: &'a InstallationSecrets,
-    installation: InstallationId,
-    vault: VaultId,
+enum InstallationSigner {
+    Software(LockedKey<KEY_BYTES>),
+    Enclave(Box<dyn super::signature::SigningProvider>),
 }
 
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
-impl super::signature::SigningProvider for InstallationSigner<'_> {
+impl super::signature::SigningProvider for InstallationSigner {
     fn public_key(&self) -> VaultResult<Vec<u8>> {
-        if self.secrets.wrapped_enclave_key.is_some() {
-            return self
-                .secrets
-                .enclave_signer(self.installation, self.vault)?
-                .public_key();
+        match self {
+            Self::Software(seed) => super::signature::SoftwareSigner(seed).public_key(),
+            Self::Enclave(signer) => signer.public_key(),
         }
-        let seed = self.secrets.signing_seed(self.installation, self.vault)?;
-        super::signature::SoftwareSigner(&seed).public_key()
     }
 
     #[cfg(feature = "vault-store")]
     fn sign(&self, payload: &[u8]) -> VaultResult<Vec<u8>> {
-        if self.secrets.wrapped_enclave_key.is_some() {
-            return self
-                .secrets
-                .enclave_signer(self.installation, self.vault)?
-                .sign(payload);
+        match self {
+            Self::Software(seed) => super::signature::SoftwareSigner(seed).sign(payload),
+            Self::Enclave(signer) => signer.sign(payload),
         }
-        let seed = self.secrets.signing_seed(self.installation, self.vault)?;
-        super::signature::SoftwareSigner(&seed).sign(payload)
     }
 }
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
@@ -197,12 +193,15 @@ impl InstallationSecrets {
         &self,
         installation: InstallationId,
         vault: VaultId,
-    ) -> impl super::signature::SigningProvider + '_ {
-        InstallationSigner {
-            secrets: self,
-            installation,
-            vault,
+    ) -> VaultResult<impl super::signature::SigningProvider> {
+        if self.wrapped_enclave_key.is_some() {
+            return Ok(InstallationSigner::Enclave(
+                self.enclave_signer(installation, vault)?,
+            ));
         }
+        Ok(InstallationSigner::Software(
+            self.signing_seed(installation, vault)?,
+        ))
     }
 
     #[cfg(feature = "key-protection")]
@@ -534,14 +533,15 @@ mod tests {
         let legacy = serde_json::to_value(&wrapped).unwrap();
         assert_eq!(legacy.as_object().unwrap().len(), 1);
         assert!(legacy.get("signing_seed").is_some());
-        let signer = keys.signer(installation, vault);
+        let signer = keys.signer(installation, vault).unwrap();
         let public = signer.public_key().unwrap();
         assert_eq!(public, signature::public_key_for_seed(&[11; 32]));
         let proof = signer.sign(b"provider transcript").unwrap();
         signature::verify(&public, b"provider transcript", &proof).unwrap();
+        // A wrong installation cannot even build the signer: the seed is
+        // authenticated once when the capability is selected.
         assert!(
             keys.signer(InstallationId::from_bytes([1; 16]), vault)
-                .sign(b"provider transcript")
                 .is_err()
         );
     }
