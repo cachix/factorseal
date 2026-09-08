@@ -12,7 +12,7 @@ cp "$repo_root/platform/apple/Extension/Info.plist" "$extension/Contents/Info.pl
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$extension/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$extension/Contents/Info.plist"
-xcrun swiftc -parse-as-library -emit-executable \
+xcrun swiftc -parse-as-library -emit-executable -warnings-as-errors \
     -target "$(uname -m)-apple-macosx26.0" \
     -application-extension -module-name FactorSealCredentialProvider \
     -Xlinker -e -Xlinker _NSExtensionMain \

@@ -23,7 +23,7 @@ main = plistlib.loads((app / "Info.plist").read_bytes())
 assert main["CFBundleExecutable"] == "factorseal-desktop"
 assert main["FactorSealExperimentalCredentialExchange"] is True
 assert main["LSMinimumSystemVersion"] == "26.0"
-assert main["NSUserActivityTypes"] == ["ASCredentialExchangeActivityType"]
+assert len(main["NSUserActivityTypes"]) == 1
 extension = plistlib.loads((app / "PlugIns/FactorSealCredentialProvider.appex/Contents/Info.plist").read_bytes())
 assert extension["CFBundleIdentifier"] == main["CFBundleIdentifier"] + ".credentials"
 assert extension["CFBundleVersion"] == main["CFBundleVersion"]
@@ -33,6 +33,13 @@ assert capabilities == {"SupportsCredentialExchange": True, "SupportedCredential
 assert (app / "Frameworks/libFactorSealAppleBridge.dylib").is_file()
 assert not (app / "embedded.provisionprofile").exists(), "CI package must use local signing"
 PY
+xcrun swift - "$app/Contents/Info.plist" <<'SWIFT'
+import AuthenticationServices
+import Foundation
+let data = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
+let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as! [String: Any]
+precondition(plist["NSUserActivityTypes"] as? [String] == [ASCredentialExchangeActivity])
+SWIFT
 symbols=$(nm -gU "$app/Contents/Frameworks/libFactorSealAppleBridge.dylib")
 for symbol in install set_unlocked finish export; do
     grep -q "_factorseal_apple_$symbol$" <<<"$symbols"
