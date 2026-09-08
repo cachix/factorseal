@@ -36,6 +36,11 @@ pub enum Operation {
         duration_seconds: Option<u64>,
         group: UnlockGroup,
     },
+    /// Authenticate and sign approvals without opening or serving the database.
+    SignPermissions {
+        group: UnlockGroup,
+        requests: Vec<(String, [u8; 32], Option<u64>)>,
+    },
     Initialize {
         policy: UnlockPolicy,
     },

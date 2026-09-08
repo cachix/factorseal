@@ -14,17 +14,23 @@ fn passphrase_from_entropy(entropy: &[u8; 16]) -> Zeroizing<String> {
     Zeroizing::new(mnemonic.to_string())
 }
 
-fn generate_passphrase() -> Result<Zeroizing<String>, getrandom::Error> {
+pub(super) fn generate_passphrase() -> Result<Zeroizing<String>, getrandom::Error> {
     let mut entropy = Zeroizing::new([0_u8; 16]);
     getrandom::fill(&mut *entropy)?;
     Ok(passphrase_from_entropy(&entropy))
 }
 
 pub(super) fn can_generate(kind: PersonalSecretKind, field: &PersonalDraftField) -> bool {
-    field.field_type == PersonalFieldType::Concealed
-        && (kind == PersonalSecretKind::Generic
-            || field.id == "password"
-            || field.id == "passphrase")
+    can_generate_value(kind, &field.field_type, &field.id)
+}
+
+pub(super) fn can_generate_value(
+    kind: PersonalSecretKind,
+    field_type: &PersonalFieldType,
+    id: &str,
+) -> bool {
+    *field_type == PersonalFieldType::Concealed
+        && (kind == PersonalSecretKind::Generic || id == "password" || id == "passphrase")
 }
 
 impl DesktopView {
@@ -105,6 +111,45 @@ impl DesktopView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_is_available_for_passwords_but_not_external_credentials() {
+        assert!(can_generate_value(
+            PersonalSecretKind::Login,
+            &PersonalFieldType::Concealed,
+            "password"
+        ));
+        assert!(can_generate_value(
+            PersonalSecretKind::SshKey,
+            &PersonalFieldType::Concealed,
+            "passphrase"
+        ));
+        assert!(can_generate_value(
+            PersonalSecretKind::Generic,
+            &PersonalFieldType::Concealed,
+            "custom"
+        ));
+        assert!(!can_generate_value(
+            PersonalSecretKind::Login,
+            &PersonalFieldType::Text,
+            "username"
+        ));
+        assert!(!can_generate_value(
+            PersonalSecretKind::Login,
+            &PersonalFieldType::Totp,
+            "totp"
+        ));
+        assert!(!can_generate_value(
+            PersonalSecretKind::Card,
+            &PersonalFieldType::Concealed,
+            "cvv"
+        ));
+        assert!(!can_generate_value(
+            PersonalSecretKind::ApiCredential,
+            &PersonalFieldType::Concealed,
+            "credential"
+        ));
+    }
 
     #[test]
     fn generated_passphrases_are_valid_twelve_word_bip39_mnemonics() {

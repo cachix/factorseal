@@ -458,6 +458,68 @@ impl DesktopRuntime {
         })
     }
 
+    pub(crate) fn approve_permissions(
+        &self,
+        metadata: &VaultMetadata,
+        permissions: &[factorseal::Permission],
+        group: factorseal::UnlockGroup,
+        password: Zeroizing<Vec<u8>>,
+        duration: Option<u64>,
+    ) -> Result<(), String> {
+        let requests = permissions
+            .iter()
+            .map(|permission| {
+                let factorseal::PermissionState::Pending { challenge, .. } = permission.state
+                else {
+                    return Err("permission is no longer pending".to_owned());
+                };
+                Ok((permission.id.clone(), challenge, duration))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let password = LockedBytes::from_zeroizing(password).map_err(|error| error.to_string())?;
+        let mut worker = self.spawn_worker(
+            factorseal::desktop_worker::Operation::SignPermissions { group, requests },
+            password,
+        )?;
+        let signatures = factorseal::desktop_worker::receive::<Result<Vec<Vec<u8>>, String>>(
+            worker
+                .child
+                .stdout
+                .as_mut()
+                .ok_or("signing worker output unavailable")?,
+        )
+        .map_err(|error| error.to_string())??;
+        worker.wait()?;
+        if signatures.len() != permissions.len() {
+            return Err("invalid signing response".to_owned());
+        }
+        for (permission, signature) in permissions.iter().zip(signatures) {
+            self.request_live(
+                metadata,
+                &VaultRequest::new(factorseal::VaultAction::ApprovePermission {
+                    id: permission.id.clone(),
+                    signature,
+                    duration_seconds: duration,
+                })
+                .map_err(|error| error.to_string())?,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn deny_permission(
+        &self,
+        metadata: &VaultMetadata,
+        id: String,
+    ) -> Result<(), String> {
+        self.request_live(
+            metadata,
+            &VaultRequest::new(factorseal::VaultAction::DenyPermission { id })
+                .map_err(|error| error.to_string())?,
+        )
+        .map(|_| ())
+    }
+
     pub(crate) fn wait_permissions(
         &self,
         metadata: &VaultMetadata,
@@ -627,6 +689,7 @@ impl DesktopRuntime {
         let signing = matches!(
             operation,
             factorseal::desktop_worker::Operation::SignPermission { .. }
+                | factorseal::desktop_worker::Operation::SignPermissions { .. }
         );
         let bootstrap = factorseal::desktop_worker::Bootstrap {
             desktop_executable: desktop,

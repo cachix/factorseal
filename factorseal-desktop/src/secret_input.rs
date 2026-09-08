@@ -101,6 +101,8 @@ impl SecretBuffer {
 pub(crate) struct SecretInputState {
     secret: SecretBuffer,
     masked: bool,
+    submit_on_enter: bool,
+    blur_subscription: Option<gpui::Subscription>,
     focus: FocusHandle,
     placeholder: SharedString,
     selection: Range<usize>,
@@ -137,6 +139,8 @@ impl SecretInputState {
         Self {
             secret: SecretBuffer::default(),
             masked: true,
+            submit_on_enter: false,
+            blur_subscription: None,
             focus: cx.focus_handle(),
             placeholder: "".into(),
             selection: 0..0,
@@ -147,6 +151,7 @@ impl SecretInputState {
     }
     pub(crate) fn from_value(value: &str, masked: bool, cx: &mut Context<Self>) -> Self {
         let mut input = Self::empty(cx).multiline().masked(masked);
+        input.submit_on_enter = true;
         if !input.secret.replace(0..0, value) {
             input.secret.allocation_failed = true;
         }
@@ -215,11 +220,13 @@ impl SecretInputState {
             modifiers.control
         };
         match key {
+            "escape" if self.submit_on_enter => window.blur(cx),
             "escape" => self.clear(cx),
-            "enter" if self.secret.multiline => {
+            "enter" if self.secret.multiline && (!self.submit_on_enter || modifiers.shift) => {
                 let range = self.selection.clone();
                 if self.secret.replace(range.clone(), "\n") {
                     self.selection = range.start + 1..range.start + 1;
+                    cx.emit(InputEvent::Change);
                     cx.notify();
                 }
             }
@@ -398,7 +405,12 @@ impl EntityInputHandler for SecretInputState {
 
 impl Render for SecretInputState {
     #[allow(clippy::too_many_lines)]
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.submit_on_enter && self.blur_subscription.is_none() {
+            self.blur_subscription = Some(cx.on_blur(&self.focus, window, |_, _, cx| {
+                cx.emit(InputEvent::Blur);
+            }));
+        }
         let entity = cx.entity();
         let text: SharedString = if self.secret.text.is_empty() {
             self.placeholder.clone()

@@ -2,7 +2,6 @@ use super::*;
 use factorseal::{
     Permission, PermissionChange, PermissionState, UnlockFactorKind, UnlockGroup, VaultAction,
 };
-use std::fmt::Write as _;
 
 pub(super) struct ApprovalForm {
     permission: Permission,
@@ -272,7 +271,7 @@ impl DesktopView {
             factorseal::PermissionState::Granted { .. } => "Granted",
         };
         let mut details = vec![
-            ("Type", "Application access".to_owned()),
+            ("Type", permission_access_type(permission.scope).to_owned()),
             (
                 "Operation",
                 permission_operation_label(permission.operation).to_owned(),
@@ -286,13 +285,7 @@ impl DesktopView {
         details.push(("User", permission.principal.user_id.clone()));
         details.push((
             "Executable digest",
-            permission.principal.executable_digest.iter().fold(
-                String::with_capacity(64),
-                |mut text, byte| {
-                    let _ = write!(text, "{byte:02x}");
-                    text
-                },
-            ),
+            hex_digest(&permission.principal.executable_digest),
         ));
         if let Some(signer) = &permission.principal.signer_id {
             details.push(("Signer", signer.clone()));
@@ -325,6 +318,12 @@ impl DesktopView {
         }
         if let Some(project) = &permission.application.project {
             details.push(("Project", project.clone()));
+        }
+        if let Some(profile) = &permission.application.profile {
+            details.push(("Profile", profile.clone()));
+        }
+        if let Some(base_dir) = &permission.application.base_dir {
+            details.push(("Base directory", base_dir.clone()));
         }
         v_flex()
             .size_full()

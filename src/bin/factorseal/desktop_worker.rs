@@ -75,6 +75,35 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
         *reported = true;
         return Ok(());
     }
+    let operation = match operation {
+        Operation::SignPermissions { group, requests } => {
+            let result = (|| -> Result<Vec<Vec<u8>>, CliError> {
+                if requests.is_empty() || requests.len() > 128 {
+                    return Err(CliError::DesktopLaunch("invalid approval batch".to_owned()));
+                }
+                let unsealed = Vault::unseal_with_unlock_group(
+                    root,
+                    &group,
+                    UnlockCredentials::with_password(password.expose()),
+                )?;
+                drop(password);
+                requests
+                    .iter()
+                    .map(|(id, challenge, duration)| {
+                        unsealed
+                            .sign_permission_challenge(id, challenge, *duration)
+                            .map_err(Into::into)
+                    })
+                    .collect()
+            })()
+            .map_err(|error| error.to_string());
+            send(&mut std::io::stdout(), &result)
+                .map_err(|error| CliError::DesktopLaunch(error.to_string()))?;
+            *reported = true;
+            return result.map(|_| ()).map_err(CliError::DesktopLaunch);
+        }
+        operation => operation,
+    };
     let owner = Arc::new(Mutex::new(Weak::<VaultService>::new()));
     timing::result("desktop_worker", "watch_parent", || {
         watch_parent(Arc::clone(&owner))
@@ -95,6 +124,9 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
         || {
             let unlocked = match operation {
                 Operation::SignPermission { .. } => unreachable!("permission signer handled above"),
+                Operation::SignPermissions { .. } => {
+                    unreachable!("signing does not start a vault worker")
+                }
                 Operation::Initialize { policy } => (
                     Vault::prepare_with_unlock_policy_and_profile(
                         root,

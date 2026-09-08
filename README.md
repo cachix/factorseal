@@ -122,9 +122,8 @@ alternative to `factorseal agent`, not a client of it, so do not configure both
 to autostart. Repeated Desktop launches activate the existing per-vault
 instance. On Linux, the Desktop package registers D-Bus activation for
 `org.freedesktop.secrets`. Desktop keeps answering while sealed, but credential
-searches return `IsLocked` immediately: manually unlock Desktop before using
-applications that look up credentials. Native socket and SecretSpec clients
-also require Desktop to be unsealed first.
+searches open a compact access dialog and resume after approval and authentication. Native
+socket and SecretSpec clients also require Desktop to be unsealed first.
 Sealing removes the native service endpoint and all unwrapped vault keys.
 
 If the vault does not exist yet, `factorseal agent` stays alive, logs the
@@ -600,10 +599,25 @@ To run the disposable two-host forwarding test on Unix, set
 On Linux, Factorseal Desktop registers `org.freedesktop.secrets` for D-Bus
 activation and serves a locked collection while the vault is sealed. Item
 labels and lookup attributes remain in the encrypted index; no plaintext search
-cache is written. Manually unlock Desktop before credential lookup. Sealed
-searches return `org.freedesktop.Secret.Error.IsLocked` immediately, without
-opening an unlock window or reporting that the credential is missing. Clients
-that explicitly call `Unlock` can still use the normal prompt flow.
+cache is written. Sealed searches open a separate access dialog showing the
+requesting executable, working directory, process, and lookup attributes. The
+standard SecretSpec service path also supplies the project, profile, and secret
+name. These project labels are caller-provided; they are not a verified project
+identity. Unlocking and grant approval stay in one popup, reusing the secure
+password entry. The signed grant binds the authenticated executable, project,
+folder, and operation, either for one hour or until revoked. Keyring requests
+use the nearest `secretspec.toml` ancestor of the OS-reported working directory
+(or that directory itself); SecretSpec IPC supplies its canonical project folder. Grants appear in Access
+Grants and are checked again for each secret operation. SecretSpec IPC uses the
+same approval flow, with separate grants for its provider-cache scope.
+Desktop writes open a masked, editable secret-entry dialog and authorize only
+that save, without creating a write grant. Native IPC transports the value over
+a private file descriptor. Its current `set` protocol already supplies a value;
+starting the prompt before that value exists requires a SecretSpec-side change.
+Explicit denial returns `org.freedesktop.Secret.Error.AccessDenied`, dismissal
+returns `org.freedesktop.Secret.Error.Cancelled`, and expiration returns
+`org.freedesktop.Secret.Error.TimedOut`. Clients may impose a shorter D-Bus
+timeout. Clients that explicitly call `Unlock` use the normal prompt flow.
 
 Do not run another provider that owns that bus name, such as GNOME Keyring or
 oo7, at the same time. macOS Keychain and Windows Credential Manager remain

@@ -81,6 +81,7 @@ impl VaultService {
                         namespace: Some(&namespace),
                         address: None,
                         project: None,
+                        base_dir: None,
                         permission: GrantPermission::SshSign,
                     },
                     now,

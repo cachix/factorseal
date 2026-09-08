@@ -66,25 +66,118 @@ async fn registered_items(
     Ok(items)
 }
 
+fn service_target(attributes: &HashMap<String, String>) -> String {
+    use sha2::{Digest as _, Sha256};
+    if let Some(service) = attributes
+        .get("service")
+        .filter(|service| !service.is_empty())
+    {
+        return format!("service/{service}");
+    }
+    let ordered: std::collections::BTreeMap<_, _> = attributes.iter().collect();
+    format!(
+        "attributes/{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&ordered).expect("string map serializes")
+        ))
+    )
+}
+
 async fn matching_items(
     shared: &Arc<Shared>,
     server: &ObjectServer,
     attributes: &HashMap<String, String>,
+    owner: &str,
 ) -> Result<Vec<OwnedObjectPath>, SecretServiceError> {
-    Ok(registered_items(shared, server)
-        .await?
-        .into_iter()
-        .filter(|item| {
-            attributes
-                .iter()
-                .all(|(key, value)| item.attributes.get(key) == Some(value))
-        })
-        .map(|item| item_path(&item.id))
-        .collect::<fdo::Result<Vec<_>>>()?)
+    if attributes.contains_key("service") {
+        shared
+            .authorized_agent(
+                owner,
+                &service_target(attributes),
+                super::super::PermissionOperation::Get,
+            )
+            .await?;
+    }
+    let mut paths = Vec::new();
+    for item in registered_items(shared, server).await? {
+        if attributes
+            .iter()
+            .all(|(key, value)| item.attributes.get(key) == Some(value))
+        {
+            if !attributes.contains_key("service") {
+                shared
+                    .authorized_agent(
+                        owner,
+                        &service_target(&item.attributes),
+                        super::super::PermissionOperation::Get,
+                    )
+                    .await?;
+            }
+            paths.push(item_path(&item.id)?);
+        }
+    }
+    Ok(paths)
 }
 
-fn sealed() -> fdo::Error {
-    fdo::Error::Failed("the FactorSeal vault is sealed".to_owned())
+#[cfg(feature = "key-protection")]
+async fn authorize_input_peer(shared: &Shared, owner: String) -> Result<(), SecretServiceError> {
+    let store = shared.agent()?.store.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        store.backend_request(super::super::VaultRequest::new(
+            super::super::VaultAction::AuthorizeSecretInput { sender: owner },
+        )?)
+    })
+    .await
+    .map_err(failed)?
+    .map_err(failed)?;
+    response.check_delivery().map_err(failed)?;
+    if response.result.is_err() {
+        return Err(SecretServiceError::AccessDenied(
+            "Only an authorized FactorSeal provider may receive secure IPC input".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn access_context(
+    attributes: &HashMap<String, String>,
+    header: &zbus::message::Header<'_>,
+    connection: &zbus::Connection,
+) -> super::SecretServiceAccessContext {
+    let owner = header.sender().map(ToString::to_string).unwrap_or_default();
+    let mut context = super::SecretServiceAccessContext {
+        attributes: attributes
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        sender: owner.clone(),
+        ..Default::default()
+    };
+    if let Ok(bus) = fdo::DBusProxy::new(connection).await
+        && let Ok(name) = zbus::names::BusName::try_from(owner.as_str())
+        && let Ok(pid) = bus.get_connection_unix_process_id(name).await
+    {
+        context.process_id = Some(pid);
+        context.executable = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+        context.working_directory = std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+        if attributes
+            .get("service")
+            .is_some_and(|service| service.starts_with("secretspec/"))
+            && let Some(cwd) = context
+                .working_directory
+                .as_ref()
+                .and_then(|cwd| std::fs::canonicalize(cwd).ok())
+        {
+            let folder = cwd
+                .ancestors()
+                .find(|folder| folder.join("secretspec.toml").is_file())
+                .unwrap_or(&cwd);
+            context
+                .attributes
+                .insert("base_dir".to_owned(), folder.display().to_string());
+        }
+    }
+    context
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::unused_self)]
@@ -139,18 +232,87 @@ impl Service {
         Ok((session_output(output)?, object_path))
     }
 
-    /// The search index is encrypted. Report IsLocked immediately rather than
-    /// inventing a missing credential or waiting for UI within a method call.
+    /// Ask the host to unlock the encrypted index before searching.
     #[zbus(out_args("unlocked", "locked"))]
     pub(super) async fn search_items(
         &self,
         attributes: HashMap<String, String>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>), SecretServiceError> {
-        Ok((
-            matching_items(&self.shared, server, &attributes).await?,
-            Vec::new(),
-        ))
+        let context = access_context(&attributes, &header, connection).await;
+        if self.shared.locked() {
+            self.shared.unlock_for_search(context.clone()).await?;
+        }
+        let result = matching_items(&self.shared, server, &attributes, &sender(&header)?).await;
+        self.shared.prompter.finish_access(context);
+        result.map(|items| (items, Vec::new()))
+    }
+
+    /// FactorSeal extension: unlock before retrying native IPC; grants are separate.
+    async fn unlock_for_ipc(
+        &self,
+        attributes: HashMap<String, String>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<(), SecretServiceError> {
+        self.shared
+            .unlock_for_search(access_context(&attributes, &header, connection).await)
+            .await
+    }
+
+    #[cfg(feature = "key-protection")]
+    async fn input_for_ipc(
+        &self,
+        attributes: HashMap<String, String>,
+        channel: zbus::zvariant::OwnedFd,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<(), SecretServiceError> {
+        let context = access_context(&attributes, &header, connection).await;
+        if self.shared.locked() {
+            self.shared.unlock_for_search(context.clone()).await?;
+        }
+        let owner = sender(&header)?;
+        if let Err(error) = authorize_input_peer(&self.shared, owner.clone()).await {
+            self.shared.prompter.finish_access(context);
+            return Err(error);
+        }
+        let mut channel = std::os::unix::net::UnixStream::from(std::os::fd::OwnedFd::from(channel));
+        channel
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .map_err(failed)?;
+        channel
+            .set_write_timeout(Some(std::time::Duration::from_secs(2)))
+            .map_err(failed)?;
+        let (mut channel, initial) = tokio::task::spawn_blocking(move || {
+            let initial = crate::desktop_worker::receive::<super::super::WireSecret>(&mut channel);
+            (channel, initial)
+        })
+        .await
+        .map_err(failed)?;
+        let value = self
+            .shared
+            .input_secret(context, initial.map_err(failed)?)
+            .await?;
+        authorize_input_peer(&self.shared, owner).await?;
+        tokio::task::spawn_blocking(move || crate::desktop_worker::send(&mut channel, &value))
+            .await
+            .map_err(failed)?
+            .map_err(failed)?;
+        Ok(())
+    }
+
+    async fn finish_ipc_access(
+        &self,
+        attributes: HashMap<String, String>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) {
+        self.shared
+            .prompter
+            .finish_access(access_context(&attributes, &header, connection).await);
     }
 
     /// Unsealed objects are already unlocked. Sealed ones need the host to
@@ -202,7 +364,7 @@ impl Service {
     }
 
     #[zbus(out_args("secrets",))]
-    fn get_secrets(
+    async fn get_secrets(
         &self,
         items: Vec<OwnedObjectPath>,
         session: OwnedObjectPath,
@@ -214,6 +376,14 @@ impl Service {
         for path in items {
             let id = item_id(path.as_str())?;
             let item = agent.item(id)?;
+            let agent = self
+                .shared
+                .authorized_agent(
+                    &owner,
+                    &service_target(&item.attributes),
+                    super::super::PermissionOperation::Get,
+                )
+                .await?;
             let value = agent
                 .store
                 .get(secret_item(id))
@@ -256,9 +426,17 @@ impl Collection {
     pub(super) async fn search_items(
         &self,
         attributes: HashMap<String, String>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<Vec<OwnedObjectPath>, SecretServiceError> {
-        matching_items(&self.shared, server, &attributes).await
+        let context = access_context(&attributes, &header, connection).await;
+        if self.shared.locked() {
+            self.shared.unlock_for_search(context.clone()).await?;
+        }
+        let result = matching_items(&self.shared, server, &attributes, &sender(&header)?).await;
+        self.shared.prompter.finish_access(context);
+        result
     }
 
     #[zbus(out_args("item", "prompt"))]
@@ -268,14 +446,38 @@ impl Collection {
         secret: Secret,
         replace: bool,
         #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretServiceError> {
-        let agent = self.shared.agent()?;
-        let (value, content_type) = self.shared.decrypt_secret(secret, &sender(&header)?)?;
         let label = property_string(&properties, "org.freedesktop.Secret.Item.Label")?;
         let attributes = property_map(&properties, "org.freedesktop.Secret.Item.Attributes")?;
+        let (value, content_type) = self.shared.decrypt_secret(secret, &sender(&header)?)?;
+        let context = access_context(&attributes, &header, connection).await;
+        let (agent, value) = if self.shared.prompter.supports_input() {
+            let value = self
+                .shared
+                .input_secret(
+                    context.clone(),
+                    super::super::WireSecret::new(value.to_vec()).map_err(failed)?,
+                )
+                .await?;
+            (self.shared.agent()?, value)
+        } else {
+            let agent = self
+                .shared
+                .authorized_agent(
+                    &sender(&header)?,
+                    &service_target(&attributes),
+                    super::super::PermissionOperation::Put,
+                )
+                .await?;
+            (
+                agent,
+                super::super::WireSecret::new(value.to_vec()).map_err(failed)?,
+            )
+        };
         let (item, created) =
-            agent.create_or_replace(label, attributes, &value, content_type, replace)?;
+            agent.create_or_replace(label, attributes, value.expose(), content_type, replace)?;
         let path = item_path(&item.id)?;
         if created {
             server
@@ -289,23 +491,25 @@ impl Collection {
                 .await
                 .map_err(failed)?;
         }
+        self.shared.prompter.finish_access(context);
         Ok((path, root_path()?))
     }
 
     #[zbus(property)]
     async fn items(
         &self,
+        #[zbus(header)] header: Option<zbus::message::Header<'_>>,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<Vec<OwnedObjectPath>> {
-        match self.shared.agent() {
-            Ok(_) => registered_items(&self.shared, server)
-                .await
-                .map_err(failed)?
-                .into_iter()
-                .map(|item| item_path(&item.id))
-                .collect(),
-            Err(_) => Ok(Vec::new()),
+        let Some(header) = header else {
+            return Ok(Vec::new());
+        };
+        if self.shared.locked() {
+            return Ok(Vec::new());
         }
+        matching_items(&self.shared, server, &HashMap::new(), &sender(&header)?)
+            .await
+            .map_err(failed)
     }
 
     #[zbus(property)]
@@ -323,12 +527,14 @@ impl Collection {
 #[interface(name = "org.freedesktop.Secret.Item")]
 impl Item {
     #[zbus(out_args("secret",))]
-    fn get_secret(
+    async fn get_secret(
         &self,
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<Secret, SecretServiceError> {
-        let agent = self.shared.agent()?;
+        let agent = self
+            .authorized_agent(&header, super::super::PermissionOperation::Get)
+            .await?;
         let owner = sender(&header)?;
         let item = agent.item(&self.id)?;
         let value = agent
@@ -341,22 +547,48 @@ impl Item {
             .encrypt_secret(session, &owner, &value, item.content_type)?)
     }
 
-    fn set_secret(
+    async fn set_secret(
         &self,
         secret: Secret,
         #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretServiceError> {
         let agent = self.shared.agent()?;
+        let item = agent.item(&self.id)?;
+        let context = access_context(&item.attributes, &header, connection).await;
         let (value, content_type) = self.shared.decrypt_secret(secret, &sender(&header)?)?;
-        Ok(agent.set_secret(&self.id, &value, content_type)?)
+        let (agent, value) = if self.shared.prompter.supports_input() {
+            let value = self
+                .shared
+                .input_secret(
+                    context.clone(),
+                    super::super::WireSecret::new(value.to_vec()).map_err(failed)?,
+                )
+                .await?;
+            (self.shared.agent()?, value)
+        } else {
+            let agent = self
+                .authorized_agent(&header, super::super::PermissionOperation::Put)
+                .await?;
+            (
+                agent,
+                super::super::WireSecret::new(value.to_vec()).map_err(failed)?,
+            )
+        };
+        let result = agent.set_secret(&self.id, value.expose(), content_type);
+        self.shared.prompter.finish_access(context);
+        Ok(result?)
     }
 
     #[zbus(out_args("prompt",))]
     async fn delete(
         &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<OwnedObjectPath, SecretServiceError> {
-        let agent = self.shared.agent()?;
+        let agent = self
+            .authorized_agent(&header, super::super::PermissionOperation::Delete)
+            .await?;
         agent.delete_item(&self.id)?;
         server
             .remove::<Item, _>(item_path(&self.id)?)
@@ -366,13 +598,35 @@ impl Item {
     }
 
     #[zbus(property)]
-    fn label(&self) -> fdo::Result<String> {
-        Ok(self.agent()?.item(&self.id)?.label)
+    async fn label(
+        &self,
+        #[zbus(header)] header: Option<zbus::message::Header<'_>>,
+    ) -> fdo::Result<String> {
+        let Some(header) = header else {
+            return Ok(String::new());
+        };
+        Ok(self
+            .authorized_agent(&header, super::super::PermissionOperation::Get)
+            .await
+            .map_err(failed)?
+            .item(&self.id)?
+            .label)
     }
 
     #[zbus(property)]
-    fn attributes(&self) -> fdo::Result<HashMap<String, String>> {
-        Ok(self.agent()?.item(&self.id)?.attributes)
+    async fn attributes(
+        &self,
+        #[zbus(header)] header: Option<zbus::message::Header<'_>>,
+    ) -> fdo::Result<HashMap<String, String>> {
+        let Some(header) = header else {
+            return Ok(HashMap::new());
+        };
+        Ok(self
+            .authorized_agent(&header, super::super::PermissionOperation::Get)
+            .await
+            .map_err(failed)?
+            .item(&self.id)?
+            .attributes)
     }
 
     #[zbus(property)]
@@ -381,19 +635,52 @@ impl Item {
     }
 
     #[zbus(property)]
-    fn created(&self) -> fdo::Result<u64> {
-        Ok(self.agent()?.item(&self.id)?.created)
+    async fn created(
+        &self,
+        #[zbus(header)] header: Option<zbus::message::Header<'_>>,
+    ) -> fdo::Result<u64> {
+        let Some(header) = header else {
+            return Ok(0);
+        };
+        Ok(self
+            .authorized_agent(&header, super::super::PermissionOperation::Get)
+            .await
+            .map_err(failed)?
+            .item(&self.id)?
+            .created)
     }
 
     #[zbus(property)]
-    fn modified(&self) -> fdo::Result<u64> {
-        Ok(self.agent()?.item(&self.id)?.modified)
+    async fn modified(
+        &self,
+        #[zbus(header)] header: Option<zbus::message::Header<'_>>,
+    ) -> fdo::Result<u64> {
+        let Some(header) = header else {
+            return Ok(0);
+        };
+        Ok(self
+            .authorized_agent(&header, super::super::PermissionOperation::Get)
+            .await
+            .map_err(failed)?
+            .item(&self.id)?
+            .modified)
     }
 }
 
 impl Item {
-    fn agent(&self) -> fdo::Result<Arc<Agent>> {
-        self.shared.agent().map_err(|_| sealed())
+    async fn authorized_agent(
+        &self,
+        header: &zbus::message::Header<'_>,
+        operation: super::super::PermissionOperation,
+    ) -> Result<Arc<Agent>, SecretServiceError> {
+        let item = self.shared.agent()?.item(&self.id)?;
+        self.shared
+            .authorized_agent(
+                &sender(header)?,
+                &service_target(&item.attributes),
+                operation,
+            )
+            .await
     }
 }
 
