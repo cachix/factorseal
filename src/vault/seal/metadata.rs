@@ -27,7 +27,10 @@ const VAULT_FORMAT: &str = "factorseal-vault";
 // its metadata shape is identical and both versions remain readable. Version 9
 // adds an alternative root-encrypted Secure Enclave ML-DSA-65 reference. Old
 // readers reject it rather than interpreting it as an exportable signing seed.
+// A vault with a software seed is byte for byte a version 8 file, so it keeps
+// that stamp and stays readable by previous releases.
 const VAULT_VERSION: u32 = 9;
+const SOFTWARE_SEED_VAULT_VERSION: u32 = 8;
 const COMPATIBLE_VAULT_VERSION: u32 = 7;
 const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 
@@ -94,9 +97,14 @@ impl VaultFile {
             wrapped_installation_secrets,
             created_at,
         } = contents;
+        let version = if wrapped_installation_secrets.uses_enclave_signer() {
+            VAULT_VERSION
+        } else {
+            SOFTWARE_SEED_VAULT_VERSION
+        };
         Self {
             format: VAULT_FORMAT.to_owned(),
-            version: VAULT_VERSION,
+            version,
             installation_id,
             device_vault_id,
             device_key_id,
@@ -137,7 +145,10 @@ impl VaultFile {
 
     pub(super) fn validate(&self) -> VaultResult<()> {
         if self.format != VAULT_FORMAT
-            || !matches!(self.version, COMPATIBLE_VAULT_VERSION | 8 | VAULT_VERSION)
+            || !matches!(
+                self.version,
+                COMPATIBLE_VAULT_VERSION | SOFTWARE_SEED_VAULT_VERSION | VAULT_VERSION
+            )
         {
             return Err(VaultError::Protection(
                 "unsupported vault metadata format or version".to_owned(),

@@ -666,3 +666,22 @@ fn every_platform_requires_a_nested_factor_and_hardware() {
         assert_eq!(unsealed.public(), &expected);
     }
 }
+
+#[test]
+fn software_seed_vaults_keep_the_version_eight_stamp_older_readers_accept() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("factorseal");
+    Vault::create_for_test(&root).unwrap();
+    let stored = read_vault(&root).unwrap();
+    // The on-disk shape with a software signing seed is identical to version
+    // 8; only an enclave signing reference needs the version 9 gate.
+    assert_eq!(
+        stored.version,
+        if stored.wrapped_installation_secrets.uses_enclave_signer() {
+            9
+        } else {
+            8
+        }
+    );
+    stored.validate().unwrap();
+}
