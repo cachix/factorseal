@@ -116,6 +116,8 @@ pub fn serve_linux_vault_with_ready(
         crate::timing::result("vault_startup", "bind_listener", || {
             bind_listener(&options.socket_path)
         })?;
+    let (ssh_listener, _ssh_guard) =
+        bind_listener(&options.socket_path.with_extension("ssh.sock"))?;
 
     let stopping = Arc::new(AtomicBool::new(false));
     if let Some(monitor) = lifecycle_monitor {
@@ -150,6 +152,7 @@ pub fn serve_linux_vault_with_ready(
             let result = accept_until_sealed(
                 service,
                 &listener,
+                &ssh_listener,
                 &stopping,
                 &options.socket_path,
                 options.poll_interval,
@@ -548,7 +551,7 @@ pub fn linux_caller_identity_for_executable(
     )
 }
 
-fn caller_identity(
+pub(super) fn caller_identity(
     stream: &UnixStream,
     cache: &CallerIdentityCache,
 ) -> VaultResult<CallerIdentity> {
@@ -994,10 +997,12 @@ mod tests {
         let (ready_sender, ready_receiver) = sync_channel(1);
         let server = std::thread::spawn(move || {
             serve_linux_vault_with_ready(&server_service, &options, None, || {
+                assert!(options.socket_path.with_extension("ssh.sock").exists());
                 ready_sender.send(()).unwrap();
                 Ok(())
             })
         });
+        let ssh_socket = socket.with_extension("ssh.sock");
         let client = LinuxVaultClient::new(socket);
         ready_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
         let status = client
@@ -1007,6 +1012,13 @@ mod tests {
             status.result.is_ok(),
             "the first probe after readiness must succeed"
         );
+        assert_eq!(
+            fs::metadata(&ssh_socket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Leave an idle SSH client connected: sealing must cancel its read,
+        // join the SSH workers, and remove both endpoints promptly.
+        let _idle_ssh_client = UnixStream::connect(&ssh_socket).unwrap();
         assert_approval_wait_allows_concurrent_request(&service, &caller, &client, now);
 
         let address = WireSecretAddress::new("project/default/TOKEN", None);
@@ -1048,6 +1060,7 @@ mod tests {
             .unwrap();
         assert!(matches!(sealed.result, Ok(VaultResponseBody::Sealed)));
         server.join().unwrap().unwrap();
+        assert!(!ssh_socket.exists());
     }
 
     #[cfg(feature = "hardware")]

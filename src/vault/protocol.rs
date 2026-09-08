@@ -15,10 +15,11 @@ pub use service::{GrantAuthorization, GrantAuthorizationTarget, VaultService};
 pub use wire::{
     CallerIdentity, CallerPlatform, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
     MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionOperation, PermissionPrincipal,
-    PermissionState, PermissionWaitStatus, RequestId, VaultAction, VaultApplicationContext,
-    VaultClient, VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference,
-    VaultMutation, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
-    VaultResponseErrorCode, WireSecret, WireSecretAddress, read_permission_pages,
+    PermissionState, PermissionWaitStatus, RequestId, SshDestination, VaultAction,
+    VaultApplicationContext, VaultClient, VaultEntryImportStatus, VaultEntryMetadata,
+    VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse, VaultResponseBody,
+    VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    read_permission_pages,
 };
 
 #[cfg(test)]

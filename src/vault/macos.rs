@@ -118,6 +118,8 @@ pub fn serve_macos_vault_with_ready(
     }
     validate_socket_options("macOS", &options.socket_path, options.poll_interval)?;
     let (listener, _socket_guard) = bind_listener(&options.socket_path)?;
+    let (ssh_listener, _ssh_guard) =
+        bind_listener(&options.socket_path.with_extension("ssh.sock"))?;
 
     let stopping = Arc::new(AtomicBool::new(false));
     if let Some(monitor) = lifecycle_monitor {
@@ -142,6 +144,7 @@ pub fn serve_macos_vault_with_ready(
         accept_until_sealed(
             service,
             &listener,
+            &ssh_listener,
             &stopping,
             &options.socket_path,
             options.poll_interval,
@@ -351,7 +354,7 @@ pub fn macos_caller_identity_for_executable(
     )
 }
 
-fn caller_identity(
+pub(super) fn caller_identity(
     stream: &UnixStream,
     cache: &CallerIdentityCache,
 ) -> VaultResult<CallerIdentity> {
