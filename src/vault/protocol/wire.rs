@@ -1435,6 +1435,8 @@ mod locked_secret_tests {
 
     #[test]
     fn keyring_access_rejects_ssh_signing_operations() {
+        use super::{PermissionOperation, VaultAction, VaultError};
+
         let request = VaultAction::KeyringAccess {
             sender: ":1.42".into(),
             service: "service/example".into(),
