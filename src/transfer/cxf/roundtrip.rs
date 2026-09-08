@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context as _, bail};
+use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
 use super::*;

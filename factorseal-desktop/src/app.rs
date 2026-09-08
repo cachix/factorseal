@@ -5,6 +5,8 @@ mod devices;
 mod personal_actions;
 mod personal_detail;
 mod personal_templates;
+#[cfg(feature = "apple-credential-exchange")]
+mod system_transfer;
 
 pub(crate) enum AccessEvent {
     #[cfg(target_os = "linux")]
@@ -689,6 +691,8 @@ struct DesktopView {
     transfer_replace_existing: bool,
     transfer_plaintext_confirmed: bool,
     transfer_notice: Option<TransferNotice>,
+    #[cfg(feature = "apple-credential-exchange")]
+    system_transfer: system_transfer::State,
     system_integrations_expanded: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -972,6 +976,8 @@ impl DesktopView {
             transfer_replace_existing: false,
             transfer_plaintext_confirmed: false,
             transfer_notice: None,
+            #[cfg(feature = "apple-credential-exchange")]
+            system_transfer: system_transfer::State::default(),
             system_integrations_expanded: false,
             _subscriptions: vec![password_submit, vault_search_change],
         }
@@ -1090,6 +1096,10 @@ impl DesktopView {
             _ => None,
         };
         if !matches!(snapshot, Snapshot::Unsealed { .. }) {
+            #[cfg(feature = "apple-credential-exchange")]
+            if matches!(self.snapshot, Snapshot::Unsealed { .. }) {
+                self.cancel_system_transfer();
+            }
             self.clear_secret_inputs(cx);
             self.pairing_ticket.update(cx, SecretInputState::clear);
             self.devices.state.invitation = None;
@@ -2874,6 +2884,10 @@ impl DesktopView {
                         })),
                 );
         if !is_backup {
+            #[cfg(feature = "apple-credential-exchange")]
+            if crate::apple_exchange::available() {
+                form = form.child(self.render_system_transfer(is_import, cx));
+            }
             form = form.child(
                 v_flex()
                     .gap_2()
@@ -3826,6 +3840,8 @@ fn forget_desktop_window(handle: AnyWindowHandle, cx: &mut App) -> bool {
 }
 
 fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
+    #[cfg(feature = "apple-credential-exchange")]
+    crate::apple_exchange::set_unlocked(matches!(snapshot, Snapshot::Unsealed { .. }));
     let view_holder = {
         let desktop = cx.global_mut::<DesktopWindow>();
         desktop.snapshot = snapshot.clone();
@@ -4214,6 +4230,8 @@ pub(crate) fn setup(
     if !no_tray {
         install_tray(cx);
     }
+    #[cfg(feature = "apple-credential-exchange")]
+    system_transfer::setup(cx);
 
     let task = cx.spawn(async move |cx| {
         while let Ok(snapshot) = receiver.recv().await {

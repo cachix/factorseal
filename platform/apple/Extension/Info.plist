@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>FactorSealCredentialProvider</string>
+  <key>CFBundleIdentifier</key><string>dev.factorseal.credentials</string>
+  <key>CFBundleName</key><string>FactorSeal</string>
+  <key>CFBundlePackageType</key><string>XPC!</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>NSExtension</key><dict>
+    <key>NSExtensionPointIdentifier</key><string>com.apple.authentication-services-credential-provider-ui</string>
+    <key>NSExtensionPrincipalClass</key><string>FactorSealCredentialProvider</string>
+    <key>NSExtensionAttributes</key><dict>
+      <key>ASCredentialProviderExtensionCapabilities</key><dict>
+        <key>SupportsCredentialExchange</key><true/>
+        <key>SupportedCredentialExchangeVersions</key><array><string>1.0</string></array>
+      </dict>
+    </dict>
+  </dict>
+</dict></plist>

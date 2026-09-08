@@ -1,8 +1,9 @@
 # Apple Passwords credential exchange acceptance
 
-**Current status: blocked on provider-extension and desktop integration.**
-The SDK runner at `scripts/test-apple-exchange.sh` can run now. The procedure
-below becomes executable once a signed build exposes system credential exchange.
+**Current status: experimental extension and desktop integration; live acceptance NOT RUN.**
+Build with `FACTORSEAL_APPLE_EXCHANGE=1` and both app/extension provisioning
+profiles as described in [the Apple adapter guide](../platform/apple/README.md).
+The SDK and package CI checks do not exercise the live system picker.
 Do not record a file transfer or SDK test as a passing system-transfer result.
 
 ## Setup
