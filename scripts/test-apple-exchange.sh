@@ -32,6 +32,8 @@ results_root="$repo_root/platform/apple/.build/credential-exchange-results"
 mkdir -p "$results_root"
 results_dir=$(mktemp -d "$results_root/run.XXXXXX")
 export FACTORSEAL_TEST_APPLE_CXF_OUTPUT="$results_dir/apple-roundtrip.json"
+export FACTORSEAL_TEST_APPLE_NATIVE_CXF="$results_dir/native-from-rust.json"
+export FACTORSEAL_TEST_APPLE_NATIVE_OUTPUT="$results_dir/native-from-apple.json"
 
 {
     sw_vers
@@ -46,16 +48,24 @@ export FACTORSEAL_TEST_APPLE_CXF_OUTPUT="$results_dir/apple-roundtrip.json"
     fi
 } 2>&1 | tee "$results_dir/environment.log"
 
+cargo test --locked --no-default-features --features transfer --lib \
+    transfer::cxf::tests::native_fields_round_trip_through_independent_cxf_reader -- --exact \
+    2>&1 | tee "$results_dir/rust-native-fixture.log"
+[[ -s $FACTORSEAL_TEST_APPLE_NATIVE_CXF ]]
 xcrun swift test --package-path platform/apple -Xswiftc -warnings-as-errors 2>&1 | tee "$results_dir/swift-tests.log"
 if [[ ! -s $FACTORSEAL_TEST_APPLE_CXF_OUTPUT ]]; then
     echo "Swift did not produce the required synthetic CXF roundtrip artifact." >&2
     exit 1
 fi
+[[ -s $FACTORSEAL_TEST_APPLE_NATIVE_OUTPUT ]]
 cargo test --locked --no-default-features --features transfer --lib transfer:: \
     2>&1 | tee "$results_dir/rust-transfer-tests.log"
 cargo test --locked --no-default-features --features transfer --lib \
     transfer::cxf::tests::apple_sdk_roundtrip -- --ignored --exact \
     2>&1 | tee "$results_dir/rust-apple-roundtrip.log"
+cargo test --locked --no-default-features --features transfer --lib \
+    transfer::cxf::tests::apple_native_sdk_roundtrip -- --ignored --exact \
+    2>&1 | tee "$results_dir/rust-native-roundtrip.log"
 
 echo "Apple SDK and Rust interoperability checks passed. Results: $results_dir"
 echo "Live Apple Passwords transfer is a separate signed-app acceptance test."

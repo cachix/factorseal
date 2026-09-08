@@ -25,8 +25,10 @@ the independent CXF reader, and FactorSeal's re-exporter. It fails if Swift does
 not produce that output, so the interoperability check cannot silently skip.
 The bundled fixture contains synthetic passwords, notes, TOTP, URLs, account
 and item identities, and timestamps. No vault or signing credentials are used.
-Additional tests cover unsupported versions and metadata that the SDK would
-discard. For only the Swift tests, run `swift test --package-path platform/apple`.
+The runner also generates a native FactorSeal login with the Rust exporter,
+passes its reviewed metadata projection through Apple's SDK, and checks the
+result with both Rust readers. Additional tests cover unsupported versions,
+metadata loss, locked imports, cancellation, and late SDK replies after sealing. For only the Swift tests, run `swift test --package-path platform/apple`.
 
 The **Apple credential exchange** GitHub Actions workflow runs this command on
 `macos-26` for relevant pull requests and pushes to `main`; it also supports

@@ -3,6 +3,21 @@ import Testing
 @testable import FactorSealCredentialExchange
 
 struct SystemExportTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["FACTORSEAL_TEST_APPLE_NATIVE_CXF"] != nil))
+    func actualRustExportRetainsCredentialDataThroughAppleSDK() throws {
+        let input = try #require(ProcessInfo.processInfo.environment["FACTORSEAL_TEST_APPLE_NATIVE_CXF"])
+        let output = try #require(ProcessInfo.processInfo.environment["FACTORSEAL_TEST_APPLE_NATIVE_OUTPUT"])
+        let source = try Data(contentsOf: URL(fileURLWithPath: input))
+        let projection = try SystemExport(source)
+        #expect(projection.omittedExtensions > 0)
+        let encoded = try CXFCodec.encode(CXFCodec.decode(projection.data))
+        #expect(CXFCodec.preserves(
+            source: try JSONSerialization.jsonObject(with: projection.data),
+            encoded: try JSONSerialization.jsonObject(with: encoded)
+        ))
+        try encoded.write(to: URL(fileURLWithPath: output), options: .atomic)
+    }
+
     func fixture() throws -> [String: Any] {
         let url = try #require(Bundle.module.url(forResource: "login-totp", withExtension: "json", subdirectory: "Fixtures"))
         return try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
