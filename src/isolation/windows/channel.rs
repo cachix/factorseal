@@ -82,6 +82,9 @@ impl Read for Channel {
             Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA.0.cast_signed()) => {
                 Err(io::ErrorKind::WouldBlock.into())
             }
+            // A closed peer is end of file, as Read requires: read_to_end
+            // callers rely on it. No data yet is WouldBlock above, so unlike
+            // the vault's client pipes a zero-byte read here is never a stall.
             Err(error) if matches!(error.raw_os_error(), Some(109 | 233)) => Ok(0),
             Err(error) => Err(error),
         }

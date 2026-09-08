@@ -63,7 +63,33 @@ fn parse_with(
     timeout: std::time::Duration,
 ) -> VaultResult<VaultRequest> {
     use crate::vault::transport::{IoBudget, read_frame, write_frame};
+    /// The bounded reader retries a zero-byte Windows read as "no data yet"
+    /// because the vault's client pipes report it that way. A helper channel
+    /// reports no data as WouldBlock and a closed peer as zero bytes, so a
+    /// helper that died after taking the request would otherwise cost the
+    /// whole budget. Turn its end of file into an error the reader stops on.
+    struct Closed<'a>(&'a mut process::Channel);
+    impl std::io::Read for Closed<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            match std::io::Read::read(&mut *self.0, bytes) {
+                Ok(0) if !bytes.is_empty() => Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "parser helper closed its pipe",
+                )),
+                result => result,
+            }
+        }
+    }
+    impl std::io::Write for Closed<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            std::io::Write::write(&mut *self.0, bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            std::io::Write::flush(&mut *self.0)
+        }
+    }
     let (_owner, mut channel) = process::spawn(executable, None).map_err(failure)?;
+    let mut channel = Closed(&mut channel);
     let budget = IoBudget::new(timeout);
     write_frame(&mut channel, bytes, budget)?;
     let response = read_frame(&mut channel, budget)?;
