@@ -29,6 +29,11 @@ pub struct Bootstrap {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum Operation {
+    /// Authenticate and sign approvals without opening or serving the database.
+    SignPermissions {
+        group: UnlockGroup,
+        requests: Vec<(String, [u8; 32], Option<u64>)>,
+    },
     Initialize {
         policy: UnlockPolicy,
     },

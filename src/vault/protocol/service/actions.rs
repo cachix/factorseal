@@ -29,14 +29,17 @@ struct ActionContext<'a> {
     clock: RequestTime,
     valid_until: &'a std::cell::Cell<Option<u64>>,
     provenance: &'a Provenance,
+    base_dir: Option<&'a str>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn execute_action(
     store: &VaultStore,
     caller: &CallerIdentity,
     action: VaultAction,
     lease_deadlines: (u64, u64),
     provenance: &Provenance,
+    base_dir: Option<&str>,
     clock: RequestTime,
     valid_until: &std::cell::Cell<Option<u64>>,
 ) -> VaultResult<(VaultResponseBody, bool)> {
@@ -48,6 +51,7 @@ pub(super) fn execute_action(
         clock,
         valid_until,
         provenance,
+        base_dir,
     };
     match action {
         VaultAction::Status => {
@@ -125,6 +129,9 @@ pub(super) fn execute_action(
         | VaultAction::ExportVaultEntry { .. }
         | VaultAction::ImportVaultEntry { .. }
         | VaultAction::ExportRevision
+        | VaultAction::AuthorizeSecretInput { .. }
+        | VaultAction::WriteCacheFromDialog { .. }
+        | VaultAction::KeyringAccess { .. }
         | VaultAction::ListPermissions
         | VaultAction::ListPermissionsPage { .. }
         | VaultAction::WaitPermissions { .. }
@@ -157,6 +164,7 @@ impl ActionContext<'_> {
                 namespace: Some(namespace),
                 address,
                 project: None,
+                base_dir: None,
                 permission,
             },
             self.clock.wall(),
@@ -178,6 +186,7 @@ impl ActionContext<'_> {
                 namespace: Some(project.as_bytes()),
                 address,
                 project: Some(project),
+                base_dir: self.base_dir,
                 permission,
             },
             self.clock.wall(),
@@ -196,6 +205,7 @@ impl ActionContext<'_> {
                 namespace: None,
                 address: None,
                 project: None,
+                base_dir: None,
                 permission,
             },
             self.clock.wall(),
@@ -431,6 +441,7 @@ impl ActionContext<'_> {
                 namespace: Some(PERMISSION_CONTROL_NAMESPACE),
                 address: None,
                 project: None,
+                base_dir: None,
                 permission: GrantPermission::ManagePermissions,
             },
             self.clock.wall(),

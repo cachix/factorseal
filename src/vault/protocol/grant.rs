@@ -89,6 +89,7 @@ pub(super) enum GrantTarget<'a> {
         scope: DocumentKind,
         namespace: &'a [u8],
         project: &'a str,
+        base_dir: Option<&'a str>,
     },
 }
 
@@ -100,6 +101,7 @@ pub(super) struct GrantRequirement<'a> {
     pub namespace: Option<&'a [u8]>,
     pub address: Option<&'a SecretAddress>,
     pub project: Option<&'a str>,
+    pub base_dir: Option<&'a str>,
     pub permission: GrantPermission,
 }
 
@@ -408,10 +410,16 @@ pub(super) fn list_granted_permissions(
     Ok(registry
         .permissions
         .into_iter()
-        .filter_map(|stored| match stored.permission.state {
+        .filter_map(|mut stored| match stored.permission.state {
             PermissionState::Granted { expires_at, .. }
                 if expires_at.is_none_or(|deadline| deadline > now) =>
             {
+                if stored.permission.scope.is_none() {
+                    stored.permission.scope = legacy_permission_scope(
+                        &stored.permission.application,
+                        stored.target_digest,
+                    );
+                }
                 Some(stored.permission)
             }
             _ => None,
@@ -526,6 +534,7 @@ pub(super) fn require_grant_until(
         namespace,
         address,
         project,
+        base_dir,
         permission,
     } = requirement;
     let caller_fingerprint = caller.fingerprint();
@@ -551,6 +560,7 @@ pub(super) fn require_grant_until(
                 scope,
                 namespace,
                 project,
+                base_dir,
             }));
         }
         targets.push(grant_target_digest(&GrantTarget::Namespace {
@@ -624,10 +634,17 @@ pub(super) fn grant_target_digest(target: &GrantTarget<'_>) -> [u8; 32] {
             scope,
             namespace,
             project,
+            base_dir,
         } => {
-            digest.update([3, document_kind_tag(*scope)]);
+            digest.update([
+                if base_dir.is_some() { 4 } else { 3 },
+                document_kind_tag(*scope),
+            ]);
             append_digest_bytes(&mut digest, namespace);
             append_digest_bytes(&mut digest, project.as_bytes());
+            if let Some(base_dir) = base_dir {
+                append_digest_bytes(&mut digest, base_dir.as_bytes());
+            }
         }
     }
     digest.finalize().into()
@@ -669,5 +686,58 @@ fn permission_name(permission: GrantPermission) -> &'static str {
         GrantPermission::Clear => "clear",
         GrantPermission::Seal => "seal",
         GrantPermission::ManagePermissions => "manage-permissions",
+    }
+}
+
+/// Recover old summaries only when the actual stored target digest matches.
+fn legacy_permission_scope(
+    application: &super::VaultApplicationContext,
+    target_digest: [u8; 32],
+) -> Option<DocumentKind> {
+    let project = application.project.as_deref()?;
+    [
+        DocumentKind::LinuxSecretService,
+        DocumentKind::SecretSpecProviderCache,
+    ]
+    .into_iter()
+    .find(|scope| {
+        grant_target_digest(&GrantTarget::Project {
+            scope: *scope,
+            namespace: project.as_bytes(),
+            project,
+            base_dir: application.base_dir.as_deref(),
+        }) == target_digest
+    })
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_scope_uses_target_digest_not_project_name() {
+        let application = super::super::VaultApplicationContext::new(
+            Some("secretspec/codex-mcp".into()),
+            None,
+            Some("/projects/mcp".into()),
+            None,
+        )
+        .unwrap();
+        for scope in [
+            DocumentKind::LinuxSecretService,
+            DocumentKind::SecretSpecProviderCache,
+        ] {
+            let digest = grant_target_digest(&GrantTarget::Project {
+                scope,
+                namespace: b"secretspec/codex-mcp",
+                project: "secretspec/codex-mcp",
+                base_dir: Some("/projects/mcp"),
+            });
+            assert_eq!(legacy_permission_scope(&application, digest), Some(scope));
+            let mut other_folder = application.clone();
+            other_folder.base_dir = Some("/another/project".into());
+            assert_eq!(legacy_permission_scope(&other_folder, digest), None);
+        }
+        assert_eq!(legacy_permission_scope(&application, [0; 32]), None);
     }
 }

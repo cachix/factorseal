@@ -156,7 +156,7 @@ fn main() {
         lease,
         secret_service,
     };
-    let instance = instance::acquire(&config.root, !args.background || args.keyring_activation)
+    let instance = instance::acquire(&config.root, !args.background && !args.keyring_activation)
         .unwrap_or_else(|error| {
             eprintln!("factorseal-desktop: {error}");
             factorseal::diagnostics::finish(false);
@@ -180,12 +180,12 @@ fn main() {
     let instance::Instance::Primary {
         _lock: instance_lock,
         activations,
-        activate,
     } = instance
     else {
         unreachable!("secondary Desktop instances return before application startup")
     };
-    let secret_service_host = start_secret_service(secret_service, activate);
+    let (access_sender, access_requests) = smol::channel::unbounded();
+    let secret_service_host = start_secret_service(secret_service, access_sender);
     let _crash_reporting =
         crash_reporting::start(saved.automatic_crash_reports).unwrap_or_else(|error| {
             eprintln!("factorseal-desktop: {error}");
@@ -198,9 +198,10 @@ fn main() {
         .run(move |cx| {
             app::setup(
                 config,
-                args.background,
+                args.background || args.keyring_activation,
                 args.no_tray,
                 activations,
+                access_requests,
                 secret_service_host,
                 cx,
             );
@@ -241,7 +242,7 @@ fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
 
 fn start_secret_service(
     enabled: bool,
-    activate: smol::channel::Sender<()>,
+    activate: smol::channel::Sender<app::AccessEvent>,
 ) -> Option<std::sync::Arc<app::SecretServiceHost>> {
     #[cfg(target_os = "linux")]
     {
@@ -262,17 +263,29 @@ fn start_secret_service(
     }
 }
 
-/// Brings the unlock window forward when a Secret Service client runs a
-/// prompt, exactly as a second `factorseal-desktop` launch would.
+/// Sends keyring requests to the dedicated access window.
 #[cfg(target_os = "linux")]
 struct DesktopPrompter {
-    activate: smol::channel::Sender<()>,
+    activate: smol::channel::Sender<app::AccessEvent>,
 }
 
 #[cfg(target_os = "linux")]
 impl factorseal::SecretServicePrompter for DesktopPrompter {
+    fn supports_input(&self) -> bool {
+        true
+    }
+    fn request_input(&self, request: factorseal::SecretServiceInputRequest) {
+        let _ = self.activate.try_send(app::AccessEvent::Input(request));
+    }
+    fn finish_access(&self, context: factorseal::SecretServiceAccessContext) {
+        let _ = self.activate.try_send(app::AccessEvent::Finished(context));
+    }
     fn request_unlock(&self) {
-        let _ = self.activate.try_send(());
+        let _ = self.activate.try_send(app::AccessEvent::Unlock);
+    }
+
+    fn request_access(&self, request: factorseal::SecretServiceAccessRequest) {
+        let _ = self.activate.try_send(app::AccessEvent::Request(request));
     }
 }
 

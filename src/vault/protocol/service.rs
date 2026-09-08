@@ -349,6 +349,123 @@ impl VaultService {
                 state.touch(now, monotonic_now)?;
                 return Ok(VaultResponseBody::VaultEntryImported { status });
             }
+            VaultAction::WriteCacheFromDialog {
+                project,
+                address,
+                value,
+                evict_at,
+            } => {
+                require_live_manager(&state, caller, clock, valid_until)?;
+                validate_evict_at(evict_at, now)?;
+                if address
+                    .project()
+                    .is_some_and(|declared| declared != project)
+                {
+                    return Err(VaultError::Protocol("secret project mismatch".to_owned()).into());
+                }
+                state.store().put_at(
+                    DocumentKind::SecretSpecProviderCache,
+                    project.as_bytes(),
+                    &crate::vault::SecretAddress::secret_spec(address)?,
+                    value.expose(),
+                    evict_at,
+                    &provenance,
+                    now,
+                )?;
+                clock.check(valid_until.get())?;
+                let (now, monotonic_now) = clock.sample();
+                state.touch(now, monotonic_now)?;
+                return Ok(VaultResponseBody::Stored);
+            }
+            VaultAction::AuthorizeSecretInput { sender } => {
+                let deadline = super::grant::require_grant_until(
+                    state.store(),
+                    caller,
+                    GrantRequirement {
+                        scope: DocumentKind::LinuxSecretService,
+                        namespace: Some(b"factorseal/secret-service/v1"),
+                        address: None,
+                        project: None,
+                        base_dir: None,
+                        permission: GrantPermission::Get,
+                    },
+                    now,
+                )?;
+                tighten(valid_until, deadline);
+                let (peer, _) = keyring_peer(&sender)?;
+                require_live_manager(&state, &peer, clock, valid_until)?;
+                return Ok(VaultResponseBody::PermissionWait {
+                    status: super::PermissionWaitStatus::Granted,
+                });
+            }
+            VaultAction::KeyringAccess {
+                sender,
+                service,
+                operation,
+                action,
+                pending,
+            } => {
+                // Only a host holding the internal adapter namespace grant may
+                // delegate. Project grants never confer bridge authority.
+                let broker_deadline = super::grant::require_grant_until(
+                    state.store(),
+                    caller,
+                    super::grant::GrantRequirement {
+                        scope: DocumentKind::LinuxSecretService,
+                        namespace: Some(b"factorseal/secret-service/v1"),
+                        address: None,
+                        project: None,
+                        base_dir: None,
+                        permission: GrantPermission::Get,
+                    },
+                    now,
+                )?;
+                tighten(valid_until, broker_deadline);
+                clock.check(valid_until.get())?;
+                let (peer, base_dir) = keyring_peer(&sender)?;
+                if let Some(id) = pending {
+                    let status =
+                        state.wait_for_permission(&peer, &id, Duration::from_millis(1), clock)?;
+                    return Ok(VaultResponseBody::PermissionWait { status });
+                }
+                let candidate =
+                    ApprovalCandidate::for_keyring(&peer, &service, base_dir, operation);
+                match candidate.require_keyring(state.store(), now) {
+                    Ok(deadline) => {
+                        tighten(valid_until, deadline);
+                        clock.check(valid_until.get())?;
+                    }
+                    Err(VaultError::AuthorizationRequired) => {
+                        let interaction = state.create_approval(candidate, now)?;
+                        return Err(RequestFailure {
+                            error: VaultError::AuthorizationRequired,
+                            interaction: Some(interaction),
+                        });
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                if let Some(action) = action {
+                    let result = execute_action(
+                        state.store(),
+                        caller,
+                        *action,
+                        state.lease_deadlines(),
+                        &Provenance::caller(&peer, None),
+                        None,
+                        clock,
+                        valid_until,
+                    )?;
+                    clock.check(valid_until.get())?;
+                    if result.1 {
+                        let (now, monotonic_now) = clock.sample();
+                        state.touch(now, monotonic_now)?;
+                    }
+                    return Ok(result.0);
+                }
+                return Ok(VaultResponseBody::PermissionWait {
+                    status: super::PermissionWaitStatus::Granted,
+                });
+            }
             VaultAction::ListPermissions | VaultAction::ListPermissionsPage { .. } => {
                 require_live_manager(&state, caller, clock, valid_until)?;
                 let (revision, permissions) = state.list_permissions(now)?;
@@ -423,6 +540,9 @@ impl VaultService {
                 action,
                 state.lease_deadlines(),
                 &provenance,
+                application
+                    .as_ref()
+                    .and_then(|context| context.base_dir.as_deref()),
                 clock,
                 valid_until,
             ),
@@ -481,6 +601,7 @@ fn permission_manager_deadline(
             namespace: Some(PERMISSION_CONTROL_NAMESPACE),
             address: None,
             project: None,
+            base_dir: None,
             permission: GrantPermission::ManagePermissions,
         },
         now,
@@ -698,4 +819,13 @@ fn import_secret_service_item(
     } else {
         super::VaultEntryImportStatus::Added
     })
+}
+
+#[cfg(all(feature = "vault", target_os = "linux"))]
+fn keyring_peer(sender: &str) -> VaultResult<(CallerIdentity, String)> {
+    crate::vault::linux::dbus_caller_identity(sender)
+}
+#[cfg(not(all(feature = "vault", target_os = "linux")))]
+fn keyring_peer(_sender: &str) -> VaultResult<(CallerIdentity, String)> {
+    Err(VaultError::AuthorizationRequired)
 }

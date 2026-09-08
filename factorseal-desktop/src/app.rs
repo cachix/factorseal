@@ -1,8 +1,23 @@
 use crate::secret_input::SecretInputState;
+#[cfg(target_os = "linux")]
+mod access;
 mod devices;
 mod personal_actions;
 mod personal_detail;
 mod personal_templates;
+
+pub(crate) enum AccessEvent {
+    #[cfg(target_os = "linux")]
+    Finished(factorseal::SecretServiceAccessContext),
+    #[cfg(target_os = "linux")]
+    Input(factorseal::SecretServiceInputRequest),
+    #[cfg(target_os = "linux")]
+    Unlock,
+    #[cfg(target_os = "linux")]
+    Request(factorseal::SecretServiceAccessRequest),
+    #[cfg(target_os = "linux")]
+    Permissions(Vec<factorseal::Permission>),
+}
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
@@ -405,14 +420,37 @@ fn category_is_visible(
         })
 }
 
+fn hex_digest(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static str {
+    match scope {
+        Some(factorseal::DocumentKind::LinuxSecretService) => "System keyring",
+        Some(factorseal::DocumentKind::SecretSpecProviderCache) => "SecretSpec provider",
+        Some(factorseal::DocumentKind::LocalKeyring) => "Application keyring",
+        Some(_) => "Vault access",
+        None => "Legacy access · type unknown",
+    }
+}
+
 fn permission_matches_search(permission: &factorseal::Permission, query: &str) -> bool {
-    search_matches(&permission.principal.application_id, query)
-        || permission
-            .application
-            .project
-            .as_deref()
-            .is_some_and(|project| search_matches(project, query))
-        || search_matches(permission_operation_label(permission.operation), query)
+    [
+        Some(permission.principal.application_id.as_str()),
+        permission.application.project.as_deref(),
+        permission.application.profile.as_deref(),
+        permission.application.base_dir.as_deref(),
+        Some(permission_access_type(permission.scope)),
+        Some(permission_operation_label(permission.operation)),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| search_matches(value, query))
 }
 
 fn vault_entry_details(entry: &factorseal::VaultEntryMetadata) -> Vec<(&'static str, String)> {
@@ -2154,40 +2192,55 @@ impl DesktopView {
                 .unwrap_or(&permission.principal.application_id)
                 .to_owned();
             let selection = VaultSelection::Permission((*permission).clone());
-            rows = rows.child(
-                h_flex()
-                    .id(("permission-row", index))
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .px_4()
-                    .py_3()
-                    .when(index > 0, |row| row.border_t_1().border_color(theme.border))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.muted))
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .gap_1()
-                            .child(div().font_semibold().child(application))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(permission_operation_label(permission.operation)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.muted_foreground)
-                            .child("›"),
-                    )
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.select_vault_item(selection.clone(), cx);
-                    })),
-            );
+            rows =
+                rows.child(
+                    h_flex()
+                        .id(("permission-row", index))
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .gap_4()
+                        .px_4()
+                        .py_3()
+                        .when(index > 0, |row| row.border_t_1().border_color(theme.border))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.muted))
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .gap_1()
+                                .child(div().font_semibold().child(application))
+                                .child(div().text_sm().text_color(theme.muted_foreground).child(
+                                    format!(
+                                        "{} · {}",
+                                        permission_access_type(permission.scope),
+                                        permission_operation_label(permission.operation)
+                                    ),
+                                ))
+                                .child(
+                                    div().text_sm().text_color(theme.muted_foreground).child(
+                                        permission.application.base_dir.clone().unwrap_or_else(
+                                            || "No project folder recorded".to_owned(),
+                                        ),
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(permission.principal.application_id.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.muted_foreground)
+                                .child("›"),
+                        )
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.select_vault_item(selection.clone(), cx);
+                        })),
+                );
         }
         if permissions.is_empty() {
             rows = rows.child(Self::empty_item_rows(
@@ -2803,6 +2856,7 @@ impl DesktopView {
             .child(body)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_vault_detail(&self, contents: &VaultContents, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let entry_count = contents
@@ -2875,7 +2929,10 @@ impl DesktopView {
                     factorseal::PermissionState::Granted { .. } => "Granted",
                 };
                 let mut details = vec![
-                    ("Type", "Application access".to_owned()),
+                    (
+                        "Access via",
+                        permission_access_type(permission.scope).to_owned(),
+                    ),
                     (
                         "Operation",
                         permission_operation_label(permission.operation).to_owned(),
@@ -2889,14 +2946,73 @@ impl DesktopView {
                 if let Some(project) = &permission.application.project {
                     details.push(("Project", project.clone()));
                 }
+                for (label, value) in [
+                    ("Profile", &permission.application.profile),
+                    ("Request", &permission.application.reason),
+                ] {
+                    if let Some(value) = value {
+                        details.push((label, value.clone()));
+                    }
+                }
+                details.push((
+                    "Executable digest",
+                    hex_digest(&permission.principal.executable_digest),
+                ));
+                details.push((
+                    "Project folder",
+                    permission
+                        .application
+                        .base_dir
+                        .clone()
+                        .unwrap_or_else(|| "No project folder recorded".to_owned()),
+                ));
+                details.push(("Grant ID", permission.id.clone()));
                 v_flex()
                     .size_full()
                     .gap_4()
                     .p_6()
                     .child(div().text_xl().font_semibold().child(application))
                     .child(Self::render_detail_rows(details, cx))
+                    .when(
+                        matches!(
+                            permission.state,
+                            factorseal::PermissionState::Granted { .. }
+                        ),
+                        |element| {
+                            let permission = permission.clone();
+                            element.child(
+                                Button::new("revoke-access-grant")
+                                    .label("Revoke access")
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.revoke_access(permission.id.clone(), cx);
+                                    })),
+                            )
+                        },
+                    )
             }
         }
+    }
+
+    fn revoke_access(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(metadata) = self.snapshot.metadata().cloned() else {
+            return;
+        };
+        let runtime = Arc::clone(&self.runtime);
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || runtime.revoke_permission(&metadata, id)).await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => view.selected_vault_item = None,
+                    Err(message) => {
+                        if let Snapshot::Unsealed { error, .. } = &mut view.snapshot {
+                            *error = Some(message);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn vault_page_title(&self) -> Option<&'static str> {
@@ -3457,6 +3573,8 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
     cx.global_mut::<DesktopStatus>().unsealed = matches!(snapshot, Snapshot::Unsealed { .. });
     refresh_tray(cx);
     sync_secret_service(snapshot, cx);
+    #[cfg(target_os = "linux")]
+    access::update(snapshot, cx);
     if matches!(snapshot, Snapshot::Unsealed { .. }) {
         crate::timing::finish_unlock("ui_updated", "ok");
     }
@@ -3534,6 +3652,14 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
     if let Some(handle) = existing {
         if handle
             .update(cx, |_, window, _| {
+                // Wayland can reject activation without a recent input serial
+                // from this application (for example, a keyring lookup from a
+                // terminal). Remap the existing window so the compositor shows
+                // it again, preserving the unlock form and any entered input.
+                #[cfg(target_os = "linux")]
+                if std::env::var_os("WAYLAND_DISPLAY").is_some() && !window.is_window_active() {
+                    window.set_visible(false);
+                }
                 window.set_visible(true);
                 window.activate_window();
             })
@@ -3770,6 +3896,7 @@ pub(crate) fn setup(
     background: bool,
     no_tray: bool,
     activations: smol::channel::Receiver<()>,
+    access_requests: smol::channel::Receiver<AccessEvent>,
     secret_service: Option<Arc<SecretServiceHost>>,
     cx: &mut App,
 ) {
@@ -3835,6 +3962,10 @@ pub(crate) fn setup(
         }
     })
     .detach();
+    #[cfg(target_os = "linux")]
+    access::setup(access_requests, cx);
+    #[cfg(not(target_os = "linux"))]
+    let _ = access_requests;
     if !background {
         cx.activate(true);
     }
@@ -3880,6 +4011,10 @@ fn sync_secret_service(snapshot: &Snapshot, cx: &mut App) {
 /// A hidden window cannot answer an unlock prompt. Complete pending prompts
 /// as dismissed so waiting clients get an answer instead of a hang.
 fn dismiss_secret_service_prompts(cx: &mut App) {
+    #[cfg(target_os = "linux")]
+    if access::is_open(cx) {
+        return;
+    }
     #[cfg(target_os = "linux")]
     if !cx.global::<DesktopStatus>().unsealed
         && let Some(host) = &cx.global::<SecretServiceGlobal>().0

@@ -98,7 +98,10 @@ pub use vault::{
     serve_linux_vault, serve_linux_vault_with_lifecycle, serve_linux_vault_with_ready,
 };
 #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
-pub use vault::{SECRET_SERVICE_NAMESPACE, SecretServiceHost, SecretServicePrompter};
+pub use vault::{
+    SECRET_SERVICE_NAMESPACE, SecretServiceAccessContext, SecretServiceAccessRequest,
+    SecretServiceHost, SecretServiceInputRequest, SecretServicePrompter,
+};
 
 #[cfg(all(feature = "vault-client", target_os = "macos"))]
 pub use vault::MacosVaultClient;

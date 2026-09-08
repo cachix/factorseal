@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use sha2::{Digest as _, Sha256};
 use zbus::fdo;
-use zeroize::Zeroizing;
 
 use super::{failed, no_item, random_id, secret_item, unix_time};
 use crate::vault::{
@@ -49,10 +48,11 @@ impl Backend for Remote {
 #[derive(Clone)]
 pub(super) struct Store {
     backend: Arc<dyn Backend>,
+    delegation: Option<(String, String, crate::vault::PermissionOperation)>,
 }
 
 impl Store {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "key-protection"))]
     pub(super) fn backend_request(&self, request: VaultRequest) -> VaultResult<VaultResponse> {
         self.backend.request(request)
     }
@@ -69,16 +69,58 @@ impl Store {
     ) -> Self {
         Self {
             backend: Arc::new(InProcess { service, caller }),
+            delegation: None,
         }
     }
 
     pub(super) fn remote(client: Box<dyn VaultClient>) -> Self {
         Self {
             backend: Arc::new(Remote { client }),
+            delegation: None,
         }
     }
 
+    pub(super) fn delegated(
+        &self,
+        sender: String,
+        service: String,
+        operation: crate::vault::PermissionOperation,
+    ) -> Self {
+        Self {
+            backend: Arc::clone(&self.backend),
+            delegation: Some((sender, service, operation)),
+        }
+    }
+
+    pub(super) fn check_access(
+        &self,
+        sender: String,
+        service: String,
+        operation: crate::vault::PermissionOperation,
+        pending: Option<String>,
+    ) -> VaultResult<VaultResponse> {
+        self.backend
+            .request(VaultRequest::new(VaultAction::KeyringAccess {
+                sender,
+                service,
+                operation,
+                pending,
+                action: None,
+            })?)
+    }
+
     fn call(&self, action: VaultAction) -> VaultResult<VaultResponseBody> {
+        let action = if let Some((sender, service, operation)) = &self.delegation {
+            VaultAction::KeyringAccess {
+                sender: sender.clone(),
+                service: service.clone(),
+                operation: *operation,
+                pending: None,
+                action: Some(Box::new(action)),
+            }
+        } else {
+            action
+        };
         let request = VaultRequest::new(action)?;
         let response = self.backend.request(request)?;
         response.check_delivery()?;
@@ -165,7 +207,7 @@ impl Agent {
         &self,
         label: String,
         attributes: HashMap<String, String>,
-        value: &Zeroizing<Vec<u8>>,
+        value: &[u8],
         content_type: String,
         replace: bool,
     ) -> fdo::Result<(IndexItem, bool)> {
@@ -235,7 +277,7 @@ impl Agent {
     pub(super) fn set_secret(
         &self,
         id: &str,
-        value: &Zeroizing<Vec<u8>>,
+        value: &[u8],
         content_type: String,
     ) -> fdo::Result<()> {
         for _ in 0..16 {

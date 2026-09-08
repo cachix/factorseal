@@ -1192,6 +1192,7 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
         "\u{1b}[2J\u{1b}]8;;https://invalid\u{7}\r\n\t\u{8}\u{85}\u{202e}\u{2066}\u{2028}\\\"é";
     let mut permission = Permission {
         id: attack.to_owned(),
+        scope: None,
         operation: PermissionOperation::Get,
         principal: PermissionPrincipal::from(&caller),
         application: VaultApplicationContext::new(
