@@ -6,9 +6,11 @@ use std::{
 };
 
 #[cfg(all(any(unix, windows), feature = "personal-sync-network"))]
+use crate::security::bounded::{IoBudget, read_bounded, write_bounded};
+#[cfg(all(any(unix, windows), feature = "personal-sync-network"))]
 use std::{
     io::{Read, Write},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[cfg(all(windows, feature = "personal-sync-network"))]
@@ -109,10 +111,42 @@ pub(super) fn stdio_channel() -> io::Result<std::os::unix::net::UnixStream> {
     Ok(stream)
 }
 
+/// A helper channel with one budget over a whole frame. The retry loops are
+/// the vault transport's; on Unix each read first sleeps in poll until the
+/// socket is readable or the budget ends instead of retrying on an interval.
 #[cfg(all(any(unix, windows), feature = "personal-sync-network"))]
 struct Deadline<'a> {
     stream: &'a mut Channel,
-    until: Instant,
+    budget: IoBudget<'a>,
+}
+
+#[cfg(all(any(unix, windows), feature = "personal-sync-network"))]
+impl<'a> Deadline<'a> {
+    fn new(stream: &'a mut Channel) -> Self {
+        Self {
+            stream,
+            budget: IoBudget::new(Duration::from_secs(30)),
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_readable(&self) -> io::Result<()> {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::fd::AsFd;
+        loop {
+            let timeout =
+                PollTimeout::try_from(self.budget.remaining()).unwrap_or(PollTimeout::MAX);
+            match poll(
+                &mut [PollFd::new(self.stream.as_fd(), PollFlags::POLLIN)],
+                timeout,
+            ) {
+                Ok(0) => return Err(IoBudget::expired("read")),
+                Ok(_) => return Ok(()),
+                Err(nix::errno::Errno::EINTR) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
 }
 
 /// Block until the bytes arrive: tests assert on frames, never on elapsed time.
@@ -126,41 +160,15 @@ pub(super) fn read_exact_for_test(stream: &mut Channel, bytes: &mut [u8]) -> io:
 #[cfg(all(any(unix, windows), feature = "personal-sync-network"))]
 impl Read for Deadline<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        loop {
-            if Instant::now() >= self.until {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "helper read timed out",
-                ));
-            }
-            match self.stream.read(bytes) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                result => return result,
-            }
-        }
+        #[cfg(unix)]
+        self.wait_readable()?;
+        read_bounded(self.stream, bytes, self.budget)
     }
 }
 #[cfg(all(any(unix, windows), feature = "personal-sync-network"))]
 impl Write for Deadline<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        loop {
-            if Instant::now() >= self.until {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "helper write timed out",
-                ));
-            }
-            match self.stream.write(bytes) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                result => return result,
-            }
-        }
+        write_bounded(self.stream, bytes, self.budget)
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
@@ -173,14 +181,7 @@ pub(super) fn send(
     message: &impl serde::Serialize,
     maximum: usize,
 ) -> io::Result<()> {
-    super::codec::send(
-        &mut Deadline {
-            stream,
-            until: Instant::now() + Duration::from_secs(30),
-        },
-        message,
-        maximum,
-    )
+    super::codec::send(&mut Deadline::new(stream), message, maximum)
 }
 
 #[cfg(all(any(unix, windows), feature = "personal-sync-network"))]
@@ -207,12 +208,6 @@ pub(super) fn receive<T: serde::de::DeserializeOwned>(
     }
     #[cfg(windows)]
     stream.wait_readable()?;
-    let bytes = super::codec::read(
-        &mut Deadline {
-            stream,
-            until: Instant::now() + Duration::from_secs(30),
-        },
-        maximum,
-    )?;
+    let bytes = super::codec::read(&mut Deadline::new(stream), maximum)?;
     super::codec::decode(&bytes, maximum)
 }

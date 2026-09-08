@@ -14,6 +14,12 @@ pub(crate) mod regular;
     feature = "vault-client",
     feature = "vault-store"
 ))]
+pub(crate) mod bounded;
+#[cfg(any(
+    feature = "key-protection",
+    feature = "vault-client",
+    feature = "vault-store"
+))]
 pub(crate) mod frame;
 #[cfg(any(
     feature = "key-protection",

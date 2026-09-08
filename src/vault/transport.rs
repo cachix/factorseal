@@ -7,11 +7,12 @@
 
 #[cfg(feature = "vault")]
 use std::fs::File;
-use std::io::{self, Read, Write};
+#[cfg(any(feature = "vault", target_os = "windows", test))]
+use std::io;
+use std::io::{Read, Write};
 #[cfg(feature = "vault")]
 use std::path::Path;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(feature = "vault")]
 use sha2::{Digest, Sha256};
@@ -39,59 +40,8 @@ pub(crate) const IPC_FRAME_IO_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(feature = "vault-client")]
 pub(crate) const IPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
-const IO_RETRY_INTERVAL: Duration = Duration::from_millis(2);
-
-/// One deadline covering every partial read and write of a whole frame.
-///
-/// Starting a fresh deadline inside each helper let one peer spend the bound
-/// once per partial transfer instead of once per frame.
-#[derive(Clone, Copy)]
-pub(crate) struct IoBudget<'a> {
-    deadline: Instant,
-    cancelled: Option<&'a std::sync::atomic::AtomicBool>,
-}
-
-impl IoBudget<'_> {
-    pub(crate) fn new(timeout: Duration) -> Self {
-        Self {
-            // An unrepresentable deadline fails closed rather than panicking.
-            deadline: Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now),
-            cancelled: None,
-        }
-    }
-
-    fn exhausted(self) -> bool {
-        Instant::now() >= self.deadline
-            || self
-                .cancelled
-                .is_some_and(|flag| flag.load(Ordering::Acquire))
-    }
-
-    #[cfg(feature = "vault")]
-    pub(crate) fn capped(mut self, deadline: Option<Instant>) -> Self {
-        if let Some(deadline) = deadline {
-            self.deadline = self.deadline.min(deadline);
-        }
-        self
-    }
-
-    fn expired(operation: &'static str) -> io::Error {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("local IPC {operation} deadline exceeded"),
-        )
-    }
-}
-
-#[cfg(feature = "vault")]
-impl<'a> IoBudget<'a> {
-    pub(crate) fn cancelled_by(mut self, flag: Option<&'a std::sync::atomic::AtomicBool>) -> Self {
-        self.cancelled = flag;
-        self
-    }
-}
+pub(crate) use crate::security::bounded::IoBudget;
+use crate::security::bounded::{read_exact_bounded, write_all_bounded};
 
 /// Send one authenticated-client request and validate its matching response.
 ///
@@ -156,76 +106,6 @@ pub(crate) fn write_frame(
     write_all_bounded(writer, &length.to_be_bytes(), budget)
         .and_then(|()| write_all_bounded(writer, bytes, budget))
         .map_err(|error| VaultError::Protocol(format!("could not write frame: {error}")))
-}
-
-fn read_exact_bounded(
-    reader: &mut impl Read,
-    mut bytes: &mut [u8],
-    budget: IoBudget,
-) -> io::Result<()> {
-    while !bytes.is_empty() {
-        if budget.exhausted() {
-            return Err(IoBudget::expired("read"));
-        }
-        match reader.read(bytes) {
-            // A nonblocking Windows pipe reports "nothing to read yet" as a
-            // successful zero-byte read rather than WouldBlock, and a pipe
-            // that has actually closed surfaces as an error instead. Treating
-            // that as end of file made the vault drop every connection the
-            // instant it accepted one, before the client had written. On Unix
-            // a zero-byte read is end of file and has to stay one.
-            Ok(0) if cfg!(windows) => {
-                if budget.exhausted() {
-                    return Err(IoBudget::expired("read"));
-                }
-                std::thread::sleep(IO_RETRY_INTERVAL);
-            }
-            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
-            Ok(read) => bytes = &mut bytes[read..],
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if budget.exhausted() {
-                    return Err(IoBudget::expired("read"));
-                }
-                std::thread::sleep(IO_RETRY_INTERVAL);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
-fn write_all_bounded(
-    writer: &mut impl Write,
-    mut bytes: &[u8],
-    budget: IoBudget,
-) -> io::Result<()> {
-    while !bytes.is_empty() {
-        if budget.exhausted() {
-            return Err(IoBudget::expired("write"));
-        }
-        match writer.write(bytes) {
-            // Same asymmetry as the read side: a nonblocking Windows pipe
-            // reports a full buffer as a successful zero-byte write.
-            Ok(0) if cfg!(windows) => {
-                if budget.exhausted() {
-                    return Err(IoBudget::expired("write"));
-                }
-                std::thread::sleep(IO_RETRY_INTERVAL);
-            }
-            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
-            Ok(written) => bytes = &bytes[written..],
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if budget.exhausted() {
-                    return Err(IoBudget::expired("write"));
-                }
-                std::thread::sleep(IO_RETRY_INTERVAL);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    writer.flush()
 }
 
 /// Digest an already opened executable, so the bytes hashed are the bytes of
