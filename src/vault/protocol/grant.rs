@@ -718,10 +718,14 @@ mod scope_tests {
 
     #[test]
     fn legacy_scope_uses_target_digest_not_project_name() {
+        let base_dir = std::env::temp_dir()
+            .join("projects/mcp")
+            .display()
+            .to_string();
         let application = super::super::VaultApplicationContext::new(
             Some("secretspec/codex-mcp".into()),
             None,
-            Some("/projects/mcp".into()),
+            Some(base_dir.clone()),
             None,
         )
         .unwrap();
@@ -733,11 +737,16 @@ mod scope_tests {
                 scope,
                 namespace: b"secretspec/codex-mcp",
                 project: "secretspec/codex-mcp",
-                base_dir: Some("/projects/mcp"),
+                base_dir: Some(&base_dir),
             });
             assert_eq!(legacy_permission_scope(&application, digest), Some(scope));
             let mut other_folder = application.clone();
-            other_folder.base_dir = Some("/another/project".into());
+            other_folder.base_dir = Some(
+                std::env::temp_dir()
+                    .join("another/project")
+                    .display()
+                    .to_string(),
+            );
             assert_eq!(legacy_permission_scope(&other_folder, digest), None);
         }
         assert_eq!(legacy_permission_scope(&application, [0; 32]), None);

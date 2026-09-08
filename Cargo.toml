@@ -249,6 +249,11 @@ opt-level = 3
 
 [patch.crates-io]
 # Upstream replaces unmaintained proc-macro-error2 with proc-macro-error3.
+# Keep the workspace crates on the same source: Nix's Cargo vendor directory
+# cannot contain registry and Git copies with identical names and versions.
+i18n-config = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-embed = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-embed-impl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
 i18n-embed-fl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
 gpui = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f", version = "=0.2.2" }
 

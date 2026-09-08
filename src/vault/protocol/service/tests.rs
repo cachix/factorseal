@@ -1429,7 +1429,7 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         VaultApplicationContext::new(
             Some(project.to_owned()),
             Some("production".to_owned()),
-            Some("/projects/first".to_owned()),
+            Some(directory.path().join("first").display().to_string()),
             Some("deploy".to_owned()),
         )
         .unwrap()
@@ -1610,7 +1610,10 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
             .interaction
             .is_some()
     );
-    for folder in [Some("/projects/second".to_owned()), None] {
+    for folder in [
+        Some(directory.path().join("second").display().to_string()),
+        None,
+    ] {
         let mut context = application("demo");
         context.base_dir = folder;
         let result = service.handle(
@@ -2346,15 +2349,15 @@ fn pending_permissions_fit_transport() {
     let (_directory, service) = service(100, UnsealLeasePolicy::default());
     let manager = caller();
     service.authorize_permission_manager(&manager, 100).unwrap();
+    let mut base_dir = std::env::temp_dir().display().to_string();
+    // Keep the original maximum-length stress case while using a native
+    // absolute path, including a drive prefix on Windows.
+    base_dir.push_str(&"\t".repeat(32768 - base_dir.len()));
     for i in 0..33 {
         let project = format!("audit-{i}");
-        let context = VaultApplicationContext::new(
-            Some(project.clone()),
-            None,
-            Some(format!("/{}", "\t".repeat(32767))),
-            None,
-        )
-        .unwrap();
+        let context =
+            VaultApplicationContext::new(Some(project.clone()), None, Some(base_dir.clone()), None)
+                .unwrap();
         let request = VaultRequest::new_with_application(
             VaultAction::GetCache {
                 project: project.clone(),
