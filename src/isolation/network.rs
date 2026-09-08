@@ -141,9 +141,47 @@ mod native {
         // Pairing identity shown to the user comes only from the vault host.
         // The untrusted network process may report transport liveness, but it
         // cannot relabel a pairing request before the user approves its ID.
-        state: Mutex<crate::desktop_worker::sync::State>,
+        state: Mutex<Cached>,
         failure: Mutex<Option<String>>,
         live: AtomicBool,
+    }
+
+    /// Host state with its verified transports derived once per change.
+    ///
+    /// Verifying the membership chain costs one ML-DSA-65 check per epoch,
+    /// and the desktop asks for a View every few seconds. Deriving on every
+    /// reply ran that work on the listen thread while host callbacks waited.
+    struct Cached {
+        state: crate::desktop_worker::sync::State,
+        devices: Result<Vec<crate::personal::sync::TransportBinding>, String>,
+    }
+
+    impl Cached {
+        fn new(state: crate::desktop_worker::sync::State) -> Self {
+            let devices = Self::devices(&state);
+            Self { state, devices }
+        }
+
+        fn devices(
+            state: &crate::desktop_worker::sync::State,
+        ) -> Result<Vec<crate::personal::sync::TransportBinding>, String> {
+            state
+                .group
+                .as_ref()
+                .map(|group| {
+                    group
+                        .verified()
+                        .map(|group| group.transports().to_vec())
+                        .map_err(err)
+                })
+                .transpose()
+                .map(Option::unwrap_or_default)
+        }
+
+        fn set_group(&mut self, group: crate::desktop_worker::sync::PublicGroup) {
+            self.state.group = Some(group);
+            self.devices = Self::devices(&self.state);
+        }
     }
 
     impl Shared {
@@ -192,7 +230,7 @@ mod native {
                 writer: Mutex::new(channel.try_clone().map_err(err)?),
                 pending: Mutex::new(HashMap::new()),
                 permit: Mutex::new(None),
-                state: Mutex::new(crate::desktop_worker::sync::State::default()),
+                state: Mutex::new(Cached::new(crate::desktop_worker::sync::State::default())),
                 failure: Mutex::new(None),
                 live: AtomicBool::new(true),
             });
@@ -335,19 +373,9 @@ mod native {
                         .ok_or("unexpected network reply")?;
                     let result = result
                         .map(|mut view| {
-                            view.state = shared.state.lock().map_err(err)?.clone();
-                            view.devices = view
-                                .state
-                                .group
-                                .as_ref()
-                                .map(|group| {
-                                    group
-                                        .verified()
-                                        .map(|group| group.transports().to_vec())
-                                        .map_err(err)
-                                })
-                                .transpose()?
-                                .unwrap_or_default();
+                            let cached = shared.state.lock().map_err(err)?;
+                            view.state = cached.state.clone();
+                            view.devices = cached.devices.clone()?;
                             Ok(*view)
                         })
                         .and_then(|result| result);
@@ -367,19 +395,20 @@ mod native {
                         Err("network helper has no authority for this command".into())
                     };
                     if let Ok(Reply::State(state)) = &result {
-                        *shared.state.lock().map_err(err)? = *state.clone();
+                        *shared.state.lock().map_err(err)? = Cached::new(*state.clone());
                     }
                     if let Ok(Reply::Group(group)) = &result {
-                        shared.state.lock().map_err(err)?.group = Some(group.clone());
+                        shared.state.lock().map_err(err)?.set_group(group.clone());
                     }
                     if state_request && result.is_err() {
                         // Public membership can remain visible while sealed.
                         // Tickets and pending approvals must leave the parent
                         // cache as soon as the key owner becomes unavailable.
-                        let mut state = shared.state.lock().map_err(err)?;
-                        *state = crate::desktop_worker::sync::State {
-                            group: state.group.take(),
-                            readers: state.readers,
+                        // The group is unchanged, so its transports stay valid.
+                        let mut cached = shared.state.lock().map_err(err)?;
+                        cached.state = crate::desktop_worker::sync::State {
+                            group: cached.state.group.take(),
+                            readers: cached.state.readers,
                             ..Default::default()
                         };
                         *shared.permit.lock().map_err(err)? = None;
@@ -681,7 +710,7 @@ mod native {
                 writer: Mutex::new(parent.try_clone().unwrap()),
                 pending: Mutex::new(HashMap::from([(1, reply)])),
                 permit: Mutex::new(None),
-                state: Mutex::new(State::default()),
+                state: Mutex::new(Cached::new(State::default())),
                 failure: Mutex::new(None),
                 live: AtomicBool::new(true),
             };
@@ -795,7 +824,7 @@ mod native {
                 writer: Mutex::new(parent.try_clone().unwrap()),
                 pending: Mutex::new(HashMap::from([(1, reply)])),
                 permit: Mutex::new(Some(Permit::Approve([3; 32]))),
-                state: Mutex::new(state),
+                state: Mutex::new(Cached::new(state)),
                 failure: Mutex::new(None),
                 live: AtomicBool::new(true),
             };
