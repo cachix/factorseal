@@ -1,0 +1,30 @@
+{
+  "version": { "major": 1, "minor": 0 },
+  "timestamp": 1788800000,
+  "exporterRpId": "example.test",
+  "exporterDisplayName": "Synthetic interoperability fixture",
+  "accounts": [{
+    "id": "AQ",
+    "username": "alice",
+    "email": "alice@example.test",
+    "collections": [],
+    "items": [{
+      "id": "Ag",
+      "title": "Synthetic login",
+      "creationAt": 1700000000,
+      "scope": { "urls": ["https://example.test"], "androidApps": [] },
+      "credentials": [
+        {
+          "type": "basic-auth",
+          "username": { "fieldType": "string", "value": "alice" },
+          "password": { "fieldType": "concealed-string", "value": "synthetic-password" }
+        },
+        {
+          "type": "totp", "secret": "JBSWY3DPEHPK3PXP", "period": 30,
+          "digits": 6, "algorithm": "sha1", "issuer": "Example", "username": "alice"
+        },
+        { "type": "note", "content": { "fieldType": "string", "value": "Synthetic note" } }
+      ]
+    }]
+  }]
+}

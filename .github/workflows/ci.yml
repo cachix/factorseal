@@ -51,9 +51,8 @@ jobs:
         run: |
           devenv shell -- sh -c '
             set -eu
-            dbus_config="$(dirname "$(command -v dbus-daemon)")/../share/dbus-1/session.conf"
-            dbus-run-session --config-file "$dbus_config" -- cargo test --workspace --all-targets --all-features
-            dbus-run-session --config-file "$dbus_config" -- env FACTORSEAL_TEST_SECRET_TOOL=/usr/bin/secret-tool cargo test --lib libsecret_store_seal_lookup
+            bash scripts/test-with-dbus.sh cargo test --workspace --all-targets --all-features
+            bash scripts/test-with-dbus.sh env FACTORSEAL_TEST_SECRET_TOOL=/usr/bin/secret-tool cargo test --lib libsecret_store_seal_lookup
           '
       - name: Check the feature combinations packagers and embedders build
         run: |
@@ -61,7 +60,7 @@ jobs:
             devenv shell -- cargo check --no-default-features --features "$features"
           done
       - name: Lint packaged shell scripts
-        run: devenv shell -- shellcheck packaging/build-unix.sh packaging/linux/factorseal-start
+        run: devenv shell -- shellcheck packaging/build-unix.sh packaging/linux/factorseal-start scripts/test-with-dbus.sh scripts/test-apple-exchange.sh
       - name: Lint packaged POSIX helpers
         run: devenv shell -- shellcheck -s sh packaging/macos/factorseal-askpass packaging/macos/prepare-app.sh packaging/macos/sign-app.sh
       - name: Lint opt-in native acceptance runners

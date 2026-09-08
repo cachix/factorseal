@@ -13,10 +13,10 @@ use factorseal::{
     CallerIdentity, DocumentKind, GrantAuthorization, GrantAuthorizationTarget, GrantPermission,
     HistoryEntry, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, Permission, PermissionChange,
     PermissionState, SecretSpecAddress, UnlockCredentials, UnlockFactorKind, UnlockGroup,
-    UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultArchive,
-    VaultArchiveEntry, VaultClient, VaultCryptoProfile, VaultEntryImportStatus, VaultEntryMetadata,
-    VaultError, VaultMetadata, VaultRequest, VaultResponseBody, VaultResponseErrorCode,
-    VaultService, WireSecret, decrypt_vault_archive, encrypt_vault_archive,
+    UnlockPolicy, UnsealLeasePolicy, UnsealedVault, Vault, VaultAction, VaultArchive, VaultClient,
+    VaultCryptoProfile, VaultEntryMetadata, VaultError, VaultMetadata, VaultRequest,
+    VaultResponseBody, VaultResponseErrorCode, VaultService, decrypt_vault_archive,
+    encrypt_vault_archive,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -31,8 +31,7 @@ use super::{
     PROJECT_PERMISSIONS,
 };
 use factorseal::transfer::{
-    PersonalSecret, TransferFormat, export_manager, import_manager, read_transfer_file,
-    write_private_file,
+    PersonalSecret, TransferFormat, export_manager, read_transfer_file, write_private_file,
 };
 
 #[derive(Serialize)]
@@ -239,22 +238,9 @@ pub(super) fn seal_vault(root: &Path, socket: Option<&Path>) -> Result<(), CliEr
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct TransferSummary {
-    added: usize,
-    replaced: usize,
-    kept_existing: usize,
-}
-
-impl TransferSummary {
-    fn record(&mut self, status: VaultEntryImportStatus) {
-        match status {
-            VaultEntryImportStatus::Added => self.added += 1,
-            VaultEntryImportStatus::Replaced => self.replaced += 1,
-            VaultEntryImportStatus::KeptExisting => self.kept_existing += 1,
-        }
-    }
-}
+#[cfg(test)]
+use factorseal::transfer::import_plan::ImportSummary as TransferSummary;
+use factorseal::transfer::import_plan::PreparedImport;
 
 pub(super) fn export_vault(
     root: &Path,
@@ -262,13 +248,30 @@ pub(super) fn export_vault(
     file: &Path,
     format: TransferFormat,
     passphrase_file: Option<&Path>,
+    recipient_file: Option<&Path>,
 ) -> Result<(), CliError> {
-    validate_transfer_options(format, passphrase_file)?;
+    validate_transfer_options(format, passphrase_file, recipient_file)?;
+    let recipient = recipient_file
+        .map(factorseal::transfer::cxf::read_recipient_file)
+        .transpose()
+        .map_err(transfer_error)?;
     let client = native_client(root, socket)?;
     let output = if format.is_native() {
         let passphrase = read_archive_passphrase(passphrase_file, true)?;
         let archived = factorseal::read_vault_export(&client, |_| true)?;
         encrypt_vault_archive(&VaultArchive::new(unix_time()?, archived), &passphrase)?
+    } else if format == TransferFormat::CxfAge {
+        let secrets = read_personal_secrets(&client)?;
+        let payload = export_manager(format, &secrets).map_err(transfer_error)?;
+        if let Some(recipient) = recipient {
+            factorseal::transfer::cxf::encrypt_to_recipient(&payload, &recipient)
+                .map_err(transfer_error)?
+        } else {
+            let passphrase = read_archive_passphrase(passphrase_file, true)?;
+            factorseal::security::validate_new_password(&passphrase)
+                .map_err(CliError::ArchivePassphrase)?;
+            factorseal::transfer::cxf::encrypt(&payload, &passphrase).map_err(transfer_error)?
+        }
     } else {
         eprintln!("factorseal: warning: password-manager exports are plaintext");
         let secrets = read_personal_secrets(&client)?;
@@ -279,26 +282,53 @@ pub(super) fn export_vault(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn import_vault(
     root: &Path,
     socket: Option<&Path>,
     file: &Path,
     format: TransferFormat,
     passphrase_file: Option<&Path>,
+    identity_file: Option<&Path>,
     replace_existing: bool,
+    dry_run: bool,
 ) -> Result<(), CliError> {
-    validate_transfer_options(format, passphrase_file)?;
+    validate_transfer_options(format, passphrase_file, identity_file)?;
+    let identity = identity_file
+        .map(factorseal::transfer::cxf::read_identity_file)
+        .transpose()
+        .map_err(transfer_error)?;
     let bytes = read_transfer_file(file).map_err(transfer_error)?;
-    let client = native_client(root, socket)?;
-    let summary = if format.is_native() {
+    let prepared = if format.is_native() {
         let passphrase = read_archive_passphrase(passphrase_file, false)?;
         let archive = decrypt_vault_archive(&bytes, &passphrase)?;
-        reject_expired_archive(&archive)?;
-        import_entries(&client, archive.entries, replace_existing)?
+        PreparedImport::archive(archive, unix_time()?).map_err(transfer_error)?
+    } else if format == TransferFormat::CxfAge {
+        let payload = if let Some(identity) = identity {
+            factorseal::transfer::cxf::decrypt_with_hybrid_identity(&bytes, &identity)
+                .map_err(transfer_error)?
+        } else {
+            let passphrase = read_archive_passphrase(passphrase_file, false)?;
+            factorseal::transfer::cxf::decrypt(&bytes, &passphrase).map_err(transfer_error)?
+        };
+        PreparedImport::manager(format, &payload).map_err(transfer_error)?
     } else {
         eprintln!("factorseal: warning: password-manager imports are read from plaintext");
-        import_personal_secrets(&client, format, &bytes, replace_existing)?
+        PreparedImport::manager(format, &bytes).map_err(transfer_error)?
     };
+    if dry_run {
+        println!(
+            "Validated {} source items; {} contain data without full functional support. Existing items would be {}. No vault writes performed.",
+            prepared.len(),
+            prepared.preserved_only(),
+            if replace_existing { "replaced" } else { "kept" }
+        );
+        return Ok(());
+    }
+    let client = native_client(root, socket)?;
+    let summary = prepared
+        .commit(&client, replace_existing)
+        .map_err(transfer_error)?;
     println!(
         "Imported {} items: {} added, {} replaced, {} kept existing",
         summary.added + summary.replaced + summary.kept_existing,
@@ -306,16 +336,29 @@ pub(super) fn import_vault(
         summary.replaced,
         summary.kept_existing
     );
+    if summary.preserved_only > 0 {
+        println!(
+            "{} source items contain data preserved without full functional support. Keep the old vault and verify important credentials. A FactorSeal archive backs up all retained data; CXF also retains unsupported CXF credentials for re-export.",
+            summary.preserved_only
+        );
+    }
     Ok(())
 }
 
 fn validate_transfer_options(
     format: TransferFormat,
     passphrase_file: Option<&Path>,
+    key_file: Option<&Path>,
 ) -> Result<(), CliError> {
-    if !format.is_native() && passphrase_file.is_some() {
+    if key_file.is_some() && (format != TransferFormat::CxfAge || passphrase_file.is_some()) {
         return Err(CliError::Transfer(
-            "--passphrase-file is only valid with --format factorseal".to_owned(),
+            "age key files require --format cxf-age and cannot be combined with --passphrase-file"
+                .to_owned(),
+        ));
+    }
+    if !format.is_encrypted() && passphrase_file.is_some() {
+        return Err(CliError::Transfer(
+            "--passphrase-file is only valid with --format factorseal or cxf-age".to_owned(),
         ));
     }
     Ok(())
@@ -336,76 +379,16 @@ fn read_personal_secrets(client: &dyn VaultClient) -> Result<Vec<PersonalSecret>
         .collect()
 }
 
+#[cfg(test)]
 fn import_personal_secrets(
     client: &dyn VaultClient,
     format: TransferFormat,
     bytes: &[u8],
     replace_existing: bool,
 ) -> Result<TransferSummary, CliError> {
-    let secrets = import_manager(format, bytes).map_err(transfer_error)?;
-
-    let mut prepared = Vec::with_capacity(secrets.len());
-    for secret in secrets {
-        prepared.push(VaultArchiveEntry {
-            metadata: VaultEntryMetadata {
-                display_name: None,
-                display_type: None,
-                updated_at: None,
-                document_kind: DocumentKind::LocalKeyring,
-                partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
-                address: factorseal::SecretAddress::new(secret.id.clone(), None)?,
-            },
-            value: WireSecret::new(secret.encode().map_err(transfer_error)?.to_vec())?,
-            evict_at: None,
-        });
-    }
-    import_entries(client, prepared, replace_existing)
-}
-
-fn import_entries(
-    client: &dyn VaultClient,
-    entries: Vec<VaultArchiveEntry>,
-    replace_existing: bool,
-) -> Result<TransferSummary, CliError> {
-    let mut summary = TransferSummary::default();
-    for entry in entries {
-        let body = request_body(
-            client,
-            VaultAction::ImportVaultEntry {
-                entry: entry.metadata,
-                value: entry.value,
-                evict_at: entry.evict_at,
-                replace_existing,
-            },
-        )?;
-        let VaultResponseBody::VaultEntryImported { status } = body else {
-            return Err(unexpected_transfer_response("vault import"));
-        };
-        summary.record(status);
-    }
-    Ok(summary)
-}
-
-fn reject_expired_archive(archive: &VaultArchive) -> Result<(), CliError> {
-    let now = unix_time()?;
-    if archive
-        .entries
-        .iter()
-        .any(|entry| entry.evict_at.is_some_and(|deadline| deadline < now))
-    {
-        return Err(CliError::Transfer(
-            "archive contains an entry that has already expired".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn request_body(
-    client: &dyn VaultClient,
-    action: VaultAction,
-) -> Result<VaultResponseBody, CliError> {
-    let response = client.request(&VaultRequest::new(action)?)?;
-    response.result.map_err(vault_request_error)
+    PreparedImport::manager(format, bytes)
+        .and_then(|prepared| prepared.commit(client, replace_existing))
+        .map_err(transfer_error)
 }
 
 fn is_personal_entry(entry: &VaultEntryMetadata) -> bool {
@@ -415,12 +398,6 @@ fn is_personal_entry(entry: &VaultEntryMetadata) -> bool {
 
 fn transfer_error(error: impl std::fmt::Display) -> CliError {
     CliError::Transfer(error.to_string())
-}
-
-fn unexpected_transfer_response(operation: &str) -> CliError {
-    CliError::Transfer(format!(
-        "vault returned an unexpected response during {operation}"
-    ))
 }
 
 /// Ask the running agent which state this vault is in.

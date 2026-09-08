@@ -4,6 +4,9 @@ use std::path::Path;
 use anyhow::{Context as _, anyhow, bail};
 use zeroize::Zeroizing;
 
+pub mod cxf;
+#[cfg(feature = "vault-client")]
+pub mod import_plan;
 mod onepux;
 pub use crate::personal::{
     PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
@@ -13,6 +16,9 @@ use crate::personal::{
     zeroize_json_strings,
 };
 
+/// Decode a manager's in-memory payload. `CxfAge` expects decrypted CXF JSON;
+/// file callers must authenticate it with `cxf::decrypt` or
+/// `cxf::decrypt_with_hybrid_identity` first.
 pub fn import_manager(format: TransferFormat, bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
     let mut items = import_manager_items(format, bytes)?;
     // An export can contain repeated source IDs. Preserve each record, with
@@ -51,6 +57,9 @@ fn import_manager_items(
     }
     if format == TransferFormat::OnePasswordPux {
         return onepux::import(bytes);
+    }
+    if format == TransferFormat::CxfAge {
+        return cxf::import_json(bytes);
     }
     let mut items: Vec<_> = import_legacy_manager(format, bytes)?
         .into_iter()
@@ -191,10 +200,16 @@ fn prune_empty(value: &mut serde_json::Value) {
     }
 }
 
+/// Encode a plaintext manager payload. For `CxfAge`, file callers must pass
+/// the returned JSON through `cxf::encrypt` or `cxf::encrypt_to_recipient`
+/// before writing it.
 pub fn export_manager(
     format: TransferFormat,
     secrets: &[PersonalSecret],
 ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    if format == TransferFormat::CxfAge {
+        return cxf::export_json(secrets);
+    }
     let legacy = secrets
         .iter()
         .map(PersonalSecret::to_legacy)
@@ -226,6 +241,24 @@ pub fn personal_import_names(secrets: &[PersonalSecret]) -> Vec<String> {
     unique_import_names(secrets.iter().map(|secret| secret.title.as_str()))
 }
 
+/// Items containing data retained for backup without full functional support.
+#[must_use]
+pub fn preserved_only_items(secrets: &[PersonalSecret]) -> usize {
+    secrets
+        .iter()
+        .filter(|item| {
+            item.source
+                .as_ref()
+                .is_some_and(|source| source["format"] != "cxf" || source["unsupported"] != false)
+                || item
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .any(|field| matches!(field.field_type, PersonalFieldType::Unknown(_)))
+        })
+        .count()
+}
+
 #[cfg(test)]
 #[path = "transfer/fixture_tests.rs"]
 mod fixture_tests;
@@ -254,6 +287,7 @@ impl Drop for SensitiveJson {
 pub enum TransferFormat {
     #[default]
     FactorSeal,
+    CxfAge,
     BitwardenJson,
     OnePasswordCsv,
     OnePasswordPux,
@@ -261,8 +295,9 @@ pub enum TransferFormat {
 }
 
 impl TransferFormat {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::FactorSeal,
+        Self::CxfAge,
         Self::BitwardenJson,
         Self::OnePasswordCsv,
         Self::OnePasswordPux,
@@ -273,6 +308,7 @@ impl TransferFormat {
     pub const fn label(self) -> &'static str {
         match self {
             Self::FactorSeal => "FactorSeal archive",
+            Self::CxfAge => "Credential Exchange (age encrypted)",
             Self::BitwardenJson => "Bitwarden JSON",
             Self::OnePasswordCsv => "1Password CSV",
             Self::OnePasswordPux => "1Password 1PUX",
@@ -284,6 +320,7 @@ impl TransferFormat {
     pub const fn extension(self) -> &'static str {
         match self {
             Self::FactorSeal => "factorseal",
+            Self::CxfAge => "age",
             Self::BitwardenJson => "json",
             Self::OnePasswordCsv | Self::KeePassCsv => "csv",
             Self::OnePasswordPux => "1pux",
@@ -293,6 +330,11 @@ impl TransferFormat {
     #[must_use]
     pub const fn is_native(self) -> bool {
         matches!(self, Self::FactorSeal)
+    }
+
+    #[must_use]
+    pub const fn is_encrypted(self) -> bool {
+        matches!(self, Self::FactorSeal | Self::CxfAge)
     }
 }
 
@@ -308,6 +350,7 @@ fn import_legacy_manager(
         TransferFormat::OnePasswordCsv => import_one_password(bytes)?,
         TransferFormat::KeePassCsv => import_keepass(bytes)?,
         TransferFormat::FactorSeal => bail!("native archives use the encrypted archive reader"),
+        TransferFormat::CxfAge => bail!("CXF uses the structured item reader"),
         TransferFormat::OnePasswordPux => bail!("1PUX uses the structured item reader"),
     };
     if secrets.len() > MAX_MANAGER_ITEMS {
@@ -355,6 +398,7 @@ fn export_legacy_manager(
         TransferFormat::OnePasswordCsv => export_one_password(secrets),
         TransferFormat::KeePassCsv => export_keepass(secrets),
         TransferFormat::FactorSeal => bail!("native archives use the encrypted archive writer"),
+        TransferFormat::CxfAge => bail!("CXF uses the structured item writer"),
         TransferFormat::OnePasswordPux => {
             bail!("1PUX is import-only; use an encrypted FactorSeal archive to export")
         }
@@ -365,7 +409,7 @@ fn validate_manager_export(format: TransferFormat, secrets: &[LegacySecret]) -> 
     for secret in secrets {
         let lossy = match format {
             TransferFormat::FactorSeal => false,
-            TransferFormat::OnePasswordPux => true,
+            TransferFormat::CxfAge | TransferFormat::OnePasswordPux => true,
             TransferFormat::BitwardenJson => secret.archived || !secret.tags.is_empty(),
             TransferFormat::OnePasswordCsv | TransferFormat::KeePassCsv => {
                 !matches!(
