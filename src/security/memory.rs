@@ -311,7 +311,9 @@ mod platform {
     static LOCKED_BYTES: Mutex<usize> = Mutex::new(0);
 
     fn lock(ptr: *mut u8, size: usize) -> io::Result<()> {
-        let mut locked = LOCKED_BYTES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut locked = LOCKED_BYTES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let required = locked
             .checked_add(size)
             .ok_or_else(|| io::Error::other("locked memory size overflow"))?;
@@ -346,7 +348,9 @@ mod platform {
     }
 
     fn unlock_pages(ptr: *mut u8, size: usize) {
-        let mut locked = LOCKED_BYTES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut locked = LOCKED_BYTES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: caller owns this locked range and is about to release it.
         unsafe {
             let _ = VirtualUnlock(ptr.cast(), size);
@@ -695,6 +699,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_large_locked_buffers_reuse_working_set_allowance() {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetProcessWorkingSetSize, SetProcessWorkingSetSize,
+        };
         const CHILD: &str = "FACTORSEAL_TEST_WINDOWS_LOCK_QUOTA";
         if std::env::var_os(CHILD).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -709,9 +716,6 @@ mod tests {
             assert!(output.status.success(), "{output:?}");
             return;
         }
-        use windows::Win32::System::Threading::{
-            GetCurrentProcess, GetProcessWorkingSetSize, SetProcessWorkingSetSize,
-        };
         let working_set = || {
             let (mut minimum, mut maximum) = (0, 0);
             // SAFETY: current-process pseudohandle and valid output pointers.

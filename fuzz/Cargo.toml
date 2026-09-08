@@ -15,6 +15,9 @@ factorseal = { path = "..", default-features = false, features = ["fuzzing"] }
 members = ["."]
 
 [patch.crates-io]
+i18n-config = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-embed = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-embed-impl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
 i18n-embed-fl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
 
 [[bin]]
