@@ -1429,7 +1429,10 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         VaultApplicationContext::new(
             Some(project.to_owned()),
             Some("production".to_owned()),
-            Some("/projects/first".to_owned()),
+            Some(format!(
+                "{}/projects/first",
+                if cfg!(windows) { "C:" } else { "" }
+            )),
             Some("deploy".to_owned()),
         )
         .unwrap()
@@ -1610,7 +1613,8 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
             .interaction
             .is_some()
     );
-    for folder in [Some("/projects/second".to_owned()), None] {
+    let second = format!("{}/projects/second", if cfg!(windows) { "C:" } else { "" });
+    for folder in [Some(second), None] {
         let mut context = application("demo");
         context.base_dir = folder;
         let result = service.handle(
@@ -2346,12 +2350,13 @@ fn pending_permissions_fit_transport() {
     let (_directory, service) = service(100, UnsealLeasePolicy::default());
     let manager = caller();
     service.authorize_permission_manager(&manager, 100).unwrap();
+    let prefix = if cfg!(windows) { "C:/" } else { "/" };
     for i in 0..33 {
         let project = format!("audit-{i}");
         let context = VaultApplicationContext::new(
             Some(project.clone()),
             None,
-            Some(format!("/{}", "\t".repeat(32767))),
+            Some(format!("{}{}", prefix, "\t".repeat(32768 - prefix.len()))),
             None,
         )
         .unwrap();

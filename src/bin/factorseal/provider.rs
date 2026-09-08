@@ -429,10 +429,11 @@ impl ProviderHandler for FactorsealProvider {
             .map_or_else(std::env::current_dir, Ok)
             .and_then(std::fs::canonicalize)
             .map_err(|_| RpcError::new(ErrorKind::InvalidParams))?;
-        let folder = folder
-            .to_str()
-            .ok_or_else(|| RpcError::new(ErrorKind::InvalidParams))?
-            .to_owned();
+        let folder = without_verbatim_prefix(
+            folder
+                .to_str()
+                .ok_or_else(|| RpcError::new(ErrorKind::InvalidParams))?,
+        );
         let application_context = VaultApplicationContext::new(
             application.context.project,
             application.context.profile,
@@ -670,3 +671,18 @@ pub(super) fn serve(root: &Path, socket: Option<&Path>) -> Result<(), CliError> 
 #[cfg(test)]
 #[path = "provider/tests.rs"]
 mod tests;
+
+/// Windows canonicalization yields verbatim paths (`\\?\C:\dir` and
+/// `\\?\UNC\host\share`). The base directory scopes grants and is shown to
+/// the user, so keep the ordinary spelling the rest of the system uses.
+fn without_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\")
+        && rest.as_bytes().get(1) == Some(&b':')
+    {
+        return rest.to_owned();
+    }
+    path.to_owned()
+}
