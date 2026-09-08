@@ -386,6 +386,15 @@ impl DesktopRuntime {
         }
     }
 
+    #[cfg(feature = "apple-credential-exchange")]
+    pub(crate) fn export_system_credentials(
+        &self,
+        metadata: &VaultMetadata,
+    ) -> Result<Zeroizing<Vec<u8>>, String> {
+        let secrets = self.read_personal_secrets(metadata)?;
+        factorseal::transfer::cxf::export_json(&secrets).map_err(|error| error.to_string())
+    }
+
     pub(crate) fn commit_import(
         &self,
         metadata: &VaultMetadata,

@@ -3,14 +3,16 @@ set -eu
 umask 077
 
 usage() {
-    echo "usage: $0 APP_BUNDLE SIGNING_IDENTITY [PROVISIONING_PROFILE]" >&2
+    echo "usage: $0 APP_BUNDLE SIGNING_IDENTITY [PROVISIONING_PROFILE [EXTENSION_PROFILE]]" >&2
     exit 2
 }
 
-case $# in 2|3) ;; *) usage ;; esac
+case $# in 2|3|4) ;; *) usage ;; esac
 app=$1
 signing_identity=$2
 profile=${3:-}
+extension_profile=${4:-}
+credential_extension="$app/Contents/PlugIns/FactorSealCredentialProvider.appex"
 
 [ "$(uname -s)" = Darwin ] || {
     echo "macOS app signing must run on macOS" >&2
@@ -31,6 +33,15 @@ profile=${3:-}
     echo "provisioning profile not found: $profile" >&2
     exit 2
 }
+if [ -d "$credential_extension" ] && [ -n "$profile" ]; then
+    [ -n "$extension_profile" ] && [ -f "$extension_profile" ] || {
+        echo "credential exchange requires a separate extension provisioning profile" >&2
+        exit 2
+    }
+elif [ -n "$extension_profile" ]; then
+    echo "an extension profile requires the credential extension and an app profile" >&2
+    exit 2
+fi
 
 script_dir=$(CDPATH='' cd -P "$(dirname "$0")" && pwd)
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/factorseal-signing.XXXXXX")
@@ -128,9 +139,25 @@ if [ -n "$profile" ]; then
         -e "s/@TEAM_ID@/$team_id/g" \
         "$script_dir/Factorseal.entitlements.in" >"$entitlements"
     cp "$profile" "$app/Contents/embedded.provisionprofile"
+    if [ -d "$credential_extension" ]; then
+        expected_extension_id="$bundle_id.credentials"
+        actual_extension_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$credential_extension/Contents/Info.plist")
+        [ "$actual_extension_id" = "$expected_extension_id" ] || {
+            echo "credential extension bundle identifier does not match the app" >&2
+            exit 2
+        }
+        /usr/bin/security cms -D -i "$extension_profile" >"$scratch/extension-profile.plist"
+        python3 "$script_dir/../../scripts/apple-exchange-entitlements.py" \
+            "$profile_plist" "$scratch/extension-profile.plist" "$bundle_id" "$identity_hash" \
+            "$entitlements" "$scratch/extension-entitlements.plist"
+        cp "$extension_profile" "$credential_extension/Contents/embedded.provisionprofile"
+    fi
 else
     # Do not carry a profile from an earlier Team-signed copy into a local build.
     rm -f "$app/Contents/embedded.provisionprofile"
+    if [ -d "$credential_extension" ]; then
+        rm -f "$credential_extension/Contents/embedded.provisionprofile"
+    fi
 fi
 
 case ${identity_name:-} in
@@ -155,8 +182,16 @@ main="$app/Contents/MacOS/$main_name"
 # part of the outer app so it receives the app's Keychain entitlements.
 /usr/bin/find "$app/Contents" -type f -print | while IFS= read -r nested_code; do
     [ "$nested_code" != "$main" ] || continue
+    case $nested_code in "$credential_extension"/*) continue ;; esac
     /usr/bin/file -b "$nested_code" | /usr/bin/grep -q 'Mach-O' || continue
-    sign_nested "$nested_code"
+    if [ "$nested_code" = "$app/Contents/MacOS/factorseal" ] && [ -n "$profile" ]; then
+        # The Desktop's sibling CLI runs the vault worker. It needs the same
+        # protected Keychain group as the containing app to unlock the vault.
+        /usr/bin/codesign --force --sign "$signing_identity" --identifier "$bundle_id" \
+            --options runtime "$timestamp" --entitlements "$entitlements" "$nested_code"
+    else
+        sign_nested "$nested_code"
+    fi
 done
 
 # Then sign nested bundle containers from the inside out. Do not use
@@ -165,7 +200,12 @@ done
     \( -name '*.framework' -o -name '*.app' -o -name '*.xpc' \
     -o -name '*.appex' -o -name '*.plugin' \) -print |
     while IFS= read -r nested_bundle; do
-        sign_nested "$nested_bundle"
+        if [ "$nested_bundle" = "$credential_extension" ] && [ -n "$profile" ]; then
+            /usr/bin/codesign --force --sign "$signing_identity" --options runtime \
+                "$timestamp" --entitlements "$scratch/extension-entitlements.plist" "$nested_bundle"
+        else
+            sign_nested "$nested_bundle"
+        fi
     done
 
 if [ -n "$profile" ]; then
@@ -194,6 +234,13 @@ if [ -n "$profile" ]; then
     [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.application-identifier' "$signed_entitlements")" = "$application_id" ]
     [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$signed_entitlements")" = "$team_id" ]
     [ "$(/usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$signed_entitlements")" = "$application_id" ]
+    if [ -d "$credential_extension" ]; then
+        capability=com.apple.developer.authentication-services.autofill-credential-provider
+        [ "$(/usr/libexec/PlistBuddy -c "Print :$capability" "$signed_entitlements")" = true ]
+        /usr/bin/codesign -d --entitlements - --xml "$credential_extension" >"$scratch/signed-extension.plist"
+        [ "$(/usr/libexec/PlistBuddy -c "Print :$capability" "$scratch/signed-extension.plist")" = true ]
+        [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.application-identifier' "$scratch/signed-extension.plist")" = "$application_id.credentials" ]
+    fi
     signature_details=$(/usr/bin/codesign -dvvv "$app" 2>&1)
     signed_team_id=$(printf '%s\n' "$signature_details" | /usr/bin/sed -n 's/^TeamIdentifier=//p')
     [ "$signed_team_id" = "$team_id" ] || {
