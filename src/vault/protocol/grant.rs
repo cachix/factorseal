@@ -34,6 +34,7 @@ pub enum GrantPermission {
     Clear,
     Seal,
     ManagePermissions,
+    SshSign,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -686,6 +687,7 @@ fn permission_name(permission: GrantPermission) -> &'static str {
         GrantPermission::Clear => "clear",
         GrantPermission::Seal => "seal",
         GrantPermission::ManagePermissions => "manage-permissions",
+        GrantPermission::SshSign => "ssh-sign",
     }
 }
 
