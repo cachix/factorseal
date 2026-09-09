@@ -11,16 +11,10 @@
     dbus
     gtk4
     libxkbcommon
-    llvmPackages.llvm
-    nasm
     pkg-config
     qt6.qtbase
     shellcheck
     vulkan-loader
-    # Native resource scripts in dependencies also need a compiler during xwin checks.
-    (writeShellScriptBin "rc.exe" ''
-      exec ${llvmPackages.llvm}/bin/llvm-rc "$@"
-    '')
   ];
 
   languages.rust = {
