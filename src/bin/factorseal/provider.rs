@@ -46,7 +46,7 @@ fn check_request_live(context: &RequestContext) -> RpcResult<()> {
 /// One Factorseal process acting as a SecretSpec provider endpoint.
 pub(super) struct FactorsealProvider {
     client: Arc<dyn VaultClient>,
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     test_input: bool,
     application: OnceLock<VaultApplicationContext>,
 }
@@ -55,7 +55,7 @@ impl FactorsealProvider {
     fn new(root: &Path, socket: Option<&Path>) -> Result<Self, CliError> {
         Ok(Self {
             client: Arc::new(super::platform::native_client(root, socket)?),
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "linux"))]
             test_input: false,
             application: OnceLock::new(),
         })
@@ -65,6 +65,7 @@ impl FactorsealProvider {
     fn with_client(client: Arc<dyn VaultClient>) -> Self {
         Self {
             client,
+            #[cfg(target_os = "linux")]
             test_input: true,
             application: OnceLock::new(),
         }
@@ -119,18 +120,19 @@ impl FactorsealProvider {
     where
         F: FnMut() -> factorseal::VaultResult<VaultAction>,
     {
-        let mut first = self
+        let first = self
             .request_once(action().map_err(|e| map_vault_error(&e))?)
             .await;
         #[cfg(target_os = "linux")]
-        if matches!(&first, Err(error) if error.data.kind == ErrorKind::InteractionRequired && error.data.interaction.is_none())
+        let first = if matches!(&first, Err(error) if error.data.kind == ErrorKind::InteractionRequired && error.data.interaction.is_none())
         {
             *_opened_desktop = true;
             self.unlock_desktop(context).await?;
-            first = self
-                .request_once(action().map_err(|error| map_vault_error(&error))?)
-                .await;
-        }
+            self.request_once(action().map_err(|error| map_vault_error(&error))?)
+                .await
+        } else {
+            first
+        };
         let interaction = match &first {
             Err(error) if error.data.kind == ErrorKind::InteractionRequired => {
                 error.data.interaction.clone()
