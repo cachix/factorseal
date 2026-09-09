@@ -1,8 +1,8 @@
 { lib }:
 
 {
-  "automerge-0.11.0" = "sha256-UnoH9y7pgq8TThwm7u5kQzucsWnFUcHIZgNGH0hABM4=";
-  "hexane-1.0.0-alpha.5" = "sha256-UnoH9y7pgq8TThwm7u5kQzucsWnFUcHIZgNGH0hABM4=";
+  "automerge-0.11.0" = "sha256-R8j3iIkGqhcYscrZvFj8odsrK9BfBSBWMTlSkh3m6ag=";
+  "hexane-1.0.0-alpha.5" = "sha256-R8j3iIkGqhcYscrZvFj8odsrK9BfBSBWMTlSkh3m6ag=";
   "collections-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "derive_refineable-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "gpui-0.2.2" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";

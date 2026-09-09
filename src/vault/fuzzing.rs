@@ -201,6 +201,19 @@ mod tests {
     }
 
     #[test]
+    fn unread_change_column_bytes_are_rejected_without_panicking() {
+        // Automerge change whose value metadata says null with a nonzero
+        // length, leaving bytes in the raw column that no op reads. Older
+        // Automerge accepted it and later rebuilt it under a different hash.
+        let bytes =
+            include_bytes!("../../fuzz/regressions/personal_sync/null-value-with-payload.bin");
+        personal_sync(bytes);
+        let update: crate::personal::replica::PersonalUpdate =
+            serde_json::from_slice(bytes).unwrap();
+        assert!(update.validate().is_err());
+    }
+
+    #[test]
     fn synthetic_corpus_exercises_production_parsers() {
         for (name, bytes) in seeds() {
             match name {
