@@ -54,13 +54,13 @@ pub fn disable_core_dumps() -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        use windows::Win32::System::ErrorReporting::{
+        use ::windows::Win32::System::ErrorReporting::{
             WER_FAULT_REPORTING_FLAG_NOHEAP, WerGetFlags, WerSetFlags,
         };
         // SAFETY: sets a documented flag for the calling process; no pointers.
         #[allow(unsafe_code)]
         unsafe {
-            let flags = WerGetFlags(windows::Win32::System::Threading::GetCurrentProcess())
+            let flags = WerGetFlags(::windows::Win32::System::Threading::GetCurrentProcess())
                 .map_err(std::io::Error::other)?;
             WerSetFlags(flags | WER_FAULT_REPORTING_FLAG_NOHEAP)
         }
@@ -88,7 +88,7 @@ pub fn harden_key_owner() -> std::io::Result<()> {
 mod tests {
     #[test]
     fn windows_crash_reporting_omits_heap() {
-        use windows::Win32::System::{
+        use ::windows::Win32::System::{
             ErrorReporting::{WER_FAULT_REPORTING_FLAG_NOHEAP, WerGetFlags},
             Threading::GetCurrentProcess,
         };

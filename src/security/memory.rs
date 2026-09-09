@@ -293,6 +293,8 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::{NonNull, io};
+    use std::sync::Mutex;
+    use windows::Win32::Foundation::ERROR_WORKING_SET_QUOTA;
     use windows::Win32::System::{
         ErrorReporting::{WerRegisterExcludedMemoryBlock, WerUnregisterExcludedMemoryBlock},
         Memory::{
@@ -300,7 +302,61 @@ mod platform {
             VirtualFree, VirtualLock, VirtualUnlock,
         },
         SystemInformation::{GetSystemInfo, SYSTEM_INFO},
+        Threading::{GetCurrentProcess, GetProcessWorkingSetSize, SetProcessWorkingSetSize},
     };
+
+    // VirtualLock's quota is the process minimum working set minus OS overhead.
+    // Track simultaneous allocations, not lifetime allocation volume. Serialize
+    // quota changes and lock/unlock so concurrent allocations cannot race.
+    static LOCKED_BYTES: Mutex<usize> = Mutex::new(0);
+
+    fn lock(ptr: *mut u8, size: usize) -> io::Result<()> {
+        let mut locked = LOCKED_BYTES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let required = locked
+            .checked_add(size)
+            .ok_or_else(|| io::Error::other("locked memory size overflow"))?;
+        // SAFETY: caller owns the committed, page-aligned range. The process
+        // pseudohandle and initialized working-set output pointers are valid.
+        unsafe {
+            if let Err(error) = VirtualLock(ptr.cast(), size) {
+                if error.code() != windows::core::HRESULT::from_win32(ERROR_WORKING_SET_QUOTA.0) {
+                    return Err(io::Error::other(error));
+                }
+                let process = GetCurrentProcess();
+                let (mut minimum, mut maximum) = (0, 0);
+                GetProcessWorkingSetSize(process, &raw mut minimum, &raw mut maximum)
+                    .map_err(io::Error::other)?;
+                // Leave headroom for the OS and other libraries. Preserve any
+                // larger existing limits; only grow after a real quota failure.
+                // Released pages are reused within this high-water allowance.
+                let requested = required
+                    .checked_add(1024 * 1024)
+                    .zip(minimum.checked_add(size))
+                    .map(|(ours, growth)| ours.max(growth))
+                    .ok_or_else(|| io::Error::other("working set size overflow"))?;
+                SetProcessWorkingSetSize(process, requested, maximum.max(requested))
+                    .map_err(io::Error::other)?;
+                // Raising the allowance does not itself protect memory. Always
+                // require VirtualLock to succeed; never fall back to paging.
+                VirtualLock(ptr.cast(), size).map_err(io::Error::other)?;
+            }
+        }
+        *locked = required;
+        Ok(())
+    }
+
+    fn unlock_pages(ptr: *mut u8, size: usize) {
+        let mut locked = LOCKED_BYTES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: caller owns this locked range and is about to release it.
+        unsafe {
+            let _ = VirtualUnlock(ptr.cast(), size);
+        }
+        *locked -= size;
+    }
     pub(super) fn page_size() -> io::Result<usize> {
         let mut info = SYSTEM_INFO::default();
         // SAFETY: valid initialized out parameter.
@@ -319,23 +375,27 @@ mod platform {
             .ok_or_else(io::Error::last_os_error)
     }
     pub(super) fn protect_and_lock(ptr: *mut u8, size: usize) -> io::Result<()> {
-        // SAFETY: commit only the middle page of the owned reservation; guards
-        // stay uncommitted. VirtualLock applies only to this committed page.
+        let report_size = u32::try_from(size).map_err(io::Error::other)?;
+        // SAFETY: commit only the middle of the owned reservation; guards stay
+        // uncommitted. Locking and dump exclusion cover this committed range.
         unsafe {
             if VirtualAlloc(Some(ptr.cast()), size, MEM_COMMIT, PAGE_READWRITE).is_null() {
                 return Err(io::Error::last_os_error());
             }
-            VirtualLock(ptr.cast(), size).map_err(io::Error::other)?;
-            let size = u32::try_from(size).map_err(io::Error::other)?;
-            WerRegisterExcludedMemoryBlock(ptr.cast(), size).map_err(io::Error::other)
+            lock(ptr, size)?;
+            if let Err(error) = WerRegisterExcludedMemoryBlock(ptr.cast(), report_size) {
+                unlock_pages(ptr, size);
+                return Err(io::Error::other(error));
+            }
         }
+        Ok(())
     }
     pub(super) fn unlock(ptr: *mut u8, size: usize) {
         // SAFETY: caller has wiped the owned page and no references remain.
         unsafe {
             let _ = WerUnregisterExcludedMemoryBlock(ptr.cast());
-            let _ = VirtualUnlock(ptr.cast(), size);
         }
+        unlock_pages(ptr, size);
     }
     pub(super) fn release(ptr: *mut u8, _size: usize) {
         // SAFETY: release the entire original reservation, not an interior page.
@@ -633,6 +693,64 @@ mod tests {
                 assert_eq!(*key, [0xa5; 32]);
             }
             _ => panic!("unknown subprocess mode"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_large_locked_buffers_reuse_working_set_allowance() {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetProcessWorkingSetSize, SetProcessWorkingSetSize,
+        };
+        const CHILD: &str = "FACTORSEAL_TEST_WINDOWS_LOCK_QUOTA";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "security::memory::tests::windows_large_locked_buffers_reuse_working_set_allowance",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
+        let working_set = || {
+            let (mut minimum, mut maximum) = (0, 0);
+            // SAFETY: current-process pseudohandle and valid output pointers.
+            unsafe {
+                GetProcessWorkingSetSize(GetCurrentProcess(), &raw mut minimum, &raw mut maximum)
+                    .unwrap();
+            }
+            (minimum, maximum)
+        };
+        // Isolate a deliberately small starting quota from the test runner.
+        // Two live eight-MiB buffers must grow it without weakening locking.
+        unsafe {
+            SetProcessWorkingSetSize(GetCurrentProcess(), 256 * 1024, 1024 * 1024).unwrap();
+        }
+        let mut high_water = None;
+        for _ in 0..4 {
+            let mut first = LockedBytes::zeroed(8 * 1024 * 1024).unwrap();
+            first.fill(0xa5);
+            let second = std::thread::spawn(|| LockedBytes::zeroed(8 * 1024 * 1024).unwrap())
+                .join()
+                .unwrap();
+            assert!(first.iter().all(|byte| *byte == 0xa5));
+            assert!(second.iter().all(|byte| *byte == 0));
+            let allowance = working_set();
+            if let Some(previous) = high_water {
+                assert_eq!(
+                    allowance, previous,
+                    "quota must not grow with allocation churn"
+                );
+            } else {
+                assert!(allowance.0 >= first.len() + second.len());
+                high_water = Some(allowance);
+            }
+            drop(first);
+            assert!(second.iter().all(|byte| *byte == 0));
         }
     }
 

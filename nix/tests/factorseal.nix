@@ -160,8 +160,15 @@ pkgs.testers.runNixOSTest {
         expected_status=0,
     ):
         start_transient(node, unit, command)
-        for _ in range(approval_count):
-            approve_permission(node, pending_permission_id(node, project))
+        try:
+            for _ in range(approval_count):
+                approve_permission(node, pending_permission_id(node, project))
+        except Exception:
+            # These VMs contain only synthetic test credentials. Include the
+            # client error so a discovery/authorization failure is diagnosable.
+            print(node.succeed(f"cat /tmp/{unit}.stdout /tmp/{unit}.stderr"))
+            print(as_user(node, f"${package}/bin/factorseal --root={root} permissions list --json"))
+            raise
         wait_transient(node, unit, expected_status=expected_status)
 
     def initialize_on(node):

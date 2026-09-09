@@ -228,6 +228,80 @@ collision-free suffixes.
 
 ### Personal item types and migration
 
+For an open credential interchange format, use **CXF 1.0 encrypted with age**:
+
+```console
+$ factorseal export credentials.cxf.json.age --format cxf-age
+Archive passphrase:
+Confirm archive passphrase:
+$ factorseal import credentials.cxf.json.age --format cxf-age
+Archive passphrase:
+```
+
+In desktop, choose **Transfer credentials**, then **Encrypted transfer**.
+Choose **Back up vault** to create or restore a FactorSeal backup; that flow
+selects the backup format automatically.
+`--passphrase-file` and `--replace-existing` work as with native archives.
+
+For encryption to a recipient's **hybrid post-quantum key**, generate a key
+with [age 1.3 or later](https://github.com/FiloSottile/age#post-quantum-keys):
+
+```console
+$ age-keygen -pq -o identity.txt
+$ age-keygen -y identity.txt > recipient.txt
+$ factorseal export credentials.cxf.json.age --format cxf-age --recipient-file recipient.txt
+$ factorseal import credentials.cxf.json.age --format cxf-age --identity-file identity.txt
+```
+
+Share `recipient.txt` with the exporting device and keep `identity.txt` private
+on the importing device. Desktop exposes this as **Post-quantum key**, with a
+file chooser for the public recipient or private identity. Both interfaces
+accept exactly one hybrid key per file, with standard age comments and blank
+lines. Private identity files must be unencrypted and accessible only to your
+account. Classical age keys and SSH keys are rejected; key-file options cannot
+be combined with `--passphrase-file`. FactorSeal does not need an external age
+executable to encrypt or decrypt.
+
+Hybrid mode uses ML-KEM-768 + X25519. Both age modes retain the standard 128-bit
+file key; hybrid mode does not raise that to 256 bits. Passphrase mode uses
+symmetric encryption and its security also depends on passphrase strength.
+See the [age post-quantum security rationale](https://words.filippo.io/post-quantum-age/).
+
+The contents follow FIDO's [Credential Exchange Format 1.0, March 2026 errata](https://fidoalliance.org/specs/cx/cxf-v1.0-ps-errata-20260309.html);
+the file uses the open [age v1 encryption format](https://age-encryption.org/v1).
+No plaintext intermediary file is created. A standard age implementation can
+decrypt the file independently of FactorSeal, although destination managers
+may require that decryption step and must support CXF JSON import. This does
+not implement CXP. An opt-in [macOS 26 desktop integration](platform/apple/README.md)
+adds Apple's system credential-transfer interface and a bundled credential-provider
+extension. It remains experimental pending live Apple Passwords acceptance.
+
+CXF exports cover Personal secrets. Logins and API credentials use standard
+credential fields, verification-code seeds use standard TOTP credentials,
+and other text fields use labeled, typed custom sections. Small FactorSeal
+extensions retain local field types, section order, folders, and archive flags;
+other managers may ignore those extensions. TOTP URIs normalize during import.
+Re-export preserves imported CXF accounts, collections, and unknown properties
+while applying edits and removing deleted fields. Conflicting account metadata,
+raw edits to unsupported credentials, and source data from other formats block
+export before the destination file is changed. CXF file references
+without an attachment transport block import. Unknown credentials, including
+passkeys, are preserved as source data and reported as lacking full functional
+support; retaining a passkey does not enable authentication with it.
+
+Keep using `.factorseal` for complete portable backups, including project
+addresses, system-keyring metadata, and expiry deadlines. Its existing v1/v2
+readers remain compatible. After migrating, keep the old vault as a fallback
+and verify important credentials before relying exclusively on the new vault.
+See [credential exchange design](security/credential-exchange.md) for the
+format boundary, resource limits, and compatibility tests.
+
+Desktop imports show the validated item count and unsupported-data count before
+writing. For a CLI preview, add `--dry-run` to `factorseal import`; it validates
+the whole input without connecting to a vault. Imports commit individual records.
+If interrupted, retry the same input without `--replace-existing` to keep records
+already imported, including a write whose response was lost.
+
 Personal items use a versioned record with a stable ID, category, ordered sections,
 and typed fields. Templates cover logins, secure notes, cards, identities, SSH
 keys, API credentials, passports, bank accounts, documents, and generic secrets.
@@ -504,6 +578,11 @@ the original provider request remains within its deadline. Approval completes
 that request without exposing permission-management APIs to SecretSpec; a later
 approval remains useful when the caller retries after its deadline.
 
+With the headless agent, SecretSpec writes use these signed project permissions.
+With Desktop, each write uses the secure input dialog described below. The
+provider checks the host's input capability before choosing the flow; cancelling
+or failing a desktop dialog ends the write.
+
 Granting requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal
 prompts for the permission lifetime; Enter accepts the app-requested default (or one
@@ -646,7 +725,7 @@ reporting instructions.
 The repository uses [devenv](https://devenv.sh/) on Linux:
 
 ```console
-$ devenv shell cargo test --workspace --all-targets --all-features
+$ devenv shell -- bash scripts/test-with-dbus.sh cargo test --workspace --all-targets --all-features
 $ devenv shell cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ devenv shell cargo fmt --all -- --check
 ```
@@ -658,6 +737,11 @@ $ cargo test --workspace --all-targets --all-features
 $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo fmt --all -- --check
 ```
+
+For Apple credential-exchange SDK and Rust interoperability checks on macOS 26+
+with Xcode 26+, run `bash scripts/test-apple-exchange.sh`. See the
+[Apple test setup](platform/apple/README.md) for CI artifacts and the separate
+signed-app acceptance procedure.
 
 The feature split is intentional:
 

@@ -1,0 +1,21 @@
+{
+  "version": { "major": 1, "minor": 0 },
+  "exporterRpId": "example.org",
+  "exporterDisplayName": "Synthetic interoperability fixture",
+  "timestamp": 0,
+  "accounts": [{
+    "id": "AQ",
+    "username": "",
+    "email": "",
+    "collections": [],
+    "items": [{
+      "id": "Ag",
+      "title": "Example login",
+      "credentials": [{
+        "type": "basic-auth",
+        "username": { "fieldType": "string", "value": "alice" },
+        "password": { "fieldType": "concealed-string", "value": "synthetic-password" }
+      }]
+    }]
+  }]
+}

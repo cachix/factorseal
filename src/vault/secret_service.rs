@@ -680,6 +680,8 @@ pub(super) enum SecretServiceError {
     AccessDenied(String),
     Cancelled(String),
     TimedOut(String),
+    #[cfg(feature = "key-protection")]
+    NotSupported(String),
 }
 
 impl From<fdo::Error> for SecretServiceError {
@@ -1256,7 +1258,7 @@ mod tests {
     #[test]
     fn secure_keyring_write_saves_edited_value_without_a_write_grant() {
         runtime().block_on(async {
-            let server = free_session_bus().await.unwrap();
+            let (server, _bus_guard) = free_session_bus().await.unwrap();
             let (_directory, vault, manager) = test_service_unprivileged();
             vault.authorize_permission_manager(&manager, 100).unwrap();
             let agent =
@@ -1355,9 +1357,45 @@ mod tests {
 
     #[cfg(feature = "key-protection")]
     #[test]
+    fn headless_native_input_reports_unsupported_without_waiting_for_unlock() {
+        runtime().block_on(async {
+            let (server, _bus_guard) = free_session_bus().await.unwrap();
+            let (unlocks, mut requests) = mpsc::unbounded_channel();
+            let shared = Arc::new(Shared::new(Arc::new(ChannelPrompter(unlocks))));
+            server
+                .object_server()
+                .at(SERVICE_PATH, Service { shared })
+                .await
+                .unwrap();
+            let client = Connection::session().await.unwrap();
+            let service = Proxy::new(
+                &client,
+                BUS_NAME,
+                SERVICE_PATH,
+                "org.freedesktop.Secret.Service",
+            )
+            .await
+            .unwrap();
+            assert!(!service.get_property::<bool>("SupportsSecureInput").await.unwrap());
+            let (_local, remote) = std::os::unix::net::UnixStream::pair().unwrap();
+            let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                service.call::<_, _, ()>("InputForIpc", &(HashMap::from([("project", "test")]), fd)),
+            )
+            .await
+            .expect("headless input must fail promptly")
+            .unwrap_err();
+            assert!(matches!(&error, zbus::Error::MethodError(name, ..) if name.as_str() == "org.freedesktop.Secret.Error.NotSupported"), "{error:?}");
+            assert!(requests.try_recv().is_err(), "unsupported input must not request unlock");
+        });
+    }
+
+    #[cfg(feature = "key-protection")]
+    #[test]
     fn native_secure_input_exchanges_values_only_over_the_private_channel() {
         runtime().block_on(async {
-            let server = free_session_bus().await.unwrap();
+            let (server, _bus_guard) = free_session_bus().await.unwrap();
             let (_directory, vault, manager) = test_service_unprivileged();
             let peer = crate::vault::linux::linux_caller_identity_for_executable(
                 std::env::current_exe().unwrap(),
@@ -1383,6 +1421,7 @@ mod tests {
             )
             .await
             .unwrap();
+            assert!(service.get_property::<bool>("SupportsSecureInput").await.unwrap());
             let (_local, remote) = std::os::unix::net::UnixStream::pair().unwrap();
             let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
             let denied = service.call::<_, _, ()>("InputForIpc", &(HashMap::from([("project", "test")]), fd)).await.unwrap_err();
@@ -1439,15 +1478,30 @@ mod tests {
     /// already registered, can still run the unit suite. Linux CI runs it
     /// under `dbus-run-session`, where these exchanges are mandatory on an
     /// isolated bus. Returns a connection that briefly held the name.
-    async fn free_session_bus() -> Option<Connection> {
+    async fn free_session_bus() -> Option<(Connection, tokio::sync::MutexGuard<'static, ()>)> {
+        static TEST_BUS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         std::env::var_os("DBUS_SESSION_BUS_ADDRESS")?;
-        let connection = Connection::session().await.ok()?;
+        let guard = TEST_BUS.lock().await;
+        let required = std::env::var_os("FACTORSEAL_TEST_PRIVATE_DBUS").is_some();
+        let connection = match Connection::session().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                assert!(!required, "could not connect to isolated test bus: {error}");
+                return None;
+            }
+        };
         match connection
             .request_name_with_flags(BUS_NAME, fdo::RequestNameFlags::DoNotQueue.into())
             .await
         {
-            Ok(_) => Some(connection),
-            Err(zbus::Error::NameTaken) => None,
+            Ok(_) => Some((connection, guard)),
+            Err(zbus::Error::NameTaken) => {
+                assert!(
+                    !required,
+                    "isolated test bus still has a Secret Service owner"
+                );
+                None
+            }
             Err(error) => panic!("could not register the Secret Service test name: {error}"),
         }
     }
@@ -1555,7 +1609,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn session_bus_crud_uses_the_exported_secret_service_interfaces() {
         runtime().block_on(async {
-            let Some(server_connection) = free_session_bus().await else {
+            let Some((server_connection, _bus_guard)) = free_session_bus().await else {
                 return;
             };
             let (_directory, agent) = agent();
@@ -1870,7 +1924,7 @@ mod tests {
             return;
         };
         runtime().block_on(async {
-            let probe = free_session_bus()
+            let (probe, _bus_guard) = free_session_bus()
                 .await
                 .expect("test needs an isolated, unused bus");
             let client = Connection::session().await.unwrap();
@@ -2083,7 +2137,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn a_sealed_host_locks_the_collection_and_completes_prompts_on_unseal() {
         runtime().block_on(async {
-            let Some(probe) = free_session_bus().await else {
+            let Some((probe, _bus_guard)) = free_session_bus().await else {
                 return;
             };
             assert!(probe.release_name(BUS_NAME).await.unwrap());
@@ -2223,7 +2277,7 @@ mod tests {
     #[test]
     fn the_host_takes_over_the_name_once_the_previous_owner_releases_it() {
         runtime().block_on(async {
-            let Some(previous_owner) = free_session_bus().await else {
+            let Some((previous_owner, _bus_guard)) = free_session_bus().await else {
                 return;
             };
             let observer = Connection::session().await.unwrap();

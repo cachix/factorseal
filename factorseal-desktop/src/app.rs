@@ -5,6 +5,8 @@ mod devices;
 mod personal_actions;
 mod personal_detail;
 mod personal_templates;
+#[cfg(feature = "apple-credential-exchange")]
+mod system_transfer;
 
 pub(crate) enum AccessEvent {
     #[cfg(target_os = "linux")]
@@ -43,8 +45,8 @@ use gpui_tray::{Icon, Tray};
 use zeroize::Zeroizing;
 
 use crate::runtime::{
-    DesktopRuntime, PERSONAL_SECRET_NAMESPACE, RuntimeConfig, Snapshot, TransferSummary,
-    VaultContents,
+    DesktopRuntime, PERSONAL_SECRET_NAMESPACE, RuntimeConfig, Snapshot, TransferKey,
+    TransferSummary, VaultContents,
 };
 use crate::{branding, theming};
 use factorseal::transfer::{
@@ -179,6 +181,11 @@ struct TransferCompletion {
     summary: Option<TransferSummary>,
     contents: Option<VaultContents>,
     path: std::path::PathBuf,
+}
+
+enum TransferOperation {
+    Prepared(crate::runtime::PreparedImport),
+    Exported(TransferCompletion),
 }
 
 impl Global for EventTask {}
@@ -598,8 +605,8 @@ fn category_documentation(
 enum VaultSelection {
     PersonalSecrets,
     Devices,
-    Import,
-    Export,
+    TransferCredentials,
+    BackupVault,
     Category(factorseal::DocumentKind),
     Entry(factorseal::VaultEntryMetadata),
     Permission(factorseal::Permission),
@@ -610,8 +617,8 @@ impl VaultSelection {
     fn page_title(&self) -> Option<&'static str> {
         match self {
             Self::Devices => Some("Devices"),
-            Self::Import => Some("Import"),
-            Self::Export => Some("Export"),
+            Self::TransferCredentials => Some("Transfer credentials"),
+            Self::BackupVault => Some("Back up vault"),
             _ => None,
         }
     }
@@ -676,10 +683,15 @@ struct DesktopView {
     device_name: gpui::Entity<InputState>,
     pairing_ticket: gpui::Entity<SecretInputState>,
     transfer_format: TransferFormat,
+    transfer_is_import: bool,
+    transfer_use_recipient: bool,
+    transfer_key_file: Option<std::path::PathBuf>,
     transfer_busy: bool,
     transfer_replace_existing: bool,
     transfer_plaintext_confirmed: bool,
     transfer_notice: Option<TransferNotice>,
+    #[cfg(feature = "apple-credential-exchange")]
+    system_transfer: system_transfer::State,
     system_integrations_expanded: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -952,23 +964,32 @@ impl DesktopView {
             devices_loaded: false,
             device_pairing: None,
             devices_notice: None,
-            device_name: cx.new(|cx| {
-                let name = crate::appearance::current(cx)
-                    .device_name
-                    .clone()
-                    .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
-                InputState::new(window, cx).default_value(name)
-            }),
+            device_name: Self::device_name_input(window, cx),
             pairing_ticket: cx
                 .new(|cx| SecretInputState::new(window, cx).placeholder("Paste pairing ticket")),
             transfer_format: TransferFormat::default(),
+            transfer_is_import: false,
+            transfer_use_recipient: false,
+            transfer_key_file: None,
             transfer_busy: false,
             transfer_replace_existing: false,
             transfer_plaintext_confirmed: false,
             transfer_notice: None,
+            #[cfg(feature = "apple-credential-exchange")]
+            system_transfer: system_transfer::State::default(),
             system_integrations_expanded: false,
             _subscriptions: vec![password_submit, vault_search_change],
         }
+    }
+
+    fn device_name_input(window: &mut Window, cx: &mut Context<Self>) -> gpui::Entity<InputState> {
+        cx.new(|cx| {
+            let name = crate::appearance::current(cx)
+                .device_name
+                .clone()
+                .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+            InputState::new(window, cx).default_value(name)
+        })
     }
 
     fn choose_setup_method(
@@ -1074,6 +1095,10 @@ impl DesktopView {
             _ => None,
         };
         if !matches!(snapshot, Snapshot::Unsealed { .. }) {
+            #[cfg(feature = "apple-credential-exchange")]
+            if matches!(self.snapshot, Snapshot::Unsealed { .. }) {
+                self.cancel_system_transfer();
+            }
             self.clear_secret_inputs(cx);
             self.pairing_ticket.update(cx, SecretInputState::clear);
             self.devices.state.invitation = None;
@@ -1105,17 +1130,32 @@ impl DesktopView {
     }
 
     fn select_vault_item(&mut self, selection: VaultSelection, cx: &mut Context<Self>) {
+        if self.transfer_busy
+            && matches!(
+                selection,
+                VaultSelection::TransferCredentials | VaultSelection::BackupVault
+            )
+        {
+            return;
+        }
         if !self.flush_personal_changes(cx) {
             return;
         }
         self.clear_secret_inputs(cx);
-        if matches!(selection, VaultSelection::Import | VaultSelection::Export) {
+        if matches!(
+            selection,
+            VaultSelection::TransferCredentials | VaultSelection::BackupVault
+        ) {
             self.transfer_notice = None;
-        }
-        if matches!(selection, VaultSelection::Export)
-            && self.transfer_format == TransferFormat::OnePasswordPux
-        {
-            self.transfer_format = TransferFormat::FactorSeal;
+            self.transfer_key_file = None;
+            self.transfer_plaintext_confirmed = false;
+            self.transfer_replace_existing = false;
+            self.transfer_is_import = false;
+            self.transfer_format = if selection == VaultSelection::BackupVault {
+                TransferFormat::FactorSeal
+            } else {
+                TransferFormat::CxfAge
+            };
         }
         self.selected_vault_item = Some(selection.clone());
         if let VaultSelection::Entry(entry) = selection
@@ -1144,8 +1184,55 @@ impl DesktopView {
         }
         self.clear_secret_inputs(cx);
         self.transfer_format = format;
+        self.transfer_key_file = None;
         self.transfer_plaintext_confirmed = false;
         self.transfer_notice = None;
+        cx.notify();
+    }
+
+    fn select_transfer_direction(&mut self, is_import: bool, cx: &mut Context<Self>) {
+        if self.transfer_busy
+            || is_import == self.transfer_is_import
+            || !self.flush_personal_changes(cx)
+        {
+            return;
+        }
+        self.clear_secret_inputs(cx);
+        self.transfer_is_import = is_import;
+        if !is_import && self.transfer_format == TransferFormat::OnePasswordPux {
+            self.transfer_format = TransferFormat::CxfAge;
+        }
+        self.transfer_key_file = None;
+        self.transfer_replace_existing = false;
+        self.transfer_plaintext_confirmed = false;
+        self.transfer_notice = None;
+        cx.notify();
+    }
+
+    fn choose_transfer_key_file(&mut self, is_import: bool, cx: &mut Context<Self>) {
+        if self.transfer_busy {
+            return;
+        }
+        self.transfer_busy = true;
+        cx.spawn(async move |view, cx| {
+            let chosen = rfd::AsyncFileDialog::new()
+                .set_title(if is_import {
+                    "Choose private age identity"
+                } else {
+                    "Choose public age recipient"
+                })
+                .pick_file()
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                view.transfer_busy = false;
+                if let Some(chosen) = chosen {
+                    view.transfer_key_file = Some(chosen.path().to_owned());
+                    view.transfer_notice = None;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1163,31 +1250,55 @@ impl DesktopView {
         };
         let metadata = metadata.clone();
         let format = self.transfer_format;
-        let passphrase = self.archive_passphrase.read(cx).value();
-        let confirmation = self.archive_passphrase_confirmation.read(cx).value();
-        if format.is_native() && passphrase.is_empty() {
+        let use_recipient = format == TransferFormat::CxfAge && self.transfer_use_recipient;
+        let needs_passphrase = format.is_encrypted() && !use_recipient;
+        let key_file = if use_recipient {
+            self.transfer_key_file.clone()
+        } else {
+            None
+        };
+        if use_recipient && key_file.is_none() {
             self.transfer_notice = Some(TransferNotice::Error(
-                "Enter the archive passphrase.".to_owned(),
+                if is_import {
+                    "Choose the private age identity file."
+                } else {
+                    "Choose the recipient's public age key file."
+                }
+                .to_owned(),
             ));
             cx.notify();
             return;
         }
-        if !is_import && format.is_native() && passphrase != confirmation {
+        let passphrase = self.archive_passphrase.read(cx).value();
+        let confirmation = self.archive_passphrase_confirmation.read(cx).value();
+        if needs_passphrase && passphrase.is_empty() {
             self.transfer_notice = Some(TransferNotice::Error(
-                "The archive passphrases do not match.".to_owned(),
+                if format.is_native() {
+                    "Enter the backup passphrase."
+                } else {
+                    "Enter the transfer passphrase."
+                }
+                .to_owned(),
+            ));
+            cx.notify();
+            return;
+        }
+        if !is_import && needs_passphrase && passphrase != confirmation {
+            self.transfer_notice = Some(TransferNotice::Error(
+                "The passphrases do not match.".to_owned(),
             ));
             cx.notify();
             return;
         }
         if !is_import
-            && format.is_native()
+            && needs_passphrase
             && let Some(error) = password_strength_error(&passphrase)
         {
             self.transfer_notice = Some(TransferNotice::Error(error));
             cx.notify();
             return;
         }
-        if !is_import && !format.is_native() && !self.transfer_plaintext_confirmed {
+        if !is_import && !format.is_encrypted() && !self.transfer_plaintext_confirmed {
             self.transfer_notice = Some(TransferNotice::Error(
                 "Confirm that you understand the export will contain plaintext secrets.".to_owned(),
             ));
@@ -1207,13 +1318,19 @@ impl DesktopView {
         let replace_existing = self.transfer_replace_existing;
         let runtime = Arc::clone(&self.runtime);
         cx.spawn(async move |view, cx| {
-            let dialog =
-                rfd::AsyncFileDialog::new().add_filter(format.label(), &[format.extension()]);
+            let dialog = rfd::AsyncFileDialog::new()
+                .set_title(match (format.is_native(), is_import) {
+                    (true, true) => "Choose backup to restore",
+                    (true, false) => "Save vault backup",
+                    (false, true) => "Choose credentials to import",
+                    (false, false) => "Save credential transfer",
+                })
+                .add_filter(format.label(), &[format.extension()]);
             let chosen = if is_import {
                 dialog.pick_file().await
             } else {
                 dialog
-                    .set_file_name(format!("factorseal-export.{}", format.extension()))
+                    .set_file_name(format!("factorseal-{}.{}", if format.is_native() { "backup" } else { "credentials" }, format.extension()))
                     .save_file()
                     .await
             };
@@ -1226,48 +1343,75 @@ impl DesktopView {
             };
             let path = chosen.path().to_owned();
             let operation_path = path.clone();
+            let commit_runtime = Arc::clone(&runtime);
+            let commit_metadata = metadata.clone();
             let result = smol::unblock(move || {
+                let key = key_file.as_deref().map_or(
+                    TransferKey::Passphrase(&passphrase),
+                    TransferKey::HybridFile,
+                );
+                if !is_import
+                    && key_file.as_deref().is_some_and(|key| {
+                        std::fs::canonicalize(key)
+                            .ok()
+                            .zip(std::fs::canonicalize(&operation_path).ok())
+                            .is_some_and(|(key, destination)| key == destination)
+                    })
+                {
+                    return Err(
+                        "Choose an export destination different from the age key file.".to_owned(),
+                    );
+                }
                 if is_import {
                     let bytes =
                         read_transfer_file(&operation_path).map_err(|error| error.to_string())?;
-                    let (summary, contents) = if format.is_native() {
-                        runtime.import_native_archive(
-                            &metadata,
-                            &bytes,
-                            &passphrase,
-                            replace_existing,
-                        )?
-                    } else {
-                        runtime.import_password_manager(
-                            &metadata,
-                            &bytes,
-                            format,
-                            replace_existing,
-                        )?
-                    };
-                    Ok(TransferCompletion {
-                        summary: Some(summary),
-                        contents: Some(contents),
-                        path: operation_path,
-                    })
+                    DesktopRuntime::prepare_import(&bytes, format, key).map(TransferOperation::Prepared)
                 } else {
                     let output = if format.is_native() {
                         runtime.export_native_archive(&metadata, &passphrase)?
                     } else {
-                        runtime.export_password_manager(&metadata, format)?
+                        runtime.export_password_manager(&metadata, format, key)?
                     };
                     write_private_file(&operation_path, &output)
                         .map_err(|error| error.to_string())?;
-                    Ok(TransferCompletion {
+                    Ok(TransferOperation::Exported(TransferCompletion {
                         summary: None,
                         contents: None,
                         path: operation_path,
-                    })
+                    }))
                 }
             })
             .await;
+            let result = match result {
+                Ok(TransferOperation::Prepared(prepared)) => {
+                    let preview = format!(
+                        "{} items are ready to {}. {} contain data without full functional support.\n\nExisting items will be {}. Keep the old vault until you have verified important logins and verification codes.",
+                        prepared.len(), if format.is_native() { "restore" } else { "import" }, prepared.preserved_only(),
+                        if replace_existing { "replaced" } else { "kept" },
+                    );
+                    let decision = rfd::AsyncMessageDialog::new()
+                        .set_title(if format.is_native() { "Review restore" } else { "Review import" })
+                        .set_description(preview)
+                        .set_buttons(rfd::MessageButtons::OkCancel)
+                        .show().await;
+                    if decision != rfd::MessageDialogResult::Ok {
+                        let _ = view.update(cx, |view, cx| {
+                            view.transfer_busy = false;
+                            view.transfer_notice = None;
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    smol::unblock(move || {
+                        let (summary, contents) = commit_runtime.commit_import(&commit_metadata, prepared, replace_existing)?;
+                        Ok(TransferCompletion { summary: Some(summary), contents: Some(contents), path })
+                    }).await
+                }
+                Ok(TransferOperation::Exported(completion)) => Ok(completion),
+                Err(error) => Err(error),
+            };
             let _ = view.update(cx, |view, cx| {
-                view.finish_transfer(is_import, result);
+                view.finish_transfer(is_import, format.is_native(), result);
                 cx.notify();
             });
         })
@@ -1275,7 +1419,12 @@ impl DesktopView {
         cx.notify();
     }
 
-    fn finish_transfer(&mut self, is_import: bool, result: Result<TransferCompletion, String>) {
+    fn finish_transfer(
+        &mut self,
+        is_import: bool,
+        is_backup: bool,
+        result: Result<TransferCompletion, String>,
+    ) {
         self.transfer_busy = false;
         match result {
             Ok(completion) => {
@@ -1290,24 +1439,52 @@ impl DesktopView {
                     *contents_error = None;
                 }
                 let message = if let Some(summary) = completion.summary {
-                    format!(
-                        "Imported {} items: {} added, {} replaced, {} kept existing.",
+                    let mut message = format!(
+                        "{} {} items: {} added, {} replaced, {} kept existing.",
+                        if is_backup { "Restored" } else { "Imported" },
                         summary.processed(),
                         summary.added,
                         summary.replaced,
                         summary.kept_existing
-                    )
+                    );
+                    if summary.preserved_only > 0 {
+                        use std::fmt::Write as _;
+                        let _ = write!(
+                            message,
+                            " {} source items contain data preserved without full functional support. Keep the old vault until you have verified important credentials.",
+                            summary.preserved_only
+                        );
+                    }
+                    message
                 } else if is_import {
-                    "Import complete.".to_owned()
+                    if is_backup {
+                        "Restore complete."
+                    } else {
+                        "Import complete."
+                    }
+                    .to_owned()
                 } else {
-                    format!("Exported secrets to {}.", completion.path.display())
+                    format!(
+                        "{} saved to {}.",
+                        if is_backup {
+                            "Backup"
+                        } else {
+                            "Credential transfer"
+                        },
+                        completion.path.display()
+                    )
                 };
                 self.transfer_notice = Some(TransferNotice::Success(message));
             }
             Err(error) => {
                 self.transfer_notice = Some(TransferNotice::Error(format!(
                     "{} failed: {error}",
-                    if is_import { "Import" } else { "Export" }
+                    match (is_backup, is_import) {
+                        (true, true) => "Restore",
+                        (true, false) => "Backup",
+                        (false, true) => "Import",
+                        (false, false) => "Export",
+                    }
                 )));
             }
         }
@@ -2597,20 +2774,67 @@ impl DesktopView {
             )
     }
 
+    fn render_cxf_key_options(&self, is_import: bool, cx: &mut Context<Self>) -> Div {
+        let mut panel = v_flex().gap_3().child(
+            h_flex().gap_2().children(
+                [(false, "Passphrase"), (true, "Post-quantum key")]
+                    .into_iter()
+                    .map(|(hybrid, label)| {
+                        Button::new(("transfer-key-mode", usize::from(hybrid)))
+                            .label(label)
+                            .selected(self.transfer_use_recipient == hybrid)
+                            .disabled(self.transfer_busy)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.clear_secret_inputs(cx);
+                                view.transfer_use_recipient = hybrid;
+                                view.transfer_key_file = None;
+                                view.transfer_notice = None;
+                                cx.notify();
+                            }))
+                    }),
+            ),
+        );
+        if self.transfer_use_recipient {
+            panel = panel
+                .child(div().whitespace_normal().child(if is_import {
+                    "Choose the private age identity matching the recipient used for this export. The key file must be unencrypted and private to your account."
+                } else {
+                    "Choose the recipient's public age post-quantum key. Only the matching private key can decrypt this export. Compatible with age 1.3 and later."
+                }))
+                .child(
+                    Button::new("choose-transfer-key")
+                        .label(if is_import { "Choose private key file" } else { "Choose public key file" })
+                        .disabled(self.transfer_busy)
+                        .on_click(cx.listener(move |view, _, _, cx| view.choose_transfer_key_file(is_import, cx))),
+                )
+                .when_some(self.transfer_key_file.as_ref(), |panel, path| {
+                    panel.child(div().whitespace_normal().child(path.file_name().unwrap_or_default().to_string_lossy().into_owned()))
+                });
+        }
+        panel
+    }
+
     #[allow(clippy::too_many_lines)]
-    fn render_transfer_detail(&self, is_import: bool, cx: &mut Context<Self>) -> Div {
+    fn render_transfer_detail(&self, is_backup: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
-        let description = if is_import {
-            "Restore a FactorSeal backup or bring personal items from another password manager."
-        } else {
-            "Create an encrypted FactorSeal backup or migrate personal items to another password manager."
+        let is_import = self.transfer_is_import;
+        let description = match (is_backup, is_import) {
+            (true, true) => "Restore saved vault items from a FactorSeal backup.",
+            (true, false) => {
+                "Save an encrypted backup of your Personal secrets, project secrets, and system-keyring items."
+            }
+            (false, true) => {
+                "Bring Personal credentials from another password manager or an encrypted transfer file."
+            }
+            (false, false) => "Move Personal credentials to another device or password manager.",
         };
         let format = self.transfer_format;
+        let use_recipient = format == TransferFormat::CxfAge && self.transfer_use_recipient;
         let replace_control = {
             let view = cx.entity().downgrade();
             Checkbox::new("replace-import-conflicts")
                 .checked(self.transfer_replace_existing)
-                .label("Replace vault items with the same name or address")
+                .label("Replace existing items")
                 .disabled(self.transfer_busy)
                 .on_click(move |checked, _, cx| {
                     let _ = view.update(cx, |view, cx| {
@@ -2634,24 +2858,67 @@ impl DesktopView {
                     });
                 })
         };
-        let mut form = v_flex().w_full().min_w_0().gap_5().child(
-            h_flex().gap_2().flex_wrap().children(
-                TransferFormat::ALL
-                    .into_iter()
-                    .filter(|candidate| is_import || *candidate != TransferFormat::OnePasswordPux)
-                    .enumerate()
-                    .map(|(index, candidate)| {
-                        Button::new(("transfer-format", index))
-                            .selected(format == candidate)
-                            .disabled(self.transfer_busy)
-                            .label(candidate.label())
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.select_transfer_format(candidate, cx);
-                            }))
-                    }),
-            ),
-        );
-        if format.is_native() {
+        let mut form =
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_5()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .children([false, true].into_iter().map(|import| {
+                            Button::new(("transfer-direction", usize::from(import)))
+                                .selected(is_import == import)
+                                .disabled(self.transfer_busy)
+                                .label(match (is_backup, import) {
+                                    (true, false) => "Create backup",
+                                    (true, true) => "Restore backup",
+                                    (false, false) => "Export credentials",
+                                    (false, true) => "Import credentials",
+                                })
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.select_transfer_direction(import, cx);
+                                }))
+                        })),
+                );
+        if !is_backup {
+            #[cfg(feature = "apple-credential-exchange")]
+            if crate::apple_exchange::available() {
+                form = form.child(self.render_system_transfer(is_import, cx));
+            }
+            form = form.child(
+                v_flex()
+                    .gap_2()
+                    .child(div().text_sm().font_semibold().child("File type"))
+                    .child(
+                        h_flex().gap_2().flex_wrap().children(
+                            TransferFormat::ALL
+                                .into_iter()
+                                .filter(|candidate| {
+                                    !candidate.is_native()
+                                        && (is_import
+                                            || *candidate != TransferFormat::OnePasswordPux)
+                                })
+                                .enumerate()
+                                .map(|(index, candidate)| {
+                                    Button::new(("transfer-format", index))
+                                        .selected(format == candidate)
+                                        .disabled(self.transfer_busy)
+                                        .label(if candidate == TransferFormat::CxfAge {
+                                            "Encrypted transfer"
+                                        } else {
+                                            candidate.label()
+                                        })
+                                        .on_click(cx.listener(move |view, _, _, cx| {
+                                            view.select_transfer_format(candidate, cx);
+                                        }))
+                                }),
+                        ),
+                    ),
+            );
+        }
+        if format.is_encrypted() {
             form = form.child(
                 v_flex()
                     .gap_3()
@@ -2663,23 +2930,26 @@ impl DesktopView {
                     .child(
                         div()
                             .font_semibold()
-                            .child("Encrypted FactorSeal archive"),
+                            .child(if is_backup { "Encrypted backup" } else { "Encrypted credential file" }),
                     )
                     .child(
                         div()
                             .w_full()
                             .whitespace_normal()
                             .text_color(theme.muted_foreground)
-                            .child(if is_import {
-                                "Enter the separate passphrase used when this backup was created. Restored data is encrypted again using this device's TPM."
+                            .child(if format == TransferFormat::CxfAge {
+                                "Uses the open CXF credential format with age encryption. The receiving manager needs CXF support and may require a separate decryption step."
+                            } else if is_import {
+                                "Enter the passphrase used when this backup was created. Restored data is protected by this device's vault keys."
                             } else {
                                 "Includes durable vault items, but not provider caches, application authorizations, history, or device keys. Choose a separate passphrase for this portable backup."
                             }),
                     )
-                    .child(field_label("Archive passphrase", self.archive_passphrase.clone()))
-                    .when(!is_import, |panel| {
+                    .when(format == TransferFormat::CxfAge, |panel| panel.child(self.render_cxf_key_options(is_import, cx)))
+                    .when(!use_recipient, |panel| panel.child(field_label(if is_backup { "Backup passphrase" } else { "Transfer passphrase" }, self.archive_passphrase.clone())))
+                    .when(!is_import && !use_recipient, |panel| {
                         panel.child(
-                            field_label("Confirm archive passphrase", self.archive_passphrase_confirmation.clone()),
+                            field_label("Confirm passphrase", self.archive_passphrase_confirmation.clone()),
                         )
                     }),
             );
@@ -2736,7 +3006,13 @@ impl DesktopView {
                                 .text_color(theme.muted_foreground)
                                 .child(Spinner::new().small())
                                 .child(if is_import {
-                                    "Importing and securing…"
+                                    if is_backup {
+                                        "Restore in progress…"
+                                    } else {
+                                        "Import in progress…"
+                                    }
+                                } else if is_backup {
+                                    "Preparing backup…"
                                 } else {
                                     "Preparing export…"
                                 }),
@@ -2751,9 +3027,11 @@ impl DesktopView {
                         .primary()
                         .disabled(self.transfer_busy)
                         .label(if is_import {
-                            "Choose file and import"
+                            "Choose file and review"
+                        } else if is_backup {
+                            "Save backup"
                         } else {
-                            "Choose location and export"
+                            "Save transfer file"
                         })
                         .on_click(cx.listener(
                             move |view, _, window, cx| {
@@ -2895,8 +3173,8 @@ impl DesktopView {
             Some(VaultSelection::Devices) => {
                 v_flex().size_full().p_6().child(self.render_devices(cx))
             }
-            Some(VaultSelection::Import) => self.render_transfer_detail(true, cx),
-            Some(VaultSelection::Export) => self.render_transfer_detail(false, cx),
+            Some(VaultSelection::TransferCredentials) => self.render_transfer_detail(false, cx),
+            Some(VaultSelection::BackupVault) => self.render_transfer_detail(true, cx),
             Some(VaultSelection::Category(kind)) => {
                 self.render_category_detail(*kind, contents, cx)
             }
@@ -3129,19 +3407,21 @@ impl DesktopView {
                                 })),
                         )
                         .child(
-                            Button::new("import-vault")
+                            Button::new("transfer-credentials")
                                 .small()
-                                .label("Import")
+                                .disabled(self.transfer_busy)
+                                .label("Transfer credentials")
                                 .on_click(cx.listener(|view, _, _, cx| {
-                                    view.select_vault_item(VaultSelection::Import, cx);
+                                    view.select_vault_item(VaultSelection::TransferCredentials, cx);
                                 })),
                         )
                         .child(
-                            Button::new("export-vault")
+                            Button::new("backup-vault")
                                 .small()
-                                .label("Export")
+                                .disabled(self.transfer_busy)
+                                .label("Back up vault")
                                 .on_click(cx.listener(|view, _, _, cx| {
-                                    view.select_vault_item(VaultSelection::Export, cx);
+                                    view.select_vault_item(VaultSelection::BackupVault, cx);
                                 })),
                         ),
                 )
@@ -3546,10 +3826,12 @@ impl Render for DesktopView {
 }
 
 fn forget_desktop_window(handle: AnyWindowHandle, cx: &mut App) -> bool {
-    let desktop = cx.global_mut::<DesktopWindow>();
-    if desktop.handle != Some(handle) {
+    if cx.global::<DesktopWindow>().handle != Some(handle) {
         return false;
     }
+    #[cfg(feature = "apple-credential-exchange")]
+    system_transfer::cancel(cx);
+    let desktop = cx.global_mut::<DesktopWindow>();
     desktop.handle = None;
     desktop.visible = false;
     if let Ok(mut view) = desktop.view.lock() {
@@ -3559,6 +3841,8 @@ fn forget_desktop_window(handle: AnyWindowHandle, cx: &mut App) -> bool {
 }
 
 fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
+    #[cfg(feature = "apple-credential-exchange")]
+    crate::apple_exchange::set_unlocked(matches!(snapshot, Snapshot::Unsealed { .. }));
     let view_holder = {
         let desktop = cx.global_mut::<DesktopWindow>();
         desktop.snapshot = snapshot.clone();
@@ -3697,6 +3981,8 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
 }
 
 fn close_desktop(_: &CloseDesktop, cx: &mut App) {
+    #[cfg(feature = "apple-credential-exchange")]
+    system_transfer::cancel(cx);
     flush_desktop_personal_changes(cx);
     let handle = cx.global::<DesktopWindow>().handle;
     let Some(handle) = handle else {
@@ -3947,6 +4233,8 @@ pub(crate) fn setup(
     if !no_tray {
         install_tray(cx);
     }
+    #[cfg(feature = "apple-credential-exchange")]
+    system_transfer::setup(cx);
 
     let task = cx.spawn(async move |cx| {
         while let Ok(snapshot) = receiver.recv().await {

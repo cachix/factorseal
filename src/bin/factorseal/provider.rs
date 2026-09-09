@@ -46,7 +46,7 @@ fn check_request_live(context: &RequestContext) -> RpcResult<()> {
 /// One Factorseal process acting as a SecretSpec provider endpoint.
 pub(super) struct FactorsealProvider {
     client: Arc<dyn VaultClient>,
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     test_input: bool,
     application: OnceLock<VaultApplicationContext>,
 }
@@ -55,7 +55,7 @@ impl FactorsealProvider {
     fn new(root: &Path, socket: Option<&Path>) -> Result<Self, CliError> {
         Ok(Self {
             client: Arc::new(super::platform::native_client(root, socket)?),
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "linux"))]
             test_input: false,
             application: OnceLock::new(),
         })
@@ -65,6 +65,7 @@ impl FactorsealProvider {
     fn with_client(client: Arc<dyn VaultClient>) -> Self {
         Self {
             client,
+            #[cfg(target_os = "linux")]
             test_input: true,
             application: OnceLock::new(),
         }
@@ -119,18 +120,19 @@ impl FactorsealProvider {
     where
         F: FnMut() -> factorseal::VaultResult<VaultAction>,
     {
-        let mut first = self
+        let first = self
             .request_once(action().map_err(|e| map_vault_error(&e))?)
             .await;
         #[cfg(target_os = "linux")]
-        if matches!(&first, Err(error) if error.data.kind == ErrorKind::InteractionRequired && error.data.interaction.is_none())
+        let first = if matches!(&first, Err(error) if error.data.kind == ErrorKind::InteractionRequired && error.data.interaction.is_none())
         {
             *_opened_desktop = true;
             self.unlock_desktop(context).await?;
-            first = self
-                .request_once(action().map_err(|error| map_vault_error(&error))?)
-                .await;
-        }
+            self.request_once(action().map_err(|error| map_vault_error(&error))?)
+                .await
+        } else {
+            first
+        };
         let interaction = match &first {
             Err(error) if error.data.kind == ErrorKind::InteractionRequired => {
                 error.data.interaction.clone()
@@ -216,6 +218,31 @@ impl FactorsealProvider {
     }
 
     #[cfg(target_os = "linux")]
+    async fn supports_desktop_input(&self, context: &RequestContext) -> RpcResult<bool> {
+        #[cfg(test)]
+        if self.test_input {
+            return Ok(true);
+        }
+        let query = async {
+            let connection = zbus::Connection::session().await?;
+            let service = zbus::Proxy::new(
+                &connection,
+                "org.freedesktop.secrets",
+                "/org/freedesktop/secrets",
+                "org.freedesktop.Secret.Service",
+            )
+            .await?;
+            service.get_property::<bool>("SupportsSecureInput").await
+        };
+        tokio::select! {
+            () = context.cancellation.cancelled() => Err(RpcError::new(ErrorKind::Cancelled)),
+            result = tokio::time::timeout_at(context.deadline, query) => result
+                .map_err(|_| RpcError::new(ErrorKind::DeadlineExceeded))?
+                .map_err(|_| RpcError::interaction_required(None)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     async fn edit_secret(
         &self,
         context: &RequestContext,
@@ -296,7 +323,7 @@ impl FactorsealProvider {
         check_request_live(context)?;
         let project = self.project()?.to_owned();
         #[cfg(target_os = "linux")]
-        {
+        if self.supports_desktop_input(context).await? {
             let initial = WireSecret::new(value.expose().as_bytes().to_vec())
                 .map_err(|error| map_vault_error(&error))?;
             let value = self.edit_secret(context, &address, initial).await?;
@@ -311,26 +338,25 @@ impl FactorsealProvider {
                     evict_at,
                 })
                 .await?;
-            matches!(response, VaultResponseBody::Stored)
+            return matches!(response, VaultResponseBody::Stored)
                 .then_some(())
-                .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
+                .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed));
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let response = self
-                .request(context, || {
-                    Ok(VaultAction::PutCache {
-                        project: project.clone(),
-                        address: address.clone(),
-                        value: WireSecret::new(value.expose().as_bytes().to_vec())?,
-                        evict_at,
-                    })
+        // Headless hosts and other platforms require a signed project grant.
+        // A failed or cancelled desktop dialog never reaches this path.
+        let response = self
+            .request(context, || {
+                Ok(VaultAction::PutCache {
+                    project: project.clone(),
+                    address: address.clone(),
+                    value: WireSecret::new(value.expose().as_bytes().to_vec())?,
+                    evict_at,
                 })
-                .await?;
-            matches!(response, VaultResponseBody::Stored)
-                .then_some(())
-                .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
-        }
+            })
+            .await?;
+        matches!(response, VaultResponseBody::Stored)
+            .then_some(())
+            .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
     }
 
     async fn wait_for_permission(
@@ -651,10 +677,7 @@ fn unix_time_ms() -> RpcResult<u64> {
 
 pub(super) fn serve(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
     let provider = FactorsealProvider::new(root, socket)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .map_err(|error| CliError::ProviderProtocol(error.to_string()))?;
+    let runtime = provider_runtime()?;
     runtime
         .block_on(serve_provider(
             tokio::io::stdin(),
@@ -662,6 +685,14 @@ pub(super) fn serve(root: &Path, socket: Option<&Path>) -> Result<(), CliError> 
             provider,
             ServerConfig::default(),
         ))
+        .map_err(|error| CliError::ProviderProtocol(error.to_string()))
+}
+
+fn provider_runtime() -> Result<tokio::runtime::Runtime, CliError> {
+    // Linux provider requests use zbus's Tokio sockets as well as timers.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .map_err(|error| CliError::ProviderProtocol(error.to_string()))
 }
 

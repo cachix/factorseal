@@ -20,6 +20,11 @@ fi
 
 signing_identity=
 provisioning_profile=
+exchange=${FACTORSEAL_APPLE_EXCHANGE:-0}
+case $exchange in 0|1) ;; *) echo "FACTORSEAL_APPLE_EXCHANGE must be 0 or 1" >&2; exit 2 ;; esac
+[ "$exchange" = 0 ] || [ "$platform" = macos ] || { echo "Apple exchange requires macOS" >&2; exit 2; }
+build_profile=${FACTORSEAL_BUILD_PROFILE:-release}
+case $build_profile in release) profile_dir=release ;; dev) profile_dir=debug ;; *) echo "FACTORSEAL_BUILD_PROFILE must be release or dev" >&2; exit 2 ;; esac
 if [ "$platform" = macos ]; then
     signing_identity=${FACTORSEAL_MACOS_SIGNING_IDENTITY:-}
     provisioning_profile=${FACTORSEAL_MACOS_PROVISIONING_PROFILE:-}
@@ -55,14 +60,22 @@ if [ "$platform" = macos ]; then
     # controls the oldest runnable macOS. Build cleanly so stale metadata cannot
     # survive a target change.
     macos_deployment_target=11.0
+    if [ "$exchange" = 1 ]; then
+        macos_deployment_target=26.0
+        FACTORSEAL_APPLE_BRIDGE_DIR="$stage/apple-bridge"
+        export FACTORSEAL_APPLE_BRIDGE_DIR
+    fi
     MACOSX_DEPLOYMENT_TARGET=$macos_deployment_target
     CARGO_TARGET_DIR="$stage/cargo-target"
     export MACOSX_DEPLOYMENT_TARGET CARGO_TARGET_DIR
 fi
 
-cargo build --locked --release --no-default-features \
+cargo build --locked --profile "$build_profile" --no-default-features \
     --features vault,cli,hardware \
     --bin factorseal
+if [ "$exchange" = 1 ]; then
+    cargo build --locked --profile "$build_profile" -p factorseal-desktop --features apple-credential-exchange
+fi
 target_dir=$(cargo metadata --locked --no-deps --format-version 1 |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 if [ -z "$target_dir" ]; then
@@ -77,7 +90,7 @@ chmod 0755 "$stage/$archive/run-acceptance.sh"
 
 if [ "$platform" = linux ]; then
     mkdir -p "$stage/$archive/bin" "$stage/$archive/share/systemd/user"
-    cp "$target_dir/release/factorseal" "$stage/$archive/bin/"
+    cp "$target_dir/$profile_dir/factorseal" "$stage/$archive/bin/"
     cp packaging/linux/factorseal-start "$stage/$archive/bin/"
     # systemd needs an absolute ExecStart, so the unit is written for the
     # documented install prefix. Unpacking the tarball somewhere else means
@@ -92,11 +105,24 @@ if [ "$platform" = linux ]; then
 else
     app="$stage/$archive/Factorseal.app/Contents"
     mkdir -p "$app/MacOS" "$app/Resources" "$stage/$archive/Library/LaunchAgents"
-    cp "$target_dir/release/factorseal" "$app/MacOS/"
+    cp "$target_dir/$profile_dir/factorseal" "$app/MacOS/"
     cp packaging/macos/factorseal-askpass "$app/Resources/"
     sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Info.plist"
     cp packaging/macos/dev.factorseal.plist "$stage/$archive/Library/LaunchAgents/"
     chmod 0755 "$app/MacOS/factorseal" "$app/Resources/factorseal-askpass"
+    if [ "$exchange" = 1 ]; then
+        mkdir -p "$app/Frameworks"
+        cp "$target_dir/$profile_dir/factorseal-desktop" "$app/MacOS/"
+        cp "$FACTORSEAL_APPLE_BRIDGE_DIR/libFactorSealAppleBridge.dylib" "$app/Frameworks/"
+        /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable factorseal-desktop' "$app/Info.plist"
+        /usr/libexec/PlistBuddy -c 'Set :LSUIElement false' "$app/Info.plist"
+        /usr/libexec/PlistBuddy -c 'Add :LSMinimumSystemVersion string 26.0' "$app/Info.plist"
+        /usr/libexec/PlistBuddy -c 'Add :FactorSealExperimentalCredentialExchange bool true' "$app/Info.plist"
+        /usr/libexec/PlistBuddy -c 'Add :NSUserActivityTypes array' "$app/Info.plist"
+        activity_type=$(xcrun swift -e 'import AuthenticationServices; print(ASCredentialExchangeActivity)')
+        /usr/libexec/PlistBuddy -c "Add :NSUserActivityTypes:0 string $activity_type" "$app/Info.plist"
+        sh packaging/macos/build-credential-extension.sh "${app%/Contents}"
+    fi
 
     sh packaging/macos/prepare-app.sh \
         "${app%/Contents}" \
@@ -105,7 +131,8 @@ else
         sh packaging/macos/sign-app.sh \
             "${app%/Contents}" \
             "$signing_identity" \
-            "$provisioning_profile"
+            "$provisioning_profile" \
+            "${FACTORSEAL_MACOS_EXTENSION_PROVISIONING_PROFILE:-}"
     else
         sh packaging/macos/sign-app.sh "${app%/Contents}" -
     fi

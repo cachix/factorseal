@@ -68,7 +68,7 @@ diagnostics = ["dep:directories", "transfer"]
 personal = ["dep:anyhow", "dep:uuid"]
 personal-sync-network = ["personal-sync", "dep:iroh", "dep:qrcode", "tokio/net", "tokio/rt-multi-thread", "tokio/io-util"]
 personal-sync = ["vault-store", "key-protection", "dep:hpke", "dep:aes-gcm-hpke", "dep:tempfile"]
-transfer = ["personal", "dep:csv", "dep:tempfile", "dep:nt-token", "dep:zip"]
+transfer = ["personal", "dep:age", "dep:age-core", "dep:hpke", "hpke/chacha", "hpke/x25519", "dep:csv", "dep:percent-encoding", "dep:tempfile", "dep:nt-token", "dep:zip"]
 secretspec-provider = [
     "dep:async-trait",
     "dep:percent-encoding",
@@ -102,6 +102,10 @@ required-features = ["vault", "cli", "hardware"]
 # and `polyval` entries exist only to wipe the expanded key schedule and the
 # GHASH authentication key when a cipher instance is dropped.
 aes = { version = "0.8.4", features = ["zeroize"], optional = true }
+# Upstream's RustCrypto update shares our HPKE/KEM versions; crates.io 0.12.1
+# still pulls an incompatible pre-release KEM API.
+age = { git = "https://github.com/str4d/rage.git", rev = "b5b68c4f4f7ea5c368bc060f6fe0237549c3a13f", version = "0.12.1", default-features = false, optional = true }
+age-core = { git = "https://github.com/str4d/rage.git", rev = "b5b68c4f4f7ea5c368bc060f6fe0237549c3a13f", version = "0.12.0", optional = true }
 aes-gcm = { version = "0.10.3", features = ["zeroize"], optional = true }
 argon2 = { version = "0.5.3", features = ["zeroize"], optional = true }
 anyhow = { version = "1.0", optional = true }
@@ -150,6 +154,7 @@ zxcvbn = { version = "3.1.1", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+credential-exchange-format = "0.4.0"
 tempfile = "3.20.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -217,7 +222,20 @@ opt-level = 3
 [profile.dev.package.sha2]
 opt-level = 3
 
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
 [patch.crates-io]
+# Upstream replaces unmaintained proc-macro-error2 with proc-macro-error3.
+# Keep the workspace crates on the same source: Nix's Cargo vendor directory
+# cannot contain registry and Git copies with identical names and versions.
+i18n-config = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-embed = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-embed-impl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-embed-fl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
 gpui = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f", version = "=0.2.2" }
 
 [patch."https://github.com/zed-industries/zed.git"]

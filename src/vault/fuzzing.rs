@@ -86,6 +86,10 @@ pub fn transfer(bytes: &[u8]) {
     for format in crate::transfer::TransferFormat::ALL {
         let _ = crate::transfer::import_manager(format, bytes);
     }
+    if let Ok(key) = std::str::from_utf8(bytes) {
+        let _ = key.parse::<crate::transfer::cxf::HybridRecipient>();
+        let _ = key.parse::<crate::transfer::cxf::HybridIdentity>();
+    }
 }
 
 pub fn bootstrap(bytes: &[u8]) {

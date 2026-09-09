@@ -262,6 +262,13 @@ impl Service {
             .await
     }
 
+    // zbus's generated property dispatcher still references a getter removed
+    // by method-level cfg. Keep this getter and report disabled capabilities.
+    #[zbus(property)]
+    fn supports_secure_input(&self) -> bool {
+        cfg!(feature = "key-protection") && self.shared.prompter.supports_input()
+    }
+
     #[cfg(feature = "key-protection")]
     async fn input_for_ipc(
         &self,
@@ -270,6 +277,11 @@ impl Service {
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretServiceError> {
+        if !self.shared.prompter.supports_input() {
+            return Err(SecretServiceError::NotSupported(
+                "This host has no secure input UI".to_owned(),
+            ));
+        }
         let context = access_context(&attributes, &header, connection).await;
         if self.shared.locked() {
             self.shared.unlock_for_search(context.clone()).await?;

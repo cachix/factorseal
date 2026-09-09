@@ -1,0 +1,4 @@
+# Fixtures are byte-for-byte references, including embedded newlines and
+# encrypted plaintext. Preserve their original bytes on every checkout.
+tests/fixtures/** -text
+platform/apple/Tests/**/Fixtures/** -text

@@ -1,6 +1,8 @@
 { lib }:
 
 {
+  "age-0.12.1" = "sha256-CNYGypRocOTPj454fLOr0xGA2zFj54PKPEC6opGE9f4=";
+  "age-core-0.12.0" = "sha256-CNYGypRocOTPj454fLOr0xGA2zFj54PKPEC6opGE9f4=";
   "automerge-0.11.0" = "sha256-RRo6hDFB4JKGHOkG0aknmOnAc6pHHlw7Qjpe+EZ8juk=";
   "hexane-1.0.0-alpha.5" = "sha256-RRo6hDFB4JKGHOkG0aknmOnAc6pHHlw7Qjpe+EZ8juk=";
   "collections-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
@@ -22,6 +24,10 @@
   "gpui_wgpu-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "gpui_windows-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "http_client-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "i18n-config-0.4.8" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";
+  "i18n-embed-0.16.0" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";
+  "i18n-embed-fl-0.10.1" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";
+  "i18n-embed-impl-0.8.4" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";
   "media-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "perf-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "refineable-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";

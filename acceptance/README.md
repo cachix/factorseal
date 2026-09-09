@@ -7,6 +7,10 @@ Enclave policy, user-verification prompt, or operating-system lifecycle path.
 
 ## Volunteer quick start
 
+Credential migration has a separate [Apple Passwords acceptance procedure](apple-credential-exchange.md).
+Its automated SDK tests run with `bash scripts/test-apple-exchange.sh`; live
+system transfer additionally requires the signed credential-provider integration.
+
 Download and unpack the release archive for your platform, open a terminal in
 the unpacked directory, and run one command:
 

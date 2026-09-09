@@ -67,7 +67,7 @@ impl VaultArchive {
         }
     }
 
-    fn validate(&self) -> VaultResult<()> {
+    pub(crate) fn validate(&self) -> VaultResult<()> {
         if self.format != FORMAT || self.version != VERSION {
             return Err(VaultError::InvalidData(
                 "unsupported FactorSeal archive format or version".to_owned(),

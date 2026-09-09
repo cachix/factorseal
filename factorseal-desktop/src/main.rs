@@ -1,5 +1,7 @@
 mod app;
 mod appearance;
+#[cfg(feature = "apple-credential-exchange")]
+mod apple_exchange;
 mod branding;
 mod crash_reporting;
 mod instance;

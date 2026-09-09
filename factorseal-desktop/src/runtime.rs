@@ -5,14 +5,44 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use factorseal::security::LockedBytes;
 use factorseal::{
-    DocumentKind, MAX_LIST_PAGE_SIZE, NativeVaultClient, SecretAddress, UnlockGroup, UnlockPolicy,
-    Vault, VaultAction, VaultArchive, VaultClient, VaultEntryImportStatus, VaultEntryMetadata,
-    VaultMetadata, VaultRequest, VaultResponseBody, WireSecret, WireSecretAddress,
-    decrypt_vault_archive, encrypt_vault_archive,
+    DocumentKind, MAX_LIST_PAGE_SIZE, NativeVaultClient, UnlockGroup, UnlockPolicy, Vault,
+    VaultAction, VaultArchive, VaultClient, VaultEntryMetadata, VaultMetadata, VaultRequest,
+    VaultResponseBody, WireSecret, WireSecretAddress, decrypt_vault_archive, encrypt_vault_archive,
 };
 use zeroize::Zeroizing;
 
-use factorseal::transfer::{PersonalSecret, TransferFormat, export_manager, import_manager};
+use factorseal::transfer::{PersonalSecret, TransferFormat, export_manager};
+
+#[derive(Clone, Copy)]
+pub(crate) enum TransferKey<'a> {
+    Passphrase(&'a [u8]),
+    HybridFile(&'a Path),
+}
+
+impl TransferKey<'_> {
+    fn encrypt_cxf(&self, payload: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+        use factorseal::transfer::cxf;
+        match self {
+            Self::Passphrase(passphrase) => {
+                factorseal::security::validate_new_password(passphrase)?;
+                cxf::encrypt(payload, passphrase)
+            }
+            Self::HybridFile(path) => cxf::read_recipient_file(path)
+                .and_then(|recipient| cxf::encrypt_to_recipient(payload, &recipient)),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    fn decrypt_cxf(&self, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+        use factorseal::transfer::cxf;
+        match self {
+            Self::Passphrase(passphrase) => cxf::decrypt(bytes, passphrase),
+            Self::HybridFile(path) => cxf::read_identity_file(path)
+                .and_then(|identity| cxf::decrypt_with_hybrid_identity(bytes, &identity)),
+        }
+        .map_err(|error| error.to_string())
+    }
+}
 
 const METADATA_FILE: &str = "factorseal.json";
 pub(crate) use factorseal::personal::PERSONAL_SECRET_NAMESPACE;
@@ -62,26 +92,9 @@ impl VaultContents {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct TransferSummary {
-    pub(crate) added: usize,
-    pub(crate) replaced: usize,
-    pub(crate) kept_existing: usize,
-}
-
-impl TransferSummary {
-    pub(crate) const fn processed(self) -> usize {
-        self.added + self.replaced + self.kept_existing
-    }
-
-    fn record(&mut self, status: VaultEntryImportStatus) {
-        match status {
-            VaultEntryImportStatus::Added => self.added += 1,
-            VaultEntryImportStatus::Replaced => self.replaced += 1,
-            VaultEntryImportStatus::KeptExisting => self.kept_existing += 1,
-        }
-    }
-}
+pub(crate) use factorseal::transfer::import_plan::{
+    ImportSummary as TransferSummary, PreparedImport,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) enum Snapshot {
@@ -334,94 +347,70 @@ impl DesktopRuntime {
         encrypt_vault_archive(&archive, passphrase).map_err(|error| error.to_string())
     }
 
-    pub(crate) fn import_native_archive(
-        &self,
-        metadata: &VaultMetadata,
+    pub(crate) fn prepare_import(
         bytes: &[u8],
-        passphrase: &[u8],
-        replace_existing: bool,
-    ) -> Result<(TransferSummary, VaultContents), String> {
-        let archive =
-            decrypt_vault_archive(bytes, passphrase).map_err(|error| error.to_string())?;
-        let now = unix_time()?;
-        if archive
-            .entries
-            .iter()
-            .any(|entry| entry.evict_at.is_some_and(|deadline| deadline < now))
-        {
-            return Err("archive contains an entry that has already expired".to_owned());
-        }
-        let mut summary = TransferSummary::default();
-        for entry in archive.entries {
-            let request = VaultRequest::new(VaultAction::ImportVaultEntry {
-                entry: entry.metadata,
-                value: entry.value,
-                evict_at: entry.evict_at,
-                replace_existing,
-            })
-            .map_err(|error| error.to_string())?;
-            let VaultResponseBody::VaultEntryImported { status } =
-                self.request_live(metadata, &request)?
-            else {
-                return Err("vault returned an unexpected archive-import response".to_owned());
+        format: TransferFormat,
+        key: TransferKey<'_>,
+    ) -> Result<PreparedImport, String> {
+        if format.is_native() {
+            let TransferKey::Passphrase(passphrase) = key else {
+                return Err("Native archives require a passphrase".into());
             };
-            summary.record(status);
+            let archive =
+                decrypt_vault_archive(bytes, passphrase).map_err(|error| error.to_string())?;
+            return PreparedImport::archive(archive, unix_time()?)
+                .map_err(|error| error.to_string());
         }
-        Ok((summary, self.load_live_contents(metadata)?))
+        let decrypted;
+        let bytes = if format == TransferFormat::CxfAge {
+            decrypted = key.decrypt_cxf(bytes)?;
+            &decrypted
+        } else {
+            bytes
+        };
+        PreparedImport::manager(format, bytes).map_err(|error| error.to_string())
     }
 
     pub(crate) fn export_password_manager(
         &self,
         metadata: &VaultMetadata,
         format: TransferFormat,
+        key: TransferKey<'_>,
     ) -> Result<Zeroizing<Vec<u8>>, String> {
         let secrets = self.read_personal_secrets(metadata)?;
-        export_manager(format, &secrets).map_err(|error| error.to_string())
+        let payload = export_manager(format, &secrets).map_err(|error| error.to_string())?;
+        if format == TransferFormat::CxfAge {
+            key.encrypt_cxf(&payload)
+        } else {
+            Ok(payload)
+        }
     }
 
-    pub(crate) fn import_password_manager(
+    #[cfg(feature = "apple-credential-exchange")]
+    pub(crate) fn export_system_credentials(
         &self,
         metadata: &VaultMetadata,
-        bytes: &[u8],
-        format: TransferFormat,
+    ) -> Result<Zeroizing<Vec<u8>>, String> {
+        let secrets = self.read_personal_secrets(metadata)?;
+        factorseal::transfer::cxf::export_json(&secrets).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn commit_import(
+        &self,
+        metadata: &VaultMetadata,
+        prepared: PreparedImport,
         replace_existing: bool,
     ) -> Result<(TransferSummary, VaultContents), String> {
-        let secrets = import_manager(format, bytes).map_err(|error| error.to_string())?;
-
-        let mut prepared = Vec::with_capacity(secrets.len());
-        for secret in secrets {
-            let value = secret.encode().map_err(|error| error.to_string())?;
-            let entry = VaultEntryMetadata {
-                display_name: None,
-                display_type: None,
-                updated_at: None,
-                document_kind: DocumentKind::LocalKeyring,
-                partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
-                address: SecretAddress::new(secret.id.clone(), None)
-                    .map_err(|error| error.to_string())?,
-            };
-            prepared.push((
-                entry,
-                WireSecret::new(value.to_vec()).map_err(|e| e.to_string())?,
-            ));
-        }
-        let mut summary = TransferSummary::default();
-        for (entry, value) in prepared {
-            let request = VaultRequest::new(VaultAction::ImportVaultEntry {
-                entry,
-                value,
-                evict_at: None,
-                replace_existing,
-            })
+        let summary = prepared
+            .commit(&native_client(&self.config, metadata), replace_existing)
             .map_err(|error| error.to_string())?;
-            let VaultResponseBody::VaultEntryImported { status } =
-                self.request_live(metadata, &request)?
-            else {
-                return Err("vault returned an unexpected password-import response".to_owned());
-            };
-            summary.record(status);
-        }
-        Ok((summary, self.load_live_contents(metadata)?))
+        let contents = self.load_live_contents(metadata).map_err(|error| {
+            format!(
+                "Import completed for {} items, but refreshing the vault failed: {error}",
+                summary.processed()
+            )
+        })?;
+        Ok((summary, contents))
     }
 
     fn read_personal_secrets(

@@ -21,12 +21,33 @@ use zeroize::Zeroizing;
 
 type CacheKey = (String, SecretSpecAddress);
 
+#[cfg(target_os = "linux")]
+#[test]
+fn provider_runtime_drives_async_sockets() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    provider_runtime().unwrap().block_on(async {
+        let (mut writer, mut reader) = tokio::net::UnixStream::pair().unwrap();
+        writer.write_all(b"provider-io").await.unwrap();
+        let mut response = [0; 11];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reader.read_exact(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&response, b"provider-io");
+    });
+}
+
 fn application_context() -> VaultApplicationContext {
     VaultApplicationContext::new(
         Some("demo".to_owned()),
         Some("default".to_owned()),
         Some(
             std::env::current_dir()
+                .and_then(std::fs::canonicalize)
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

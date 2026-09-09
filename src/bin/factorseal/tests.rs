@@ -263,6 +263,130 @@ fn archive_passphrase_can_be_read_from_a_private_file() {
 }
 
 #[test]
+fn cxf_encrypted_transfer_accepts_passphrase_file() {
+    for command in ["import", "export"] {
+        let cli = Cli::try_parse_from([
+            "factorseal",
+            command,
+            "credentials.cxf.json.age",
+            "--format",
+            "cxf-age",
+            "--passphrase-file",
+            "passphrase",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Import {
+                format: TransferFormat::CxfAge,
+                ..
+            } | Command::Export {
+                format: TransferFormat::CxfAge,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn hybrid_transfer_options_parse_and_conflict_with_passphrase_files() {
+    for (command, option) in [
+        ("export", "--recipient-file"),
+        ("import", "--identity-file"),
+    ] {
+        let args = [
+            "factorseal",
+            command,
+            "credentials.age",
+            "--format",
+            "cxf-age",
+            option,
+            "key.txt",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Command::Export {
+                recipient_file,
+                passphrase_file,
+                ..
+            } => {
+                assert_eq!(recipient_file.unwrap(), PathBuf::from("key.txt"));
+                assert!(passphrase_file.is_none());
+            }
+            Command::Import {
+                identity_file,
+                passphrase_file,
+                ..
+            } => {
+                assert_eq!(identity_file.unwrap(), PathBuf::from("key.txt"));
+                assert!(passphrase_file.is_none());
+            }
+            _ => panic!("expected transfer command"),
+        }
+        assert!(
+            Cli::try_parse_from(
+                args.into_iter()
+                    .chain(["--passphrase-file", "password.txt"])
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn hybrid_options_reject_wrong_formats_before_connecting_to_vault() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("export");
+    let key = root.path().join("missing-key");
+    for format in [
+        factorseal::transfer::TransferFormat::FactorSeal,
+        factorseal::transfer::TransferFormat::BitwardenJson,
+    ] {
+        assert!(
+            matches!(super::commands::export_vault(root.path(), None, &file, format, None, Some(&key)), Err(CliError::Transfer(message)) if message.contains("require --format cxf-age"))
+        );
+        assert!(
+            matches!(super::commands::import_vault(root.path(), None, &file, format, None, Some(&key), false, false), Err(CliError::Transfer(message)) if message.contains("require --format cxf-age"))
+        );
+    }
+}
+
+#[test]
+fn import_dry_run_validates_without_an_initialized_or_running_vault() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("synthetic.json");
+    let vault = directory.path().join("uninitialized-vault");
+    std::fs::write(&input, br#"{"items":[{"id":"synthetic","type":1,"name":"Example","login":{"username":"alice","password":"synthetic"}}]}"#).unwrap();
+    super::commands::import_vault(
+        &vault,
+        None,
+        &input,
+        factorseal::transfer::TransferFormat::BitwardenJson,
+        None,
+        None,
+        false,
+        true,
+    )
+    .unwrap();
+    assert!(!vault.exists());
+    std::fs::write(&input, b"invalid JSON").unwrap();
+    assert!(
+        super::commands::import_vault(
+            &vault,
+            None,
+            &input,
+            factorseal::transfer::TransferFormat::BitwardenJson,
+            None,
+            None,
+            false,
+            true
+        )
+        .is_err()
+    );
+    assert!(!vault.exists());
+}
+
+#[test]
 fn agent_waits_for_initialization_metadata() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("missing-vault");
