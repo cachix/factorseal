@@ -16,12 +16,53 @@
 > [!WARNING]
 > FactorSeal is an unaudited prototype. It is not ready for production secrets.
 
-FactorSeal is a hardware-backed local secrets vault. It stores encrypted
-secrets on your device and makes them available through a per-user service
-protected by [TPM 2.0](https://trustedcomputinggroup.org/resource/tpm-library-specification/)
+FactorSeal is a hardware-backed vault for personal passwords and application
+secrets. Manage logins, notes, and other personal records in Desktop, or give
+local applications scoped access to project secrets and keyring entries.
+Secrets are encrypted on your device, with vault unlock protected by
+[TPM 2.0](https://trustedcomputinggroup.org/resource/tpm-library-specification/)
 on Linux and Windows or Apple's
 [Secure Enclave](https://developer.apple.com/documentation/security/protecting-keys-with-the-secure-enclave)
 on macOS.
+
+## What you can do
+
+- **Manage personal secrets:** Desktop provides typed records for logins,
+  secure notes, cards, identities, SSH keys, API credentials, and more, with
+  custom fields and masked input. See [personal item types](#personal-item-types-and-migration).
+- **Migrate and back up:** Import from Bitwarden, 1Password, and KeePass export
+  formats, or create an encrypted FactorSeal archive for portable backup and
+  restore. See [import and export](#import-and-export).
+- **Use secrets in development:** Store durable project secrets through the
+  CLI and provide a separate disposable
+  [provider cache](https://secretspec.dev/concepts/providers/caching/) for
+  [SecretSpec](https://secretspec.dev/).
+- **Serve local applications:** Provide a native
+  [keyring](#interfaces-and-document-kinds) and the standard
+  [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-service/latest/)
+  interface on Linux, with explicit application access grants.
+- **Pair devices for personal sync:** Desktop offers experimental encrypted
+  peer sync with QR/ticket pairing and code approval. See
+  [personal sync](#personal-sync-experimental) for its current limits.
+
+Personal password management is still incomplete: browser autofill, usable
+passkeys, auto-type, and TOTP code generation are not currently provided.
+Storing an SSH key or importing a TOTP seed does not provide SSH-agent or
+authenticator functionality.
+
+## Hardware binding and application access
+
+The native vault is bound to your device's hardware keys. Copying its database
+and configuration to another machine is not enough to unlock it. Recovery after
+hardware loss requires a portable export made beforehand; keep an
+[encrypted backup](#import-and-export).
+
+Desktop and local clients access the vault through a per-user service. The
+service authenticates calling executables and checks grants for the requested
+secrets and operations. Applications never open the database or receive its
+encryption and signing keys. These grants provide defense in depth between
+same-user applications; a compromised authorized client can still disclose
+secrets it receives. See the [security model](SECURITY.md).
 
 The basic lifecycle is:
 
@@ -29,26 +70,8 @@ The basic lifecycle is:
 2. **Unseal** it by satisfying one of those policies.
 3. **Authorize** local applications for only the secrets and operations they
    need.
-4. **Use** the vault through the CLI or an integration while it is unsealed.
+4. **Use** the vault through Desktop, the CLI, or an integration while it is unsealed.
 5. **Seal** it to stop the service and remove plaintext vault keys from memory.
-
-Applications ask the service to perform narrowly scoped operations such as
-getting or storing a secret. They never open the database or receive the
-vault's encryption and signing keys.
-
-Factorseal provides:
-
-- durable, project-partitioned secrets for the CLI, plus a local
-  [keyring](#interfaces-and-document-kinds) for Factorseal-aware applications;
-- a separate disposable [provider cache](https://secretspec.dev/concepts/providers/caching/)
-  for [SecretSpec](https://secretspec.dev/);
-- the standard
-  [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-service/latest/)
-  interface on Linux.
-
-Factorseal is a local security broker around platform hardware. It is not a
-password manager or remote secrets service, and it does not attempt to replace
-every Apple Keychain or Windows Credential Manager API.
 
 ## Desktop unlock support
 
@@ -260,6 +283,23 @@ encoded personal item is limited to 512 KiB to fit the vault protocol. An oversi
 item fails preparation before any imported items are written. 1PUX is import-only;
 use an encrypted FactorSeal archive to back up these richer records. Preserving
 passkey or other unrecognized source data does not make it usable for authentication.
+
+### Personal sync (experimental)
+
+Desktop can pair devices using QR codes or tickets with explicit code approval
+and exchange encrypted personal-item changes through an iroh courier. Once
+configured, the courier can continue transferring ciphertext while Desktop
+remains open and the vault is sealed. Applying changes requires the vault worker
+to be unsealed. Project secrets, application grants, and device keys remain local.
+
+Sync is experimental. Mobile camera integration, peer application receipts, a
+conflict-resolution chooser, and controller transfer and removal UI are still
+missing. A connected peer does not confirm that it has applied your changes.
+Personal history includes old and deleted values, and newly enrolled readers
+receive that history. Sync does not replace a portable backup.
+
+See the [personal sync boundary](security/personal-sync-wire.md) for protocol,
+history-retention, and platform limitations.
 
 ## How it works
 
