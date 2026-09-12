@@ -456,6 +456,7 @@ impl Render for SecretInputState {
                             background_color: None,
                             underline: None,
                             strikethrough: None,
+                            letter_spacing: style.letter_spacing,
                         };
                         window.text_system().shape_line(text, px(14.), &[run], None)
                     },

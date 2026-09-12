@@ -4,8 +4,8 @@
 use std::{f32::consts::PI, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt as _, App, Bounds, Hsla, IntoElement, PathBuilder, Pixels,
-    TransformationMatrix, Window, canvas, div, point, prelude::*, px, rems, size, svg,
+    Animation, AnimationExt as _, App, Bounds, ColorExt as _, Hsla, IntoElement, PathBuilder,
+    Pixels, TransformationMatrix, Window, canvas, div, point, prelude::*, px, rems, size, svg,
 };
 use gpui_component::theme::Theme;
 
@@ -110,7 +110,13 @@ impl Face {
         let light = (-0.4 * normal.x - 0.65 * normal.y + 0.65 * normal.z) * normal.depth().signum()
             / length.max(0.001);
         let shading = 0.08 + 0.10 * (1. - light.clamp(-1., 1.));
-        color.l = (color.l + if color.l > 0.5 { -shading } else { shading }).clamp(0., 1.);
+        color.lightness = (color.lightness
+            + if color.lightness > 0.5 {
+                -shading
+            } else {
+                shading
+            })
+        .clamp(0., 1.);
         Self { vertices, color }
     }
 }

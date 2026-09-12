@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use gpui::{Hsla, px, rgb};
+use gpui::{ColorExt as _, Hsla, px, rgb, rgb_to_hsla};
 use gpui_component::{scroll::ScrollbarMode, theme::Theme};
 
 pub(crate) const MARK_ASSET: &str = "factorseal-mark.svg";
@@ -52,7 +52,7 @@ static DEFINITION: LazyLock<Definition> = LazyLock::new(|| {
 });
 
 fn color(hex: u32) -> Hsla {
-    rgb(hex).into()
+    rgb_to_hsla(rgb(hex))
 }
 
 /// Apply `FactorSeal`'s Ink brand to the native component theme.

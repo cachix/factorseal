@@ -545,15 +545,9 @@ fn install_theme(loaded: &LoadedTheme, cx: &mut App) {
     let theme = Theme::global_mut(cx);
     apply_native_theme(theme, &loaded.resolved);
     let background = loaded.resolved.input.background_color;
-    cx.set_global(InputBackground(
-        gpui::rgba(u32::from_be_bytes([
-            background.r,
-            background.g,
-            background.b,
-            background.a,
-        ]))
-        .into(),
-    ));
+    cx.set_global(InputBackground(gpui::rgb_to_hsla(gpui::rgba(
+        u32::from_be_bytes([background.r, background.g, background.b, background.a]),
+    ))));
     Theme::sync_base(cx);
 }
 
@@ -562,7 +556,9 @@ pub(crate) fn apply_native_theme(
     native: &native_theme::theme::ResolvedTheme,
 ) {
     let color = |value: native_theme::color::Rgba| -> gpui::Hsla {
-        gpui::rgba(u32::from_be_bytes([value.r, value.g, value.b, value.a])).into()
+        gpui::rgb_to_hsla(gpui::rgba(u32::from_be_bytes([
+            value.r, value.g, value.b, value.a,
+        ])))
     };
     let defaults = &native.defaults;
     theme.font_family = defaults.font.family.to_string().into();
@@ -741,13 +737,12 @@ mod tests {
                     .variant;
                 super::apply_native_theme(&mut target, &native);
                 let background = native.window.background_color;
-                let expected: gpui::Hsla = gpui::rgba(u32::from_be_bytes([
+                let expected = gpui::rgb_to_hsla(gpui::rgba(u32::from_be_bytes([
                     background.r,
                     background.g,
                     background.b,
                     background.a,
-                ]))
-                .into();
+                ])));
                 assert_eq!(target.background, expected);
                 assert_eq!(target.button_primary, target.primary);
                 assert_eq!(target.button_primary_foreground, target.primary_foreground);

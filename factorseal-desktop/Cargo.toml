@@ -17,11 +17,12 @@ factorseal = { path = "..", default-features = false, features = ["vault-client"
 fs2 = "0.4.3"
 gethostname = "1.1.0"
 getrandom = "0.3.3"
-gpui = "=0.2.2"
-gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "39c2c86dbee7" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component.git", rev = "39c2c86dbee7" }
-gpui_platform = { git = "https://github.com/zed-industries/zed.git" }
-gpui-tray = { version = "=0.1.0", git = "https://github.com/domenkozar/gpui-tray.git", rev = "9793fb38b1dbe6b5fdabcb288521ab63c1b30f27" }
+gpui = { package = "gpui-ce", git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe" }
+# CE's component fork with the current platform/deferred API compatibility fixes.
+gpui-component = { package = "gpui_ce_components", git = "https://github.com/domenkozar/gpui-kit.git", rev = "c7440f24e3c392beefe759aeb7989bd4ea4ffd4e" }
+gpui-component-assets = { package = "gpui_ce_components_assets", git = "https://github.com/domenkozar/gpui-kit.git", rev = "c7440f24e3c392beefe759aeb7989bd4ea4ffd4e" }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe", features = ["font-kit", "x11", "wayland"] }
+gpui-tray = { version = "=0.1.1", git = "https://github.com/domenkozar/gpui-tray.git", rev = "db57d965a7187563644c5028bb1a17d36486b919", default-features = false, features = ["gpui-ce", "menu-state"] }
 rfd = { version = "0.15.4", default-features = false, features = ["async-std", "xdg-portal"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 sentry = { version = "0.49.2", default-features = false, features = ["backtrace"] }

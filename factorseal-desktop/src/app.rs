@@ -21,8 +21,9 @@ pub(crate) enum AccessEvent {
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, Div, Global, Hsla, MenuItem, Render, Subscription, Task,
-    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rems, size, svg,
+    AnyWindowHandle, App, Bounds, ColorExt as _, Context, Div, Global, Hsla, MenuItem, Render,
+    Subscription, Task, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rems,
+    size, svg,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Root, Selectable as _, Sizable as _, Size,

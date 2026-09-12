@@ -244,10 +244,7 @@ opt-level = 3
 [patch.crates-io]
 # Windows route discovery without WMI: https://github.com/n0-computer/net-tools/pull/226
 netwatch = { git = "https://github.com/domenkozar/net-tools.git", rev = "0b252c90a768cae2aacba8d304e1de5a4ed062db" }
-gpui = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f", version = "=0.2.2" }
-
-[patch."https://github.com/zed-industries/zed.git"]
-gpui = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f", version = "=0.2.2" }
-gpui_macros = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f" }
-gpui_platform = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f" }
-gpui_web = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f" }
+# Components and tray must share the application's CE types and Git revision.
+gpui-ce = { git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe" }
+gpui_ce_macros = { git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe" }
+gpui_ce_platform = { git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe" }
