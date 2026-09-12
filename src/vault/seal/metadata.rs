@@ -24,8 +24,13 @@ const VAULT_FORMAT: &str = "factorseal-vault";
 // Version 7 hardware-wraps only the installation root per unlock group. The
 // signing seed is root-wrapped once and the index key is derived from the
 // root. Version 8 changed only the independently migrated database schema, so
-// its metadata shape is identical and both versions remain readable.
-const VAULT_VERSION: u32 = 8;
+// its metadata shape is identical and both versions remain readable. Version 9
+// adds an alternative root-encrypted Secure Enclave ML-DSA-65 reference. Old
+// readers reject it rather than interpreting it as an exportable signing seed.
+// A vault with a software seed is byte for byte a version 8 file, so it keeps
+// that stamp and stays readable by previous releases.
+const VAULT_VERSION: u32 = 9;
+const SOFTWARE_SEED_VAULT_VERSION: u32 = 8;
 const COMPATIBLE_VAULT_VERSION: u32 = 7;
 const MAX_VAULT_FILE_BYTES: u64 = 1024 * 1024;
 
@@ -92,9 +97,14 @@ impl VaultFile {
             wrapped_installation_secrets,
             created_at,
         } = contents;
+        let version = if wrapped_installation_secrets.uses_enclave_signer() {
+            VAULT_VERSION
+        } else {
+            SOFTWARE_SEED_VAULT_VERSION
+        };
         Self {
             format: VAULT_FORMAT.to_owned(),
-            version: VAULT_VERSION,
+            version,
             installation_id,
             device_vault_id,
             device_key_id,
@@ -125,6 +135,7 @@ impl VaultFile {
             actor_id: self.actor_id.clone(),
             platform: self.platform,
             hardware_backend: self.hardware_backend.clone(),
+            enclave_signing: self.wrapped_installation_secrets.uses_enclave_signer(),
             cryptographic_profile: self.cryptographic_profile,
             unlock_policy: self.unlock_policy.clone(),
             preferred_unlock_group,
@@ -134,13 +145,23 @@ impl VaultFile {
 
     pub(super) fn validate(&self) -> VaultResult<()> {
         if self.format != VAULT_FORMAT
-            || !matches!(self.version, COMPATIBLE_VAULT_VERSION | VAULT_VERSION)
+            || !matches!(
+                self.version,
+                COMPATIBLE_VAULT_VERSION | SOFTWARE_SEED_VAULT_VERSION | VAULT_VERSION
+            )
         {
             return Err(VaultError::Protection(
                 "unsupported vault metadata format or version".to_owned(),
             ));
         }
         self.wrapped_installation_secrets.validate()?;
+        if self.wrapped_installation_secrets.uses_enclave_signer()
+            && (self.version < 9 || self.platform != VaultPlatform::Macos)
+        {
+            return Err(VaultError::Protection(
+                "enclave signing requires macOS vault metadata version 9".into(),
+            ));
+        }
         if self.installation_id.as_bytes() == self.device_vault_id.as_bytes()
             || !platform_accepts_backend(self.platform, &self.hardware_backend)
             || self.actor_id.is_empty()

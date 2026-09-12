@@ -792,6 +792,81 @@ fn vault_inventory_is_value_free_paginated_and_permission_manager_only() {
 }
 
 #[test]
+fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
+    use crate::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret};
+
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let manager = caller();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    let mut item = PersonalSecret::generic("Original title".into(), "secret".into());
+    item.kind = crate::personal::PersonalSecretKind::Login;
+    let source = VaultEntryMetadata {
+        display_name: Some("untrusted title".into()),
+        display_type: Some("untrusted type".into()),
+        updated_at: Some(u64::MAX),
+        document_kind: DocumentKind::LocalKeyring,
+        partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
+        address: SecretAddress::new("legacy title address", None).unwrap(),
+    };
+    for (title, replace, expected) in [
+        ("Original title", false, VaultEntryImportStatus::Added),
+        ("Renamed", false, VaultEntryImportStatus::KeptExisting),
+        ("Renamed", true, VaultEntryImportStatus::Replaced),
+    ] {
+        item.title = title.into();
+        let response = service.handle(
+            &manager,
+            VaultRequest::new(VaultAction::ImportVaultEntry {
+                entry: source.clone(),
+                value: WireSecret::new(item.encode().unwrap().to_vec()).unwrap(),
+                evict_at: None,
+                replace_existing: replace,
+            })
+            .unwrap(),
+            101,
+        );
+        assert!(
+            matches!(response.result, Ok(VaultResponseBody::VaultEntryImported { status }) if status == expected)
+        );
+    }
+    let response = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListVaultEntries {
+            cursor: None,
+            limit: 8,
+        })
+        .unwrap(),
+        102,
+    );
+    let VaultResponseBody::VaultEntries { entries, .. } = response.result.unwrap() else {
+        panic!()
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].address.as_local(),
+        Some((item.id.as_str(), None))
+    );
+    assert_eq!(entries[0].display_name.as_deref(), Some("Renamed"));
+    assert_eq!(entries[0].display_type.as_deref(), Some(item.kind.label()));
+    assert_eq!(entries[0].updated_at, Some(101));
+    let response = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ExportVaultEntry {
+            entry: entries[0].clone(),
+        })
+        .unwrap(),
+        103,
+    );
+    let VaultResponseBody::VaultEntrySecret { value, .. } = response.result.unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        PersonalSecret::decode_current(value.expose()).unwrap(),
+        item
+    );
+}
+
+#[test]
 fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
     let (_directory, service) = service(100, UnsealLeasePolicy::default());
     let manager = caller();
@@ -806,8 +881,11 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
         .unwrap();
     service.authorize_permission_manager(&manager, 100).unwrap();
     let source = VaultEntryMetadata {
+        display_name: None,
+        display_type: None,
+        updated_at: None,
         document_kind: DocumentKind::LocalKeyring,
-        partition: b"factorseal/personal-secrets/v1".to_vec(),
+        partition: b"portable-entry-test".to_vec(),
         address: SecretAddress::new("source", None).unwrap(),
     };
     assert!(matches!(
@@ -1059,6 +1137,7 @@ fn revoking_an_expired_permission_cleans_the_registry() {
     let provenance = Provenance::service(ServiceReason::GrantStorage);
     let permission = |id: &str, expires_at: Option<u64>| Permission {
         id: id.to_owned(),
+        scope: None,
         operation: PermissionOperation::Get,
         principal: PermissionPrincipal::from(&principal),
         application: VaultApplicationContext::new(Some("demo".to_owned()), None, None, None)
@@ -1075,6 +1154,7 @@ fn revoking_an_expired_permission_cleans_the_registry() {
             store,
             &principal,
             GrantTarget::Project {
+                base_dir: None,
                 scope: DocumentKind::SecretSpecProviderCache,
                 namespace: b"demo",
                 project: "demo",
@@ -1087,6 +1167,12 @@ fn revoking_an_expired_permission_cleans_the_registry() {
         .unwrap();
     }
     assert_eq!(list_granted_permissions(store, 100).unwrap().len(), 2);
+    assert!(
+        list_granted_permissions(store, 100)
+            .unwrap()
+            .iter()
+            .all(|permission| permission.scope == Some(DocumentKind::SecretSpecProviderCache))
+    );
     assert_eq!(list_granted_permissions(store, 150).unwrap().len(), 1);
 
     revoke_permission(store, "prm_short", 160, &provenance).unwrap();
@@ -1335,7 +1421,10 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         VaultApplicationContext::new(
             Some(project.to_owned()),
             Some("production".to_owned()),
-            None,
+            Some(format!(
+                "{}/projects/first",
+                if cfg!(windows) { "C:" } else { "" }
+            )),
             Some("deploy".to_owned()),
         )
         .unwrap()
@@ -1516,6 +1605,27 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
             .interaction
             .is_some()
     );
+    let second = format!("{}/projects/second", if cfg!(windows) { "C:" } else { "" });
+    for folder in [Some(second), None] {
+        let mut context = application("demo");
+        context.base_dir = folder;
+        let result = service.handle(
+            &provider,
+            VaultRequest::new_with_application(
+                VaultAction::GetCache {
+                    project: "demo".to_owned(),
+                    address: project_address("demo"),
+                },
+                context,
+            )
+            .unwrap(),
+            207,
+        );
+        assert!(
+            result.result.unwrap_err().interaction.is_some(),
+            "a grant for one folder must not authorize another folder or missing folder"
+        );
+    }
     let mismatched = service
         .handle(&provider, get_scoped("demo", "other-project"), 208)
         .result
@@ -2192,6 +2302,9 @@ fn export_obeys_record_delivery_expiry() {
     };
     let before = revision();
     let entry = VaultEntryMetadata {
+        display_name: None,
+        display_type: None,
+        updated_at: None,
         document_kind: DocumentKind::LocalKeyring,
         partition: b"audit".to_vec(),
         address: SecretAddress::new("token", None).unwrap(),
@@ -2229,12 +2342,13 @@ fn pending_permissions_fit_transport() {
     let (_directory, service) = service(100, UnsealLeasePolicy::default());
     let manager = caller();
     service.authorize_permission_manager(&manager, 100).unwrap();
+    let prefix = if cfg!(windows) { "C:/" } else { "/" };
     for i in 0..33 {
         let project = format!("audit-{i}");
         let context = VaultApplicationContext::new(
             Some(project.clone()),
             None,
-            Some(format!("/{}", "\t".repeat(32767))),
+            Some(format!("{}{}", prefix, "\t".repeat(32768 - prefix.len()))),
             None,
         )
         .unwrap();
@@ -2381,4 +2495,64 @@ fn checked_mutations_reject_stale_state_without_partial_writes() {
         panic!("missing value")
     };
     assert_eq!(value.expose(), b"updated");
+}
+
+#[test]
+fn dialog_cache_write_is_manager_only_and_does_not_grant_future_writes() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let manager = caller();
+    let write = || {
+        VaultRequest::new(VaultAction::WriteCacheFromDialog {
+            project: "demo".to_owned(),
+            address: project_address("demo"),
+            value: WireSecret::new(b"entered-in-dialog".to_vec()).unwrap(),
+            evict_at: Some(300),
+        })
+        .unwrap()
+    };
+    assert!(service.handle(&manager, write(), 101).result.is_err());
+    service.authorize_permission_manager(&manager, 101).unwrap();
+    assert!(matches!(
+        service.handle(&manager, write(), 102).result,
+        Ok(VaultResponseBody::Stored)
+    ));
+    let permissions = service
+        .handle(
+            &manager,
+            VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+            103,
+        )
+        .result
+        .unwrap();
+    assert!(
+        matches!(permissions, VaultResponseBody::Permissions { permissions, .. } if permissions.is_empty())
+    );
+    let ordinary = VaultRequest::new(VaultAction::PutCache {
+        project: "demo".to_owned(),
+        address: project_address("demo"),
+        value: WireSecret::new(b"unapproved-replacement".to_vec()).unwrap(),
+        evict_at: None,
+    })
+    .unwrap();
+    assert!(service.handle(&manager, ordinary, 104).result.is_err());
+    service
+        .authorize_document_kind(
+            &manager,
+            DocumentKind::SecretSpecProviderCache,
+            [GrantPermission::Get],
+            None,
+            104,
+        )
+        .unwrap();
+    let read = VaultRequest::new(VaultAction::GetCache {
+        project: "demo".to_owned(),
+        address: project_address("demo"),
+    })
+    .unwrap();
+    let VaultResponseBody::Secret { value: Some(value) } =
+        service.handle(&manager, read, 105).result.unwrap()
+    else {
+        panic!("stored value")
+    };
+    assert_eq!(value.expose(), b"entered-in-dialog");
 }

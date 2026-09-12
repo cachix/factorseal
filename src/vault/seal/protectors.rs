@@ -13,7 +13,7 @@ use super::{
     KEY_BYTES, UnlockCredentials, UnlockFactorKind, UnlockGroup, UnlockPolicy, UnsealFactor,
     UnsealedVault, VaultCryptoProfile, VaultPlatform,
 };
-use crate::vault::signature::{SIGNING_SEED_BYTES, public_key_for_seed};
+use crate::vault::signature::SigningProvider as _;
 use crate::vault::{
     DeviceKeyId, InstallationId, InstallationSecrets, KeyProtector, VaultError, VaultId,
     VaultResult,
@@ -26,6 +26,7 @@ pub(super) struct VaultCreation {
     pub(super) created_at: u64,
     pub(super) platform: VaultPlatform,
     pub(super) cryptographic_profile: VaultCryptoProfile,
+    pub(super) native_signing: bool,
 }
 
 pub(super) struct LabeledProtector<'a> {
@@ -62,14 +63,10 @@ pub(super) fn create_with_protectors(
         created_at,
         platform,
         cryptographic_profile,
+        native_signing,
     } = creation;
     let mut vault_root_key = crate::security::memory::LockedKey::<KEY_BYTES>::zeroed()?;
-    let mut signing_seed = crate::security::memory::LockedKey::<SIGNING_SEED_BYTES>::zeroed()?;
     getrandom::fill(&mut *vault_root_key)?;
-    getrandom::fill(&mut *signing_seed)?;
-    let public_signing_key = public_key_for_seed(&signing_seed);
-    let device_key_id = DeviceKeyId::for_public_key(&public_signing_key);
-    let actor_id = actor_id_for_public_key(&public_signing_key).to_vec();
     let mut hardware_backend = None;
     let mut slots = Vec::with_capacity(protectors.len());
 
@@ -100,12 +97,18 @@ pub(super) fn create_with_protectors(
         });
     }
 
-    let (secrets, wrapped_installation_secrets) = InstallationSecrets::generate(
+    let (secrets, wrapped_installation_secrets) = InstallationSecrets::generate_new(
         installation_id,
         device_vault_id,
         vault_root_key,
-        &signing_seed,
+        platform,
+        native_signing,
     )?;
+    let public_signing_key = secrets
+        .signer(installation_id, device_vault_id)?
+        .public_key()?;
+    let device_key_id = DeviceKeyId::for_public_key(&public_signing_key);
+    let actor_id = actor_id_for_public_key(&public_signing_key).to_vec();
     let stored = VaultFile::new(NewVaultFile {
         installation_id,
         device_vault_id,
@@ -206,15 +209,13 @@ pub(super) fn unseal_with_protectors(
             &stored.wrapped_installation_secrets,
         )
     })?;
-    // The root-wrapped seed is the only copy of the signing identity, so
-    // derive the public key from it and refuse a metadata file whose public
+    // Reconstruct the selected provider and refuse a metadata file whose public
     // identity does not match before anything is opened with it.
-    let signing_seed = crate::timing::result("key_hierarchy", "derive_signing_seed", || {
-        secrets.signing_seed(stored.installation_id, stored.device_vault_id)
-    })?;
     let public_signing_key =
         crate::timing::result("key_hierarchy", "derive_public_identity", || {
-            Ok::<_, VaultError>(public_key_for_seed(&signing_seed))
+            secrets
+                .signer(stored.installation_id, stored.device_vault_id)?
+                .public_key()
         })?;
     if public_signing_key != stored.public_signing_key
         || DeviceKeyId::for_public_key(&public_signing_key) != stored.device_key_id

@@ -293,6 +293,8 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::{NonNull, io};
+    use std::sync::Mutex;
+    use windows::Win32::Foundation::ERROR_WORKING_SET_QUOTA;
     use windows::Win32::System::{
         ErrorReporting::{WerRegisterExcludedMemoryBlock, WerUnregisterExcludedMemoryBlock},
         Memory::{
@@ -300,7 +302,9 @@ mod platform {
             VirtualFree, VirtualLock, VirtualUnlock,
         },
         SystemInformation::{GetSystemInfo, SYSTEM_INFO},
+        Threading::{GetCurrentProcess, GetProcessWorkingSetSize, SetProcessWorkingSetSize},
     };
+    static WORKING_SET: Mutex<()> = Mutex::new(());
     pub(super) fn page_size() -> io::Result<usize> {
         let mut info = SYSTEM_INFO::default();
         // SAFETY: valid initialized out parameter.
@@ -319,16 +323,73 @@ mod platform {
             .ok_or_else(io::Error::last_os_error)
     }
     pub(super) fn protect_and_lock(ptr: *mut u8, size: usize) -> io::Result<()> {
+        let report_size = u32::try_from(size).map_err(io::Error::other)?;
         // SAFETY: commit only the middle page of the owned reservation; guards
         // stay uncommitted. VirtualLock applies only to this committed page.
         unsafe {
             if VirtualAlloc(Some(ptr.cast()), size, MEM_COMMIT, PAGE_READWRITE).is_null() {
                 return Err(io::Error::last_os_error());
             }
-            VirtualLock(ptr.cast(), size).map_err(io::Error::other)?;
-            let size = u32::try_from(size).map_err(io::Error::other)?;
-            WerRegisterExcludedMemoryBlock(ptr.cast(), size).map_err(io::Error::other)
+            lock(ptr, size)?;
+            if let Err(error) = WerRegisterExcludedMemoryBlock(ptr.cast(), report_size) {
+                let _ = VirtualUnlock(ptr.cast(), size);
+                return Err(io::Error::other(error));
+            }
+            Ok(())
         }
+    }
+    fn lock(ptr: *mut u8, size: usize) -> io::Result<()> {
+        // Small allocations need no quota change. Serialize only the retry so
+        // concurrent allocations do not independently grow the working set.
+        match unsafe { VirtualLock(ptr.cast(), size) } {
+            Ok(()) => return Ok(()),
+            Err(error) if error.code() != ERROR_WORKING_SET_QUOTA.to_hresult() => {
+                return Err(io::Error::other(error));
+            }
+            Err(_) => {}
+        }
+        let _gate = WORKING_SET
+            .lock()
+            .map_err(|_| io::Error::other("working-set lock poisoned"))?;
+        // The ungated first attempt of another thread can consume headroom
+        // this thread just added, so grow and retry a bounded number of times
+        // under the gate instead of treating one failed retry as final.
+        for _ in 0..8 {
+            match unsafe { VirtualLock(ptr.cast(), size) } {
+                Ok(()) => return Ok(()),
+                Err(error) if error.code() != ERROR_WORKING_SET_QUOTA.to_hresult() => {
+                    return Err(io::Error::other(error));
+                }
+                Err(_) => {}
+            }
+            grow_working_set(size)?;
+        }
+        Err(io::Error::other(
+            "locked-memory quota stays exhausted after growing the working set",
+        ))
+    }
+    /// Raise the working-set minimum by `size` plus a modest allowance.
+    ///
+    /// VirtualLock's quota is the working-set minimum minus OS overhead. Freed
+    /// mappings are still wiped and VirtualUnlocked; this setting records
+    /// capacity, not additional pinned secret pages.
+    fn grow_working_set(size: usize) -> io::Result<()> {
+        let (mut minimum, mut maximum) = (0, 0);
+        unsafe {
+            GetProcessWorkingSetSize(GetCurrentProcess(), &raw mut minimum, &raw mut maximum)
+        }
+        .map_err(io::Error::other)?;
+        let increased = minimum
+            .checked_add(size)
+            .and_then(|n| n.checked_add(1024 * 1024))
+            .ok_or_else(|| io::Error::other("locked-memory quota overflow"))?;
+        let maximum = maximum.max(
+            increased
+                .checked_add(1024 * 1024)
+                .ok_or_else(|| io::Error::other("working-set quota overflow"))?,
+        );
+        unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), increased, maximum) }
+            .map_err(io::Error::other)
     }
     pub(super) fn unlock(ptr: *mut u8, size: usize) {
         // SAFETY: caller has wiped the owned page and no references remain.
@@ -368,11 +429,22 @@ mod platform {
     }
 }
 
-/// Serialize twice: count/bound first, then write directly to locked storage.
-/// The value must have stable serialized content between the two passes.
+/// Serialize a value as JSON into an exactly sized locked allocation.
 pub(crate) fn serialize_locked(
     value: &impl serde::Serialize,
     maximum: usize,
+) -> VaultResult<LockedBytes> {
+    serialize_locked_with(maximum, |writer| {
+        serde_json::to_writer(writer, value).map_err(io::Error::other)
+    })
+}
+
+/// Serialize twice: count/bound first, then write directly to locked storage.
+/// `serialize` must produce the same bytes on both passes, so no bounded
+/// message ever passes through an unbounded temporary Vec of secret values.
+pub(crate) fn serialize_locked_with(
+    maximum: usize,
+    serialize: impl Fn(&mut dyn io::Write) -> io::Result<()>,
 ) -> VaultResult<LockedBytes> {
     struct Counter {
         remaining: usize,
@@ -390,10 +462,10 @@ pub(crate) fn serialize_locked(
         }
     }
     let mut counter = Counter { remaining: maximum };
-    serde_json::to_writer(&mut counter, value).map_err(|e| VaultError::Protocol(e.to_string()))?;
+    serialize(&mut counter).map_err(|e| VaultError::Protocol(e.to_string()))?;
     let mut bytes = LockedBytes::zeroed(maximum - counter.remaining)?;
     let mut writer = bytes.as_mut();
-    serde_json::to_writer(&mut writer, value).map_err(|e| VaultError::Protocol(e.to_string()))?;
+    serialize(&mut writer).map_err(|e| VaultError::Protocol(e.to_string()))?;
     if !writer.is_empty() {
         return Err(VaultError::Protocol("serialized length changed".into()));
     }
@@ -634,6 +706,56 @@ mod tests {
             }
             _ => panic!("unknown subprocess mode"),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_large_buffers_stay_locked_when_neighbors_drop() {
+        use windows::Win32::System::{
+            ProcessStatus::{K32QueryWorkingSetEx, PSAPI_WORKING_SET_EX_INFORMATION},
+            Threading::GetCurrentProcess,
+        };
+        const CHILD: &str = "FACTORSEAL_LARGE_LOCK_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "security::memory::tests::windows_large_buffers_stay_locked_when_neighbors_drop", "--nocapture"])
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let check = |bytes: &LockedBytes| {
+            for offset in [0, bytes.len() / 2, bytes.len() - 1] {
+                let mut info = PSAPI_WORKING_SET_EX_INFORMATION {
+                    VirtualAddress: unsafe { bytes.as_ptr().add(offset) }.cast_mut().cast(),
+                    ..Default::default()
+                };
+                assert!(
+                    unsafe {
+                        K32QueryWorkingSetEx(
+                            GetCurrentProcess(),
+                            (&raw mut info).cast(),
+                            u32::try_from(size_of_val(&info)).unwrap(),
+                        )
+                    }
+                    .as_bool()
+                );
+                // PSAPI_WORKING_SET_EX_BLOCK: Valid is bit 0, Locked is bit 22.
+                let flags = unsafe { info.VirtualAttributes.Flags };
+                assert_eq!(flags & (1 | (1 << 22)), 1 | (1 << 22));
+            }
+        };
+        let first = LockedBytes::zeroed(4 * 1024 * 1024).unwrap();
+        let second = LockedBytes::zeroed(8 * 1024 * 1024).unwrap();
+        check(&first);
+        check(&second);
+        drop(first);
+        check(&second);
     }
 
     #[cfg(windows)]

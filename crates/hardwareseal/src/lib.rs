@@ -12,6 +12,8 @@ use zeroize::Zeroizing;
 mod android;
 #[cfg(all(feature = "apple", target_vendor = "apple"))]
 mod apple;
+#[cfg(feature = "apple")]
+pub mod apple_pq;
 // `windows` is compiled under `test` on every platform so its envelope and
 // authorization tests run everywhere, which means the modules it depends on
 // have to follow the same gate.

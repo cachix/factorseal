@@ -58,7 +58,13 @@ impl VaultClient for MemoryVault {
                         .map(|value| WireSecret::new(value).unwrap()),
                 }
             }
-            VaultAction::PutCache {
+            VaultAction::WriteCacheFromDialog {
+                project,
+                address,
+                value,
+                evict_at,
+            }
+            | VaultAction::PutCache {
                 project,
                 address,
                 value,
@@ -550,4 +556,36 @@ async fn secretspec_request_waits_for_approval_and_completes() {
 
     client.close(deadline()).await.unwrap();
     server.await.unwrap().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cancelled_input_shuts_down_all_private_channel_clones() {
+    use std::io::Read as _;
+    let (local, mut remote) = std::os::unix::net::UnixStream::pair().unwrap();
+    remote
+        .set_read_timeout(Some(std::time::Duration::from_millis(250)))
+        .unwrap();
+    let guard = InputChannelGuard(local.try_clone().unwrap());
+    drop(guard);
+    assert_eq!(remote.read(&mut [0_u8; 1]).unwrap(), 0);
+    drop(local);
+}
+
+#[test]
+fn canonical_base_directories_lose_the_windows_verbatim_prefix() {
+    assert_eq!(
+        super::without_verbatim_prefix(r"\\?\C:\work\app"),
+        r"C:\work\app"
+    );
+    assert_eq!(
+        super::without_verbatim_prefix(r"\\?\UNC\host\share\app"),
+        r"\\host\share\app"
+    );
+    assert_eq!(
+        super::without_verbatim_prefix(r"C:\work\app"),
+        r"C:\work\app"
+    );
+    assert_eq!(super::without_verbatim_prefix("/work/app"), "/work/app");
+    assert_eq!(super::without_verbatim_prefix(r"\\?\pipe\x"), r"\\?\pipe\x");
 }

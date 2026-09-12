@@ -60,7 +60,7 @@ requirements and independently wrapped groups are OR alternatives. Password
 groups use memory-hard Argon2id by default. The opt-in FIPS profile instead
 uses PBKDF2-HMAC-SHA-256 with 600,000 iterations. Both encrypt the installation
 root with AES-256-GCM before one hardware key per group wraps it. The root
-derives the document-index key and authenticates the wrapped signing seed and
+derives the document-index key and authenticates the wrapped signing capability and
 each generation's independently wrapped DEK.
 Biometric groups gate their hardware keys with the platform biometric policy;
 biometric-only groups do not contain a password layer. Password files are
@@ -81,9 +81,12 @@ Software keyring and DPAPI-only fallbacks are rejected.
 
 Each biometric HardwareSeal unseal performs a native authorization ceremony.
 Factorseal then holds only the installation root and document-index key for its
-independently bounded idle and absolute lease. A document DEK and exportable
-signing seed are root-unwrapped into zeroizing memory only for the operation
-that needs them. Native cancellation, denial, unavailable UI, locked session,
+independently bounded idle and absolute lease. Document DEKs and signing
+capabilities are root-unwrapped into zeroizing memory only for an operation.
+For new macOS 26+ vaults, this capability is an opaque Secure Enclave ML-DSA-65
+reference; the private signing key stays in the enclave. Other platforms and
+existing vaults retain software signing seeds.
+Native cancellation, denial, unavailable UI, locked session,
 and invalidated credentials remain distinct vault errors; unavailable hardware
 and unsupported policy are distinct as well. None is treated as a prompt
 success or silently downgraded.
@@ -186,6 +189,23 @@ outside the separately built CLI key owner's dependency graph.
 
 ## Honest limitations
 
+- Personal documents retain per-item Automerge histories inside their signed,
+  encrypted snapshots. Unlike the value-free audit log, this includes old and
+  deleted secret values, and newly enrolled readers currently receive that
+  retained history. There is no password-history pruning or cryptographic
+  erasure claim. The experimental `personal-sync` feature provides root-wrapped
+  reader keys, authenticated encrypted change packets, durable publication and
+  incoming merge/conflict handling through lease-bound host-management APIs.
+  The optional `personal-sync-network` library adds a keyless iroh courier and
+  controller-signed transport membership. Desktop now offers QR/ticket pairing
+  and explicit code approval through inherited private worker pipes. Its courier
+  continues while sealed if Desktop remains open; it starts after sync setup.
+  Paired counts and reachability do not claim remote application. Mobile camera
+  integration, peer application receipts, a conflict-resolution chooser,
+  controller transfer and removal UI remain unimplemented.
+  See the [implemented boundary](security/personal-sync-wire.md) for bounds,
+  experimental cryptography, retained metadata, and integration requirements.
+
 - An OR policy is bounded by its weakest unlock group. Biometric-only access
   has no independent recovery secret and can be lost after hardware reset,
   biometric enrollment changes, or platform-key invalidation.
@@ -225,6 +245,11 @@ outside the separately built CLI key owner's dependency graph.
   `/proc/<pid>/exe` link. The current systemd user unit therefore cannot use
   filesystem mount-namespace hardening. A verified IPC sandbox/application
   identity or different broker design is required to close that isolation gap.
+- The Linux personal sync helper hard-requires fully enforced Landlock ABI 3
+  (kernel 6.2 or later) and refuses to start otherwise; there is no weaker
+  fallback confinement. Kernels older than that, including Debian 12 and
+  Ubuntu 22.04 stock kernels, cannot run personal sync. The parser helper
+  relies on seccomp only and has no such requirement.
 - Executable identity is resolved after the connection is accepted, and no
   supported platform reports the image a peer had at connect time. A same-user
   process can therefore connect, queue its request, and only then execute a
@@ -270,9 +295,10 @@ outside the separately built CLI key owner's dependency graph.
   support, TPM binding, timeout/cancellation behavior, the application-owned
   prompt window, and the supported Windows Hello prompt before the release
   gate can pass.
-- The current ML-DSA-65 signing seed is root-wrapped and exists in
-  zeroizing vault memory only while signing. Signing is not yet performed by a
-  non-exportable platform primitive. The retained installation root still has
+- Software ML-DSA-65 signing seeds are root-wrapped and exist in zeroizing
+  vault memory only while signing. New macOS 26+ vaults instead use a
+  non-exportable enclave key through a root-wrapped reference. Existing
+  identities are not rotated on upgrade. The retained installation root still has
   authority to unwrap every local document during an active lease, so code
   execution in the unsealed process remains outside this protection.
 - Hardware binding cannot prevent an already authorized or compromised client

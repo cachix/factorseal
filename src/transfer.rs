@@ -2,23 +2,239 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
-use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-const PERSONAL_FORMAT: &str = "factorseal-personal-secret";
-const PERSONAL_VERSION: u16 = 1;
+mod onepux;
+pub use crate::personal::{
+    PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
+};
+use crate::personal::{
+    legacy::{LegacyField, LegacyFieldSection, LegacySecret},
+    zeroize_json_strings,
+};
+
+pub fn import_manager(format: TransferFormat, bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
+    let mut items = import_manager_items(format, bytes)?;
+    // An export can contain repeated source IDs. Preserve each record, with
+    // deterministic replacement identities so retrying the import is idempotent.
+    let mut reserved: HashSet<String> = items.iter().map(|item| item.id.clone()).collect();
+    let mut seen = HashSet::new();
+    for item in &mut items {
+        if seen.insert(item.id.clone()) && item.has_storage_id() {
+            continue;
+        }
+        let original = item.id.clone();
+        let mut occurrence = 2_u64;
+        loop {
+            use sha2::{Digest as _, Sha256};
+            let mut digest = Sha256::new();
+            digest.update(b"factorseal/duplicate-import-id/v1\0");
+            digest.update(original.as_bytes());
+            digest.update(occurrence.to_be_bytes());
+            let candidate = format!("duplicate-{}", hex::encode(digest.finalize()));
+            if reserved.insert(candidate.clone()) {
+                item.id = candidate;
+                break;
+            }
+            occurrence += 1;
+        }
+    }
+    Ok(items)
+}
+
+fn import_manager_items(
+    format: TransferFormat,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<PersonalSecret>> {
+    if bytes.len() > MAX_MANAGER_FILE_BYTES {
+        bail!("password-manager export is larger than 128 MiB");
+    }
+    if format == TransferFormat::OnePasswordPux {
+        return onepux::import(bytes);
+    }
+    let mut items: Vec<_> = import_legacy_manager(format, bytes)?
+        .into_iter()
+        .map(PersonalSecret::from_legacy)
+        .collect::<anyhow::Result<_>>()?;
+    if format == TransferFormat::BitwardenJson {
+        let root = SensitiveJson(serde_json::from_slice(bytes)?);
+        for (item, original) in items.iter_mut().zip(
+            root["items"]
+                .as_array()
+                .context("Bitwarden JSON has no items array")?,
+        ) {
+            map_additional_bitwarden_fields(item, original);
+            if let Some(id) = string_at(original, "id") {
+                item.id = format!("bitwarden-{id}");
+            }
+            let mut extra = SensitiveJson(original.clone());
+            if let Some(object) = extra.0.as_object_mut() {
+                for key in [
+                    "id",
+                    "name",
+                    "type",
+                    "notes",
+                    "favorite",
+                    "folderId",
+                    "fields",
+                    "card",
+                    "identity",
+                    "secureNote",
+                ] {
+                    if let Some(mut removed) = object.remove(key) {
+                        zeroize_json_strings(&mut removed);
+                    }
+                }
+                if let Some(login) = object
+                    .get_mut("login")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    for key in ["username", "password", "totp"] {
+                        if let Some(mut removed) = login.remove(key) {
+                            zeroize_json_strings(&mut removed);
+                        }
+                    }
+                    if let Some(uris) = login
+                        .get_mut("uris")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for uri in uris.iter_mut() {
+                            if let Some(obj) = uri.as_object_mut()
+                                && let Some(mut removed) = obj.remove("uri")
+                            {
+                                zeroize_json_strings(&mut removed);
+                            }
+                        }
+                    }
+                }
+            }
+            prune_empty(&mut extra.0);
+            let unusual = original["type"]
+                .as_u64()
+                .is_some_and(|n| !(1..=4).contains(&n))
+                || original["fields"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|field| {
+                        field["name"].as_str().is_none()
+                            || (!field["value"].is_null() && !field["value"].is_string())
+                            || field.as_object().is_some_and(|object| {
+                                object.keys().any(|key| {
+                                    !["name", "value", "type", "linkedId"].contains(&key.as_str())
+                                })
+                            })
+                    })
+                || ["card", "identity"].iter().any(|key| {
+                    original[*key].as_object().is_some_and(|object| {
+                        object.values().any(|v| !v.is_null() && !v.is_string())
+                    })
+                });
+            if extra.0 != serde_json::json!({}) || unusual {
+                item.source = Some(serde_json::json!({"format":"bitwarden", "item":original}));
+            }
+        }
+    }
+    Ok(items)
+}
+
+fn map_additional_bitwarden_fields(item: &mut PersonalSecret, original: &serde_json::Value) {
+    let (kind, key) = match original["type"].as_u64() {
+        Some(5) => (PersonalSecretKind::SshKey, "sshKey"),
+        Some(6) => (PersonalSecretKind::BankAccount, "bankAccount"),
+        Some(8) => (PersonalSecretKind::Passport, "passport"),
+        _ => return,
+    };
+    item.kind = kind;
+    if let Some(object) = original[key].as_object() {
+        item.sections.push(PersonalSection {
+            id: key.into(),
+            label: kind.label().into(),
+            fields: object
+                .iter()
+                .map(|(name, value)| {
+                    let ty = match (name.as_str(), value.is_string()) {
+                        ("privateKey", true) => PersonalFieldType::SshKey,
+                        ("publicKey", true) => PersonalFieldType::Multiline,
+                        (_, true) => PersonalFieldType::Concealed,
+                        _ => PersonalFieldType::Unknown(format!("bitwarden-{key}")),
+                    };
+                    PersonalField::new(name.clone(), name.clone(), ty, value.clone())
+                })
+                .collect(),
+        });
+    }
+}
+
+fn prune_empty(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for child in object.values_mut() {
+                prune_empty(child);
+            }
+            object.retain(|_, v| {
+                !v.is_null() && v != &serde_json::json!({}) && v != &serde_json::json!([])
+            });
+        }
+        serde_json::Value::Array(array) => {
+            for child in array.iter_mut() {
+                prune_empty(child);
+            }
+            if array
+                .iter()
+                .all(|v| v.is_null() || v == &serde_json::json!({}))
+            {
+                array.clear();
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn export_manager(
+    format: TransferFormat,
+    secrets: &[PersonalSecret],
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let legacy = secrets
+        .iter()
+        .map(PersonalSecret::to_legacy)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let encoded = export_legacy_manager(format, &legacy)?;
+    if format == TransferFormat::BitwardenJson {
+        let mut root = SensitiveJson(serde_json::from_slice(&encoded)?);
+        for (item, secret) in root.0["items"]
+            .as_array_mut()
+            .context("invalid generated Bitwarden items")?
+            .iter_mut()
+            .zip(secrets)
+        {
+            item["id"] = secret
+                .id
+                .strip_prefix("bitwarden-")
+                .unwrap_or(&secret.id)
+                .into();
+        }
+        return serde_json::to_vec_pretty(&root.0)
+            .map(Zeroizing::new)
+            .context("could not encode Bitwarden JSON");
+    }
+    Ok(encoded)
+}
+
+#[must_use]
+pub fn personal_import_names(secrets: &[PersonalSecret]) -> Vec<String> {
+    unique_import_names(secrets.iter().map(|secret| secret.title.as_str()))
+}
+
+#[cfg(test)]
+#[path = "transfer/fixture_tests.rs"]
+mod fixture_tests;
+
 const MAX_MANAGER_FILE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_MANAGER_ITEMS: usize = 100_000;
 const MAX_TRANSFER_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 struct SensitiveJson(serde_json::Value);
-
-#[derive(Deserialize)]
-struct PersonalHeader<'a> {
-    #[serde(borrow)]
-    format: Option<&'a str>,
-    version: Option<u16>,
-}
 
 impl std::ops::Deref for SensitiveJson {
     type Target = serde_json::Value;
@@ -34,37 +250,22 @@ impl Drop for SensitiveJson {
     }
 }
 
-fn zeroize_json_strings(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::String(value) => value.zeroize(),
-        serde_json::Value::Array(values) => {
-            for value in values {
-                zeroize_json_strings(value);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for value in values.values_mut() {
-                zeroize_json_strings(value);
-            }
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TransferFormat {
     #[default]
     FactorSeal,
     BitwardenJson,
     OnePasswordCsv,
+    OnePasswordPux,
     KeePassCsv,
 }
 
 impl TransferFormat {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::FactorSeal,
         Self::BitwardenJson,
         Self::OnePasswordCsv,
+        Self::OnePasswordPux,
         Self::KeePassCsv,
     ];
 
@@ -74,6 +275,7 @@ impl TransferFormat {
             Self::FactorSeal => "FactorSeal archive",
             Self::BitwardenJson => "Bitwarden JSON",
             Self::OnePasswordCsv => "1Password CSV",
+            Self::OnePasswordPux => "1Password 1PUX",
             Self::KeePassCsv => "KeePass CSV",
         }
     }
@@ -84,6 +286,7 @@ impl TransferFormat {
             Self::FactorSeal => "factorseal",
             Self::BitwardenJson => "json",
             Self::OnePasswordCsv | Self::KeePassCsv => "csv",
+            Self::OnePasswordPux => "1pux",
         }
     }
 
@@ -93,163 +296,10 @@ impl TransferFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PersonalSecretKind {
-    Login,
-    SecureNote,
-    Card,
-    Identity,
-    #[default]
-    Generic,
-}
-
-#[derive(Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PersonalField {
-    pub(crate) name: String,
-    pub(crate) value: String,
-    #[serde(default, skip_serializing_if = "PersonalFieldSection::is_custom")]
-    section: PersonalFieldSection,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum PersonalFieldSection {
-    #[default]
-    Custom,
-    Card,
-    Identity,
-}
-
-impl PersonalFieldSection {
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    const fn is_custom(&self) -> bool {
-        matches!(self, Self::Custom)
-    }
-}
-
-impl Drop for PersonalField {
-    fn drop(&mut self) {
-        self.name.zeroize();
-        self.value.zeroize();
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PersonalSecret {
-    format: String,
-    version: u16,
-    kind: PersonalSecretKind,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) username: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) password: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) urls: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) totp: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) notes: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) custom_fields: Vec<PersonalField>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) folder: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) tags: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) favorite: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) archived: bool,
-}
-
-impl PersonalSecret {
-    #[must_use]
-    pub fn generic(title: String, value: String) -> Self {
-        Self {
-            format: PERSONAL_FORMAT.to_owned(),
-            version: PERSONAL_VERSION,
-            kind: PersonalSecretKind::Generic,
-            title,
-            username: None,
-            password: nonempty(value),
-            urls: Vec::new(),
-            totp: None,
-            notes: None,
-            custom_fields: Vec::new(),
-            folder: None,
-            tags: Vec::new(),
-            favorite: false,
-            archived: false,
-        }
-    }
-
-    pub fn encode(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        serde_json::to_vec(self)
-            .map(Zeroizing::new)
-            .context("could not encode personal secret")
-    }
-
-    pub fn decode(title: &str, bytes: &[u8]) -> anyhow::Result<Self> {
-        if let Ok(header) = serde_json::from_slice::<PersonalHeader<'_>>(bytes)
-            && header.format == Some(PERSONAL_FORMAT)
-        {
-            if header.version != Some(PERSONAL_VERSION) {
-                bail!("unsupported FactorSeal personal-secret version");
-            }
-            let secret: Self = serde_json::from_slice(bytes)
-                .context("invalid FactorSeal personal-secret record")?;
-            if !secret.is_supported() {
-                bail!("unsupported FactorSeal personal-secret version");
-            }
-            return Ok(secret);
-        }
-        Ok(Self::generic(
-            title.to_owned(),
-            String::from_utf8_lossy(bytes).into_owned(),
-        ))
-    }
-
-    fn is_supported(&self) -> bool {
-        self.format == PERSONAL_FORMAT && self.version == PERSONAL_VERSION
-    }
-
-    fn new(kind: PersonalSecretKind, title: String) -> Self {
-        Self {
-            format: PERSONAL_FORMAT.to_owned(),
-            version: PERSONAL_VERSION,
-            kind,
-            title,
-            username: None,
-            password: None,
-            urls: Vec::new(),
-            totp: None,
-            notes: None,
-            custom_fields: Vec::new(),
-            folder: None,
-            tags: Vec::new(),
-            favorite: false,
-            archived: false,
-        }
-    }
-}
-
-impl Drop for PersonalSecret {
-    fn drop(&mut self) {
-        self.title.zeroize();
-        self.username.zeroize();
-        self.password.zeroize();
-        self.urls.zeroize();
-        self.totp.zeroize();
-        self.notes.zeroize();
-        self.folder.zeroize();
-        self.tags.zeroize();
-    }
-}
-
-pub fn import_manager(format: TransferFormat, bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
+fn import_legacy_manager(
+    format: TransferFormat,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<LegacySecret>> {
     if bytes.len() > MAX_MANAGER_FILE_BYTES {
         bail!("password-manager export is larger than 128 MiB");
     }
@@ -258,6 +308,7 @@ pub fn import_manager(format: TransferFormat, bytes: &[u8]) -> anyhow::Result<Ve
         TransferFormat::OnePasswordCsv => import_one_password(bytes)?,
         TransferFormat::KeePassCsv => import_keepass(bytes)?,
         TransferFormat::FactorSeal => bail!("native archives use the encrypted archive reader"),
+        TransferFormat::OnePasswordPux => bail!("1PUX uses the structured item reader"),
     };
     if secrets.len() > MAX_MANAGER_ITEMS {
         bail!("password-manager export contains too many items");
@@ -268,19 +319,23 @@ pub fn import_manager(format: TransferFormat, bytes: &[u8]) -> anyhow::Result<Ve
 /// Assign stable, unique addresses within an import, reserving original titles
 /// before allocating suffixes. Destination conflicts are handled by the vault.
 #[must_use]
-pub fn personal_import_names(secrets: &[PersonalSecret]) -> Vec<String> {
-    let mut reserved: HashSet<String> = secrets.iter().map(|secret| secret.title.clone()).collect();
+#[cfg(test)]
+fn legacy_import_names(secrets: &[LegacySecret]) -> Vec<String> {
+    unique_import_names(secrets.iter().map(|secret| secret.title.as_str()))
+}
+
+fn unique_import_names<'a>(titles: impl Iterator<Item = &'a str> + Clone) -> Vec<String> {
+    let mut reserved: HashSet<String> = titles.clone().map(str::to_owned).collect();
     let mut seen = HashMap::<&str, u64>::new();
-    secrets
-        .iter()
-        .map(|secret| {
-            let suffix = seen.entry(&secret.title).or_insert(1);
+    titles
+        .map(|title| {
+            let suffix = seen.entry(title).or_insert(1);
             if *suffix == 1 {
                 *suffix = 2;
-                return secret.title.clone();
+                return title.to_owned();
             }
             loop {
-                let name = format!("{} ({suffix})", secret.title);
+                let name = format!("{title} ({suffix})");
                 *suffix += 1;
                 if reserved.insert(name.clone()) {
                     return name;
@@ -290,9 +345,9 @@ pub fn personal_import_names(secrets: &[PersonalSecret]) -> Vec<String> {
         .collect()
 }
 
-pub fn export_manager(
+fn export_legacy_manager(
     format: TransferFormat,
-    secrets: &[PersonalSecret],
+    secrets: &[LegacySecret],
 ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     validate_manager_export(format, secrets)?;
     match format {
@@ -300,16 +355,17 @@ pub fn export_manager(
         TransferFormat::OnePasswordCsv => export_one_password(secrets),
         TransferFormat::KeePassCsv => export_keepass(secrets),
         TransferFormat::FactorSeal => bail!("native archives use the encrypted archive writer"),
+        TransferFormat::OnePasswordPux => {
+            bail!("1PUX is import-only; use an encrypted FactorSeal archive to export")
+        }
     }
 }
 
-fn validate_manager_export(
-    format: TransferFormat,
-    secrets: &[PersonalSecret],
-) -> anyhow::Result<()> {
+fn validate_manager_export(format: TransferFormat, secrets: &[LegacySecret]) -> anyhow::Result<()> {
     for secret in secrets {
         let lossy = match format {
             TransferFormat::FactorSeal => false,
+            TransferFormat::OnePasswordPux => true,
             TransferFormat::BitwardenJson => secret.archived || !secret.tags.is_empty(),
             TransferFormat::OnePasswordCsv | TransferFormat::KeePassCsv => {
                 !matches!(
@@ -349,7 +405,7 @@ pub fn write_private_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         .with_context(|| format!("could not write private file {}", path.display()))
 }
 
-fn import_bitwarden(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
+fn import_bitwarden(bytes: &[u8]) -> anyhow::Result<Vec<LegacySecret>> {
     let root = SensitiveJson(serde_json::from_slice(bytes).context("invalid Bitwarden JSON")?);
     if root.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true) {
         bail!("encrypted Bitwarden exports are not supported; export unencrypted JSON instead");
@@ -379,7 +435,7 @@ fn import_bitwarden(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
 fn bitwarden_item(
     item: &serde_json::Value,
     folders: &HashMap<String, String>,
-) -> anyhow::Result<PersonalSecret> {
+) -> anyhow::Result<LegacySecret> {
     let item_type = item
         .get("type")
         .and_then(serde_json::Value::as_u64)
@@ -397,7 +453,7 @@ fn bitwarden_item(
         .filter(|name| !name.trim().is_empty())
         .ok_or_else(|| anyhow!("Bitwarden item has no name"))?
         .to_owned();
-    let mut secret = PersonalSecret::new(kind, title);
+    let mut secret = LegacySecret::new(kind, title);
     secret.notes = string_at(item, "notes");
     secret.favorite = item
         .get("favorite")
@@ -421,15 +477,22 @@ fn bitwarden_item(
             .collect();
     }
     if let Some(fields) = item.get("fields").and_then(serde_json::Value::as_array) {
-        secret
-            .custom_fields
-            .extend(fields.iter().filter_map(|field| {
-                Some(PersonalField {
-                    name: string_at(field, "name")?,
-                    value: string_at(field, "value").unwrap_or_default(),
-                    section: PersonalFieldSection::Custom,
-                })
-            }));
+        secret.custom_fields.extend(fields.iter().map(|field| {
+            LegacyField {
+                name: field
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                value: string_at(field, "value").unwrap_or_default(),
+                section: LegacyFieldSection::Custom,
+                field_type: field
+                    .get("type")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                linked_id: field.get("linkedId").and_then(serde_json::Value::as_u64),
+            }
+        }));
     }
     let object_name = match kind {
         PersonalSecretKind::Card => Some("card"),
@@ -446,13 +509,15 @@ fn bitwarden_item(
                 value
                     .as_str()
                     .and_then(|value| nonempty(value.to_owned()))
-                    .map(|value| PersonalField {
+                    .map(|value| LegacyField {
                         name: name.clone(),
                         value,
+                        field_type: 0,
+                        linked_id: None,
                         section: if kind == PersonalSecretKind::Card {
-                            PersonalFieldSection::Card
+                            LegacyFieldSection::Card
                         } else {
-                            PersonalFieldSection::Identity
+                            LegacyFieldSection::Identity
                         },
                     })
             }));
@@ -460,7 +525,7 @@ fn bitwarden_item(
     Ok(secret)
 }
 
-fn export_bitwarden(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+fn export_bitwarden(secrets: &[LegacySecret]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let mut folders = Vec::<serde_json::Value>::new();
     let mut folder_ids = HashMap::<&str, String>::new();
     for secret in secrets {
@@ -476,16 +541,20 @@ fn export_bitwarden(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Vec<
         .iter()
         .map(|secret| {
             let item_type = match secret.kind {
-                PersonalSecretKind::Login | PersonalSecretKind::Generic => 1,
                 PersonalSecretKind::SecureNote => 2,
                 PersonalSecretKind::Card => 3,
                 PersonalSecretKind::Identity => 4,
+                _ => 1,
             };
             let fields = secret
                 .custom_fields
                 .iter()
-                .filter(|field| field.section == PersonalFieldSection::Custom)
-                .map(|field| serde_json::json!({ "name": field.name, "value": field.value, "type": 0 }))
+                .filter(|field| field.section == LegacyFieldSection::Custom)
+                .map(|field| {
+                    let mut value = serde_json::json!({ "name": field.name, "value": field.value, "type": field.field_type });
+                    if let Some(id) = field.linked_id { value["linkedId"] = id.into(); }
+                    value
+                })
                 .collect::<Vec<_>>();
             let mut item = serde_json::json!({
                 "id": uuid::Uuid::new_v4().to_string(),
@@ -512,12 +581,13 @@ fn export_bitwarden(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Vec<
                 }
                 PersonalSecretKind::Card => {
                     item["card"] =
-                        fields_as_object(&secret.custom_fields, PersonalFieldSection::Card);
+                        fields_as_object(&secret.custom_fields, LegacyFieldSection::Card);
                 }
                 PersonalSecretKind::Identity => {
                     item["identity"] =
-                        fields_as_object(&secret.custom_fields, PersonalFieldSection::Identity);
+                        fields_as_object(&secret.custom_fields, LegacyFieldSection::Identity);
                 }
+                _ => unreachable!("unsupported categories rejected before export"),
             }
             item
         })
@@ -532,7 +602,7 @@ fn export_bitwarden(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Vec<
         .context("could not encode Bitwarden JSON")
 }
 
-fn fields_as_object(fields: &[PersonalField], section: PersonalFieldSection) -> serde_json::Value {
+fn fields_as_object(fields: &[LegacyField], section: LegacyFieldSection) -> serde_json::Value {
     serde_json::Value::Object(
         fields
             .iter()
@@ -547,11 +617,11 @@ fn fields_as_object(fields: &[PersonalField], section: PersonalFieldSection) -> 
     )
 }
 
-fn import_one_password(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
+fn import_one_password(bytes: &[u8]) -> anyhow::Result<Vec<LegacySecret>> {
     import_csv(bytes, CsvFlavor::OnePassword)
 }
 
-fn import_keepass(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
+fn import_keepass(bytes: &[u8]) -> anyhow::Result<Vec<LegacySecret>> {
     import_csv(bytes, CsvFlavor::KeePass)
 }
 
@@ -561,8 +631,20 @@ enum CsvFlavor {
     KeePass,
 }
 
-fn import_csv(bytes: &[u8], flavor: CsvFlavor) -> anyhow::Result<Vec<PersonalSecret>> {
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(bytes);
+#[allow(clippy::too_many_lines)]
+fn import_csv(bytes: &[u8], flavor: CsvFlavor) -> anyhow::Result<Vec<LegacySecret>> {
+    let mut builder = csv::ReaderBuilder::new();
+    builder.flexible(true);
+    // KeePass 1.x quotes every column and escapes quotes and backslashes with
+    // a backslash. Keep accepting the unquoted RFC CSV header emitted by older
+    // FactorSeal versions, as well as KeePassX's Title/Username dialect.
+    let without_bom = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    if matches!(flavor, CsvFlavor::KeePass)
+        && without_bom.starts_with(b"\"Account\",\"Login Name\",")
+    {
+        builder.escape(Some(b'\\')).double_quote(false);
+    }
+    let mut reader = builder.from_reader(bytes);
     let headers = reader.headers().context("invalid CSV header")?.clone();
     let index = headers
         .iter()
@@ -574,11 +656,65 @@ fn import_csv(bytes: &[u8], flavor: CsvFlavor) -> anyhow::Result<Vec<PersonalSec
         CsvFlavor::KeePass => &["account", "title"],
     };
     let mut output = Vec::new();
+    let known: &[&str] = match flavor {
+        CsvFlavor::OnePassword => &[
+            "title",
+            "website",
+            "url",
+            "username",
+            "password",
+            "one-timepassword",
+            "onetimepassword",
+            "otpauth",
+            "favoritestatus",
+            "favorite",
+            "archivedstatus",
+            "archived",
+            "tags",
+            "notes",
+        ],
+        CsvFlavor::KeePass => &[
+            "account",
+            "title",
+            "loginname",
+            "username",
+            "password",
+            "website",
+            "url",
+            "comments",
+            "notes",
+        ],
+    };
+    let mut unique = HashSet::new();
+    if headers.iter().any(|h| !unique.insert(normalized_header(h))) {
+        bail!("CSV contains duplicate column names");
+    }
+    for aliases in [
+        &["title", "account"][..],
+        &["website", "url"][..],
+        &["username", "loginname"][..],
+        &["one-timepassword", "onetimepassword", "otpauth"][..],
+        &["favoritestatus", "favorite"][..],
+        &["archivedstatus", "archived"][..],
+        &["comments", "notes"][..],
+    ] {
+        if aliases
+            .iter()
+            .filter(|alias| known.contains(alias) && index.contains_key(**alias))
+            .count()
+            > 1
+        {
+            bail!("CSV contains multiple columns for the same field");
+        }
+    }
     for row in reader.records() {
         let row = row.context("invalid CSV row")?;
+        if row.len() > headers.len() {
+            bail!("CSV row has values without column names");
+        }
         let title = csv_value(&row, &index, title_names)
             .ok_or_else(|| anyhow!("CSV row has no item title"))?;
-        let mut secret = PersonalSecret::new(PersonalSecretKind::Login, title);
+        let mut secret = LegacySecret::new(PersonalSecretKind::Login, title);
         match flavor {
             CsvFlavor::OnePassword => {
                 secret.urls = csv_value(&row, &index, &["website", "url"])
@@ -616,6 +752,17 @@ fn import_csv(bytes: &[u8], flavor: CsvFlavor) -> anyhow::Result<Vec<PersonalSec
                 secret.notes = csv_value(&row, &index, &["comments", "notes"]);
             }
         }
+        for (column, label) in headers.iter().enumerate() {
+            if !known.contains(&normalized_header(label).as_str()) {
+                secret.custom_fields.push(LegacyField {
+                    name: label.into(),
+                    value: row.get(column).unwrap_or_default().into(),
+                    section: LegacyFieldSection::Custom,
+                    field_type: 1,
+                    linked_id: None,
+                });
+            }
+        }
         output.push(secret);
         if output.len() > MAX_MANAGER_ITEMS {
             bail!("password-manager export contains too many items");
@@ -624,16 +771,23 @@ fn import_csv(bytes: &[u8], flavor: CsvFlavor) -> anyhow::Result<Vec<PersonalSec
     Ok(output)
 }
 
-fn export_one_password(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+fn export_one_password(secrets: &[LegacySecret]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     export_csv(secrets, CsvFlavor::OnePassword)
 }
 
-fn export_keepass(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+fn export_keepass(secrets: &[LegacySecret]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     export_csv(secrets, CsvFlavor::KeePass)
 }
 
-fn export_csv(secrets: &[PersonalSecret], flavor: CsvFlavor) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-    let mut writer = csv::Writer::from_writer(Vec::new());
+fn export_csv(secrets: &[LegacySecret], flavor: CsvFlavor) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let mut builder = csv::WriterBuilder::new();
+    if matches!(flavor, CsvFlavor::KeePass) {
+        builder
+            .quote_style(csv::QuoteStyle::Always)
+            .double_quote(false)
+            .escape(b'\\');
+    }
+    let mut writer = builder.from_writer(Vec::new());
     match flavor {
         CsvFlavor::OnePassword => writer.write_record([
             "Title",
@@ -663,13 +817,21 @@ fn export_csv(secrets: &[PersonalSecret], flavor: CsvFlavor) -> anyhow::Result<Z
                 &secret.tags.join(", "),
                 secret.notes.as_deref().unwrap_or_default(),
             ])?,
-            CsvFlavor::KeePass => writer.write_record([
-                secret.title.as_str(),
-                secret.username.as_deref().unwrap_or_default(),
-                secret.password.as_deref().unwrap_or_default(),
-                secret.urls.first().map_or("", String::as_str),
-                secret.notes.as_deref().unwrap_or_default(),
-            ])?,
+            CsvFlavor::KeePass => writer.write_record(
+                Zeroizing::new(
+                    [
+                        secret.title.as_str(),
+                        secret.username.as_deref().unwrap_or_default(),
+                        secret.password.as_deref().unwrap_or_default(),
+                        secret.urls.first().map_or("", String::as_str),
+                        secret.notes.as_deref().unwrap_or_default(),
+                    ]
+                    .into_iter()
+                    .map(|value| value.replace('\\', "\\\\"))
+                    .collect::<Vec<_>>(),
+                )
+                .iter(),
+            )?,
         }
     }
     writer
@@ -717,29 +879,40 @@ fn parse_bool(value: &str) -> bool {
     )
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
-const fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn duplicate_source_ids_are_preserved_and_repeatable() {
+        let bytes = br#"{"items":[
+            {"id":"repeated","type":1,"name":"Same title","login":{"password":"first"}},
+            {"id":"repeated","type":1,"name":"Same title","login":{"password":"second"}}
+        ]}"#;
+        let first = import_manager(TransferFormat::BitwardenJson, bytes).unwrap();
+        let second = import_manager(TransferFormat::BitwardenJson, bytes).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0].id, first[1].id);
+        assert_eq!(first[0].title, first[1].title);
+        assert_eq!(first[0].sections[0].fields[0].text(), Some("first"));
+        assert_eq!(first[1].sections[0].fields[0].text(), Some("second"));
+    }
+
+    #[test]
     fn structured_personal_secret_round_trips_and_legacy_is_supported() {
-        let secret = PersonalSecret::generic("API token".to_owned(), "needle".to_owned());
+        let secret = LegacySecret::generic("API token".to_owned(), "needle".to_owned());
         let encoded = secret.encode().unwrap();
-        let decoded = PersonalSecret::decode("wrong title", &encoded).unwrap();
+        let decoded = LegacySecret::decode("wrong title", &encoded).unwrap();
         assert_eq!(decoded.title, "API token");
         assert_eq!(decoded.password.as_deref(), Some("needle"));
 
-        let legacy = PersonalSecret::decode("Legacy", b"old value").unwrap();
+        let legacy = LegacySecret::decode("Legacy", b"old value").unwrap();
         assert_eq!(legacy.title, "Legacy");
         assert_eq!(legacy.password.as_deref(), Some("old value"));
 
         let future = br#"{"format":"factorseal-personal-secret","version":2,"kind":"generic","title":"Future"}"#;
-        assert!(PersonalSecret::decode("Future", future).is_err());
+        assert!(LegacySecret::decode("Future", future).is_err());
     }
 
     #[test]
@@ -753,13 +926,13 @@ mod tests {
             "fields":[{"name":"recovery","value":"code","type":0}]
           }]
         }"#;
-        let imported = import_manager(TransferFormat::BitwardenJson, source).unwrap();
+        let imported = import_legacy_manager(TransferFormat::BitwardenJson, source).unwrap();
         assert_eq!(imported.len(), 1);
         assert_eq!(imported[0].folder.as_deref(), Some("Work"));
         assert_eq!(imported[0].totp.as_deref(), Some("seed"));
         assert_eq!(imported[0].custom_fields[0].value, "code");
-        let exported = export_manager(TransferFormat::BitwardenJson, &imported).unwrap();
-        let again = import_manager(TransferFormat::BitwardenJson, &exported).unwrap();
+        let exported = export_legacy_manager(TransferFormat::BitwardenJson, &imported).unwrap();
+        let again = import_legacy_manager(TransferFormat::BitwardenJson, &exported).unwrap();
         assert_eq!(again[0].username.as_deref(), Some("user"));
         assert_eq!(again[0].urls, ["https://example.com"]);
     }
@@ -772,8 +945,8 @@ mod tests {
             "fields":[{"name":"support pin","value":"1234","type":0}]
           }]
         }"#;
-        let imported = import_manager(TransferFormat::BitwardenJson, source).unwrap();
-        let exported = export_manager(TransferFormat::BitwardenJson, &imported).unwrap();
+        let imported = import_legacy_manager(TransferFormat::BitwardenJson, source).unwrap();
+        let exported = export_legacy_manager(TransferFormat::BitwardenJson, &imported).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&exported).unwrap();
         let item = &value["items"][0];
         assert_eq!(item["card"]["cardholderName"], "Ada");
@@ -784,23 +957,23 @@ mod tests {
     #[test]
     fn one_password_csv_uses_official_columns() {
         let source = b"Title,Website,Username,Password,One-time password,Favorite status,Archived status,Tags,Notes\nExample,https://example.com,user,pass,seed,true,false,work,note\n";
-        let imported = import_manager(TransferFormat::OnePasswordCsv, source).unwrap();
+        let imported = import_legacy_manager(TransferFormat::OnePasswordCsv, source).unwrap();
         assert_eq!(imported[0].password.as_deref(), Some("pass"));
         assert!(imported[0].favorite);
-        let exported = export_manager(TransferFormat::OnePasswordCsv, &imported).unwrap();
+        let exported = export_legacy_manager(TransferFormat::OnePasswordCsv, &imported).unwrap();
         assert!(String::from_utf8_lossy(&exported).starts_with("Title,Website,Username"));
-        let again = import_manager(TransferFormat::OnePasswordCsv, &exported).unwrap();
+        let again = import_legacy_manager(TransferFormat::OnePasswordCsv, &exported).unwrap();
         assert_eq!(again[0].totp.as_deref(), Some("seed"));
     }
 
     #[test]
     fn keepass_csv_uses_official_columns() {
         let source = b"Account,Login Name,Password,Web Site,Comments\nExample,user,pass,https://example.com,note\n";
-        let imported = import_manager(TransferFormat::KeePassCsv, source).unwrap();
+        let imported = import_legacy_manager(TransferFormat::KeePassCsv, source).unwrap();
         assert_eq!(imported[0].username.as_deref(), Some("user"));
-        let exported = export_manager(TransferFormat::KeePassCsv, &imported).unwrap();
-        assert!(String::from_utf8_lossy(&exported).starts_with("Account,Login Name"));
-        let again = import_manager(TransferFormat::KeePassCsv, &exported).unwrap();
+        let exported = export_legacy_manager(TransferFormat::KeePassCsv, &imported).unwrap();
+        assert!(String::from_utf8_lossy(&exported).starts_with("\"Account\",\"Login Name\""));
+        let again = import_legacy_manager(TransferFormat::KeePassCsv, &exported).unwrap();
         assert_eq!(again[0].notes.as_deref(), Some("note"));
     }
 
@@ -821,33 +994,33 @@ mod tests {
     fn duplicate_import_names_reserve_original_titles_and_are_repeatable() {
         let secrets = ["A", "A", "A (2)", "A", "A (3)", "A (2)"]
             .into_iter()
-            .map(|title| PersonalSecret::generic(title.into(), "value".into()))
+            .map(|title| LegacySecret::generic(title.into(), "value".into()))
             .collect::<Vec<_>>();
         let expected = vec!["A", "A (4)", "A (2)", "A (5)", "A (3)", "A (2) (2)"];
-        assert_eq!(personal_import_names(&secrets), expected);
-        assert_eq!(personal_import_names(&secrets), expected);
+        assert_eq!(legacy_import_names(&secrets), expected);
+        assert_eq!(legacy_import_names(&secrets), expected);
     }
 
     #[test]
     fn csv_exports_reject_lossy_items_before_writing() {
         let source = br#"{"items":[{"name":"Card","type":3,"card":{"number":"4111111111111111","code":"123"}}]}"#;
-        let cards = import_manager(TransferFormat::BitwardenJson, source).unwrap();
+        let cards = import_legacy_manager(TransferFormat::BitwardenJson, source).unwrap();
         for format in [TransferFormat::OnePasswordCsv, TransferFormat::KeePassCsv] {
             assert!(
-                export_manager(format, &cards)
+                export_legacy_manager(format, &cards)
                     .unwrap_err()
                     .to_string()
                     .contains("lossless")
             );
-            let mut login = PersonalSecret::generic("Login".into(), "value".into());
+            let mut login = LegacySecret::generic("Login".into(), "value".into());
             login.urls = vec!["https://one.test".into(), "https://two.test".into()];
-            assert!(export_manager(format, &[login]).is_err());
+            assert!(export_legacy_manager(format, &[login]).is_err());
         }
-        let mut login = PersonalSecret::generic("Login".into(), "value".into());
+        let mut login = LegacySecret::generic("Login".into(), "value".into());
         login.totp = Some("OTP-SEED".into());
-        assert!(export_manager(TransferFormat::KeePassCsv, &[login]).is_err());
-        let encoded = export_manager(TransferFormat::BitwardenJson, &cards).unwrap();
-        let restored = import_manager(TransferFormat::BitwardenJson, &encoded).unwrap();
+        assert!(export_legacy_manager(TransferFormat::KeePassCsv, &[login]).is_err());
+        let encoded = export_legacy_manager(TransferFormat::BitwardenJson, &cards).unwrap();
+        let restored = import_legacy_manager(TransferFormat::BitwardenJson, &encoded).unwrap();
         assert_eq!(restored[0].custom_fields.len(), 2);
     }
 }

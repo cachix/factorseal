@@ -4,6 +4,10 @@ use super::*;
 
 pub const MAX_INPUT: usize = 1024 * 1024;
 
+pub fn personal_sync(bytes: &[u8]) {
+    crate::personal::sync::fuzz(bytes);
+}
+
 pub fn metadata(bytes: &[u8]) {
     if bytes.len() <= MAX_INPUT {
         seal::fuzz_metadata(bytes);
@@ -86,6 +90,8 @@ pub fn transfer(bytes: &[u8]) {
 
 pub fn bootstrap(bytes: &[u8]) {
     let _ = crate::desktop_worker::receive::<crate::desktop_worker::Bootstrap>(&mut &*bytes);
+    let _ =
+        crate::desktop_worker::sync::receive::<crate::desktop_worker::sync::Command>(&mut &*bytes);
 }
 
 pub fn secret_service(bytes: &[u8]) {
@@ -133,10 +139,15 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         },
         password: WireSecret::new(b"synthetic".to_vec()).unwrap(),
         hosts_secret_service: false,
+        sync_control: true,
     };
     let mut frame = Vec::new();
     crate::desktop_worker::send(&mut frame, &bootstrap).unwrap();
+    let mut control = Vec::new();
+    crate::desktop_worker::sync::send(&mut control, &crate::desktop_worker::sync::Command::State)
+        .unwrap();
     let mut seeds = vec![
+        ("bootstrap", control),
         ("metadata", seal::fuzz_metadata_seed()),
         ("bootstrap", frame),
         ("document", records),
@@ -165,6 +176,11 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             .into_iter()
             .map(|bytes| ("envelope", bytes)),
     );
+    seeds.extend(
+        crate::personal::sync::fuzz_seeds()
+            .into_iter()
+            .map(|bytes| ("personal_sync", bytes)),
+    );
     seeds
 }
 
@@ -185,6 +201,31 @@ mod tests {
     }
 
     #[test]
+    fn unread_change_column_bytes_are_rejected_without_panicking() {
+        // Automerge change whose value metadata says null with a nonzero
+        // length, leaving bytes in the raw column that no op reads. Older
+        // Automerge accepted it and later rebuilt it under a different hash.
+        let bytes =
+            include_bytes!("../../fuzz/regressions/personal_sync/null-value-with-payload.bin");
+        personal_sync(bytes);
+        let update: crate::personal::replica::PersonalUpdate =
+            serde_json::from_slice(bytes).unwrap();
+        assert!(update.validate().is_err());
+    }
+
+    #[test]
+    fn delete_without_predecessor_is_rejected_without_panicking() {
+        // Automerge change whose only op is a delete with an empty pred
+        // list. Older Automerge applied it, kept no op for it, and then
+        // panicked rebuilding the change in get_changes.
+        let bytes = include_bytes!("../../fuzz/regressions/personal_sync/delete-without-pred.bin");
+        personal_sync(bytes);
+        let update: crate::personal::replica::PersonalUpdate =
+            serde_json::from_slice(bytes).unwrap();
+        assert!(update.validate().is_err());
+    }
+
+    #[test]
     fn synthetic_corpus_exercises_production_parsers() {
         for (name, bytes) in seeds() {
             match name {
@@ -198,6 +239,7 @@ mod tests {
                 "transfer" => transfer(&bytes),
                 "metadata" => metadata(&bytes),
                 "bootstrap" => bootstrap(&bytes),
+                "personal_sync" => personal_sync(&bytes),
                 _ => unreachable!(),
             }
         }

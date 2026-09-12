@@ -11,8 +11,6 @@ pub(crate) enum Instance {
     Primary {
         _lock: File,
         activations: smol::channel::Receiver<()>,
-        /// Raises the window the same way a second launch does.
-        activate: smol::channel::Sender<()>,
     },
     Secondary,
 }
@@ -33,7 +31,6 @@ pub(crate) fn acquire(root: &Path, request_activation: bool) -> Result<Instance,
     let watcher = open_private_file(&activation_path)?;
     watcher.set_len(0).map_err(|error| error.to_string())?;
     let (sender, activations) = smol::channel::bounded(4);
-    let activate = sender.clone();
     std::thread::Builder::new()
         .name("factorseal-desktop-activation".to_owned())
         .spawn(move || watch(&watcher, &sender))
@@ -41,7 +38,6 @@ pub(crate) fn acquire(root: &Path, request_activation: bool) -> Result<Instance,
     Ok(Instance::Primary {
         _lock: file,
         activations,
-        activate,
     })
 }
 

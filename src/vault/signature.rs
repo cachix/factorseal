@@ -7,7 +7,6 @@
 #[cfg(feature = "vault-store")]
 use core::convert::TryFrom;
 
-#[cfg(any(feature = "key-protection", test))]
 use ml_dsa::{KeyExport, Keypair};
 use ml_dsa::{KeyInit, MlDsa65, Seed, SigningKey};
 #[cfg(feature = "vault-store")]
@@ -21,6 +20,52 @@ use zeroize::Zeroizing;
 use super::{VaultError, VaultResult};
 
 pub(crate) const SIGNING_SEED_BYTES: usize = 32;
+
+/// Operation-only signing capability. Callers receive public keys and signatures,
+/// never a provider's private key. Every provider uses pure ML-DSA-65 with an
+/// empty context, preserving the existing signed transcripts and wire format.
+pub(crate) trait SigningProvider {
+    fn public_key(&self) -> crate::vault::VaultResult<Vec<u8>>;
+
+    #[cfg(feature = "vault-store")]
+    fn sign(&self, payload: &[u8]) -> crate::vault::VaultResult<Vec<u8>>;
+}
+
+/// Borrows a protected seed only for the lifetime of one signing operation.
+pub(crate) struct SoftwareSigner<'a>(pub(crate) &'a [u8; SIGNING_SEED_BYTES]);
+
+impl SigningProvider for SoftwareSigner<'_> {
+    fn public_key(&self) -> crate::vault::VaultResult<Vec<u8>> {
+        Ok(public_key_for_seed(self.0))
+    }
+
+    #[cfg(feature = "vault-store")]
+    fn sign(&self, payload: &[u8]) -> VaultResult<Vec<u8>> {
+        sign(self.0, payload)
+    }
+}
+
+#[cfg(all(feature = "hardware", target_os = "macos"))]
+pub(crate) struct EnclaveSigner(pub(crate) hardwareseal::apple_pq::MlDsa65Key);
+
+#[cfg(all(feature = "hardware", target_os = "macos"))]
+impl SigningProvider for EnclaveSigner {
+    fn public_key(&self) -> crate::vault::VaultResult<Vec<u8>> {
+        Ok(self.0.public_key().to_vec())
+    }
+
+    #[cfg(feature = "vault-store")]
+    fn sign(&self, payload: &[u8]) -> VaultResult<Vec<u8>> {
+        let signature = self
+            .0
+            .sign(payload)
+            .map_err(|error| VaultError::Protection(error.to_string()))?;
+        // Independently verify the native result against the persisted wire
+        // contract before it can authorize or commit anything.
+        verify(self.0.public_key(), payload, &signature)?;
+        Ok(signature)
+    }
+}
 #[cfg(feature = "vault-store")]
 pub(crate) const CURRENT_SIGNATURE_ALGORITHM: SignatureAlgorithm = SignatureAlgorithm::MlDsa65;
 
@@ -89,7 +134,6 @@ impl PreparedVerifyingKey {
     }
 }
 
-#[cfg(any(feature = "key-protection", test))]
 pub(crate) fn public_key_for_seed(seed: &[u8; SIGNING_SEED_BYTES]) -> Vec<u8> {
     signing_key_from_seed(seed)
         .verifying_key()
@@ -156,6 +200,23 @@ fn signing_key_from_seed(seed: &[u8; SIGNING_SEED_BYTES]) -> DeviceSigningKey {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[cfg(all(feature = "hardware", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires a physical Mac with macOS 26+ Secure Enclave access"]
+    fn secure_enclave_signatures_verify_with_rustcrypto_after_reopening() {
+        let key =
+            hardwareseal::apple_pq::MlDsa65Key::generate(hardwareseal::AccessPolicy::None).unwrap();
+        let reopened = hardwareseal::apple_pq::MlDsa65Key::from_reference(key.reference()).unwrap();
+        assert_eq!(key.public_key(), reopened.public_key());
+        let signer = EnclaveSigner(reopened);
+        let public = signer.public_key().unwrap();
+        for message in [&b""[..], &b"factorseal hardware acceptance"[..]] {
+            let proof = signer.sign(message).unwrap();
+            verify(&public, message, &proof).unwrap();
+            assert!(verify(&public, b"different transcript", &proof).is_err());
+        }
+    }
 
     #[test]
     fn mldsa_signatures_round_trip_and_reject_tampering() {

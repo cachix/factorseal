@@ -39,15 +39,6 @@ reason = "Pinned gpui-component-assets uses zed-reqwest's legacy PEM wrapper."
 migration = "DEP-4: update the component HTTP parent to rustls-pki-types PemObject APIs and test asset packaging."
 
 [[exception]]
-id = "RUSTSEC-2026-0206"
-package = "rustybuzz"
-version = "0.20.1"
-owner = "Factorseal maintainers"
-expires = 2026-10-05
-reason = "Both GPUI and component SVG renderers require rustybuzz; even usvg 0.47 still depends on this version."
-migration = "DEP-5: migrate both SVG rendering parents to harfrust, checking text shaping and vector rendering on native targets."
-
-[[exception]]
 id = "RUSTSEC-2026-0192"
 package = "ttf-parser"
 version = "0.25.1"

@@ -25,12 +25,13 @@ $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetR
 $stage = Join-Path $stageRoot $archive
 
 try {
-    cargo build --locked --release --no-default-features --features vault,cli,hardware --bin factorseal
+    cargo build --locked --release --no-default-features --features vault,cli,hardware,personal-sync-network --bin factorseal --bin factorseal-parser --bin factorseal-network
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
     $metadataJson = cargo metadata --locked --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
     $metadata = $metadataJson | ConvertFrom-Json
     $factorseal = Join-Path $metadata.target_directory "release/factorseal.exe"
+    $helpers = @('factorseal-parser', 'factorseal-network') | ForEach-Object { Join-Path $metadata.target_directory "release/$_.exe" }
     if (-not [string]::IsNullOrWhiteSpace($SigningCertificateThumbprint)) {
         $thumbprint = $SigningCertificateThumbprint.Replace(' ', '')
         if ($thumbprint -notmatch '^[0-9A-Fa-f]{40}$') {
@@ -47,11 +48,13 @@ try {
         if (-not (Test-Path -LiteralPath $SignTool -PathType Leaf)) {
             throw "signtool.exe is missing: $SignTool"
         }
-        & $SignTool sign /sha1 $thumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $factorseal
-        if ($LASTEXITCODE -ne 0) { throw 'signtool.exe failed to sign factorseal.exe' }
-        $signature = Get-AuthenticodeSignature -LiteralPath $factorseal
-        if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-            throw "factorseal.exe signature verification failed: $($signature.Status)"
+        foreach ($binary in @($factorseal) + $helpers) {
+            & $SignTool sign /sha1 $thumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $binary
+            if ($LASTEXITCODE -ne 0) { throw "signtool.exe failed to sign $binary" }
+            $signature = Get-AuthenticodeSignature -LiteralPath $binary
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+                throw "$binary signature verification failed: $($signature.Status)"
+            }
         }
     } else {
         Write-Warning 'Building an unsigned development archive; it cannot pass release acceptance.'
@@ -59,6 +62,7 @@ try {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     Copy-Item $factorseal, "LICENSE", "README.md" -Destination $stage
+    Copy-Item -LiteralPath $helpers -Destination $stage
     Copy-Item "packaging/windows/factorseal-task.xml.in", "packaging/windows/factorseal-askpass.ps1", "packaging/windows/factorseal-askpass.cmd", "packaging/windows/install-factorseal-task.ps1" -Destination $stage
     Copy-Item "acceptance/windows.ps1" -Destination (Join-Path $stage "run-acceptance.ps1")
     $zip = Join-Path $OutputDirectory "$archive.zip"

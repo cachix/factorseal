@@ -59,6 +59,67 @@ pub(super) struct PendingApprovals {
 }
 
 impl ApprovalCandidate {
+    pub(super) fn for_keyring(
+        caller: &CallerIdentity,
+        service: &str,
+        base_dir: String,
+        operation: PermissionOperation,
+    ) -> Self {
+        let parts: Vec<_> = service
+            .strip_prefix("service/")
+            .unwrap_or(service)
+            .splitn(4, '/')
+            .collect();
+        let (project, profile) = if parts.len() == 4
+            && parts[0] == "secretspec"
+            && !parts[1].is_empty()
+            && !parts[2].is_empty()
+        {
+            (
+                format!("secretspec/{}", parts[1]),
+                Some(parts[2].to_owned()),
+            )
+        } else {
+            (service.to_owned(), None)
+        };
+        let permission = match operation {
+            PermissionOperation::Get => GrantPermission::Get,
+            PermissionOperation::Put => GrantPermission::Put,
+            PermissionOperation::Delete => GrantPermission::Delete,
+            PermissionOperation::Clear => GrantPermission::Clear,
+        };
+        Self {
+            caller: caller.clone(),
+            application: VaultApplicationContext {
+                project: Some(project.clone()),
+                profile,
+                base_dir: Some(base_dir),
+                reason: Some(format!("System keyring: {service}")),
+                requested_permission_duration_seconds: None,
+            },
+            scope: DocumentKind::LinuxSecretService,
+            namespace: project.into_bytes(),
+            permission,
+            operation,
+        }
+    }
+
+    pub(super) fn require_keyring(&self, store: &VaultStore, now: u64) -> VaultResult<Option<u64>> {
+        super::super::grant::require_grant_until(
+            store,
+            &self.caller,
+            super::super::grant::GrantRequirement {
+                scope: self.scope,
+                namespace: Some(&self.namespace),
+                address: None,
+                project: self.application.project.as_deref(),
+                base_dir: self.application.base_dir.as_deref(),
+                permission: self.permission,
+            },
+            now,
+        )
+    }
+
     pub(super) fn for_request(
         caller: &CallerIdentity,
         application: Option<&VaultApplicationContext>,
@@ -207,6 +268,7 @@ impl PendingApprovals {
             record.caller.fingerprint() == fingerprint
                 && record.summary.application == candidate.application
                 && record.namespace == candidate.namespace
+                && record.scope == candidate.scope
                 && record.permission == candidate.permission
         }) {
             let PermissionState::Pending { expires_at, .. } = existing.summary.state else {
@@ -244,6 +306,7 @@ impl PendingApprovals {
         let id = format!("prm_{}", URL_SAFE_NO_PAD.encode(id_bytes));
         let summary = Permission {
             id: id.clone(),
+            scope: Some(candidate.scope),
             operation: candidate.operation,
             principal: PermissionPrincipal::from(&candidate.caller),
             application: candidate.application,
@@ -367,6 +430,7 @@ impl PendingApprovals {
                 scope: record.scope,
                 namespace: &record.namespace,
                 project,
+                base_dir: record.summary.application.base_dir.as_deref(),
             },
             record.permission,
             permission,

@@ -28,6 +28,7 @@ rustPlatform.buildRustPackage {
     fileset = lib.fileset.unions [
       ../Cargo.lock
       ../Cargo.toml
+      ../build.rs
       ../assets
       ../crates
       ../factorseal-desktop

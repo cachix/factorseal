@@ -51,11 +51,11 @@ use super::transport::{
 };
 use super::windows_client::validate_pipe_name;
 use super::{
-    CallerIdentity, CallerIdentityCache, CallerPlatform, LifecycleSignal, VaultError, VaultRequest,
-    VaultResult, VaultService,
+    CallerIdentity, CallerIdentityCache, CallerPlatform, LifecycleSignal, VaultError, VaultResult,
+    VaultService,
 };
 #[cfg(test)]
-use super::{VaultClient, WindowsVaultClient};
+use super::{VaultClient, VaultRequest, WindowsVaultClient};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const WINDOWS_SUSPEND_SEAL_DEADLINE: Duration = Duration::from_millis(1_500);
@@ -584,7 +584,7 @@ fn handle_connection(
     // parsed, and access is decided by the grant lookup in `handle`.
     let bytes = read_frame(stream, IoBudget::new(IPC_FRAME_IO_TIMEOUT))?;
     let caller = caller_identity(stream, caller_cache)?;
-    let request = VaultRequest::decode(&bytes)?;
+    let request = crate::isolation::parser::parse(&bytes)?;
     let response = service.handle(&caller, request, unix_time()?);
     let bytes = response.encode()?;
     // Delivery gets its own I/O budget, capped by this result's authority.
@@ -878,7 +878,7 @@ mod tests {
         let server_service = Arc::clone(&service);
         let server = std::thread::spawn(move || serve_windows_vault(&server_service, &options));
         let client = WindowsVaultClient::new(pipe_name);
-        wait_until_ready(&client, &server);
+        let server = wait_until_ready(&client, server);
 
         let address = WireSecretAddress::new("project/default/TOKEN", None);
         let stored = client
@@ -929,13 +929,18 @@ mod tests {
     #[cfg(feature = "hardware")]
     fn wait_until_ready(
         client: &WindowsVaultClient,
-        server: &std::thread::JoinHandle<VaultResult<()>>,
-    ) {
+        server: std::thread::JoinHandle<VaultResult<()>>,
+    ) -> std::thread::JoinHandle<VaultResult<()>> {
         let mut last = None;
         for _ in 0..200 {
+            assert!(
+                !server.is_finished(),
+                "the Windows vault thread exited during startup: {:?}",
+                server.join().unwrap()
+            );
             let status = VaultRequest::new(VaultAction::Status).unwrap();
             match client.request(&status) {
-                Ok(_) => return,
+                Ok(_) => return server,
                 Err(error) => last = Some(error),
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -944,7 +949,10 @@ mod tests {
             server.is_finished(),
             "the Windows vault is still serving but unreachable: {last:?}"
         );
-        panic!("the Windows vault thread exited during startup: {last:?}");
+        panic!(
+            "the Windows vault thread exited during startup: {:?}; client: {last:?}",
+            server.join().unwrap()
+        );
     }
 
     #[test]

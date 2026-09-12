@@ -30,6 +30,8 @@ pub(super) enum TransferFormat {
     BitwardenJson,
     #[value(name = "1password-csv")]
     OnePasswordCsv,
+    #[value(name = "1password-1pux")]
+    OnePasswordPux,
     #[value(name = "keepass-csv")]
     KeePassCsv,
 }
@@ -40,6 +42,7 @@ impl From<TransferFormat> for factorseal::transfer::TransferFormat {
             TransferFormat::FactorSeal => Self::FactorSeal,
             TransferFormat::BitwardenJson => Self::BitwardenJson,
             TransferFormat::OnePasswordCsv => Self::OnePasswordCsv,
+            TransferFormat::OnePasswordPux => Self::OnePasswordPux,
             TransferFormat::KeePassCsv => Self::KeePassCsv,
         }
     }

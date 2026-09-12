@@ -15,10 +15,34 @@ the first instance to activate instead of starting another host.
 
 On Linux, the installed Desktop package also provides the session-bus
 activation record for `org.freedesktop.secrets`. A keyring request while sealed
-starts Desktop, or activates its existing window, so the user can authenticate.
-Once unsealed, the normal Secret Service adapter claims the bus name and handles
-the queued request. The requesting application's D-Bus timeout bounds the time
-available to finish authentication.
+starts Desktop in the background and opens a separate access dialog. The dialog
+shows the caller's executable, working directory, process ID, and lookup
+attributes; conventional SecretSpec addresses also show project, profile, and
+secret name. The user can deny the request or allow it and authenticate using
+FactorSeal's secure input. Unlocking and approval stay in the same popup and
+reuse the secure password entry. The vault browser stays closed. New access
+requires a signed grant for the authenticated executable, project, folder, and operation, valid for one hour or until revoked in Access Grants. The worker
+checks grants for every operation. SecretSpec IPC also opens this approval flow,
+using its own provider-cache scope. Project labels are caller-supplied context;
+the worker authenticates the executable independently. Denial, dismissal, and
+timeout return distinct D-Bus errors. The dialog only offers unlock-method
+buttons when the vault has multiple methods configured.
+
+The Access list distinguishes System keyring from the native SecretSpec provider
+and shows the project folder and requesting executable. Grant details include
+the executable digest and grant ID. Older grants recover their access type by
+matching the stored target digest; unmatched types remain explicitly unknown.
+
+Writes use a masked secret-entry dialog with a Save button, without creating a
+persistent write grant. The incoming value can be reviewed or replaced. Native
+SecretSpec IPC carries secret values through a private file descriptor. Its
+current protocol supplies the value before invoking `set`; prompting before
+that point also requires a change in SecretSpec.
+
+On Wayland compositors supporting layer-shell, including Niri, the access
+prompt opens as a centered overlay outside the tiling layout. It takes keyboard
+focus until dismissed; Escape and Deny close it. Compositors without layer-shell
+receive a normal access dialog instead. No compositor window rule is required.
 
 On Linux, theme probes run as short-lived child processes so GTK and Qt never
 initialize their global toolkit state inside GPUI. Desktop follows the native

@@ -45,7 +45,7 @@ pub(crate) fn fuzz_commit_seed() -> Vec<u8> {
                 next_eviction: None,
                 device_key_id: super::DeviceKeyId::for_public_key(&key),
             },
-            &[0; 32],
+            &super::signature::SoftwareSigner(&[0; 32]),
         )
         .unwrap(),
     )
@@ -54,6 +54,8 @@ pub(crate) fn fuzz_commit_seed() -> Vec<u8> {
 mod database;
 mod migration;
 mod worker;
+#[cfg(feature = "personal-sync")]
+pub(crate) use worker::{PairingCommand, SyncCommand, SyncReply};
 
 pub(crate) use worker::StoredSecret;
 use worker::{Command, SecretValues, WorkerControl, request};
@@ -124,6 +126,7 @@ impl VaultStore {
         self.control.deadline()
     }
 
+    #[cfg(feature = "vault")]
     pub(crate) fn enable_emergency_exit(&self) {
         self.control.enable_emergency_exit();
     }
@@ -134,6 +137,7 @@ impl VaultStore {
     }
 
     #[must_use]
+    #[cfg(any(feature = "vault", all(test, feature = "hardware")))]
     pub(crate) fn is_shutdown_complete(&self) -> bool {
         self.control.is_shutdown_complete()
     }
@@ -350,6 +354,16 @@ impl VaultStore {
             address: address.cloned(),
             before_seq,
             limit,
+            response,
+        })
+    }
+}
+
+#[cfg(feature = "personal-sync")]
+impl VaultStore {
+    pub(crate) fn personal_sync(&self, action: SyncCommand) -> VaultResult<SyncReply> {
+        request(&self.control.sender, |response| Command::PersonalSync {
+            action,
             response,
         })
     }

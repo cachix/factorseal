@@ -111,7 +111,9 @@ fn resolve(choice: Choice, system: &Theme, system_input: Hsla) -> Result<(Theme,
         theme.font_family = system.font_family.clone();
         theme.font_size = system.font_size;
         let color = resolved.input.background_color;
-        gpui::rgba(u32::from_be_bytes([color.r, color.g, color.b, color.a])).into()
+        gpui::rgb_to_hsla(gpui::rgba(u32::from_be_bytes([
+            color.r, color.g, color.b, color.a,
+        ])))
     } else if choice == Choice::FactorSeal {
         crate::branding::apply(&mut theme);
         crate::theming::sync_component_colors(&mut theme);
@@ -304,12 +306,12 @@ mod tests {
     fn every_theme_resolves_and_system_colors_are_restored() {
         let system = Theme {
             colors: gpui_component::ThemeColor {
-                background: gpui::rgb(0x0012_3456).into(),
+                background: gpui::rgb_to_hsla(gpui::rgb(0x0012_3456)),
                 ..Theme::default().colors
             },
             ..Theme::default()
         };
-        let input = gpui::rgb(0x0065_4321).into();
+        let input = gpui::rgb_to_hsla(gpui::rgb(0x0065_4321));
         for choice in Choice::all() {
             let (theme, _) = resolve(choice, &system, input).unwrap();
             assert_eq!(

@@ -8,6 +8,99 @@ use crate::vault::{
 const TEST_NOW: u64 = 10;
 
 #[test]
+fn personal_identity_migration_is_durable_and_preserves_history() {
+    use crate::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret};
+    use automerge::transaction::Transactable;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("vault");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let old_address = SecretAddress::new("Old title", None).unwrap();
+    let expected = PersonalSecret::decode("Old title", b"legacy password").unwrap();
+    let new_address = SecretAddress::new(expected.id.clone(), None).unwrap();
+    runtime.block_on(async {
+        let mut worker = StoreWorker::open(&root, Vault::create_for_test(&root).unwrap())
+            .await
+            .unwrap();
+        let scope = DocumentKind::LocalKeyring;
+        // Construct the pre-ID layout without passing through the new write validator.
+        let provenance = provenance();
+        let context = worker.context(&provenance, TEST_NOW);
+        let mut legacy = SecretDocument::new(b"legacy", scope, b"fixture").unwrap();
+        let mut mutation = legacy
+            .put(&old_address, b"legacy password", None, &context)
+            .unwrap();
+        let mut snapshot = automerge::AutoCommit::load(&mutation.snapshot).unwrap();
+        snapshot
+            .put(
+                automerge::ROOT,
+                "partition",
+                PERSONAL_SECRET_NAMESPACE.to_vec(),
+            )
+            .unwrap();
+        mutation.snapshot = Zeroizing::new(snapshot.save());
+        mutation.partition = PERSONAL_SECRET_NAMESPACE.to_vec();
+        let id = worker.document_id(scope, PERSONAL_SECRET_NAMESPACE);
+        worker
+            .commit_mutation(id, scope, None, mutation, &context)
+            .await
+            .unwrap();
+    });
+    let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
+    let scope = DocumentKind::LocalKeyring;
+    let loaded = store
+        .get_at(scope, PERSONAL_SECRET_NAMESPACE, &new_address, TEST_NOW)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        PersonalSecret::decode_current(loaded.as_slice()).unwrap(),
+        expected
+    );
+    assert!(
+        store
+            .get_at(scope, PERSONAL_SECRET_NAMESPACE, &old_address, TEST_NOW)
+            .unwrap()
+            .is_none()
+    );
+    let page = store.list_vault_entries(None, 8, TEST_NOW).unwrap();
+    assert_eq!(page.items[0].display_name.as_deref(), Some("Old title"));
+    assert_eq!(
+        page.items[0].display_type.as_deref(),
+        Some(expected.kind.label())
+    );
+    assert_eq!(page.items[0].address, new_address);
+    assert_eq!(page.items[0].updated_at, Some(TEST_NOW));
+    let history = store
+        .list_history(
+            scope,
+            PERSONAL_SECRET_NAMESPACE,
+            Some(&new_address),
+            None,
+            8,
+        )
+        .unwrap();
+    assert_eq!(history.items.len(), 1);
+    assert_eq!(history.items[0].address, new_address);
+    let revision = store.export_revision().unwrap();
+    store.seal();
+    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
+    assert_eq!(
+        reopened.export_revision().unwrap(),
+        revision,
+        "migration must not repeat"
+    );
+    assert!(
+        reopened
+            .get_at(scope, PERSONAL_SECRET_NAMESPACE, &new_address, TEST_NOW)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn watchdog_terminates_a_wedged_native_owner_without_aborting() {
     const CHILD: &str = "FACTORSEAL_TEST_WEDGED_OWNER";
     if std::env::var_os(CHILD).is_some() {

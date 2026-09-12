@@ -216,6 +216,7 @@ impl StoreWorker {
             ));
         }
         let DocumentMutation {
+            address_migrations,
             snapshot,
             partition,
             history: pending,
@@ -232,6 +233,7 @@ impl StoreWorker {
             )?,
             None => HistoryLog::new(scope, &partition),
         };
+        history.migrate_addresses(&address_migrations);
         history.record(
             pending,
             context.now,
@@ -251,9 +253,9 @@ impl StoreWorker {
         )?;
         let wrapped_dek = serde_json::to_vec(&wrapped)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-        let signing_seed = self
+        let signer = self
             .secrets
-            .signing_seed(self.device.installation_id(), self.device.device_vault_id())?;
+            .signer(self.device.installation_id(), self.device.device_vault_id())?;
         let envelope_context = EnvelopeContext {
             vault_id: self.device.device_vault_id(),
             document_id,
@@ -279,7 +281,7 @@ impl StoreWorker {
                 next_eviction,
                 device_key_id: self.device.device_key_id(),
             },
-            &signing_seed,
+            &signer,
         )?;
         let protected_bytes = serde_json::to_vec(&protected_commit)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;

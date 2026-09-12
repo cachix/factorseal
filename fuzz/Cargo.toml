@@ -15,6 +15,13 @@ factorseal = { path = "..", default-features = false, features = ["fuzzing"] }
 members = ["."]
 
 [[bin]]
+name = "personal_sync"
+path = "fuzz_targets/personal_sync.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "seed-corpus"
 path = "src/seed.rs"
 test = false

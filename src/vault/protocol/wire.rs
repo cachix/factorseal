@@ -15,7 +15,7 @@ use crate::vault::{
 };
 
 // Version 12 adds revision-bound permission pages and logical keyring transfers.
-pub(super) const PROTOCOL_VERSION: u8 = 12;
+pub(super) const PROTOCOL_VERSION: u8 = 14;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -468,7 +468,7 @@ impl VaultRequest {
         Ok(())
     }
 
-    fn validate_fields(&self) -> VaultResult<()> {
+    pub(crate) fn validate_fields(&self) -> VaultResult<()> {
         if self.version != PROTOCOL_VERSION {
             return Err(VaultError::Protocol(
                 "unsupported request version".to_owned(),
@@ -515,6 +515,20 @@ impl io::Write for BoundedMessageWriter {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VaultAction {
+    /// Trusted Secret Service bridge. The vault resolves the unique D-Bus
+    /// sender itself; the bridge cannot supply an executable identity.
+    /// The trusted keyring host verifies that an IPC input recipient is a manager.
+    AuthorizeSecretInput {
+        sender: String,
+    },
+    KeyringAccess {
+        sender: String,
+        service: String,
+        operation: PermissionOperation,
+        action: Option<Box<VaultAction>>,
+        pending: Option<String>,
+    },
+
     Status,
     /// List value-free entry metadata across user-facing vault documents.
     /// The service permits this only to the permission manager.
@@ -629,6 +643,13 @@ pub enum VaultAction {
         address: SecretSpecAddress,
     },
     /// Write to the SecretSpec provider cache.
+    /// Trusted Desktop/CLI saves one interactively entered cache value.
+    WriteCacheFromDialog {
+        project: String,
+        address: SecretSpecAddress,
+        value: WireSecret,
+        evict_at: Option<u64>,
+    },
     PutCache {
         project: String,
         address: SecretSpecAddress,
@@ -690,6 +711,50 @@ impl VaultAction {
     #[allow(clippy::too_many_lines)]
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
+            Self::AuthorizeSecretInput { sender } => {
+                if sender.starts_with(':') && sender.len() <= 255 {
+                    Ok(())
+                } else {
+                    Err(VaultError::Protocol("invalid input peer".to_owned()))
+                }
+            }
+            Self::KeyringAccess {
+                sender,
+                service,
+                action,
+                pending,
+                ..
+            } => {
+                if !sender.starts_with(':')
+                    || sender.len() > 255
+                    || service.is_empty()
+                    || service.len() > 1024
+                {
+                    return Err(VaultError::Protocol(
+                        "invalid keyring access target".to_owned(),
+                    ));
+                }
+                if let Some(id) = pending {
+                    validate_permission_id(id)?;
+                }
+                if pending.is_some() && action.is_some() {
+                    return Err(VaultError::Protocol("invalid keyring wait".to_owned()));
+                }
+                if let Some(action) = action {
+                    match action.as_ref() {
+                        Self::Get { namespace, .. } | Self::Mutate { namespace, .. }
+                            if namespace == b"factorseal/secret-service/v1" =>
+                        {
+                            action.validate()
+                        }
+                        _ => Err(VaultError::Protocol(
+                            "invalid bridged keyring action".to_owned(),
+                        )),
+                    }
+                } else {
+                    Ok(())
+                }
+            }
             Self::Status | Self::ListPermissions | Self::ExportRevision => Ok(()),
             Self::ListPermissionsPage { cursor, .. } => validate_permission_id(cursor),
             Self::ListVaultEntries { cursor, limit } => {
@@ -748,6 +813,9 @@ impl VaultAction {
             }
             | Self::DeleteProject { project, address }
             | Self::GetCache { project, address }
+            | Self::WriteCacheFromDialog {
+                project, address, ..
+            }
             | Self::PutCache {
                 project, address, ..
             }
@@ -1016,6 +1084,15 @@ pub enum VaultResponseBody {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultEntryMetadata {
+    /// Display-only personal title, decrypted during inventory. Never used for addressing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Display-only personal item type, derived from encrypted content during inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_type: Option<String>,
+    /// Last personal-item modification time, in Unix seconds, derived during inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
     pub document_kind: DocumentKind,
     #[serde(with = "base64_bytes")]
     pub partition: Vec<u8>,
@@ -1066,10 +1143,14 @@ fn validate_transfer_entry(entry: &VaultEntryMetadata) -> VaultResult<()> {
 #[serde(deny_unknown_fields)]
 pub struct Permission {
     pub id: String,
+    /// Actual backend scope, independent of caller-supplied project labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<DocumentKind>,
     pub operation: PermissionOperation,
     /// Transport-authenticated identity used as the grant principal.
     pub principal: PermissionPrincipal,
-    /// Caller-declared display and audit context; never grant authority.
+    /// Project and folder constrain the signed grant; these labels do not
+    /// authenticate the executable principal.
     pub application: VaultApplicationContext,
     pub state: PermissionState,
 }

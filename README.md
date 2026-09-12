@@ -122,9 +122,13 @@ alternative to `factorseal agent`, not a client of it, so do not configure both
 to autostart. Repeated Desktop launches activate the existing per-vault
 instance. On Linux, the Desktop package registers D-Bus activation for
 `org.freedesktop.secrets`. Desktop keeps answering while sealed, but credential
-searches return `IsLocked` immediately: manually unlock Desktop before using
-applications that look up credentials. Native socket and SecretSpec clients
-also require Desktop to be unsealed first.
+searches open a compact access dialog and resume after approval and authentication. Native
+socket and SecretSpec clients also require Desktop to be unsealed first.
+Request parsing and personal sync run in separate confined helper processes
+installed beside the CLI. On Linux the sync helper requires Landlock ABI 3, so
+personal sync needs kernel 6.2 or later; distributions such as Debian 12 and
+Ubuntu 22.04 ship older kernels and cannot run it. The parser helper works on
+every supported kernel.
 Sealing removes the native service endpoint and all unwrapped vault keys.
 
 If the vault does not exist yet, `factorseal agent` stays alive, logs the
@@ -227,6 +231,36 @@ metadata the selected format cannot preserve; use an encrypted FactorSeal
 archive for a lossless backup. Duplicate imported titles receive stable,
 collision-free suffixes.
 
+### Personal item types and migration
+
+Personal items use a versioned record with a stable ID, category, ordered sections,
+and typed fields. Templates cover logins, secure notes, cards, identities, SSH
+keys, API credentials, passports, bank accounts, documents, and generic secrets.
+Fields have independent IDs and labels, so repeated labels and multiple passwords
+are supported. The desktop creation form offers templates and custom fields;
+values use masked, locked-memory input, including multiline values.
+
+Existing v1 records and UTF-8 secret values migrate on read; subsequent writes use
+v2. Native encrypted archives retain all sections, fields, and source metadata.
+Unknown CSV columns become concealed custom fields. Bitwarden custom-field types
+and linked-field IDs are preserved. Unmapped Bitwarden properties are retained in
+encrypted source metadata and prevent exports to formats that would discard them.
+
+Import 1Password's richer export with:
+
+```console
+$ factorseal import account.1pux --format 1password-1pux
+```
+
+1PUX v3 imports preserve sections, typed values, source metadata (including password
+history), and files. Files are currently stored as separate document items; source
+metadata retains their document IDs. The importer never extracts ZIP paths to disk,
+limits expanded archives to 128 MiB, and rejects missing referenced files. Each
+encoded personal item is limited to 512 KiB to fit the vault protocol. An oversized
+item fails preparation before any imported items are written. 1PUX is import-only;
+use an encrypted FactorSeal archive to back up these richer records. Preserving
+passkey or other unrecognized source data does not make it usable for authentication.
+
 ## How it works
 
 Once unsealed, clients send requests over authenticated native IPC to the
@@ -272,13 +306,17 @@ the persisted FIPS profile, and encrypts the wrapped payload with AES-256-GCM.
 Hardware-protector operations are not in the database write path, and
 unsealing costs one hardware operation. Once unsealed, only the installation
 root and the document-index key derived from it remain in zeroizing worker
-memory for the lease. A document DEK and exportable signing seed are unwrapped
+memory for the lease. Document DEKs and signing capabilities are unwrapped
 only for the operation that needs them and zeroized immediately afterward.
+New vaults on macOS 26+ use non-exportable Secure Enclave ML-DSA-65 keys;
+their opaque references are root-encrypted. Existing vaults, older macOS, and
+other platforms use root-encrypted software signing seeds. Enclave signing
+adds a native operation to each signature; it never falls back on failure.
 
 ### Creation and unsealing
 
 Creation generates distinct random installation and device-vault IDs, a
-256-bit installation root, and a separate ML-DSA-65 signing seed; the
+256-bit installation root, and a separate ML-DSA-65 signing identity; the
 document-index key is derived from the root and both IDs.
 The signing identity also determines the permanent `DeviceKeyId`
 and stable Automerge actor ID. Each document generation is encrypted under its
@@ -291,8 +329,8 @@ encrypt the installation root with AES-256-GCM before one hardware-backed key
 wraps it. Biometric-only groups wrap the root directly with a key whose use
 requires platform biometric approval, so unsealing needs one native ceremony.
 
-Unsealing reverses those layers, derives the public signing identity from the
-root-wrapped seed, and rejects any mismatch before opening the database.
+Unsealing reverses those layers, reconstructs the selected signing provider,
+and rejects any public-identity mismatch before opening the database.
 The store then verifies its schema, installation/device-vault identity, signed
 commit chain, wrapped document-key digests, and current document heads before
 serving requests.
@@ -389,7 +427,7 @@ context redacted unless the reader holds the `manage-permissions` grant.
 
 One worker thread owns the Turso connection, exclusive `factorseal.lock`, and
 lease-scoped installation root/index capability. It unwraps only the requested
-document DEK and the signing seed while processing an operation. A mutation
+document DEK and the signing capability while processing an operation. A mutation
 uses one transaction to compare-and-swap the document generation, append its
 encrypted state, append a signed protected commit, and advance the global head.
 The protected commit chain is periodically compacted to the current state of
@@ -498,10 +536,25 @@ macOS, and Windows.
 On Linux, Factorseal Desktop registers `org.freedesktop.secrets` for D-Bus
 activation and serves a locked collection while the vault is sealed. Item
 labels and lookup attributes remain in the encrypted index; no plaintext search
-cache is written. Manually unlock Desktop before credential lookup. Sealed
-searches return `org.freedesktop.Secret.Error.IsLocked` immediately, without
-opening an unlock window or reporting that the credential is missing. Clients
-that explicitly call `Unlock` can still use the normal prompt flow.
+cache is written. Sealed searches open a separate access dialog showing the
+requesting executable, working directory, process, and lookup attributes. The
+standard SecretSpec service path also supplies the project, profile, and secret
+name. These project labels are caller-provided; they are not a verified project
+identity. Unlocking and grant approval stay in one popup, reusing the secure
+password entry. The signed grant binds the authenticated executable, project,
+folder, and operation, either for one hour or until revoked. Keyring requests
+use the nearest `secretspec.toml` ancestor of the OS-reported working directory
+(or that directory itself); SecretSpec IPC supplies its canonical project folder. Grants appear in Access
+Grants and are checked again for each secret operation. SecretSpec IPC uses the
+same approval flow, with separate grants for its provider-cache scope.
+Desktop writes open a masked, editable secret-entry dialog and authorize only
+that save, without creating a write grant. Native IPC transports the value over
+a private file descriptor. Its current `set` protocol already supplies a value;
+starting the prompt before that value exists requires a SecretSpec-side change.
+Explicit denial returns `org.freedesktop.Secret.Error.AccessDenied`, dismissal
+returns `org.freedesktop.Secret.Error.Cancelled`, and expiration returns
+`org.freedesktop.Secret.Error.TimedOut`. Clients may impose a shorter D-Bus
+timeout. Clients that explicitly call `Unlock` use the normal prompt flow.
 
 Do not run another provider that owns that bus name, such as GNOME Keyring or
 oo7, at the same time. macOS Keychain and Windows Credential Manager remain
@@ -583,9 +636,11 @@ Platform biometric paths inherit the algorithms and certification properties
 of their TPM, Secure Enclave, or Windows Hello components and are not
 claimed to be completely post-quantum certified.
 
-The signing seed is root-wrapped, but must briefly exist in
-zeroizing process memory for each signature; signing is not yet performed by a
-non-exportable native signing primitive. The retained installation root can
+Software signing seeds briefly exist in zeroizing process memory for each
+signature. New macOS 26+ vaults instead use non-exportable enclave signing
+keys, with root-wrapped opaque references. Existing identities remain unchanged
+on upgrade; see the [migration design](security/macos-crypto-and-isolation.md).
+The retained installation root can
 unwrap any local document during an active lease, so this hierarchy reduces
 passive key retention rather than defeating code execution in the unsealed
 process. Hardware binding also cannot stop an authorized or compromised client

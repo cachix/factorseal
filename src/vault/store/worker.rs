@@ -33,6 +33,10 @@ use super::{HistoryPage, StorePage};
 
 mod integrity;
 mod mutation;
+#[cfg(feature = "personal-sync")]
+mod sync;
+#[cfg(feature = "personal-sync")]
+pub(crate) use sync::{PairingCommand, SyncCommand, SyncReply};
 
 const COMMAND_QUEUE: usize = 64;
 const MAX_COMMIT_CHAIN: usize = 1_000_000;
@@ -201,6 +205,7 @@ impl WorkerControl {
             .map_err(|_| VaultError::WorkerUnavailable)
     }
 
+    #[cfg(feature = "vault")]
     pub(super) fn enable_emergency_exit(&self) {
         self.status.emergency_exit.store(true, Ordering::Release);
     }
@@ -209,6 +214,7 @@ impl WorkerControl {
         self.status.is_sealed()
     }
 
+    #[cfg(any(feature = "vault", all(test, feature = "hardware")))]
     pub(super) fn is_shutdown_complete(&self) -> bool {
         self.status.shutdown_complete.load(Ordering::Acquire)
     }
@@ -241,6 +247,11 @@ fn watch_shutdown(watched: &std::sync::Weak<WorkerStatus>) {
 }
 
 pub(super) enum Command {
+    #[cfg(feature = "personal-sync")]
+    PersonalSync {
+        action: SyncCommand,
+        response: mpsc::Sender<VaultResult<SyncReply>>,
+    },
     ExportRevision {
         response: mpsc::Sender<VaultResult<Option<[u8; 32]>>>,
     },
@@ -434,6 +445,11 @@ fn execute_command(
     status: &WorkerStatus,
 ) -> bool {
     match command {
+        #[cfg(feature = "personal-sync")]
+        Command::PersonalSync { action, response } => {
+            let result = runtime.block_on(worker.personal_sync(action));
+            send_result(response, result, status);
+        }
         Command::Get {
             scope,
             partition,
@@ -730,6 +746,7 @@ impl StoreWorker {
             if purge_result.is_ok() { "ok" } else { "error" },
         );
         purge_result?;
+        Box::pin(worker.migrate_personal_document()).await?;
         // A database written before compaction existed still carries its whole
         // history; shrink it once here so the next unseal is fast.
         let compact_started = Instant::now();
@@ -746,6 +763,38 @@ impl StoreWorker {
         );
         compact_result?;
         Ok(worker)
+    }
+
+    async fn migrate_personal_document(&mut self) -> VaultResult<()> {
+        let personal_partition = crate::personal::PERSONAL_SECRET_NAMESPACE;
+        let personal_id = self.document_id(DocumentKind::LocalKeyring, personal_partition);
+        if let Some(LoadedDocument { mut document, head }) = self
+            .load_document(
+                personal_id,
+                DocumentKind::LocalKeyring,
+                Some(personal_partition),
+            )
+            .await?
+        {
+            let mutation = match document.migrate_personal()? {
+                Some(mutation) => Some(mutation),
+                None => document.migrate_personal_replicas()?,
+            };
+            let Some(mutation) = mutation else {
+                return Ok(());
+            };
+            let provenance = Provenance::service(ServiceReason::PersonalMigration);
+            let context = self.context(&provenance, unix_time()?);
+            self.commit_mutation(
+                personal_id,
+                DocumentKind::LocalKeyring,
+                Some(head),
+                mutation,
+                &context,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn get(
@@ -985,9 +1034,16 @@ impl StoreWorker {
                 {
                     continue;
                 }
+                let summary = document.personal_summary(&address, now)?;
+                let (display_name, display_type, updated_at) = summary
+                    .map(|(title, kind, updated)| (Some(title), Some(kind), Some(updated)))
+                    .unwrap_or_default();
                 entries.push((
                     self.vault_entry_cursor(document_kind, document_id, &storage_key),
                     VaultEntryMetadata {
+                        display_name,
+                        display_type,
+                        updated_at,
                         document_kind,
                         partition: partition.clone(),
                         address,

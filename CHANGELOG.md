@@ -4,6 +4,37 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Connect Desktop's Devices panel to iroh pairing and encrypted sync. Show QR
+  tickets, comparison codes, explicit approval/cancellation, enrolled devices,
+  reachability and publication/conflict counts. Keep forwarding while sealed
+  while Desktop remains open. Use inherited private control pipes for enrollment
+  and vault publication/application; ordinary application IPC is unchanged.
+  Install the CLI and Desktop together.
+
+- Add durable personal-device pairing management: compact QR invitations,
+  signed requests with matching verification codes, explicit exact-request
+  approval, cancellation and controller-pinned membership. Preserve pending
+  pairing across restarts and republish personal histories on enrollment.
+  Desktop supplies the pairing route and Devices UI.
+
+- Add an optional iroh ciphertext courier and controller-signed membership
+  chains, with separate reader and storage-only endpoint authorization. Verify
+  forwarding through a restarted storage node after the sender disconnects.
+  Desktop owns the background transport after sync setup.
+
+- Use per-item Automerge documents for personal-secret replication. Preserve
+  concurrent values and edit/delete conflicts, resolve against observed heads,
+  and retain Automerge history across local snapshot projection. This history
+  includes old secret values; pruning is not implemented. Upgrade stable-ID
+  records and legacy deletion markers without changing device-specific data.
+- Connect experimental encrypted sync packets to the vault worker: protect
+  reader seeds under the installation root, persist exact outgoing packets
+  before spool delivery, and atomically apply received Automerge changes with
+  durable receipts. Storage/forwarding needs no reader keys. Host-management
+  APIs enforce the unseal lease; Desktop presents pairing and device status.
+  Personal documents use format v5 and native IPC uses v14; update the service,
+  CLI, and Desktop together. The old experimental revision-packet suite is
+  rejected; packets now carry native Automerge changes.
 - Keep Secret Service search metadata encrypted. Sealed searches return
   `IsLocked` immediately and require manual Desktop unlock before lookup.
 - Store root/index, signing, document, password-derived and archive keys in
@@ -18,7 +49,7 @@ All notable changes to FactorSeal will be documented in this file.
   `LockedBytes`. Large archives require a sufficient OS memory-lock quota.
 
 The current formats are metadata v8, database schema v5, snapshot envelope v7,
-protected commit v6, document v3, record v2, and native protocol v12. Database
+protected commit v6, document v3 (personal documents v5), record v2, and native protocol v14. Database
 schema v3 is authenticated and migrated transactionally after unseal: current
 document heads are projected into the new record/history envelope, document
 keys are rotated, and a compact current-format commit chain is signed before

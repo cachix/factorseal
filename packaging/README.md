@@ -292,6 +292,14 @@ Ship the CLI alongside Desktop, or set `FACTORSEAL_CLI_EXECUTABLE` to its absolu
 path. Desktop launches a fresh hardened CLI worker for each initialization or
 unlock. Keep both binaries from the same build: the private bootstrap and native
 IPC versions must agree. The Nix Desktop wrapper supplies its CLI dependency.
+All desktop packages also install `factorseal-parser` and `factorseal-network` beside
+the CLI. The vault requires the parser; Desktop runs sync in the networking
+helper. Install all three executables from the same build. Linux network
+confinement requires fully enforced Landlock ABI 3 (Linux 6.2 or later).
+Helper startup fails if its sandbox cannot be enforced.
+Windows launches helpers in less-privileged AppContainers with private pipes
+and a job that terminates them when the owner exits. macOS uses Seatbelt.
+Native runtime acceptance for these helper policies remains required.
 Signing/entitlements and lifecycle acceptance must cover the key-owning CLI
 worker as well as the GUI. Closing the GUI lifeline must stop the worker even
 while a native factor prompt is active.

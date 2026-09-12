@@ -371,6 +371,8 @@ pkgs.testers.runNixOSTest {
             )
 
         with subtest("SecretSpec cache writes expire inside Factorseal"):
+            # Initial cache access needs two interactive approvals. Leave room
+            # for those and VM scheduling before testing the fresh cache hit.
             expiry_manifest = (
                 '[project]\n'
                 'name = "expiry"\n'
@@ -378,7 +380,7 @@ pkgs.testers.runNixOSTest {
                 '\n'
                 '[providers]\n'
                 'factorseal = "factorseal://default"\n'
-                'source = { uri = "env://", cache = { provider = "factorseal", max_age = "5s" } }\n'
+                'source = { uri = "env://", cache = { provider = "factorseal", max_age = "30s" } }\n'
                 '\n'
                 '[profiles.default]\n'
                 'CACHE_TOKEN = { description = "Expiring cache token", required = true }\n'
@@ -400,19 +402,33 @@ pkgs.testers.runNixOSTest {
             assert locked.succeed(
                 "cat /tmp/secretspec-expiry-first.stdout"
             ).strip() == "one"
-            assert as_user(
+            cached = as_user(
                 locked,
                 secretspec_command(
                     "expiry", "get CACHE_TOKEN --provider source", "CACHE_TOKEN=two"
                 ),
-            ).strip() == "one"
-            locked.succeed("sleep 7")
-            assert as_user(
+            ).strip()
+            assert cached == "one", f"fresh cache lookup returned: {cached!r}"
+            locked.succeed("sleep 32")
+            # Read the store directly before SecretSpec's envelope logic can
+            # discard or refresh anything: Factorseal itself must expire it.
+            status, output = locked.execute(
+                f"{alice_prefix} sh -c "
+                + shlex.quote(
+                    secretspec_command("expiry", "get CACHE_TOKEN --provider factorseal")
+                )
+                + " 2>&1"
+            )
+            assert status != 0 and any(
+                word in output.lower() for word in ("not found", "missing", "required")
+            ), f"expired cache entry was still available ({status}): {output}"
+            refreshed = as_user(
                 locked,
                 secretspec_command(
                     "expiry", "get CACHE_TOKEN --provider source", "CACHE_TOKEN=two"
                 ),
-            ).strip() == "two"
+            ).strip()
+            assert refreshed == "two", f"expired cache lookup returned: {refreshed!r}"
 
         # This node's lease is an hour, so expiry cannot be what ends it below.
         locked.succeed(f"loginctl lock-session {session}")

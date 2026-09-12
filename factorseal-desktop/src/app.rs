@@ -1,9 +1,29 @@
 use crate::secret_input::SecretInputState;
+#[cfg(target_os = "linux")]
+mod access;
+mod devices;
+mod personal_actions;
+mod personal_detail;
+mod personal_templates;
+
+pub(crate) enum AccessEvent {
+    #[cfg(target_os = "linux")]
+    Finished(factorseal::SecretServiceAccessContext),
+    #[cfg(target_os = "linux")]
+    Input(factorseal::SecretServiceInputRequest),
+    #[cfg(target_os = "linux")]
+    Unlock,
+    #[cfg(target_os = "linux")]
+    Request(factorseal::SecretServiceAccessRequest),
+    #[cfg(target_os = "linux")]
+    Permissions(Vec<factorseal::Permission>),
+}
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, Div, Global, Hsla, MenuItem, Render, Subscription, Task,
-    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rems, size, svg,
+    AnyWindowHandle, App, Bounds, ColorExt as _, Context, Div, Global, Hsla, MenuItem, Render,
+    Subscription, Task, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rems,
+    size, svg,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Root, Selectable as _, Sizable as _, Size,
@@ -14,6 +34,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     link::Link,
+    menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     spinner::Spinner,
     tooltip::Tooltip,
@@ -27,7 +48,10 @@ use crate::runtime::{
     VaultContents,
 };
 use crate::{branding, theming};
-use factorseal::transfer::{TransferFormat, read_transfer_file, write_private_file};
+use factorseal::transfer::{
+    PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
+    TransferFormat, read_transfer_file, write_private_file,
+};
 
 actions!(
     factorseal_desktop,
@@ -286,6 +310,18 @@ fn is_personal_secret(entry: &factorseal::VaultEntryMetadata) -> bool {
         && entry.partition == PERSONAL_SECRET_NAMESPACE
 }
 
+fn personal_entries_by_modified<'a>(
+    entries: &'a [factorseal::VaultEntryMetadata],
+    query: &str,
+) -> Vec<&'a factorseal::VaultEntryMetadata> {
+    let mut entries: Vec<_> = entries
+        .iter()
+        .filter(|entry| is_personal_secret(entry) && entry_matches_search(entry, query))
+        .collect();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
+    entries
+}
+
 fn desired_vault_browser_height(contents: &VaultContents) -> gpui::Pixels {
     let document_count = contents
         .entries
@@ -322,8 +358,12 @@ fn vault_entry_label(entry: &factorseal::VaultEntryMetadata) -> (String, String)
     };
     if is_personal_secret(entry) {
         return (
-            item.to_owned(),
-            field.map_or_else(|| "Personal secret".to_owned(), ToOwned::to_owned),
+            entry.display_name.as_deref().unwrap_or(item).to_owned(),
+            entry
+                .display_type
+                .as_deref()
+                .unwrap_or("Personal secret")
+                .to_owned(),
         );
     }
     if entry.document_kind == factorseal::DocumentKind::LinuxSecretService {
@@ -381,28 +421,54 @@ fn category_is_visible(
         })
 }
 
+fn hex_digest(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static str {
+    match scope {
+        Some(factorseal::DocumentKind::LinuxSecretService) => "System keyring",
+        Some(factorseal::DocumentKind::SecretSpecProviderCache) => "SecretSpec provider",
+        Some(factorseal::DocumentKind::LocalKeyring) => "Application keyring",
+        Some(_) => "Vault access",
+        None => "Legacy access · type unknown",
+    }
+}
+
 fn permission_matches_search(permission: &factorseal::Permission, query: &str) -> bool {
-    search_matches(&permission.principal.application_id, query)
-        || permission
-            .application
-            .project
-            .as_deref()
-            .is_some_and(|project| search_matches(project, query))
-        || search_matches(permission_operation_label(permission.operation), query)
+    [
+        Some(permission.principal.application_id.as_str()),
+        permission.application.project.as_deref(),
+        permission.application.profile.as_deref(),
+        permission.application.base_dir.as_deref(),
+        Some(permission_access_type(permission.scope)),
+        Some(permission_operation_label(permission.operation)),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| search_matches(value, query))
 }
 
 fn vault_entry_details(entry: &factorseal::VaultEntryMetadata) -> Vec<(&'static str, String)> {
-    let mut details = vec![
-        (
+    if is_personal_secret(entry) {
+        return vec![(
             "Type",
-            if is_personal_secret(entry) {
-                "Personal secret".to_owned()
-            } else {
-                vault_category_label(entry.document_kind).to_owned()
-            },
-        ),
+            entry
+                .display_type
+                .as_deref()
+                .unwrap_or("Personal secret")
+                .to_owned(),
+        )];
+    }
+    let mut details = vec![
+        ("Type", vault_category_label(entry.document_kind).to_owned()),
         (
-            "Partition",
+            "Namespace",
             String::from_utf8_lossy(&entry.partition).into_owned(),
         ),
     ];
@@ -532,11 +598,24 @@ fn category_documentation(
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum VaultSelection {
     PersonalSecrets,
+    Devices,
     Import,
     Export,
     Category(factorseal::DocumentKind),
     Entry(factorseal::VaultEntryMetadata),
     Permission(factorseal::Permission),
+}
+
+impl VaultSelection {
+    /// Dedicated pages share a breadcrumb and omit the vault navigation/sidebar.
+    fn page_title(&self) -> Option<&'static str> {
+        match self {
+            Self::Devices => Some("Devices"),
+            Self::Import => Some("Import"),
+            Self::Export => Some("Export"),
+            _ => None,
+        }
+    }
 }
 
 fn selection_for_search(selection: Option<&VaultSelection>) -> Option<VaultSelection> {
@@ -554,6 +633,15 @@ fn selection_for_search(selection: Option<&VaultSelection>) -> Option<VaultSelec
     }
 }
 
+struct PersonalDraftField {
+    section: String,
+    section_label: String,
+    id: String,
+    label: gpui::Entity<InputState>,
+    field_type: PersonalFieldType,
+    value: gpui::Entity<SecretInputState>,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 struct DesktopView {
     settings_open: bool,
@@ -569,7 +657,8 @@ struct DesktopView {
     password_confirmation: gpui::Entity<SecretInputState>,
     vault_search: gpui::Entity<InputState>,
     personal_name: gpui::Entity<InputState>,
-    personal_value: gpui::Entity<SecretInputState>,
+    personal_kind: PersonalSecretKind,
+    personal_fields: Vec<PersonalDraftField>,
     archive_passphrase: gpui::Entity<SecretInputState>,
     archive_passphrase_confirmation: gpui::Entity<SecretInputState>,
     setup_method: SetupMethod,
@@ -577,6 +666,16 @@ struct DesktopView {
     selected_vault_item: Option<VaultSelection>,
     personal_panel: PersonalPanel,
     personal_error: Option<String>,
+    personal_detail: personal_detail::PersonalDetail,
+    copied_personal_field: Option<personal_actions::CopiedField>,
+    devices: factorseal::desktop_worker::sync::network::View,
+    devices_busy: bool,
+    devices_syncing: bool,
+    devices_loaded: bool,
+    device_pairing: Option<devices::PairingScreen>,
+    devices_notice: Option<String>,
+    device_name: gpui::Entity<InputState>,
+    pairing_ticket: gpui::Entity<SecretInputState>,
     transfer_format: TransferFormat,
     transfer_busy: bool,
     transfer_replace_existing: bool,
@@ -774,14 +873,8 @@ impl DesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::poll_devices(Arc::clone(&runtime), cx);
         let settings = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
-        let settings_back = cx.subscribe(
-            &settings,
-            |view, _, _: &crate::settings_view::BackToVault, cx| {
-                view.settings_open = false;
-                cx.notify();
-            },
-        );
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -799,8 +892,7 @@ impl DesktopView {
                 .placeholder("Name")
                 .clean_on_escape()
         });
-        let personal_value =
-            cx.new(|cx| SecretInputState::new(window, cx).placeholder("Secret value"));
+        let personal_fields = Self::personal_draft(PersonalSecretKind::Generic, window, cx);
         let archive_passphrase =
             cx.new(|cx| SecretInputState::new(window, cx).placeholder("Archive passphrase"));
         let archive_passphrase_confirmation = cx
@@ -826,9 +918,7 @@ impl DesktopView {
             window,
             |view, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
-                    view.selected_vault_item =
-                        selection_for_search(view.selected_vault_item.as_ref());
-                    cx.notify();
+                    view.on_vault_search_changed(cx);
                 }
             },
         );
@@ -846,7 +936,8 @@ impl DesktopView {
             password_confirmation,
             vault_search,
             personal_name,
-            personal_value,
+            personal_kind: PersonalSecretKind::Generic,
+            personal_fields,
             archive_passphrase,
             archive_passphrase_confirmation,
             setup_method: SetupMethod::default(),
@@ -854,13 +945,30 @@ impl DesktopView {
             selected_vault_item: None,
             personal_panel: PersonalPanel::Overview,
             personal_error: None,
+            personal_detail: personal_detail::PersonalDetail::default(),
+            copied_personal_field: None,
+            devices: factorseal::desktop_worker::sync::network::View::default(),
+            devices_busy: false,
+            devices_syncing: false,
+            devices_loaded: false,
+            device_pairing: None,
+            devices_notice: None,
+            device_name: cx.new(|cx| {
+                let name = crate::appearance::current(cx)
+                    .device_name
+                    .clone()
+                    .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+                InputState::new(window, cx).default_value(name)
+            }),
+            pairing_ticket: cx
+                .new(|cx| SecretInputState::new(window, cx).placeholder("Paste pairing ticket")),
             transfer_format: TransferFormat::default(),
             transfer_busy: false,
             transfer_replace_existing: false,
             transfer_plaintext_confirmed: false,
             transfer_notice: None,
             system_integrations_expanded: false,
-            _subscriptions: vec![password_submit, vault_search_change, settings_back],
+            _subscriptions: vec![password_submit, vault_search_change],
         }
     }
 
@@ -924,21 +1032,54 @@ impl DesktopView {
         cx.notify();
     }
 
+    fn on_vault_search_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
+        self.personal_detail.clear();
+        self.selected_vault_item = selection_for_search(self.selected_vault_item.as_ref());
+        cx.notify();
+    }
+
     fn clear_secret_inputs(&mut self, cx: &mut Context<Self>) {
+        self.personal_detail.clear();
+        self.copied_personal_field = None;
         for input in [
             &self.password,
             &self.password_confirmation,
-            &self.personal_value,
             &self.archive_passphrase,
             &self.archive_passphrase_confirmation,
         ] {
             input.update(cx, SecretInputState::clear);
         }
+        for field in &self.personal_fields {
+            field.value.update(cx, SecretInputState::clear);
+        }
     }
 
     fn apply_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        let refreshed_item = match (&snapshot, &self.selected_vault_item) {
+            (Snapshot::Unsealed { contents, .. }, Some(VaultSelection::Entry(entry)))
+                if is_personal_secret(entry) =>
+            {
+                Some(
+                    contents
+                        .entries
+                        .iter()
+                        .find(|current| {
+                            is_personal_secret(current) && current.address == entry.address
+                        })
+                        .cloned(),
+                )
+            }
+            _ => None,
+        };
         if !matches!(snapshot, Snapshot::Unsealed { .. }) {
             self.clear_secret_inputs(cx);
+            self.pairing_ticket.update(cx, SecretInputState::clear);
+            self.devices.state.invitation = None;
+            self.devices.state.request = None;
+            self.devices_notice = None;
         }
         if self.selected_group.is_none() {
             self.selected_group = snapshot
@@ -949,25 +1090,56 @@ impl DesktopView {
             self.selected_vault_item = None;
         }
         self.snapshot = snapshot;
+        if let Some(refreshed_item) = refreshed_item {
+            match refreshed_item {
+                Some(entry)
+                    if self.selected_vault_item.as_ref()
+                        != Some(&VaultSelection::Entry(entry.clone())) =>
+                {
+                    self.select_vault_item(VaultSelection::Entry(entry), cx);
+                }
+                None => self.show_personal_panel(PersonalPanel::Overview, cx),
+                _ => {}
+            }
+        }
         cx.notify();
     }
 
     fn select_vault_item(&mut self, selection: VaultSelection, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
         self.clear_secret_inputs(cx);
         if matches!(selection, VaultSelection::Import | VaultSelection::Export) {
             self.transfer_notice = None;
         }
-        self.selected_vault_item = Some(selection);
+        if matches!(selection, VaultSelection::Export)
+            && self.transfer_format == TransferFormat::OnePasswordPux
+        {
+            self.transfer_format = TransferFormat::FactorSeal;
+        }
+        self.selected_vault_item = Some(selection.clone());
+        if let VaultSelection::Entry(entry) = selection
+            && is_personal_secret(&entry)
+        {
+            self.load_personal_item(entry, cx);
+        }
         cx.notify();
     }
 
     fn show_vault_browser(&mut self, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
         self.clear_secret_inputs(cx);
         self.selected_vault_item = None;
         cx.notify();
     }
 
     fn select_transfer_format(&mut self, format: TransferFormat, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
         if self.transfer_busy {
             return;
         }
@@ -1143,6 +1315,9 @@ impl DesktopView {
     }
 
     fn show_personal_panel(&mut self, panel: PersonalPanel, cx: &mut Context<Self>) {
+        if !self.flush_personal_changes(cx) {
+            return;
+        }
         self.clear_secret_inputs(cx);
         self.personal_panel = panel;
         self.personal_error = None;
@@ -1152,32 +1327,66 @@ impl DesktopView {
 
     fn save_personal_secret(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.personal_name.read(cx).value().trim().to_owned();
-        let value = Zeroizing::new(self.personal_value.read(cx).value().as_bytes().to_vec());
+        if self
+            .personal_fields
+            .iter()
+            .any(|field| field.value.read(cx).allocation_failed())
+        {
+            self.personal_error = Some(
+                "A field could not allocate secure memory. Re-enter that value before saving."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
         if name.is_empty() {
             self.personal_error = Some("Give this secret a name.".to_owned());
             cx.notify();
             return;
         }
-        if value.is_empty() {
-            self.personal_error = Some("Enter a secret value.".to_owned());
-            cx.notify();
-            return;
-        }
-        if let Snapshot::Unsealed { contents, .. } = &self.snapshot
-            && contents.entries.iter().any(|entry| {
-                is_personal_secret(entry)
-                    && entry
-                        .address
-                        .as_local()
-                        .is_some_and(|(item, _)| item == name)
-            })
+        if self
+            .personal_fields
+            .iter()
+            .all(|field| field.value.read(cx).value().is_empty())
         {
-            self.personal_error =
-                Some("A personal secret with this name already exists.".to_owned());
+            self.personal_error = Some("Enter at least one field value.".to_owned());
             cx.notify();
             return;
         }
-        match self.runtime.put_personal_secret(name, &value) {
+        let mut item = PersonalSecret::new(self.personal_kind, name);
+        for field in &self.personal_fields {
+            if field.section == "notes" {
+                let value = field.value.read(cx).value();
+                if !value.is_empty() {
+                    item.notes = Some(value.to_string());
+                }
+                continue;
+            }
+            if !item
+                .sections
+                .iter()
+                .any(|section| section.id == field.section)
+            {
+                item.sections.push(PersonalSection {
+                    id: field.section.clone(),
+                    label: field.section_label.clone(),
+                    fields: Vec::new(),
+                });
+            }
+            let value = field.value.read(cx).value();
+            item.sections
+                .iter_mut()
+                .find(|section| section.id == field.section)
+                .unwrap()
+                .fields
+                .push(PersonalField::new(
+                    field.id.clone(),
+                    field.label.read(cx).value().to_string(),
+                    field.field_type.clone(),
+                    value.to_string(),
+                ));
+        }
+        match self.runtime.put_personal_secret(&item) {
             Ok(updated_contents) => {
                 if let Snapshot::Unsealed {
                     contents,
@@ -1190,7 +1399,9 @@ impl DesktopView {
                 }
                 self.personal_name
                     .update(cx, |input, cx| input.set_value("", window, cx));
-                self.personal_value.update(cx, SecretInputState::clear);
+                for field in &self.personal_fields {
+                    field.value.update(cx, SecretInputState::clear);
+                }
                 self.personal_panel = PersonalPanel::Overview;
                 self.personal_error = None;
                 self.selected_vault_item = Some(VaultSelection::PersonalSecrets);
@@ -1261,6 +1472,7 @@ impl DesktopView {
     }
 
     fn seal(&mut self, cx: &mut Context<Self>) {
+        self.flush_personal_changes(cx);
         let Snapshot::Unsealed {
             metadata,
             idle_deadline,
@@ -1531,7 +1743,8 @@ impl DesktopView {
         }
         let theme = cx.theme().clone();
         let selection = VaultSelection::PersonalSecrets;
-        let selected = self.selected_vault_item.as_ref() == Some(&selection);
+        let selected = self.selected_vault_item.as_ref() == Some(&selection)
+            || matches!(&self.selected_vault_item, Some(VaultSelection::Entry(entry)) if is_personal_secret(entry));
         v_flex()
             .gap_1()
             .child(
@@ -1908,11 +2121,20 @@ impl DesktopView {
                         v_flex()
                             .min_w_0()
                             .gap_1()
-                            .child(div().font_semibold().child(label))
+                            .when(is_personal_secret(entry), |content| {
+                                content.flex_row().items_center().gap_2()
+                            })
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .when(is_personal_secret(entry), gpui::Styled::truncate)
+                                    .child(label),
+                            )
                             .child(
                                 div()
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
+                                    .when(is_personal_secret(entry), gpui::Styled::flex_none)
                                     .child(detail),
                             ),
                     )
@@ -1971,40 +2193,55 @@ impl DesktopView {
                 .unwrap_or(&permission.principal.application_id)
                 .to_owned();
             let selection = VaultSelection::Permission((*permission).clone());
-            rows = rows.child(
-                h_flex()
-                    .id(("permission-row", index))
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .px_4()
-                    .py_3()
-                    .when(index > 0, |row| row.border_t_1().border_color(theme.border))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.muted))
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .gap_1()
-                            .child(div().font_semibold().child(application))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(permission_operation_label(permission.operation)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.muted_foreground)
-                            .child("›"),
-                    )
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.select_vault_item(selection.clone(), cx);
-                    })),
-            );
+            rows =
+                rows.child(
+                    h_flex()
+                        .id(("permission-row", index))
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .gap_4()
+                        .px_4()
+                        .py_3()
+                        .when(index > 0, |row| row.border_t_1().border_color(theme.border))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.muted))
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .gap_1()
+                                .child(div().font_semibold().child(application))
+                                .child(div().text_sm().text_color(theme.muted_foreground).child(
+                                    format!(
+                                        "{} · {}",
+                                        permission_access_type(permission.scope),
+                                        permission_operation_label(permission.operation)
+                                    ),
+                                ))
+                                .child(
+                                    div().text_sm().text_color(theme.muted_foreground).child(
+                                        permission.application.base_dir.clone().unwrap_or_else(
+                                            || "No project folder recorded".to_owned(),
+                                        ),
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(permission.principal.application_id.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.muted_foreground)
+                                .child("›"),
+                        )
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.select_vault_item(selection.clone(), cx);
+                        })),
+                );
         }
         if permissions.is_empty() {
             rows = rows.child(Self::empty_item_rows(
@@ -2147,18 +2384,45 @@ impl DesktopView {
         query: &str,
         cx: &mut Context<Self>,
     ) -> Div {
-        let entries: Vec<_> = contents
-            .entries
-            .iter()
-            .filter(|entry| is_personal_secret(entry))
-            .filter(|entry| entry_matches_search(entry, query))
-            .collect();
+        let entries = personal_entries_by_modified(&contents.entries, query);
         let has_any = contents.entries.iter().any(is_personal_secret);
         Self::render_entry_rows(&entries, has_any, query, cx)
     }
 
+    fn personal_draft(
+        kind: PersonalSecretKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<PersonalDraftField> {
+        let template = personal_templates::new_item_template(kind);
+        template
+            .sections
+            .iter()
+            .flat_map(|section| {
+                section
+                    .fields
+                    .iter()
+                    .map(|field| (section.id.clone(), section.label.clone(), field))
+            })
+            .map(|(section, section_label, field)| PersonalDraftField {
+                section,
+                section_label,
+                id: field.id.clone(),
+                field_type: field.field_type.clone(),
+                label: cx.new(|cx| InputState::new(window, cx).default_value(field.label.clone())),
+                value: cx.new(|cx| {
+                    SecretInputState::new(window, cx)
+                        .multiline()
+                        .masked(field.concealed || field.field_type.concealed())
+                }),
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn render_personal_new_item(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
+        let custom = self.personal_kind == PersonalSecretKind::Generic;
         v_flex()
             .gap_4()
             .p_5()
@@ -2166,12 +2430,149 @@ impl DesktopView {
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover)
-            .child(div().font_semibold().child("New personal secret"))
+
+            .child(
+                h_flex().flex_wrap().gap_2().children(
+                    PersonalSecretKind::ALL
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, kind)| {
+                            Button::new(("personal-category", index))
+                                .label(kind.label())
+                                .selected(self.personal_kind == kind)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    // Switching templates is disabled while any values have been entered.
+                                    view.personal_kind = kind;
+                                    view.personal_fields = Self::personal_draft(kind, window, cx);
+                                    cx.notify();
+                                }))
+                                .disabled(
+                                    self.personal_fields
+                                        .iter()
+                                        .any(|field| !field.value.read(cx).value().is_empty()),
+                                )
+                        }),
+                ),
+            )
             .child(field_label(
                 "Name",
                 Input::new(&self.personal_name).bg(theming::input_background(cx)),
             ))
-            .child(field_label("Secret value", self.personal_value.clone()))
+            .children(
+                self.personal_fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, field)| {
+                        v_flex()
+                            .gap_2()
+                            .when(
+                                field.section != "notes"
+                                    && field.section_label != self.personal_kind.label()
+                                    && (index == 0
+                                        || self.personal_fields[index - 1].section
+                                            != field.section),
+                                |row| {
+                                    row.child(
+                                        div()
+                                            .pt_2()
+                                            .font_semibold()
+                                            .child(field.section_label.clone()),
+                                    )
+                                },
+                            )
+                            .when(!custom, |row| {
+                                row.child(
+                                    div()
+                                        .text_sm()
+                                        .child(field.label.read(cx).value().to_string()),
+                                )
+                            })
+                            .when(custom, |row| {
+                                row.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            Input::new(&field.label)
+                                                .bg(theming::input_background(cx)),
+                                        )
+                                        .child(
+                                            Button::new(("personal-field-type", index))
+                                                .label(format!("{} ▾", field.field_type.label()))
+                                                .dropdown_menu({
+                                                    let view = cx.entity().downgrade();
+                                                    let selected = field.field_type.clone();
+                                                    move |mut menu, _, _| {
+                                                        for kind in [
+                                                            PersonalFieldType::Concealed,
+                                                            PersonalFieldType::Text,
+                                                            PersonalFieldType::Url,
+                                                            PersonalFieldType::Email,
+                                                            PersonalFieldType::Phone,
+                                                            PersonalFieldType::Date,
+                                                            PersonalFieldType::MonthYear,
+                                                            PersonalFieldType::Totp,
+                                                            PersonalFieldType::Multiline,
+                                                        ] {
+                                                            let view = view.clone();
+                                                            menu = menu.item(PopupMenuItem::new(kind.label())
+                                                                .checked(kind == selected)
+                                                                .on_click(move |_, _, cx| {
+                                                                    let _ = view.update(cx, |view, cx| {
+                                                                        if view.personal_kind == PersonalSecretKind::Generic
+                                                                            && let Some(field) = view.personal_fields.get_mut(index)
+                                                                        {
+                                                                            field.value.update(cx, |input, cx| input.set_masked(kind.concealed(), cx));
+                                                                            field.field_type = kind.clone();
+                                                                            cx.notify();
+                                                                        }
+                                                                    });
+                                                                }));
+                                                        }
+                                                        menu
+                                                    }
+                                                }),
+                                        ),
+                                )
+                            })
+                            .child(h_flex().items_start().gap_2()
+                                .child(div().flex_1().min_w_0().child(field.value.clone()))
+                                .child(Button::new(("copy-personal-draft", index)).small()
+                                    .label(if self.copied_personal_field == Some(personal_actions::CopiedField::Draft(index)) { "Copied" } else { "Copy" })
+                                    .disabled(field.value.read(cx).value().is_empty())
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        let value = view.personal_fields[index].value.read(cx).value().to_string();
+                                        view.copy_personal_value(value, personal_actions::CopiedField::Draft(index), cx);
+                                    })))
+                                .when(personal_actions::can_generate(self.personal_kind, field), |row| {
+                                    row.child(Button::new(("generate-personal-password", index)).small()
+                                        .label("Generate")
+                                        .tooltip("Generate a 12-word BIP-39 passphrase")
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            view.generate_personal_password(index, window, cx);
+                                        })))
+                                }))
+                    }),
+            )
+            .when(custom, |panel| {
+                panel.child(
+                    Button::new("add-personal-field")
+                        .label("Add custom field")
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            let index = view.personal_fields.len();
+                            view.personal_fields.push(PersonalDraftField {
+                                section: "custom".into(),
+                                section_label: "Custom fields".into(),
+                                id: format!("custom-{index}"),
+                                label: cx.new(|cx| {
+                                    InputState::new(window, cx).default_value("Custom field")
+                                }),
+                                field_type: PersonalFieldType::Concealed,
+                                value: cx.new(|cx| SecretInputState::new(window, cx).multiline()),
+                            });
+                            cx.notify();
+                        })),
+                )
+            })
             .when_some(self.personal_error.clone(), |panel, error| {
                 panel.child(error_banner(error, theme.danger))
             })
@@ -2234,23 +2635,23 @@ impl DesktopView {
                     });
                 })
         };
-        let mut form =
-            v_flex().w_full().min_w_0().gap_5().child(
-                h_flex().gap_2().flex_wrap().children(
-                    TransferFormat::ALL
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, candidate)| {
-                            Button::new(("transfer-format", index))
-                                .selected(format == candidate)
-                                .disabled(self.transfer_busy)
-                                .label(candidate.label())
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.select_transfer_format(candidate, cx);
-                                }))
-                        }),
-                ),
-            );
+        let mut form = v_flex().w_full().min_w_0().gap_5().child(
+            h_flex().gap_2().flex_wrap().children(
+                TransferFormat::ALL
+                    .into_iter()
+                    .filter(|candidate| is_import || *candidate != TransferFormat::OnePasswordPux)
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        Button::new(("transfer-format", index))
+                            .selected(format == candidate)
+                            .disabled(self.transfer_busy)
+                            .label(candidate.label())
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.select_transfer_format(candidate, cx);
+                            }))
+                    }),
+            ),
+        );
         if format.is_native() {
             form = form.child(
                 v_flex()
@@ -2299,7 +2700,7 @@ impl DesktopView {
                             .whitespace_normal()
                             .text_color(theme.muted_foreground)
                             .child(if is_import {
-                                "Only Personal secrets are imported. Login fields, URLs, one-time-password seeds, notes, and supported metadata are mapped into FactorSeal."
+                                "Personal items retain typed fields and sections. Unknown source data is kept with the encrypted item. 1PUX files are imported as separate document items."
                             } else {
                                 "Only Personal secrets are exported. Password-manager interchange files are plaintext and are not protected by FactorSeal after they are written."
                             }),
@@ -2380,6 +2781,45 @@ impl DesktopView {
         contents: &VaultContents,
         cx: &mut Context<Self>,
     ) -> Div {
+        if self.personal_panel == PersonalPanel::NewItem {
+            let muted = cx.theme().muted_foreground;
+            return v_flex()
+                .size_full()
+                .min_h_0()
+                .overflow_hidden()
+                .gap_4()
+                .p_6()
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .items_center()
+                        .flex_wrap()
+                        .gap_2()
+                        .text_xl()
+                        .font_semibold()
+                        .child(
+                            div()
+                                .id("personal-secrets-breadcrumb")
+                                .cursor_pointer()
+                                .hover(move |style| style.text_color(muted))
+                                .child("Personal secrets")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.show_personal_panel(PersonalPanel::Overview, cx);
+                                })),
+                        )
+                        .child(div().text_color(muted).child("→"))
+                        .child("New Item"),
+                )
+                .child(
+                    div()
+                        .id("personal-new-item-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(self.render_personal_new_item(cx).flex_none())
+                        .overflow_y_scrollbar(),
+                );
+        }
         let theme = cx.theme().clone();
         let query = self.vault_search.read(cx).value().trim().to_lowercase();
         let body = match self.personal_panel {
@@ -2398,13 +2838,15 @@ impl DesktopView {
                     .gap_3()
                     .child(div().text_xl().font_semibold().child("Personal secrets"))
                     .child(
-                        Button::new("new-personal-secret")
-                            .small()
-                            .primary()
-                            .label("New item")
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.show_personal_panel(PersonalPanel::NewItem, cx);
-                            })),
+                        h_flex().gap_2().child(
+                            Button::new("new-personal-secret")
+                                .small()
+                                .primary()
+                                .label("New item")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.show_personal_panel(PersonalPanel::NewItem, cx);
+                                })),
+                        ),
                     ),
             )
             .child(
@@ -2415,6 +2857,7 @@ impl DesktopView {
             .child(body)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_vault_detail(&self, contents: &VaultContents, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let entry_count = contents
@@ -2450,10 +2893,16 @@ impl DesktopView {
             Some(VaultSelection::PersonalSecrets) => {
                 self.render_personal_secrets_detail(contents, cx)
             }
+            Some(VaultSelection::Devices) => {
+                v_flex().size_full().p_6().child(self.render_devices(cx))
+            }
             Some(VaultSelection::Import) => self.render_transfer_detail(true, cx),
             Some(VaultSelection::Export) => self.render_transfer_detail(false, cx),
             Some(VaultSelection::Category(kind)) => {
                 self.render_category_detail(*kind, contents, cx)
+            }
+            Some(VaultSelection::Entry(entry)) if is_personal_secret(entry) => {
+                self.render_personal_item(entry, cx)
             }
             Some(VaultSelection::Entry(entry)) => {
                 let (title, _) = vault_entry_label(entry);
@@ -2481,7 +2930,10 @@ impl DesktopView {
                     factorseal::PermissionState::Granted { .. } => "Granted",
                 };
                 let mut details = vec![
-                    ("Type", "Application access".to_owned()),
+                    (
+                        "Access via",
+                        permission_access_type(permission.scope).to_owned(),
+                    ),
                     (
                         "Operation",
                         permission_operation_label(permission.operation).to_owned(),
@@ -2495,22 +2947,83 @@ impl DesktopView {
                 if let Some(project) = &permission.application.project {
                     details.push(("Project", project.clone()));
                 }
+                for (label, value) in [
+                    ("Profile", &permission.application.profile),
+                    ("Request", &permission.application.reason),
+                ] {
+                    if let Some(value) = value {
+                        details.push((label, value.clone()));
+                    }
+                }
+                details.push((
+                    "Executable digest",
+                    hex_digest(&permission.principal.executable_digest),
+                ));
+                details.push((
+                    "Project folder",
+                    permission
+                        .application
+                        .base_dir
+                        .clone()
+                        .unwrap_or_else(|| "No project folder recorded".to_owned()),
+                ));
+                details.push(("Grant ID", permission.id.clone()));
                 v_flex()
                     .size_full()
                     .gap_4()
                     .p_6()
                     .child(div().text_xl().font_semibold().child(application))
                     .child(Self::render_detail_rows(details, cx))
+                    .when(
+                        matches!(
+                            permission.state,
+                            factorseal::PermissionState::Granted { .. }
+                        ),
+                        |element| {
+                            let permission = permission.clone();
+                            element.child(
+                                Button::new("revoke-access-grant")
+                                    .label("Revoke access")
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.revoke_access(permission.id.clone(), cx);
+                                    })),
+                            )
+                        },
+                    )
             }
         }
     }
 
-    fn render_vault_breadcrumb(&self, cx: &mut Context<Self>) -> Div {
-        let title = match self.selected_vault_item.as_ref() {
-            Some(VaultSelection::Import) => Some("Import"),
-            Some(VaultSelection::Export) => Some("Export"),
-            _ => None,
+    fn revoke_access(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(metadata) = self.snapshot.metadata().cloned() else {
+            return;
         };
+        let runtime = Arc::clone(&self.runtime);
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || runtime.revoke_permission(&metadata, id)).await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => view.selected_vault_item = None,
+                    Err(message) => {
+                        if let Snapshot::Unsealed { error, .. } = &mut view.snapshot {
+                            *error = Some(message);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn vault_page_title(&self) -> Option<&'static str> {
+        self.selected_vault_item
+            .as_ref()
+            .and_then(VaultSelection::page_title)
+    }
+
+    fn render_vault_breadcrumb(&self, cx: &mut Context<Self>) -> Div {
+        let title = self.vault_page_title();
         let theme = cx.theme();
         if let Some(title) = title {
             h_flex()
@@ -2528,7 +3041,7 @@ impl DesktopView {
                             view.show_vault_browser(cx);
                         })),
                 )
-                .child(div().text_color(theme.muted_foreground).child("←"))
+                .child(div().text_color(theme.muted_foreground).child("→"))
                 .child(title)
         } else {
             h_flex().text_2xl().font_semibold().child("Your vault")
@@ -2538,26 +3051,23 @@ impl DesktopView {
     fn render_vault_workspace(
         &self,
         contents: &VaultContents,
-        browser_height: gpui::Pixels,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme().clone();
         let corner = crate::appearance::rem_size(cx) * 0.75 - px(1.);
-        let transfer_selected = matches!(
-            self.selected_vault_item.as_ref(),
-            Some(VaultSelection::Import | VaultSelection::Export)
-        );
+        let standalone_screen = self.vault_page_title().is_some();
         h_flex()
             .w_full()
-            .h(browser_height)
+            .flex_1()
+            .min_h_0()
             .when(compact, gpui::Styled::flex_col)
             .rounded_xl()
             .border_1()
             .border_color(theme.border)
             .overflow_hidden()
             .bg(theme.popover)
-            .when(!transfer_selected, |workspace| {
+            .when(!standalone_screen, |workspace| {
                 workspace.child(
                     div()
                         .w(rems(232. / 16.))
@@ -2580,7 +3090,16 @@ impl DesktopView {
                     .min_w_0()
                     .min_h_0()
                     .when(!compact, gpui::Styled::h_full)
-                    .child(self.render_vault_detail(contents, cx)),
+                    .child(self.render_vault_detail(contents, cx))
+                    .map(|pane| {
+                        if self.selected_vault_item == Some(VaultSelection::PersonalSecrets)
+                            && self.personal_panel == PersonalPanel::NewItem
+                        {
+                            pane.overflow_hidden().into_any_element()
+                        } else {
+                            pane.overflow_y_scrollbar().into_any_element()
+                        }
+                    }),
             )
     }
 
@@ -2588,69 +3107,71 @@ impl DesktopView {
         &self,
         contents: &VaultContents,
         errors: (Option<&str>, Option<&str>),
-        browser_height: gpui::Pixels,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme().clone();
         let (contents_error, error) = errors;
-        let header_title = self.render_vault_breadcrumb(cx);
-        v_flex()
-            .gap_5()
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_end()
-                    .flex_wrap()
-                    .justify_between()
-                    .gap_4()
-                    .child(
-                        v_flex().gap_1().child(header_title).child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child("On this device. Available to authorized applications."),
+        let header_title = h_flex()
+            .items_center()
+            .flex_wrap()
+            .gap_3()
+            .child(self.render_vault_breadcrumb(cx))
+            .when(self.vault_page_title().is_none(), |row| {
+                row.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("vault-devices")
+                                .small()
+                                .label("Devices")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.select_vault_item(VaultSelection::Devices, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("import-vault")
+                                .small()
+                                .label("Import")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.select_vault_item(VaultSelection::Import, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("export-vault")
+                                .small()
+                                .label("Export")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.select_vault_item(VaultSelection::Export, cx);
+                                })),
                         ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("import-vault")
-                                    .small()
-                                    .selected(
-                                        self.selected_vault_item.as_ref()
-                                            == Some(&VaultSelection::Import),
-                                    )
-                                    .label("Import")
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.select_vault_item(VaultSelection::Import, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("export-vault")
-                                    .small()
-                                    .selected(
-                                        self.selected_vault_item.as_ref()
-                                            == Some(&VaultSelection::Export),
-                                    )
-                                    .label("Export")
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.select_vault_item(VaultSelection::Export, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .child(self.render_vault_workspace(contents, browser_height, compact, cx))
+                )
+            });
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .overflow_hidden()
+            .gap_5()
+            .child(v_flex().flex_none().gap_1().child(header_title).child(
+                div().text_sm().text_color(theme.muted_foreground).child(
+                    if self.selected_vault_item == Some(VaultSelection::Devices) {
+                        "Pair devices to sync your personal secrets."
+                    } else {
+                        "On this device. Available to authorized applications."
+                    },
+                ),
+            ))
+            .child(self.render_vault_workspace(contents, compact, cx))
             .when_some(contents_error.map(str::to_owned), |element, error| {
                 element.child(
                     div()
+                        .flex_none()
                         .text_color(theme.danger)
                         .child(format!("Could not load vault contents: {error}")),
                 )
             })
             .when_some(error.map(str::to_owned), |element, error| {
-                element.child(div().text_color(theme.danger).child(error))
+                element.child(div().flex_none().text_color(theme.danger).child(error))
             })
     }
 
@@ -2828,17 +3349,16 @@ impl DesktopView {
             .icon(gpui_component::Icon::new(IconName::Settings).text_color(cx.theme().foreground))
             .label("Settings")
             .on_click(cx.listener(|view, _, _, cx| {
+                if matches!(&view.selected_vault_item, Some(VaultSelection::Entry(entry)) if is_personal_secret(entry)) {
+                    view.show_personal_panel(PersonalPanel::Overview, cx);
+                }
+                if view.personal_detail.has_pending_changes() { return; }
                 view.settings_open = true;
                 cx.notify();
             }))
     }
 
-    fn render_body(
-        &self,
-        browser_height: gpui::Pixels,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn render_body(&self, compact: bool, cx: &mut Context<Self>) -> Div {
         if self.settings_open {
             return div().w_full().child(self.settings.clone());
         }
@@ -2881,7 +3401,6 @@ impl DesktopView {
             } => self.render_unsealed(
                 contents,
                 (contents_error.as_deref(), error.as_deref()),
-                browser_height,
                 compact,
                 cx,
             ),
@@ -2899,14 +3418,54 @@ impl DesktopView {
     }
 }
 
-fn vault_browser_height(window: &Window, compact: bool, cx: &App) -> gpui::Pixels {
-    let scale = crate::appearance::scale(cx);
-    let available = window.viewport_size().height - px(272.) * scale;
-    let minimum = px(if compact { 500. } else { 320. }) * scale;
-    if available < minimum {
-        minimum
-    } else {
-        available
+impl DesktopView {
+    fn body_max_width(&self) -> f32 {
+        if self.settings_open {
+            1200.
+        } else {
+            match &self.snapshot {
+                Snapshot::Unsealed { .. } => 1200.,
+                Snapshot::Uninitialized { .. } => 520.,
+                _ => 440.,
+            }
+        }
+    }
+}
+
+impl DesktopView {
+    fn render_content(&self, compact: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let unsealed = !self.settings_open && matches!(self.snapshot, Snapshot::Unsealed { .. });
+        let body_max_width = self.body_max_width();
+        div()
+            .id("desktop-content-scroll")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(
+                div()
+                    .w_full()
+                    .when(unsealed, |body| body.h_full().min_h_0())
+                    .when(!unsealed, gpui::Styled::min_h_full)
+                    .py_8()
+                    .flex()
+                    .justify_center()
+                    .when(!unsealed && !self.settings_open, gpui::Styled::items_center)
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(rems(body_max_width / 16.))
+                            .flex_none()
+                            .when(unsealed, |body| body.h_full().min_h_0())
+                            .child(self.render_body(compact, cx)),
+                    ),
+            )
+            .map(|content| {
+                if unsealed {
+                    content.overflow_hidden().into_any_element()
+                } else {
+                    content.overflow_y_scrollbar().into_any_element()
+                }
+            })
     }
 }
 
@@ -2916,18 +3475,7 @@ impl Render for DesktopView {
         window.set_rem_size(crate::appearance::rem_size(cx));
         let theme = cx.theme().clone();
         let header_status = self.render_header_status(cx);
-        let unsealed = !self.settings_open && matches!(self.snapshot, Snapshot::Unsealed { .. });
         let compact = window.viewport_size().width < px(800.) * crate::appearance::scale(cx);
-        let body_max_width = if self.settings_open {
-            1200.
-        } else {
-            match &self.snapshot {
-                Snapshot::Unsealed { .. } => 1200.,
-                Snapshot::Uninitialized { .. } => 520.,
-                _ => 440.,
-            }
-        };
-        let browser_height = vault_browser_height(window, compact, cx);
         v_flex()
             .size_full()
             .px_6()
@@ -2951,13 +3499,36 @@ impl Render for DesktopView {
                         h_flex()
                             .items_center()
                             .gap_2()
-                            .child(brand_mark(36., theme.foreground))
                             .child(
-                                div()
-                                    .text_size(rems(23. / 16.))
-                                    .font_semibold()
-                                    .child("FactorSeal"),
-                            ),
+                                h_flex()
+                                    .id("vault-home")
+                                    .items_center()
+                                    .gap_2()
+                                    .when(self.settings_open, |element| {
+                                        element
+                                            .cursor_pointer()
+                                            .hover(|style| style.text_color(theme.muted_foreground))
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.settings_open = false;
+                                                cx.notify();
+                                            }))
+                                    })
+                                    .child(brand_mark(36., theme.foreground))
+                                    .child(
+                                        div()
+                                            .text_size(rems(23. / 16.))
+                                            .font_semibold()
+                                            .child("FactorSeal"),
+                                    ),
+                            )
+                            .when(self.settings_open, |element| {
+                                element
+                                    .child(
+                                        gpui_component::Icon::new(IconName::ChevronRight)
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .child(div().text_lg().font_semibold().child("Settings"))
+                            }),
                     )
                     .child(
                         h_flex()
@@ -2969,30 +3540,7 @@ impl Render for DesktopView {
                             }),
                     ),
             )
-            .child(
-                div()
-                    .id("desktop-content-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(
-                        div()
-                            .w_full()
-                            .min_h_full()
-                            .py_8()
-                            .flex()
-                            .justify_center()
-                            .when(!unsealed && !self.settings_open, gpui::Styled::items_center)
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(rems(body_max_width / 16.))
-                                    .flex_none()
-                                    .child(self.render_body(browser_height, compact, cx)),
-                            ),
-                    )
-                    .overflow_y_scrollbar(),
-            )
+            .child(self.render_content(compact, cx))
             .child(self.render_footer(cx))
             .children(dialog_layer)
     }
@@ -3026,6 +3574,8 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
     cx.global_mut::<DesktopStatus>().unsealed = matches!(snapshot, Snapshot::Unsealed { .. });
     refresh_tray(cx);
     sync_secret_service(snapshot, cx);
+    #[cfg(target_os = "linux")]
+    access::update(snapshot, cx);
     if matches!(snapshot, Snapshot::Unsealed { .. }) {
         crate::timing::finish_unlock("ui_updated", "ok");
     }
@@ -3103,6 +3653,14 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
     if let Some(handle) = existing {
         if handle
             .update(cx, |_, window, _| {
+                // Wayland can reject activation without a recent input serial
+                // from this application (for example, a keyring lookup from a
+                // terminal). Remap the existing window so the compositor shows
+                // it again, preserving the unlock form and any entered input.
+                #[cfg(target_os = "linux")]
+                if std::env::var_os("WAYLAND_DISPLAY").is_some() && !window.is_window_active() {
+                    window.set_visible(false);
+                }
                 window.set_visible(true);
                 window.activate_window();
             })
@@ -3140,6 +3698,7 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
 }
 
 fn close_desktop(_: &CloseDesktop, cx: &mut App) {
+    flush_desktop_personal_changes(cx);
     let handle = cx.global::<DesktopWindow>().handle;
     let Some(handle) = handle else {
         return;
@@ -3165,7 +3724,22 @@ fn toggle_desktop(_: &ToggleDesktop, cx: &mut App) {
     }
 }
 
+fn flush_desktop_personal_changes(cx: &mut App) {
+    let holder = cx
+        .try_global::<DesktopWindow>()
+        .map(|desktop| Arc::clone(&desktop.view));
+    if let Some(holder) = holder
+        && let Ok(holder) = holder.lock()
+        && let Some(view) = holder.as_ref()
+    {
+        view.update(cx, |view, cx| {
+            view.flush_personal_changes(cx);
+        });
+    }
+}
+
 fn seal_vault(_: &SealVault, cx: &mut App) {
+    flush_desktop_personal_changes(cx);
     if let Some(runtime) = cx.try_global::<RuntimeGlobal>()
         && let Err(error) = runtime.0.seal()
     {
@@ -3175,6 +3749,7 @@ fn seal_vault(_: &SealVault, cx: &mut App) {
 }
 
 fn quit(_: &Quit, cx: &mut App) {
+    flush_desktop_personal_changes(cx);
     cx.global_mut::<DesktopStatus>().quitting = true;
     if let Some(runtime) = cx.try_global::<RuntimeGlobal>() {
         let _ = runtime.0.seal();
@@ -3322,6 +3897,7 @@ pub(crate) fn setup(
     background: bool,
     no_tray: bool,
     activations: smol::channel::Receiver<()>,
+    access_requests: smol::channel::Receiver<AccessEvent>,
     secret_service: Option<Arc<SecretServiceHost>>,
     cx: &mut App,
 ) {
@@ -3387,6 +3963,10 @@ pub(crate) fn setup(
         }
     })
     .detach();
+    #[cfg(target_os = "linux")]
+    access::setup(access_requests, cx);
+    #[cfg(not(target_os = "linux"))]
+    let _ = access_requests;
     if !background {
         cx.activate(true);
     }
@@ -3433,6 +4013,10 @@ fn sync_secret_service(snapshot: &Snapshot, cx: &mut App) {
 /// as dismissed so waiting clients get an answer instead of a hang.
 fn dismiss_secret_service_prompts(cx: &mut App) {
     #[cfg(target_os = "linux")]
+    if access::is_open(cx) {
+        return;
+    }
+    #[cfg(target_os = "linux")]
     if !cx.global::<DesktopStatus>().unsealed
         && let Some(host) = &cx.global::<SecretServiceGlobal>().0
         && let Err(error) = host.dismiss_prompts()
@@ -3453,6 +4037,56 @@ mod tests {
         category_documentation, category_guidance, hardware_backend_label, password_strength_error,
         secret_spec_address_label,
     };
+
+    #[test]
+    fn personal_inventory_sorts_newest_first_with_unknown_dates_last() {
+        let entries: Vec<_> = [Some(10), None, Some(30), Some(20)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, updated_at)| factorseal::VaultEntryMetadata {
+                display_name: Some(format!("Item {index}")),
+                display_type: Some("Login".into()),
+                updated_at,
+                document_kind: DocumentKind::LocalKeyring,
+                partition: super::PERSONAL_SECRET_NAMESPACE.to_vec(),
+                address: factorseal::SecretAddress::new(format!("item-{index}"), None).unwrap(),
+            })
+            .collect();
+        assert_eq!(
+            super::personal_entries_by_modified(&entries, "login")
+                .iter()
+                .map(|entry| entry.updated_at)
+                .collect::<Vec<_>>(),
+            [Some(30), Some(20), Some(10), None]
+        );
+        assert!(super::personal_entries_by_modified(&entries, "absent").is_empty());
+    }
+
+    #[test]
+    fn personal_inventory_shows_and_searches_item_types() {
+        for kind in super::PersonalSecretKind::ALL {
+            let entry = factorseal::VaultEntryMetadata {
+                display_name: Some("Example".into()),
+                display_type: Some(kind.label().into()),
+                updated_at: None,
+                document_kind: DocumentKind::LocalKeyring,
+                partition: super::PERSONAL_SECRET_NAMESPACE.to_vec(),
+                address: factorseal::SecretAddress::new("internal-id", None).unwrap(),
+            };
+            assert_eq!(
+                super::vault_entry_label(&entry),
+                ("Example".into(), kind.label().into())
+            );
+            assert!(super::entry_matches_search(
+                &entry,
+                &kind.label().to_lowercase()
+            ));
+            assert_eq!(
+                super::vault_entry_details(&entry),
+                vec![("Type", kind.label().into())]
+            );
+        }
+    }
 
     #[test]
     fn formats_hardware_backend_names_for_people() {

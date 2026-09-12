@@ -6,12 +6,12 @@
 //! instead of disappearing. While sealed it has no database access at all:
 //! secret reads and writes fail with `org.freedesktop.Secret.Error.IsLocked`,
 //! `Unlock` hands back a prompt, and the prompt asks the host to unseal. Once
-//! unsealed, every vault access goes through the vault protocol under the
-//! host's own grant, so the adapter never holds keys of its own. The session
-//! bus already authenticates peers as the current desktop user, which is the
-//! same boundary provided by the other Secret Service implementations.
-//! Item metadata stays in the encrypted vault. Searches while sealed return
-//! IsLocked immediately; users must unlock Desktop before credential lookup.
+//! unsealed, secret operations go through a privileged host bridge, which
+//! checks project and operation grants for the authenticated D-Bus executable.
+//! The adapter never holds keys of its own. New grants require signed approval
+//! and can expire or be revoked through the permission registry.
+//! Item metadata stays in the encrypted vault. Searches while sealed
+//! ask the host to unlock, then resume against the decrypted index.
 //!
 //! Two hosts exist: the graphical Desktop, which serves the adapter for the
 //! whole session and bridges to its vault worker over the native socket, and
@@ -65,11 +65,105 @@ pub const SECRET_SERVICE_PERMISSIONS: [super::GrantPermission; 4] = [
     super::GrantPermission::Seal,
 ];
 
-/// Brings up the host's unlock interface when a client runs a prompt.
+/// Brings up the host's unlock interface for a prompt or a sealed search.
 ///
 /// Called from the adapter's own thread; implementations must not block.
 pub trait SecretServicePrompter: Send + Sync + 'static {
     fn request_unlock(&self);
+
+    fn finish_access(&self, _context: SecretServiceAccessContext) {}
+
+    fn supports_input(&self) -> bool {
+        false
+    }
+
+    fn request_input(&self, _request: SecretServiceInputRequest) {}
+
+    /// Review a sealed lookup in the host's UI. Dropping the request denies it.
+    /// Hosts without a review UI retain the ordinary unlock behavior.
+    fn request_access(&self, mut request: SecretServiceAccessRequest) {
+        request.allow();
+        self.request_unlock();
+    }
+}
+
+/// Information supplied with a credential lookup. Attributes are caller-provided;
+/// the bus authenticates the sender, and process paths are best-effort OS data.
+#[derive(Clone, Debug, Default)]
+pub struct SecretServiceAccessContext {
+    pub attributes: std::collections::BTreeMap<String, String>,
+    pub sender: String,
+    pub process_id: Option<u32>,
+    pub executable: Option<std::path::PathBuf>,
+    pub working_directory: Option<std::path::PathBuf>,
+}
+
+/// A pending lookup requiring a decision before it can resume after unlocking.
+pub struct SecretServiceAccessRequest {
+    pub context: SecretServiceAccessContext,
+    decision: Option<oneshot::Sender<AccessDecision>>,
+}
+
+/// One user-confirmed write. No durable write grant is created.
+pub struct SecretServiceInputRequest {
+    pub context: SecretServiceAccessContext,
+    pub initial: Option<super::WireSecret>,
+    decision: Option<oneshot::Sender<Option<super::WireSecret>>>,
+}
+
+impl SecretServiceInputRequest {
+    pub fn save(&mut self, value: super::WireSecret) {
+        if let Some(sender) = self.decision.take() {
+            let _ = sender.send(Some(value));
+        }
+    }
+    pub fn deny(&mut self) {
+        if let Some(sender) = self.decision.take() {
+            let _ = sender.send(None);
+        }
+    }
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        self.decision
+            .as_ref()
+            .is_some_and(oneshot::Sender::is_closed)
+    }
+}
+
+enum AccessDecision {
+    Allow,
+    Deny,
+}
+
+impl SecretServiceAccessRequest {
+    /// Allow this pending lookup. This does not create a persistent vault grant.
+    pub fn allow(&mut self) {
+        if let Some(decision) = self.decision.take() {
+            let _ = decision.send(AccessDecision::Allow);
+        }
+    }
+
+    /// Deny explicitly; dropping the request means its dialog was dismissed.
+    pub fn deny(&mut self) {
+        if let Some(decision) = self.decision.take() {
+            let _ = decision.send(AccessDecision::Deny);
+        }
+    }
+
+    /// Whether the client stopped waiting before deciding.
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        self.decision
+            .as_ref()
+            .is_some_and(oneshot::Sender::is_closed)
+    }
+
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.decision
+            .as_ref()
+            .is_some_and(|decision| !decision.is_closed())
+    }
 }
 
 /// Serves `org.freedesktop.secrets` for the lifetime of the value.
@@ -225,6 +319,7 @@ struct Shared {
     sessions: Mutex<HashMap<String, SessionState>>,
     prompts: Mutex<HashMap<String, PromptState>>,
     prompter: Arc<dyn SecretServicePrompter>,
+    searches: Mutex<Vec<oneshot::Sender<bool>>>,
 }
 
 enum PromptState {
@@ -240,6 +335,7 @@ impl Shared {
             sessions: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
             prompter,
+            searches: Mutex::new(Vec::new()),
         }
     }
 
@@ -251,6 +347,174 @@ impl Shared {
         self.agent.read().map_err(poisoned)?.clone().ok_or_else(|| {
             SecretServiceError::IsLocked("the FactorSeal vault is sealed".to_owned())
         })
+    }
+
+    /// Keep each lookup behind its own decision, even if another request
+    /// unlocks the vault while this one is still being reviewed.
+    async fn unlock_for_search(
+        &self,
+        context: SecretServiceAccessContext,
+    ) -> Result<(), SecretServiceError> {
+        self.unlock_for_search_with_timeout(context, Duration::from_mins(2))
+            .await
+    }
+
+    async fn unlock_for_search_with_timeout(
+        &self,
+        context: SecretServiceAccessContext,
+        timeout: Duration,
+    ) -> Result<(), SecretServiceError> {
+        let receiver = {
+            let mut searches = self.searches.lock().map_err(poisoned)?;
+            if !self.locked() {
+                return Ok(());
+            }
+            searches.retain(|search| !search.is_closed());
+            let (sender, receiver) = oneshot::channel();
+            searches.push(sender);
+            receiver
+        };
+        let (decision, approval) = oneshot::channel();
+        self.prompter.request_access(SecretServiceAccessRequest {
+            context,
+            decision: Some(decision),
+        });
+        let wait = async {
+            match approval.await {
+                Ok(AccessDecision::Allow) => {}
+                Ok(AccessDecision::Deny) => {
+                    return Err(SecretServiceError::AccessDenied(
+                        "FactorSeal access request was denied".to_owned(),
+                    ));
+                }
+                Err(_) => {
+                    return Err(SecretServiceError::Cancelled(
+                        "FactorSeal access dialog was dismissed".to_owned(),
+                    ));
+                }
+            }
+            if !self.locked() {
+                return Ok(());
+            }
+            match receiver.await {
+                Ok(false) => self.agent().map(|_| ()),
+                Ok(true) => Err(SecretServiceError::Cancelled(
+                    "FactorSeal unlock was cancelled".to_owned(),
+                )),
+                Err(_) => Err(failed("FactorSeal stopped while waiting for unlock").into()),
+            }
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(result) => result,
+            Err(_) => Err(SecretServiceError::TimedOut(format!(
+                "FactorSeal access request timed out after {} seconds",
+                timeout.as_secs()
+            ))),
+        }
+    }
+
+    async fn input_secret(
+        &self,
+        context: SecretServiceAccessContext,
+        initial: super::WireSecret,
+    ) -> Result<super::WireSecret, SecretServiceError> {
+        if std::str::from_utf8(initial.expose()).is_err() {
+            return Err(failed("Secure entry supports text secrets only").into());
+        }
+        let (decision, receiver) = oneshot::channel();
+        self.prompter.request_input(SecretServiceInputRequest {
+            context,
+            initial: Some(initial),
+            decision: Some(decision),
+        });
+        match tokio::time::timeout(Duration::from_mins(2), receiver).await {
+            Ok(Ok(Some(value))) => Ok(value),
+            Ok(Ok(None)) => Err(SecretServiceError::AccessDenied(
+                "FactorSeal secret write was denied".to_owned(),
+            )),
+            Ok(Err(_)) => Err(SecretServiceError::Cancelled(
+                "FactorSeal secret entry dialog was dismissed".to_owned(),
+            )),
+            Err(_) => Err(SecretServiceError::TimedOut(
+                "FactorSeal secret entry timed out after 120 seconds".to_owned(),
+            )),
+        }
+    }
+
+    async fn authorized_agent(
+        &self,
+        sender: &str,
+        service: &str,
+        operation: super::PermissionOperation,
+    ) -> Result<Arc<Agent>, SecretServiceError> {
+        let agent = self.agent()?;
+        let mut pending = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_mins(2);
+        loop {
+            let response = tokio::task::spawn_blocking({
+                let store = agent.store.clone();
+                let sender = sender.to_owned();
+                let service = service.to_owned();
+                let pending = pending.clone();
+                move || store.check_access(sender, service, operation, pending)
+            })
+            .await
+            .map_err(failed)?
+            .map_err(failed)?;
+            response.check_delivery().map_err(failed)?;
+            match response.result {
+                Ok(super::VaultResponseBody::PermissionWait {
+                    status: super::PermissionWaitStatus::Granted,
+                }) => {
+                    if pending.take().is_some() {
+                        continue;
+                    }
+                    return Ok(Arc::new(Agent {
+                        store: agent.store.delegated(
+                            sender.to_owned(),
+                            service.to_owned(),
+                            operation,
+                        ),
+                    }));
+                }
+                Ok(super::VaultResponseBody::PermissionWait {
+                    status: super::PermissionWaitStatus::Pending,
+                }) => {}
+                Ok(super::VaultResponseBody::PermissionWait {
+                    status: super::PermissionWaitStatus::Expired,
+                }) => {
+                    return Err(SecretServiceError::TimedOut(
+                        "FactorSeal permission request expired".to_owned(),
+                    ));
+                }
+                Err(error) if error.interaction.is_some() => {
+                    pending = error.interaction.map(|reference| reference.id);
+                }
+                Ok(super::VaultResponseBody::PermissionWait {
+                    status: super::PermissionWaitStatus::Denied,
+                }) => {
+                    return Err(SecretServiceError::AccessDenied(
+                        "FactorSeal keyring access was denied".to_owned(),
+                    ));
+                }
+                Err(error) => return Err(failed(error.message).into()),
+                Ok(_) => return Err(failed("Unexpected FactorSeal permission response").into()),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SecretServiceError::TimedOut(
+                    "FactorSeal permission request timed out after 120 seconds".to_owned(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn complete_searches(&self, dismissed: bool) {
+        if let Ok(mut searches) = self.searches.lock() {
+            for search in searches.drain(..) {
+                let _ = search.send(dismissed);
+            }
+        }
     }
 
     fn set_agent(&self, agent: Option<Arc<Agent>>) -> Result<Option<Arc<Agent>>, fdo::Error> {
@@ -413,6 +677,12 @@ pub(super) enum SecretServiceError {
     ZBus(zbus::Error),
     /// The object is locked and cannot be read or written until unlocked.
     IsLocked(String),
+    AccessDenied(String),
+    Cancelled(String),
+    TimedOut(String),
+    /// The host has no way to satisfy the request, such as an entry dialog
+    /// on a host without a user interface.
+    NotSupported(String),
 }
 
 impl From<fdo::Error> for SecretServiceError {
@@ -638,6 +908,7 @@ async fn announce_lock_state(server: &ObjectServer) {
 }
 
 async fn complete_prompts(shared: &Arc<Shared>, server: &ObjectServer, dismissed: bool) {
+    shared.complete_searches(dismissed);
     let Ok(paths) = shared.take_prompts(dismissed) else {
         return;
     };
@@ -809,7 +1080,7 @@ mod tests {
         }
     }
 
-    fn test_service() -> (tempfile::TempDir, Arc<VaultService>, CallerIdentity) {
+    fn test_service_unprivileged() -> (tempfile::TempDir, Arc<VaultService>, CallerIdentity) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
         let unsealed = Vault::create_for_test(&root).unwrap();
@@ -828,6 +1099,360 @@ mod tests {
             .authorize_secret_service_namespace(&caller, NAMESPACE, SECRET_SERVICE_PERMISSIONS, 100)
             .unwrap();
         (directory, service, caller)
+    }
+
+    fn test_service() -> (tempfile::TempDir, Arc<VaultService>, CallerIdentity) {
+        let result = test_service_unprivileged();
+        let mut executables = vec![std::env::current_exe().unwrap()];
+        if let Some(path) = std::env::var_os("FACTORSEAL_TEST_SECRET_TOOL") {
+            executables.push(path.into());
+        }
+        for executable in executables {
+            let peer =
+                crate::vault::linux::linux_caller_identity_for_executable(executable).unwrap();
+            result
+                .1
+                .authorize_document_kind(
+                    &peer,
+                    crate::DocumentKind::LinuxSecretService,
+                    [
+                        super::super::GrantPermission::Get,
+                        super::super::GrantPermission::Put,
+                        super::super::GrantPermission::Delete,
+                    ],
+                    None,
+                    100,
+                )
+                .unwrap();
+        }
+        result
+    }
+
+    #[test]
+    fn access_timeout_is_distinct_from_denial_and_dismissal() {
+        runtime().block_on(async {
+            let (sender, mut requests) = mpsc::unbounded_channel();
+            let shared = Arc::new(Shared::new(Arc::new(ReviewPrompter(sender))));
+            let task = tokio::spawn({
+                let shared = shared.clone();
+                async move {
+                    shared
+                        .unlock_for_search_with_timeout(
+                            SecretServiceAccessContext::default(),
+                            Duration::from_millis(20),
+                        )
+                        .await
+                }
+            });
+            let _request = requests.recv().await.unwrap();
+            assert!(matches!(
+                task.await.unwrap(),
+                Err(SecretServiceError::TimedOut(_))
+            ));
+        });
+    }
+
+    #[test]
+    fn keyring_project_grants_bind_peer_operation_and_revocation() {
+        use crate::vault::{
+            PermissionOperation, PermissionState, PermissionWaitStatus, VaultAction, VaultRequest,
+            VaultResponseBody,
+        };
+        runtime().block_on(async {
+            let bus = zbus::Connection::session().await.unwrap();
+            let sender = bus.unique_name().unwrap().to_string();
+            let (directory, service, manager) = test_service_unprivileged();
+            service.authorize_permission_manager(&manager, 100).unwrap();
+            let call = |action| service.handle(&manager, VaultRequest::new(action).unwrap(), 101);
+            let access = |project: &str, operation| VaultAction::KeyringAccess {
+                sender: sender.clone(),
+                service: format!("service/secretspec/{project}/dev/TOKEN"),
+                operation,
+                action: None,
+                pending: None,
+            };
+            let denied = call(access("first", PermissionOperation::Get));
+            let id = denied.result.unwrap_err().interaction.unwrap().id;
+            let VaultResponseBody::Permissions { permissions, .. } =
+                call(VaultAction::ListPermissions).result.unwrap()
+            else {
+                panic!("permissions")
+            };
+            let permission = permissions.iter().find(|p| p.id == id).unwrap();
+            let peer = crate::vault::linux::linux_caller_identity_for_executable(
+                std::env::current_exe().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(permission.principal.application_id, peer.application_id());
+            assert_eq!(
+                permission.principal.executable_digest,
+                *peer.executable_digest()
+            );
+            let PermissionState::Pending { challenge, .. } = &permission.state else {
+                panic!("pending")
+            };
+            let signature = Vault::unseal_for_test(&directory.path().join("factorseal"))
+                .unwrap()
+                .sign_permission_challenge(&id, challenge, Some(3600))
+                .unwrap();
+            call(VaultAction::ApprovePermission {
+                id: id.clone(),
+                signature,
+                duration_seconds: Some(3600),
+            })
+            .result
+            .unwrap();
+            assert!(matches!(
+                call(access("first", PermissionOperation::Get)).result,
+                Ok(VaultResponseBody::PermissionWait {
+                    status: PermissionWaitStatus::Granted
+                })
+            ));
+            assert!(
+                call(access("first", PermissionOperation::Put))
+                    .result
+                    .unwrap_err()
+                    .interaction
+                    .is_some()
+            );
+            assert!(
+                call(access("second", PermissionOperation::Get))
+                    .result
+                    .unwrap_err()
+                    .interaction
+                    .is_some()
+            );
+            assert!(
+                service
+                    .handle(
+                        &peer,
+                        VaultRequest::new(access("first", PermissionOperation::Get)).unwrap(),
+                        101
+                    )
+                    .result
+                    .is_err(),
+                "a project grant must not grant bridge authority"
+            );
+            call(VaultAction::RevokePermission { id }).result.unwrap();
+            assert!(
+                call(access("first", PermissionOperation::Get))
+                    .result
+                    .unwrap_err()
+                    .interaction
+                    .is_some()
+            );
+        });
+    }
+
+    struct EditingPrompter;
+    impl SecretServicePrompter for EditingPrompter {
+        fn request_unlock(&self) {}
+        fn supports_input(&self) -> bool {
+            true
+        }
+        fn request_input(&self, mut request: SecretServiceInputRequest) {
+            assert_eq!(request.initial.as_ref().unwrap().expose(), b"supplied");
+            request.save(super::super::WireSecret::new(b"edited".to_vec()).unwrap());
+        }
+    }
+
+    #[test]
+    fn secure_keyring_write_saves_edited_value_without_a_write_grant() {
+        runtime().block_on(async {
+            let server = free_session_bus().await.unwrap();
+            let (_directory, vault, manager) = test_service_unprivileged();
+            vault.authorize_permission_manager(&manager, 100).unwrap();
+            let agent =
+                Arc::new(Agent::load(Store::in_process(vault.clone(), manager.clone())).unwrap());
+            let shared = Arc::new(Shared::new(Arc::new(EditingPrompter)));
+            shared.set_agent(Some(agent.clone())).unwrap();
+            server
+                .object_server()
+                .at(
+                    SERVICE_PATH,
+                    Service {
+                        shared: shared.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            server
+                .object_server()
+                .at(COLLECTION_PATH, Collection { shared })
+                .await
+                .unwrap();
+            let client = Connection::session().await.unwrap();
+            let service = Proxy::new(
+                &client,
+                BUS_NAME,
+                SERVICE_PATH,
+                "org.freedesktop.Secret.Service",
+            )
+            .await
+            .unwrap();
+            let input = OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
+            let (_, session): (OwnedValue, OwnedObjectPath) = service
+                .call("OpenSession", &("plain", input))
+                .await
+                .unwrap();
+            let collection = Proxy::new(
+                &client,
+                BUS_NAME,
+                COLLECTION_PATH,
+                "org.freedesktop.Secret.Collection",
+            )
+            .await
+            .unwrap();
+            let properties = HashMap::from([
+                (
+                    "org.freedesktop.Secret.Item.Label".to_owned(),
+                    OwnedValue::try_from(zbus::zvariant::Value::from("Test")).unwrap(),
+                ),
+                (
+                    "org.freedesktop.Secret.Item.Attributes".to_owned(),
+                    OwnedValue::try_from(zbus::zvariant::Value::from(HashMap::from([(
+                        "service".to_owned(),
+                        "secretspec/write-test/default/TOKEN".to_owned(),
+                    )])))
+                    .unwrap(),
+                ),
+            ]);
+            let (path, _): (OwnedObjectPath, OwnedObjectPath) = collection
+                .call(
+                    "CreateItem",
+                    &(
+                        properties,
+                        (
+                            session,
+                            Vec::<u8>::new(),
+                            b"supplied".to_vec(),
+                            "text/plain",
+                        ),
+                        false,
+                    ),
+                )
+                .await
+                .unwrap();
+            let id = item_id(&path).unwrap();
+            assert_eq!(
+                &*agent.store.get(secret_item(id)).unwrap().unwrap(),
+                b"edited"
+            );
+            let response = vault.handle(
+                &manager,
+                super::super::VaultRequest::new(super::super::VaultAction::ListPermissions)
+                    .unwrap(),
+                unix_time(),
+            );
+            let super::super::VaultResponseBody::Permissions { permissions, .. } =
+                response.result.unwrap()
+            else {
+                panic!("permissions")
+            };
+            assert!(
+                permissions.is_empty(),
+                "saving must not create a persistent write permission"
+            );
+        });
+    }
+
+    #[cfg(feature = "key-protection")]
+    #[test]
+    fn a_host_without_an_entry_dialog_refuses_input_at_once() {
+        runtime().block_on(async {
+            let Some(server) = free_session_bus().await else {
+                return;
+            };
+            let (_directory, vault, manager) = test_service_unprivileged();
+            let shared = Arc::new(Shared::new(Arc::new(NoPrompter)));
+            shared
+                .set_agent(Some(Arc::new(
+                    Agent::load(Store::in_process(vault, manager)).unwrap(),
+                )))
+                .unwrap();
+            server
+                .object_server()
+                .at(SERVICE_PATH, Service { shared })
+                .await
+                .unwrap();
+            let client = Connection::session().await.unwrap();
+            let service = Proxy::new(
+                &client,
+                BUS_NAME,
+                SERVICE_PATH,
+                "org.freedesktop.Secret.Service",
+            )
+            .await
+            .unwrap();
+            let (_local, remote) = std::os::unix::net::UnixStream::pair().unwrap();
+            let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
+            // The CLI agent has no dialog; the provider relies on this answer
+            // arriving immediately so it can write through an approval.
+            let refused = service
+                .call::<_, _, ()>("InputForIpc", &(HashMap::from([("project", "test")]), fd))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&refused, zbus::Error::MethodError(name, ..) if name.as_str().ends_with(".NotSupported")),
+                "{refused:?}"
+            );
+        });
+    }
+
+    #[cfg(feature = "key-protection")]
+    #[test]
+    fn native_secure_input_exchanges_values_only_over_the_private_channel() {
+        runtime().block_on(async {
+            let server = free_session_bus().await.unwrap();
+            let (_directory, vault, manager) = test_service_unprivileged();
+            let peer = crate::vault::linux::linux_caller_identity_for_executable(
+                std::env::current_exe().unwrap(),
+            )
+            .unwrap();
+            let shared = Arc::new(Shared::new(Arc::new(EditingPrompter)));
+            shared
+                .set_agent(Some(Arc::new(
+                    Agent::load(Store::in_process(vault.clone(), manager)).unwrap(),
+                )))
+                .unwrap();
+            server
+                .object_server()
+                .at(SERVICE_PATH, Service { shared })
+                .await
+                .unwrap();
+            let client = Connection::session().await.unwrap();
+            let service = Proxy::new(
+                &client,
+                BUS_NAME,
+                SERVICE_PATH,
+                "org.freedesktop.Secret.Service",
+            )
+            .await
+            .unwrap();
+            let (_local, remote) = std::os::unix::net::UnixStream::pair().unwrap();
+            let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
+            let denied = service.call::<_, _, ()>("InputForIpc", &(HashMap::from([("project", "test")]), fd)).await.unwrap_err();
+            assert!(matches!(denied, zbus::Error::MethodError(name, ..) if name.as_str().ends_with(".AccessDenied")));
+            vault.authorize_permission_manager(&peer, unix_time()).unwrap();
+            let (mut local, remote) = std::os::unix::net::UnixStream::pair().unwrap();
+            let exchange = tokio::task::spawn_blocking(move || {
+                local
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                crate::desktop_worker::send(
+                    &mut local,
+                    &super::super::WireSecret::new(b"supplied".to_vec()).unwrap(),
+                )
+                .unwrap();
+                crate::desktop_worker::receive::<super::super::WireSecret>(&mut local).unwrap()
+            });
+            let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
+            service
+                .call::<_, _, ()>("InputForIpc", &(HashMap::from([("project", "test")]), fd))
+                .await
+                .unwrap();
+            assert_eq!(exchange.await.unwrap().expose(), b"edited");
+        });
     }
 
     fn agent() -> (tempfile::TempDir, Agent) {
@@ -1120,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    fn sealed_search_requires_manual_unlock() {
+    fn sealed_search_requests_unlock_and_resumes() {
         runtime().block_on(async {
             if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
                 return;
@@ -1131,20 +1756,140 @@ mod tests {
             let service = Service {
                 shared: Arc::clone(&shared),
             };
-            let collection = Collection { shared };
-            assert!(matches!(
-                service
-                    .search_items(HashMap::new(), connection.object_server())
-                    .await,
-                Err(SecretServiceError::IsLocked(_))
-            ));
-            assert!(matches!(
-                collection
-                    .search_items(HashMap::new(), connection.object_server())
-                    .await,
-                Err(SecretServiceError::IsLocked(_))
-            ));
+            let collection = Collection {
+                shared: Arc::clone(&shared),
+            };
+            let message = zbus::Message::method_call(SERVICE_PATH, "SearchItems")
+                .unwrap()
+                .sender(connection.unique_name().unwrap())
+                .unwrap()
+                .build(&())
+                .unwrap();
+            let searches = async {
+                tokio::join!(
+                    service.search_items(
+                        HashMap::new(),
+                        message.header(),
+                        &connection,
+                        connection.object_server()
+                    ),
+                    collection.search_items(
+                        HashMap::new(),
+                        message.header(),
+                        &connection,
+                        connection.object_server()
+                    ),
+                )
+            };
+            let unlock = async {
+                requested.recv().await.unwrap();
+                requested.recv().await.unwrap();
+                let (_directory, vault, caller) = test_service();
+                install(
+                    &shared,
+                    connection.object_server(),
+                    Store::in_process(vault, caller),
+                )
+                .await
+                .unwrap();
+            };
+            let ((service_result, collection_result), ()) = tokio::join!(searches, unlock);
+            assert!(service_result.unwrap().0.is_empty());
+            assert!(collection_result.unwrap().is_empty());
             assert!(requested.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn sealed_search_dismissal_allows_another_request() {
+        runtime().block_on(async {
+            let (sender, mut requested) = mpsc::unbounded_channel();
+            let shared = Shared::new(Arc::new(ChannelPrompter(sender)));
+            for _ in 0..2 {
+                let (result, ()) = tokio::join!(
+                    shared.unlock_for_search(SecretServiceAccessContext::default()),
+                    async {
+                        requested.recv().await.unwrap();
+                        shared.complete_searches(true);
+                    }
+                );
+                assert!(matches!(result, Err(SecretServiceError::Cancelled(_))));
+            }
+        });
+    }
+
+    struct ReviewPrompter(mpsc::UnboundedSender<SecretServiceAccessRequest>);
+
+    impl SecretServicePrompter for ReviewPrompter {
+        fn request_unlock(&self) {}
+        fn request_access(&self, request: SecretServiceAccessRequest) {
+            let _ = self.0.send(request);
+        }
+    }
+
+    #[test]
+    fn another_unlock_does_not_bypass_pending_access_review() {
+        runtime().block_on(async {
+            let (sender, mut requests) = mpsc::unbounded_channel();
+            let shared = Arc::new(Shared::new(Arc::new(ReviewPrompter(sender))));
+            let lookup = tokio::spawn({
+                let shared = Arc::clone(&shared);
+                async move {
+                    shared
+                        .unlock_for_search(SecretServiceAccessContext::default())
+                        .await
+                }
+            });
+            let mut request = requests.recv().await.unwrap();
+            let (_directory, service, caller) = test_service();
+            shared
+                .set_agent(Some(Arc::new(
+                    Agent::load(Store::in_process(service, caller)).unwrap(),
+                )))
+                .unwrap();
+            shared.complete_searches(false);
+            tokio::task::yield_now().await;
+            assert!(
+                !lookup.is_finished(),
+                "unlock alone must not approve a reviewed request"
+            );
+            request.allow();
+            assert!(lookup.await.unwrap().is_ok());
+        });
+    }
+
+    #[test]
+    fn denying_one_access_request_does_not_approve_or_cancel_another() {
+        runtime().block_on(async {
+            let (sender, mut requests) = mpsc::unbounded_channel();
+            let shared = Arc::new(Shared::new(Arc::new(ReviewPrompter(sender))));
+            let start = || {
+                let shared = Arc::clone(&shared);
+                tokio::spawn(async move {
+                    shared
+                        .unlock_for_search(SecretServiceAccessContext::default())
+                        .await
+                })
+            };
+            let first = start();
+            let mut denied = requests.recv().await.unwrap();
+            let second = start();
+            let mut allowed = requests.recv().await.unwrap();
+            denied.deny();
+            assert!(matches!(
+                first.await.unwrap(),
+                Err(SecretServiceError::AccessDenied(_))
+            ));
+            assert!(!second.is_finished());
+            let (_directory, service, caller) = test_service();
+            shared
+                .set_agent(Some(Arc::new(
+                    Agent::load(Store::in_process(service, caller)).unwrap(),
+                )))
+                .unwrap();
+            shared.complete_searches(false);
+            allowed.allow();
+            assert!(second.await.unwrap().is_ok());
         });
     }
 
@@ -1256,7 +2001,7 @@ mod tests {
             }
             drop(service);
             // Restart sealed: neither search metadata nor secret values are
-            // available until the user manually unlocks Desktop.
+            // available until Desktop completes the requested unlock.
             drop(host);
             while next(&mut owners)
                 .await
@@ -1290,23 +2035,19 @@ mod tests {
                         .unwrap()
                 }
             });
-            let result = tokio::time::timeout(Duration::from_secs(5), sealed_lookup)
+            tokio::time::timeout(Duration::from_secs(5), requested_after_restart.recv())
                 .await
                 .unwrap()
-                .unwrap();
-            assert!(!result.status.success());
-            assert!(String::from_utf8_lossy(&result.stderr).contains("sealed"));
-            assert!(result.stdout.is_empty());
-            wait_for_no_sessions(&host).await;
+                .expect("lookup must request Desktop unlock");
+            assert!(!sealed_lookup.is_finished());
             assert!(requested.try_recv().is_err());
-            assert!(requested_after_restart.try_recv().is_err());
             assert!(
                 !directory
                     .path()
                     .join("factorseal/secret-service-metadata.json")
                     .exists()
             );
-            // Simulate manual unlock; ordinary lookup must then succeed.
+            // Complete the requested unlock; the pending lookup must resume.
             let root = directory.path().join("factorseal");
             let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
             let service =
@@ -1324,13 +2065,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let lookup = tokio::task::spawn_blocking(move || {
-                std::process::Command::new(tool)
-                    .args(["lookup", "service", "factorseal-regression"])
-                    .output()
-                    .unwrap()
-            });
-            let result = tokio::time::timeout(Duration::from_secs(10), lookup)
+            let result = tokio::time::timeout(Duration::from_secs(10), sealed_lookup)
                 .await
                 .unwrap()
                 .unwrap();

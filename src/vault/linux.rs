@@ -555,11 +555,66 @@ fn caller_identity(
     let credentials = getsockopt(stream, PeerCredentials).map_err(|error| {
         VaultError::Protocol(format!("could not read peer credentials: {error}"))
     })?;
-    let expected_uid = getuid().as_raw();
-    if credentials.uid() != expected_uid {
+    process_identity(credentials.uid(), credentials.pid(), cache)
+}
+
+pub(crate) fn dbus_caller_identity(name: &str) -> VaultResult<(CallerIdentity, String)> {
+    static CACHE: std::sync::OnceLock<CallerIdentityCache> = std::sync::OnceLock::new();
+    if !name.starts_with(':') {
         return Err(VaultError::AuthorizationRequired);
     }
-    let pid = credentials.pid();
+    let connection =
+        Connection::new_session().map_err(|error| VaultError::Protocol(error.to_string()))?;
+    let proxy = connection.with_proxy(
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        Duration::from_secs(2),
+    );
+    let (uid,): (u32,) = proxy
+        .method_call("org.freedesktop.DBus", "GetConnectionUnixUser", (name,))
+        .map_err(|_| VaultError::AuthorizationRequired)?;
+    let (pid,): (u32,) = proxy
+        .method_call(
+            "org.freedesktop.DBus",
+            "GetConnectionUnixProcessID",
+            (name,),
+        )
+        .map_err(|_| VaultError::AuthorizationRequired)?;
+    let identity = process_identity(
+        uid,
+        i32::try_from(pid).map_err(|_| VaultError::AuthorizationRequired)?,
+        CACHE.get_or_init(CallerIdentityCache::default),
+    )?;
+    // The unique bus name must still refer to the same live connection.
+    let current: Result<(u32,), _> = proxy.method_call(
+        "org.freedesktop.DBus",
+        "GetConnectionUnixProcessID",
+        (name,),
+    );
+    if current.ok() != Some((pid,)) {
+        return Err(VaultError::AuthorizationRequired);
+    }
+    let cwd = fs::canonicalize(format!("/proc/{pid}/cwd"))
+        .map_err(|_| VaultError::AuthorizationRequired)?;
+    let folder = cwd
+        .ancestors()
+        .find(|folder| folder.join("secretspec.toml").is_file())
+        .unwrap_or(&cwd);
+    let folder = folder
+        .to_str()
+        .ok_or(VaultError::AuthorizationRequired)?
+        .to_owned();
+    Ok((identity, folder))
+}
+
+fn process_identity(
+    uid: u32,
+    pid: i32,
+    cache: &CallerIdentityCache,
+) -> VaultResult<CallerIdentity> {
+    if uid != getuid().as_raw() {
+        return Err(VaultError::AuthorizationRequired);
+    }
     if pid <= 0 {
         return Err(VaultError::Protocol(
             "local peer has an invalid process ID".to_owned(),
@@ -587,7 +642,7 @@ fn caller_identity(
         .map_err(|error| path_io_error(&executable_link, &error))?;
     let cache_key = format!(
         "{}:{pid}:{start_time}:{}:{}:{}:{}:{}",
-        credentials.uid(),
+        uid,
         metadata.dev(),
         metadata.ino(),
         metadata.len(),
@@ -598,7 +653,7 @@ fn caller_identity(
         let executable_digest = hash_open_file(&mut executable, &executable_link)?;
         CallerIdentity::new(
             CallerPlatform::Linux,
-            format!("uid:{}", credentials.uid()),
+            format!("uid:{uid}"),
             executable_path.to_string_lossy().into_owned(),
             executable_digest,
             None,

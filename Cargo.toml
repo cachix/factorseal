@@ -17,10 +17,11 @@ resolver = "2"
 exclude = ["fuzz"]
 
 [features]
-fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "dep:secret-service-protocol", "hardwareseal/fuzzing"]
-default = ["vault", "cli", "hardware", "secretspec-provider"]
+fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "personal-sync", "dep:secret-service-protocol", "hardwareseal/fuzzing"]
+default = ["vault", "cli", "hardware", "secretspec-provider", "personal-sync-network"]
 vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token"]
 vault-store = [
+    "personal",
     "dep:aes",
     "dep:aes-gcm",
     "dep:automerge",
@@ -38,6 +39,7 @@ vault-store = [
 secret-service-host = ["vault-client", "dep:secret-service-protocol", "dep:tokio", "dep:zbus"]
 
 vault = [
+    "helper-isolation",
     "vault-client",
     "vault-store",
     "secret-service-host",
@@ -64,7 +66,11 @@ cli = [
     "transfer",
 ]
 diagnostics = ["dep:directories", "transfer"]
-transfer = ["dep:anyhow", "dep:csv", "dep:tempfile", "dep:uuid", "dep:nt-token"]
+personal = ["dep:anyhow", "dep:uuid"]
+personal-sync-network = ["personal-sync", "helper-isolation", "dep:iroh", "dep:qrcode", "tokio/net", "tokio/rt-multi-thread", "tokio/io-util"]
+helper-isolation = ["vault-client", "dep:ciborium", "dep:seccompiler", "dep:landlock"]
+personal-sync = ["vault-store", "key-protection", "dep:hpke", "dep:aes-gcm-hpke", "dep:tempfile"]
+transfer = ["personal", "dep:csv", "dep:tempfile", "dep:nt-token", "dep:zip"]
 secretspec-provider = [
     "dep:async-trait",
     "dep:percent-encoding",
@@ -93,6 +99,16 @@ name = "factorseal"
 path = "src/bin/factorseal.rs"
 required-features = ["vault", "cli", "hardware"]
 
+[[bin]]
+name = "factorseal-parser"
+path = "src/bin/factorseal-parser.rs"
+required-features = ["helper-isolation"]
+
+[[bin]]
+name = "factorseal-network"
+path = "src/bin/factorseal-network.rs"
+required-features = ["personal-sync-network"]
+
 [dependencies]
 # `aes-gcm` does not forward `zeroize` to its dependencies. The `aes`, `ghash`,
 # and `polyval` entries exist only to wipe the expanded key schedule and the
@@ -103,8 +119,9 @@ argon2 = { version = "0.5.3", features = ["zeroize"], optional = true }
 anyhow = { version = "1.0", optional = true }
 async-trait = { version = "0.1.89", optional = true }
 # Validate bundle counter encoding and lengths before expansion; upstream PR #1540.
-automerge = { git = "https://github.com/domenkozar/automerge.git", rev = "76746a304deecf001b4a78d6625dd0eb1ab48ddd", version = "0.11.0", optional = true }
+automerge = { git = "https://github.com/domenkozar/automerge.git", rev = "78cf972a705661b572f7427ff404600e05331b5e", version = "0.11.0", optional = true }
 base64 = "0.22.1"
+ciborium = { version = "0.2.2", optional = true }
 clap = { version = "4.5.41", features = ["derive", "env"], optional = true }
 clap_complete = { version = "4.6.9", features = ["unstable-dynamic"], optional = true }
 clap_complete_nushell = { version = "4.6.2", optional = true }
@@ -118,6 +135,11 @@ fs2 = { version = "0.4.3", optional = true }
 hardwareseal = { version = "0.1.0", path = "crates/hardwareseal", features = ["apple"], optional = true }
 hex = "0.4.3"
 hmac = { version = "0.12.1", optional = true }
+iroh = { version = "=1.1.0", default-features = false, features = ["tls-ring"], optional = true }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"], optional = true }
+hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "mlkem", "aes", "hkdfsha2", "getrandom"], optional = true }
+# Feature-unify HPKE's newer AES implementation with key-schedule wiping.
+aes-gcm-hpke = { package = "aes-gcm", version = "0.11.1", features = ["zeroize"], optional = true }
 ml-dsa = { version = "0.1.1", features = ["zeroize"], optional = true }
 percent-encoding = { version = "2.3.2", optional = true }
 polyval = { version = "0.6.2", features = ["zeroize"], optional = true }
@@ -134,6 +156,7 @@ tokio = { version = "1.47.1", features = ["macros", "rt", "sync", "time"], optio
 turso = { version = "0.8.0-pre.4", default-features = false, optional = true }
 uuid = { version = "1.0", features = ["v4"], optional = true }
 zeroize = "1.8.1"
+zip = { version = "8.6", default-features = false, features = ["deflate"], optional = true }
 zxcvbn = { version = "3.1.1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -143,6 +166,8 @@ libc = "0.2"
 tempfile = "3.20.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = { version = "0.5.0", default-features = false, optional = true }
+landlock = { version = "0.4.7", optional = true }
 dbus = { version = "0.9.12", optional = true }
 zbus = { version = "5.14.0", default-features = false, features = ["tokio"], optional = true }
 nix = { version = "0.31.3", features = ["socket", "user", "process", "resource", "poll"], optional = true }
@@ -163,18 +188,27 @@ widestring = { version = "1.2.1", optional = true }
 windows = { version = "0.61.3", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
+    "Win32_System_Com",
     "Win32_System_Memory",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_WindowsProgramming",
     "Win32_System_SystemInformation",
     "Win32_System_ErrorReporting",
     "Win32_System_Power",
+    "Win32_System_ProcessStatus",
     "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
 ] }
 
 [lints.rust]
@@ -208,10 +242,9 @@ opt-level = 3
 opt-level = 3
 
 [patch.crates-io]
-gpui = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f", version = "=0.2.2" }
-
-[patch."https://github.com/zed-industries/zed.git"]
-gpui = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f", version = "=0.2.2" }
-gpui_macros = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f" }
-gpui_platform = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f" }
-gpui_web = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f" }
+# Windows route discovery without WMI: https://github.com/n0-computer/net-tools/pull/226
+netwatch = { git = "https://github.com/domenkozar/net-tools.git", rev = "0b252c90a768cae2aacba8d304e1de5a4ed062db" }
+# Components and tray must share the application's CE types and Git revision.
+gpui-ce = { git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe" }
+gpui_ce_macros = { git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe" }
+gpui_ce_platform = { git = "https://github.com/gpui-ce/gpui-ce.git", rev = "05d89e953701a89fedac9b17b3042154bdf74afe" }

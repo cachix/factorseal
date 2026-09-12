@@ -13,13 +13,14 @@
 #![allow(unsafe_code)]
 
 use std::ffi::c_void;
+use std::fmt::Write as _;
 use std::io;
 use std::mem::size_of;
 use std::path::Path;
 use std::ptr;
 
 use nt_token::OwnedToken;
-#[cfg(feature = "transfer")]
+#[cfg(any(feature = "transfer", feature = "personal-sync"))]
 use std::{
     fs::File,
     os::windows::io::{AsRawHandle, FromRawHandle},
@@ -43,6 +44,19 @@ use windows::Win32::{
     Storage::FileSystem::CreateDirectoryW,
 };
 use windows::core::{HSTRING, PWSTR};
+
+/// Rights an isolated helper's package SID receives on spool objects, as an
+/// SDDL hexadecimal mask: read, write, append, delete, attributes, extended
+/// attributes, traverse, read control, and synchronize. It deliberately omits
+/// WRITE_DAC and WRITE_OWNER so a compromised helper cannot widen a spool
+/// object's ACL to another principal; the owning user keeps full control.
+pub(crate) const HELPER_RIGHTS: &str = "0x001301bf";
+
+/// Access mask bits that let a trustee change an object's ACL or owner or
+/// ask for everything: WRITE_DAC, WRITE_OWNER, ACCESS_SYSTEM_SECURITY,
+/// MAXIMUM_ALLOWED, and GENERIC_ALL. A helper grant carrying any of them was
+/// not written by this build.
+const CONTROL_RIGHTS: u32 = 0x0004_0000 | 0x0008_0000 | 0x0100_0000 | 0x0200_0000 | 0x1000_0000;
 
 /// Frees a `LocalAlloc` buffer returned by a Win32 call when dropped.
 struct LocalMemory(*mut c_void);
@@ -69,15 +83,28 @@ fn current_user_sid() -> io::Result<String> {
     })
 }
 
+// A helper-created spool file belongs to both its user and its own restricted
+// package identity. Full-trust vault owners keep the user-only policy.
+fn app_container_sid() -> io::Result<Option<String>> {
+    #[cfg(feature = "helper-isolation")]
+    return crate::isolation::windows::current_app_sid();
+    #[cfg(not(feature = "helper-isolation"))]
+    Ok(None)
+}
+
 /// Create the final private ACL before writing any secret bytes.
-#[cfg(feature = "transfer")]
+#[cfg(any(feature = "transfer", feature = "personal-sync"))]
 pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
     use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows::Win32::Storage::FileSystem::{
         CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
     };
     let sid = current_user_sid()?;
-    let sddl = HSTRING::from(format!("O:{sid}D:P(A;;FA;;;{sid})"));
+    let mut sddl = format!("O:{sid}D:P(A;;FA;;;{sid})");
+    if let Some(package) = app_container_sid()? {
+        write!(sddl, "(A;;{HELPER_RIGHTS};;;{package})").expect("format into String");
+    }
+    let sddl = HSTRING::from(sddl);
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     // SAFETY: live output pointer; LocalMemory releases the allocated descriptor.
     unsafe {
@@ -114,7 +141,7 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
 }
 
 /// Validate the same handle used to read the factor, including its owner.
-#[cfg(feature = "transfer")]
+#[cfg(any(feature = "transfer", feature = "personal-sync"))]
 pub(crate) fn validate_private_file(file: &File) -> io::Result<()> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Security::Authorization::GetSecurityInfo;
@@ -145,11 +172,11 @@ pub(crate) fn validate_private_file(file: &File) -> io::Result<()> {
             "file must be owned by the current user and have a private ACL",
         ));
     }
-    if granted_trustees(dacl)?
-        .iter()
-        .any(|trustee| trustee != &sid)
-    {
-        return Err(io::Error::other("file grants access to another account"));
+    let package = app_container_sid()?;
+    for grant in granted_trustees(dacl)? {
+        if let Err(reason) = grant.check(&sid, package.as_deref()) {
+            return Err(io::Error::other(format!("file {reason}")));
+        }
     }
     Ok(())
 }
@@ -187,7 +214,11 @@ fn status_io_error(status: WIN32_ERROR) -> io::Error {
 /// `fs::create_dir`.
 #[cfg(feature = "key-protection")]
 pub(crate) fn create_owner_only_directory(root: &Path) -> io::Result<()> {
-    let sddl = HSTRING::from(owner_only_sddl(&current_user_sid()?).as_str());
+    let mut sddl = owner_only_sddl(&current_user_sid()?);
+    if let Some(package) = app_container_sid()? {
+        write!(sddl, "(A;OICI;{HELPER_RIGHTS};;;{package})").expect("format into String");
+    }
+    let sddl = HSTRING::from(sddl);
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     // SAFETY: `sddl` is a NUL-terminated wide string for the duration of the
     // call, and `descriptor` receives a `LocalAlloc` buffer owned by the guard
@@ -310,23 +341,52 @@ fn validate_directory_descriptor(
             ),
         ));
     }
-    for trustee in granted_trustees(dacl)? {
-        if trustee != user_sid {
+    let package = app_container_sid()?;
+    for grant in granted_trustees(dacl)? {
+        if let Err(reason) = grant.check(user_sid, package.as_deref()) {
             return Err(permission_error(
                 path,
-                &format!(
-                    "grants access to `{trustee}` rather than only `{user_sid}`; {}",
-                    repair_hint(path, user_sid)
-                ),
+                &format!("{reason}; {}", repair_hint(path, user_sid)),
             ));
         }
     }
     Ok(())
 }
 
-/// String SIDs of all allow entries, including inherited entries. Reject
+/// One allow entry: its trustee and the access mask it grants.
+struct Grant {
+    trustee: String,
+    mask: u32,
+}
+
+impl Grant {
+    /// Accept a full grant to the user, or a helper grant that cannot change
+    /// the object's ACL or owner. Trustee identity alone is not enough: the
+    /// helper's own package SID with WRITE_DAC could regrant the object to
+    /// any other local principal.
+    fn check(&self, user_sid: &str, package: Option<&str>) -> Result<(), String> {
+        if self.trustee == user_sid {
+            return Ok(());
+        }
+        if package == Some(self.trustee.as_str()) {
+            if self.mask & CONTROL_RIGHTS == 0 {
+                return Ok(());
+            }
+            return Err(format!(
+                "grants the helper `{}` control rights {:#010x} rather than data access only",
+                self.trustee, self.mask
+            ));
+        }
+        Err(format!(
+            "grants access to `{}` rather than only `{user_sid}`",
+            self.trustee
+        ))
+    }
+}
+
+/// All allow entries with their masks, including inherited entries. Reject
 /// unfamiliar ACE types rather than assuming they cannot widen access.
-fn granted_trustees(dacl: *const ACL) -> io::Result<Vec<String>> {
+fn granted_trustees(dacl: *const ACL) -> io::Result<Vec<Grant>> {
     // SAFETY: callers supply an OS-owned ACL that lives throughout this call.
     if dacl.is_null() || !unsafe { IsValidAcl(dacl) }.as_bool() {
         return Err(io::Error::other("invalid vault access control list"));
@@ -344,7 +404,10 @@ fn granted_trustees(dacl: *const ACL) -> io::Result<Vec<String>> {
             0 => {
                 let allow = entry.cast::<ACCESS_ALLOWED_ACE>();
                 let sid = unsafe { &raw mut (*allow).SidStart };
-                trustees.push(string_sid(PSID(sid.cast()))?);
+                trustees.push(Grant {
+                    trustee: string_sid(PSID(sid.cast()))?,
+                    mask: unsafe { (*allow).Mask },
+                });
             }
             // ACCESS_DENIED_ACE_TYPE cannot widen access.
             1 => {}
@@ -391,6 +454,38 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn helper_grants_may_carry_data_rights_but_never_control_rights() {
+        let user = "S-1-5-21-1-2-3-1001";
+        let package = "S-1-15-2-1-2-3-4-5-6-7";
+        let data = u32::from_str_radix(HELPER_RIGHTS.trim_start_matches("0x"), 16).unwrap();
+        let full = 0x001F_01FF;
+        let grant = |trustee: &str, mask| Grant {
+            trustee: trustee.to_owned(),
+            mask,
+        };
+        assert!(grant(user, full).check(user, Some(package)).is_ok());
+        assert!(grant(package, data).check(user, Some(package)).is_ok());
+        assert!(grant(package, full).check(user, Some(package)).is_err());
+        assert!(
+            grant(package, 0x0004_0000)
+                .check(user, Some(package))
+                .is_err()
+        );
+        assert!(
+            grant(package, 0x0008_0000)
+                .check(user, Some(package))
+                .is_err()
+        );
+        assert!(
+            grant(package, 0x1000_0000)
+                .check(user, Some(package))
+                .is_err()
+        );
+        assert!(grant(package, data).check(user, None).is_err());
+        assert!(grant("S-1-1-0", 1).check(user, Some(package)).is_err());
+    }
 
     #[test]
     #[ignore = "invoked by acceptance/windows-security.ps1 with an isolated fixture"]
@@ -500,7 +595,11 @@ mod tests {
             let _descriptor = LocalMemory(descriptor.0);
             assert!(!dacl.is_null());
             assert_eq!(
-                granted_trustees(dacl).unwrap(),
+                granted_trustees(dacl)
+                    .unwrap()
+                    .iter()
+                    .map(|grant| grant.trustee.clone())
+                    .collect::<Vec<_>>(),
                 [current_user_sid().unwrap()]
             );
         }
@@ -532,7 +631,7 @@ mod tests {
         assert!(validate_owner_only_directory(&inherited).is_err());
     }
 
-    #[cfg(feature = "transfer")]
+    #[cfg(any(feature = "transfer", feature = "personal-sync"))]
     #[test]
     fn exports_remain_private_in_shared_directories_and_after_replacement() {
         use crate::security::{read_private_file, write_private_file};

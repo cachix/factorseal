@@ -39,7 +39,7 @@ const MAX_PROJECT_VALUE_BYTES: u64 = 64 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const DEFAULT_UNIX_SOCKET: &str = "factorseal.sock";
 const CLI_CONTROL_NAMESPACE: &[u8] = b"factorseal/cli-control/v1";
-const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";
+use factorseal::personal::PERSONAL_SECRET_NAMESPACE;
 const PROJECT_PERMISSIONS: [GrantPermission; 4] = [
     GrantPermission::List,
     GrantPermission::Get,

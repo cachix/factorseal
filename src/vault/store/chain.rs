@@ -43,11 +43,14 @@ pub(super) struct ProtectedCommit {
 }
 
 impl ProtectedCommit {
-    pub(super) fn new(contents: CommitContents, signing_seed: &[u8; 32]) -> VaultResult<Self> {
+    pub(super) fn new(
+        contents: CommitContents,
+        signer: &dyn signature::SigningProvider,
+    ) -> VaultResult<Self> {
         let signature_algorithm = CURRENT_SIGNATURE_ALGORITHM;
         let transcript = commit_transcript(signature_algorithm, &contents);
         let commit_id = digest(&transcript);
-        let signature = signature::sign(signing_seed, &commit_signature_payload(&commit_id))?;
+        let signature = signer.sign(&commit_signature_payload(&commit_id))?;
         let CommitContents {
             previous_commit_id,
             vault_id,
@@ -189,14 +192,15 @@ mod tests {
     fn commit_binds_every_field_under_its_signature() {
         let seed = [9; 32];
         let public_key = signature::PreparedVerifyingKey::new(&public_key_for_seed(&seed)).unwrap();
-        let commit = ProtectedCommit::new(contents(), &seed).unwrap();
+        let commit = ProtectedCommit::new(contents(), &signature::SoftwareSigner(&seed)).unwrap();
         commit
             .verify(commit.commit_id, commit.device_key_id, &public_key)
             .unwrap();
 
         macro_rules! rejects {
             ($field:ident, $value:expr) => {{
-                let mut changed = ProtectedCommit::new(contents(), &seed).unwrap();
+                let mut changed =
+                    ProtectedCommit::new(contents(), &signature::SoftwareSigner(&seed)).unwrap();
                 changed.$field = $value;
                 assert!(
                     changed
@@ -239,7 +243,8 @@ mod tests {
     /// to prevent when a second algorithm is added.
     #[test]
     fn an_unknown_or_missing_signature_algorithm_is_refused() {
-        let commit = ProtectedCommit::new(contents(), &[9; 32]).unwrap();
+        let commit =
+            ProtectedCommit::new(contents(), &signature::SoftwareSigner(&[9; 32])).unwrap();
 
         let mut json = serde_json::to_value(&commit).unwrap();
         json["signature_algorithm"] = serde_json::Value::String("unknown-signature".to_owned());

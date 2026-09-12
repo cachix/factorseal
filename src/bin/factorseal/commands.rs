@@ -45,6 +45,7 @@ struct Status<'a> {
     actor_id: String,
     platform: &'a str,
     hardware_backend: &'a str,
+    signing_backend: &'a str,
     cryptographic_profile: &'a str,
     unlock_policy: Vec<String>,
     preferred_unlock_group: String,
@@ -180,6 +181,7 @@ pub(super) fn show_status(root: &Path, socket: Option<&Path>) -> Result<(), CliE
         actor_id: hex::encode(device.actor_id()),
         platform: device.platform(),
         hardware_backend: device.hardware_backend(),
+        signing_backend: device.signing_backend(),
         cryptographic_profile: device.cryptographic_profile().as_str(),
         unlock_policy: device
             .unlock_policy()
@@ -343,14 +345,17 @@ fn import_personal_secrets(
     replace_existing: bool,
 ) -> Result<TransferSummary, CliError> {
     let secrets = import_manager(format, bytes).map_err(transfer_error)?;
-    let names = factorseal::transfer::personal_import_names(&secrets);
+
     let mut prepared = Vec::with_capacity(secrets.len());
-    for (secret, name) in secrets.into_iter().zip(names) {
+    for secret in secrets {
         prepared.push(VaultArchiveEntry {
             metadata: VaultEntryMetadata {
+                display_name: None,
+                display_type: None,
+                updated_at: None,
                 document_kind: DocumentKind::LocalKeyring,
                 partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
-                address: factorseal::SecretAddress::new(name, None)?,
+                address: factorseal::SecretAddress::new(secret.id.clone(), None)?,
             },
             value: WireSecret::new(secret.encode().map_err(transfer_error)?.to_vec())?,
             evict_at: None,
@@ -1189,6 +1194,7 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
         "\u{1b}[2J\u{1b}]8;;https://invalid\u{7}\r\n\t\u{8}\u{85}\u{202e}\u{2066}\u{2028}\\\"é";
     let mut permission = Permission {
         id: attack.to_owned(),
+        scope: None,
         operation: PermissionOperation::Get,
         principal: PermissionPrincipal::from(&caller),
         application: VaultApplicationContext::new(
@@ -1825,5 +1831,20 @@ mod import_tests {
             3,
             "repeat import must address the same items"
         );
+    }
+
+    #[test]
+    fn oversized_personal_item_fails_before_any_import_writes() {
+        let client = ImportClient(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let source = serde_json::to_vec(&serde_json::json!({"items":[
+            {"name":"Small", "login":{"password":"small"}},
+            {"name":"Large", "login":{"password":"x".repeat(512 * 1024)}}
+        ]}))
+        .unwrap();
+        assert!(
+            import_personal_secrets(&client, TransferFormat::BitwardenJson, &source, false)
+                .is_err()
+        );
+        assert!(client.0.lock().unwrap().is_empty());
     }
 }

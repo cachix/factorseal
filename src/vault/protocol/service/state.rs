@@ -71,6 +71,7 @@ impl ServiceState {
         })
     }
 
+    #[cfg(any(feature = "vault", all(test, feature = "hardware")))]
     pub(super) fn is_seal_complete(&self) -> bool {
         self.seal_handle.is_shutdown_complete()
     }
@@ -86,6 +87,7 @@ impl ServiceState {
         self.seal_handle.deadline()
     }
 
+    #[cfg(feature = "vault")]
     pub(super) fn enable_emergency_exit(&self) {
         self.seal_handle.enable_emergency_exit();
     }

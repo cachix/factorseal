@@ -12,10 +12,12 @@ use factorseal::{
 };
 use zeroize::Zeroizing;
 
+use factorseal::isolation::network::ProcessManager as SyncManager;
+
 use factorseal::transfer::{PersonalSecret, TransferFormat, export_manager, import_manager};
 
 const METADATA_FILE: &str = "factorseal.json";
-pub(crate) const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";
+pub(crate) use factorseal::personal::PERSONAL_SECRET_NAMESPACE;
 const CLI_EXECUTABLE_ENV: &str = "FACTORSEAL_CLI_EXECUTABLE";
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const DEFAULT_SOCKET: &str = "factorseal.sock";
@@ -130,6 +132,9 @@ pub(crate) struct DesktopRuntime {
     events: smol::channel::Sender<Snapshot>,
     lifeline: Mutex<Option<std::process::ChildStdin>>,
     unlock_in_progress: AtomicBool,
+    sync_output: Mutex<Option<std::process::ChildStdout>>,
+    sync_io: Mutex<()>,
+    sync_manager: Mutex<Option<Arc<SyncManager>>>,
 }
 
 impl DesktopRuntime {
@@ -142,6 +147,9 @@ impl DesktopRuntime {
                 events,
                 lifeline: Mutex::new(None),
                 unlock_in_progress: AtomicBool::new(false),
+                sync_output: Mutex::new(None),
+                sync_io: Mutex::new(()),
+                sync_manager: Mutex::new(None),
             }),
             receiver,
         )
@@ -277,22 +285,35 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    pub(crate) fn read_personal_item(
+        &self,
+        metadata: &VaultMetadata,
+        entry: &VaultEntryMetadata,
+    ) -> Result<PersonalSecret, String> {
+        if !is_personal_entry(entry) {
+            return Err("This is not a personal item.".into());
+        }
+        let request = VaultRequest::new(VaultAction::ExportVaultEntry {
+            entry: entry.clone(),
+        })
+        .map_err(|error| error.to_string())?;
+        match self.request_live(metadata, &request)? {
+            VaultResponseBody::VaultEntrySecret { value, .. } => {
+                PersonalSecret::decode_current(value.expose()).map_err(|error| error.to_string())
+            }
+            _ => Err("Could not read the personal item.".into()),
+        }
+    }
+
     pub(crate) fn put_personal_secret(
         &self,
-        name: String,
-        value: &Zeroizing<Vec<u8>>,
+        secret: &PersonalSecret,
     ) -> Result<VaultContents, String> {
         let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
-        let secret = PersonalSecret::generic(
-            name.clone(),
-            std::str::from_utf8(value)
-                .map_err(|_| "personal secret value is not valid UTF-8".to_owned())?
-                .to_owned(),
-        );
         let encoded = secret.encode().map_err(|error| error.to_string())?;
         let request = VaultRequest::new(VaultAction::Put {
             namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
-            address: WireSecretAddress::new(name, None),
+            address: WireSecretAddress::new(secret.id.clone(), None),
             value: WireSecret::new(encoded.to_vec()).map_err(|e| e.to_string())?,
             evict_at: None,
         })
@@ -368,14 +389,17 @@ impl DesktopRuntime {
         replace_existing: bool,
     ) -> Result<(TransferSummary, VaultContents), String> {
         let secrets = import_manager(format, bytes).map_err(|error| error.to_string())?;
-        let names = factorseal::transfer::personal_import_names(&secrets);
+
         let mut prepared = Vec::with_capacity(secrets.len());
-        for (secret, address_name) in secrets.into_iter().zip(names) {
+        for secret in secrets {
             let value = secret.encode().map_err(|error| error.to_string())?;
             let entry = VaultEntryMetadata {
+                display_name: None,
+                display_type: None,
+                updated_at: None,
                 document_kind: DocumentKind::LocalKeyring,
                 partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
-                address: SecretAddress::new(address_name, None)
+                address: SecretAddress::new(secret.id.clone(), None)
                     .map_err(|error| error.to_string())?,
             };
             prepared.push((
@@ -434,6 +458,81 @@ impl DesktopRuntime {
             let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
             self.request_live(metadata, &request)
         })
+    }
+
+    pub(crate) fn approve_permissions(
+        &self,
+        metadata: &VaultMetadata,
+        permissions: &[factorseal::Permission],
+        group: factorseal::UnlockGroup,
+        password: Zeroizing<Vec<u8>>,
+        duration: Option<u64>,
+    ) -> Result<(), String> {
+        let requests = permissions
+            .iter()
+            .map(|permission| {
+                let factorseal::PermissionState::Pending { challenge, .. } = permission.state
+                else {
+                    return Err("permission is no longer pending".to_owned());
+                };
+                Ok((permission.id.clone(), challenge, duration))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let password = LockedBytes::from_zeroizing(password).map_err(|error| error.to_string())?;
+        let mut worker = self.spawn_worker(
+            factorseal::desktop_worker::Operation::SignPermissions { group, requests },
+            password,
+        )?;
+        let signatures = factorseal::desktop_worker::receive::<Result<Vec<Vec<u8>>, String>>(
+            worker
+                .child
+                .stdout
+                .as_mut()
+                .ok_or("signing worker output unavailable")?,
+        )
+        .map_err(|error| error.to_string())??;
+        worker.wait()?;
+        if signatures.len() != permissions.len() {
+            return Err("invalid signing response".to_owned());
+        }
+        for (permission, signature) in permissions.iter().zip(signatures) {
+            self.request_live(
+                metadata,
+                &VaultRequest::new(factorseal::VaultAction::ApprovePermission {
+                    id: permission.id.clone(),
+                    signature,
+                    duration_seconds: duration,
+                })
+                .map_err(|error| error.to_string())?,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn deny_permission(
+        &self,
+        metadata: &VaultMetadata,
+        id: String,
+    ) -> Result<(), String> {
+        self.request_live(
+            metadata,
+            &VaultRequest::new(factorseal::VaultAction::DenyPermission { id })
+                .map_err(|error| error.to_string())?,
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn revoke_permission(
+        &self,
+        metadata: &VaultMetadata,
+        id: String,
+    ) -> Result<(), String> {
+        self.request_live(
+            metadata,
+            &VaultRequest::new(factorseal::VaultAction::RevokePermission { id })
+                .map_err(|error| error.to_string())?,
+        )
+        .map(|_| ())
     }
 
     fn request_live(
@@ -533,6 +632,7 @@ impl DesktopRuntime {
             operation,
             password: WireSecret::from_locked(password),
             hosts_secret_service: self.config.secret_service,
+            sync_control: true,
         };
         factorseal::desktop_worker::send(
             worker
@@ -595,6 +695,10 @@ impl DesktopRuntime {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             })?;
+        let control_install = self
+            .sync_io
+            .lock()
+            .map_err(|_| "sync control lock unavailable")?;
         self.lifeline
             .lock()
             .map_err(|_| "desktop worker lock unavailable".to_owned())?
@@ -605,6 +709,17 @@ impl DesktopRuntime {
                     .take()
                     .ok_or("worker input unavailable")?,
             );
+        self.sync_output
+            .lock()
+            .map_err(|_| "worker output lock unavailable")?
+            .replace(
+                worker
+                    .child
+                    .stdout
+                    .take()
+                    .ok_or("worker output unavailable")?,
+            );
+        drop(control_install);
         // Publish the inventory before requesting permissions. The UI starts
         // that request once it has applied this first unlocked snapshot.
         let client = native_client(&self.config, metadata);
@@ -930,6 +1045,85 @@ pub(crate) fn explicit_or_default_root(root: Option<&Path>) -> Result<PathBuf, S
     root.map_or_else(default_root, |root| Ok(root.to_owned()))
 }
 
+impl DesktopRuntime {
+    pub(crate) fn sync_view(
+        self: &Arc<Self>,
+    ) -> Result<factorseal::desktop_worker::sync::network::View, String> {
+        if !self
+            .config
+            .root
+            .join("personal-sync/transport.key")
+            .is_file()
+            && !self
+                .config
+                .root
+                .join("personal-sync/membership.json")
+                .is_file()
+        {
+            return Ok(factorseal::desktop_worker::sync::network::View::default());
+        }
+        self.sync_manager().map(|manager| manager.view())
+    }
+    pub(crate) fn sync_manager(self: &Arc<Self>) -> Result<Arc<SyncManager>, String> {
+        let mut manager = self
+            .sync_manager
+            .lock()
+            .map_err(|_| "sync lock unavailable")?;
+        if let Some(manager) = &*manager {
+            return Ok(Arc::clone(manager));
+        }
+        if !self.config.root.join(METADATA_FILE).is_file() {
+            return Err("Initialize your vault first".into());
+        }
+        let weak = Arc::downgrade(self);
+        let host = Arc::new(move |command| {
+            let runtime = weak.upgrade().ok_or("Desktop is closing")?;
+            runtime.sync_command(&command)
+        });
+        let created = {
+            let desktop = std::env::current_exe().map_err(|error| error.to_string())?;
+            let cli = cli_executable(&desktop)?.ok_or("Factorseal CLI is not installed")?;
+            let helper = factorseal::isolation::helper_executable(&cli, "factorseal-network")
+                .map_err(|error| format!("Factorseal network helper is not installed: {error}"))?;
+            Arc::new(SyncManager::open(
+                &helper,
+                &self.config.root.join("personal-sync"),
+                host,
+            )?)
+        };
+        *manager = Some(Arc::clone(&created));
+        Ok(created)
+    }
+    fn sync_command(
+        &self,
+        command: &factorseal::desktop_worker::sync::Command,
+    ) -> Result<factorseal::desktop_worker::sync::Reply, String> {
+        let _guard = self
+            .sync_io
+            .lock()
+            .map_err(|_| "sync control lock unavailable")?;
+        {
+            let mut pipe = self
+                .lifeline
+                .lock()
+                .map_err(|_| "worker lock unavailable")?;
+            let input = pipe
+                .as_mut()
+                .ok_or("Unlock the vault in this Desktop to manage devices")?;
+            factorseal::desktop_worker::sync::send(input, command)
+                .map_err(|error| error.to_string())?;
+        }
+        let mut output = self
+            .sync_output
+            .lock()
+            .map_err(|_| "worker output lock unavailable")?;
+        factorseal::desktop_worker::sync::receive::<Result<_, String>>(
+            output.as_mut().ok_or("Worker output unavailable")?,
+        )
+        .map_err(|error| error.to_string())?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -987,11 +1181,17 @@ mod tests {
         let first = SecretSpecAddress::convention("alpha", "default", "TOKEN").unwrap();
         let second = SecretSpecAddress::convention("beta", "production", "DATABASE_URL").unwrap();
         let first = VaultEntryMetadata {
+            display_name: None,
+            display_type: None,
+            updated_at: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"alpha".to_vec(),
             address: SecretAddress::secret_spec(first).unwrap(),
         };
         let second = VaultEntryMetadata {
+            display_name: None,
+            display_type: None,
+            updated_at: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"beta".to_vec(),
             address: SecretAddress::secret_spec(second).unwrap(),
@@ -1028,6 +1228,9 @@ mod tests {
     #[test]
     fn initial_inventory_does_not_wait_for_permissions() {
         let entry = VaultEntryMetadata {
+            display_name: None,
+            display_type: None,
+            updated_at: None,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"project".to_vec(),
             address: SecretAddress::secret_spec(

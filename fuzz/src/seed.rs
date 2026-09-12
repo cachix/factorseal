@@ -11,6 +11,7 @@ fn main() {
         "archive",
         "transfer",
         "bootstrap",
+        "personal_sync",
     ] {
         let directory = root.join(name);
         std::fs::create_dir_all(&directory).unwrap();

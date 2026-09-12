@@ -6,6 +6,7 @@ use factorseal::{
     CallerIdentity, DocumentKind, GrantAuthorization, GrantAuthorizationTarget, GrantPermission,
     UnlockCredentials, UnsealLeasePolicy, Vault, VaultCryptoProfile, VaultService,
 };
+#[cfg(not(feature = "personal-sync"))]
 use std::io::Read as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
@@ -31,21 +32,57 @@ pub(super) fn run(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
     result
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<(), CliError> {
     let Bootstrap {
         desktop_executable,
         operation,
         password,
         hosts_secret_service,
+        sync_control,
     } = timing::result("desktop_worker", "receive_bootstrap", || {
         receive(&mut std::io::stdin())
     })
     .map_err(|e| CliError::DesktopLaunch(e.to_string()))?;
+    if sync_control && !cfg!(feature = "personal-sync") {
+        return Err(CliError::DesktopLaunch(
+            "this CLI was built without Desktop sync support".into(),
+        ));
+    }
     if !desktop_executable.is_absolute() || !desktop_executable.is_file() {
         return Err(CliError::DesktopLaunch(
             "desktop executable must be an absolute regular file".to_owned(),
         ));
     }
+    let operation = match operation {
+        Operation::SignPermissions { group, requests } => {
+            let result = (|| -> Result<Vec<Vec<u8>>, CliError> {
+                if requests.is_empty() || requests.len() > 128 {
+                    return Err(CliError::DesktopLaunch("invalid approval batch".to_owned()));
+                }
+                let unsealed = Vault::unseal_with_unlock_group(
+                    root,
+                    &group,
+                    UnlockCredentials::with_password(password.expose()),
+                )?;
+                drop(password);
+                requests
+                    .iter()
+                    .map(|(id, challenge, duration)| {
+                        unsealed
+                            .sign_permission_challenge(id, challenge, *duration)
+                            .map_err(Into::into)
+                    })
+                    .collect()
+            })()
+            .map_err(|error| error.to_string());
+            send(&mut std::io::stdout(), &result)
+                .map_err(|error| CliError::DesktopLaunch(error.to_string()))?;
+            *reported = true;
+            return result.map(|_| ()).map_err(CliError::DesktopLaunch);
+        }
+        operation => operation,
+    };
     let owner = Arc::new(Mutex::new(Weak::<VaultService>::new()));
     timing::result("desktop_worker", "watch_parent", || {
         watch_parent(Arc::clone(&owner))
@@ -65,6 +102,9 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
         || identify_hosts(&desktop_executable),
         || {
             let unlocked = match operation {
+                Operation::SignPermissions { .. } => {
+                    unreachable!("signing does not start a vault worker")
+                }
                 Operation::Initialize { policy } => (
                     Vault::prepare_with_unlock_policy_and_profile(
                         root,
@@ -238,7 +278,40 @@ fn watch_parent(owner: Arc<Mutex<Weak<VaultService>>>) -> Result<(), CliError> {
     std::thread::Builder::new()
         .name("desktop-parent-lifeline".to_owned())
         .spawn(move || {
-            // EOF or any extra byte means the parent has requested shutdown.
+            #[cfg(feature = "personal-sync")]
+            {
+                let (send_command, commands) =
+                    std::sync::mpsc::sync_channel::<factorseal::desktop_worker::sync::Command>(8);
+                let control_owner = Arc::clone(&owner);
+                let _ = std::thread::Builder::new()
+                    .name("desktop-sync-control".into())
+                    .spawn(move || {
+                        for command in commands {
+                            let service =
+                                control_owner.lock().ok().and_then(|owner| owner.upgrade());
+                            let reply = service
+                                .ok_or_else(factorseal::desktop_worker::sync::unavailable)
+                                .and_then(|service| command.execute(&service))
+                                .map_err(|error| error.to_string());
+                            if factorseal::desktop_worker::sync::send(
+                                &mut std::io::stdout(),
+                                &reply,
+                            )
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                while let Ok(command) =
+                    factorseal::desktop_worker::sync::receive(&mut std::io::stdin())
+                {
+                    if send_command.try_send(command).is_err() {
+                        break;
+                    }
+                }
+            }
+            #[cfg(not(feature = "personal-sync"))]
             let _ = std::io::stdin().read(&mut [0]);
             let _ = std::thread::Builder::new()
                 .name("desktop-parent-watchdog".to_owned())

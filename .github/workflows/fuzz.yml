@@ -38,7 +38,7 @@ jobs:
       - name: Build fuzz binaries with address sanitizer
         run: |
           mkdir -p fuzz/bin
-          for target in metadata protocol document history envelope commit_chain secret_service archive transfer bootstrap; do
+          for target in metadata protocol document history envelope commit_chain secret_service archive transfer bootstrap personal_sync; do
             cargo +nightly fuzz build "$target" --sanitizer address --target x86_64-unknown-linux-gnu
             cp "fuzz/target/x86_64-unknown-linux-gnu/release/$target" "fuzz/bin/$target"
           done
@@ -60,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [metadata, protocol, document, history, envelope, commit_chain, secret_service, archive, transfer, bootstrap]
+        target: [metadata, protocol, document, history, envelope, commit_chain, secret_service, archive, transfer, bootstrap, personal_sync]
     steps:
       - uses: actions/download-artifact@v4
         with:

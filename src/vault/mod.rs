@@ -27,14 +27,14 @@ mod seal;
 ))]
 mod secret_service_data;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
-mod signature;
+pub(crate) mod signature;
 #[cfg(feature = "vault-store")]
 mod store;
 #[cfg(all(
     any(feature = "vault", feature = "vault-client"),
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
-mod transport;
+pub(crate) mod transport;
 
 #[cfg(all(feature = "vault", target_os = "linux"))]
 mod linux;
@@ -42,7 +42,8 @@ mod linux;
 mod secret_service;
 #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 pub use secret_service::{
-    NAMESPACE as SECRET_SERVICE_NAMESPACE, SecretServiceHost, SecretServicePrompter,
+    NAMESPACE as SECRET_SERVICE_NAMESPACE, SecretServiceAccessContext, SecretServiceAccessRequest,
+    SecretServiceHost, SecretServiceInputRequest, SecretServicePrompter,
 };
 
 #[cfg(all(feature = "vault", target_os = "macos"))]
@@ -417,6 +418,9 @@ pub enum VaultError {
 
     #[error("invalid vault protocol message: {0}")]
     Protocol(String),
+
+    #[error("Incorrect password. Please try again.")]
+    PasswordRejected,
 
     #[error("vault protection operation failed: {0}")]
     Protection(String),
