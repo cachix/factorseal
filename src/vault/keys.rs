@@ -17,6 +17,35 @@ use super::{InstallationId, VaultId};
 use super::{VaultError, VaultResult};
 
 const KEY_BYTES: usize = 32;
+
+/// The selected signing capability, authenticated once for one operation.
+///
+/// A software seed lives in a guarded locked allocation for the signer's
+/// lifetime, so an integrity rebuild or migration signs every document with
+/// one unwrap instead of re-authenticating the seed per document.
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
+enum InstallationSigner {
+    Software(LockedKey<KEY_BYTES>),
+    Enclave(Box<dyn super::signature::SigningProvider>),
+}
+
+#[cfg(any(feature = "key-protection", feature = "vault-store"))]
+impl super::signature::SigningProvider for InstallationSigner {
+    fn public_key(&self) -> VaultResult<Vec<u8>> {
+        match self {
+            Self::Software(seed) => super::signature::SoftwareSigner(seed).public_key(),
+            Self::Enclave(signer) => signer.public_key(),
+        }
+    }
+
+    #[cfg(feature = "vault-store")]
+    fn sign(&self, payload: &[u8]) -> VaultResult<Vec<u8>> {
+        match self {
+            Self::Software(seed) => super::signature::SoftwareSigner(seed).sign(payload),
+            Self::Enclave(signer) => signer.sign(payload),
+        }
+    }
+}
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 const INSTALLATION_KEY_DOMAIN: &[u8] = b"factorseal/installation-key/v1\0";
 #[cfg(feature = "key-protection")]
@@ -26,16 +55,16 @@ const DOCUMENT_KEY_DOMAIN: &[u8] = b"factorseal/document-key/v1\0";
 
 /// Root and index capabilities retained only for one unseal lease.
 ///
-/// Document keys and the exportable signing seed are deliberately absent.
-/// They are unwrapped into a guarded, locked allocation for the operation that
-/// needs them. The index key is derived from the root rather than stored, so
-/// the metadata file holds one root-wrapped secret: the signing seed. The root
-/// and index share one locked page; temporary bootstrap sources still zeroize.
+/// Document keys and signing capabilities are unwrapped only for an operation.
+/// Software signing seeds use guarded, locked allocations; enclave references
+/// never contain exportable private material. The root and its derived index
+/// share one locked page; temporary bootstrap sources still zeroize.
 #[allow(dead_code)]
 pub(crate) struct InstallationSecrets {
     #[cfg(any(feature = "key-protection", feature = "vault-store"))]
     retained_keys: LockedKey<64>,
-    wrapped_signing_seed: WrappedKey,
+    wrapped_signing_seed: Option<WrappedKey>,
+    wrapped_enclave_key: Option<WrappedSigningReference>,
 }
 
 impl std::fmt::Debug for InstallationSecrets {
@@ -53,7 +82,20 @@ impl std::fmt::Debug for InstallationSecrets {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WrappedInstallationSecrets {
-    signing_seed: WrappedKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signing_seed: Option<WrappedKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enclave_mldsa65: Option<WrappedSigningReference>,
+}
+
+/// A root-encrypted CryptoKit capability. Keeping this separate from WrappedKey
+/// preserves the strict 32-byte plaintext contract of document and reader keys.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WrappedSigningReference {
+    encryption_algorithm: EncryptionAlgorithm,
+    nonce: [u8; crate::algorithm::AES_GCM_NONCE_BYTES],
+    ciphertext: Vec<u8>,
 }
 
 /// One authenticated root-wrapped key.
@@ -67,6 +109,102 @@ pub(crate) struct WrappedKey {
 
 impl InstallationSecrets {
     #[cfg(feature = "key-protection")]
+    pub(crate) fn generate_new(
+        installation: InstallationId,
+        vault: VaultId,
+        root: LockedKey<KEY_BYTES>,
+        platform: super::VaultPlatform,
+        native_signing: bool,
+    ) -> VaultResult<(Self, WrappedInstallationSecrets)> {
+        #[cfg(all(feature = "hardware", target_os = "macos"))]
+        if native_signing
+            && platform == super::VaultPlatform::Macos
+            && hardwareseal::apple_pq::is_available()
+        {
+            let key =
+                hardwareseal::apple_pq::MlDsa65Key::generate(hardwareseal::AccessPolicy::None)
+                    .map_err(|error| VaultError::Protection(error.to_string()))?;
+            let encrypted = crate::crypto::encrypt(
+                &root,
+                &installation_key_aad(installation, vault, b"secure-enclave-mldsa65-reference-v1"),
+                key.reference(),
+            )
+            .map_err(|_| VaultError::Crypto)?;
+            let reference = WrappedSigningReference {
+                encryption_algorithm: encrypted.algorithm,
+                nonce: encrypted.nonce,
+                ciphertext: encrypted.ciphertext,
+            };
+            let secrets = Self {
+                retained_keys: retain_keys(&root, installation, vault)?,
+                wrapped_signing_seed: None,
+                wrapped_enclave_key: Some(reference.clone()),
+            };
+            return Ok((
+                secrets,
+                WrappedInstallationSecrets {
+                    signing_seed: None,
+                    enclave_mldsa65: Some(reference),
+                },
+            ));
+        }
+        let _ = (platform, native_signing);
+        let mut seed = LockedKey::<KEY_BYTES>::zeroed()?;
+        getrandom::fill(&mut *seed)?;
+        Self::generate(installation, vault, root, &seed)
+    }
+
+    #[cfg(any(feature = "key-protection", feature = "vault-store"))]
+    fn enclave_signer(
+        &self,
+        installation: InstallationId,
+        vault: VaultId,
+    ) -> VaultResult<Box<dyn super::signature::SigningProvider>> {
+        #[cfg(all(feature = "hardware", target_os = "macos"))]
+        {
+            let wrapped = self.wrapped_enclave_key.as_ref().ok_or_else(|| {
+                VaultError::Protection("missing enclave signing reference".into())
+            })?;
+            let reference = crate::crypto::decrypt(
+                wrapped.encryption_algorithm,
+                self.root_key(),
+                &wrapped.nonce,
+                &installation_key_aad(installation, vault, b"secure-enclave-mldsa65-reference-v1"),
+                &wrapped.ciphertext,
+            )
+            .map_err(|_| {
+                VaultError::Protection("cannot authenticate enclave signing reference".into())
+            })?;
+            let key = hardwareseal::apple_pq::MlDsa65Key::from_reference(&reference)
+                .map_err(|error| VaultError::Protection(error.to_string()))?;
+            Ok(Box::new(super::signature::EnclaveSigner(key)))
+        }
+        #[cfg(not(all(feature = "hardware", target_os = "macos")))]
+        {
+            let _ = (self, installation, vault);
+            Err(VaultError::Protection(
+                "this vault requires macOS 26+ Secure Enclave signing support".into(),
+            ))
+        }
+    }
+
+    #[cfg(any(feature = "key-protection", feature = "vault-store"))]
+    pub(crate) fn signer(
+        &self,
+        installation: InstallationId,
+        vault: VaultId,
+    ) -> VaultResult<impl super::signature::SigningProvider> {
+        if self.wrapped_enclave_key.is_some() {
+            return Ok(InstallationSigner::Enclave(
+                self.enclave_signer(installation, vault)?,
+            ));
+        }
+        Ok(InstallationSigner::Software(
+            self.signing_seed(installation, vault)?,
+        ))
+    }
+
+    #[cfg(feature = "key-protection")]
     #[expect(
         clippy::needless_pass_by_value,
         reason = "consume and wipe the bootstrap root after moving it into locked memory"
@@ -78,23 +216,24 @@ impl InstallationSecrets {
         signing_seed: &[u8; KEY_BYTES],
     ) -> VaultResult<(Self, WrappedInstallationSecrets)> {
         let wrapped = WrappedInstallationSecrets {
-            signing_seed: wrap_key(
+            signing_seed: Some(wrap_key(
                 &root_key,
                 &installation_key_aad(installation_id, device_vault_id, b"signing-seed"),
                 signing_seed,
-            )?,
+            )?),
+            enclave_mldsa65: None,
         };
         Ok((
             Self {
                 retained_keys: retain_keys(&root_key, installation_id, device_vault_id)?,
                 wrapped_signing_seed: wrapped.signing_seed.clone(),
+                wrapped_enclave_key: None,
             },
             wrapped,
         ))
     }
 
-    /// Reopen the operational secrets. The wrapped signing seed is
-    /// authenticated here so tampered metadata fails before the store opens.
+    /// Authenticate the selected signing capability before the store opens.
     #[cfg(feature = "key-protection")]
     #[expect(
         clippy::needless_pass_by_value,
@@ -107,16 +246,27 @@ impl InstallationSecrets {
         wrapped: &WrappedInstallationSecrets,
     ) -> VaultResult<Self> {
         wrapped.validate()?;
-        drop(unwrap_key(
-            &root_key,
-            &installation_key_aad(installation_id, device_vault_id, b"signing-seed"),
-            &wrapped.signing_seed,
-            "operational signing seed",
-        )?);
-        Ok(Self {
+        if let Some(seed) = &wrapped.signing_seed {
+            drop(unwrap_key(
+                &root_key,
+                &installation_key_aad(installation_id, device_vault_id, b"signing-seed"),
+                seed,
+                "operational signing seed",
+            )?);
+        }
+        let secrets = Self {
             retained_keys: retain_keys(&root_key, installation_id, device_vault_id)?,
             wrapped_signing_seed: wrapped.signing_seed.clone(),
-        })
+            wrapped_enclave_key: wrapped.enclave_mldsa65.clone(),
+        };
+        if secrets.wrapped_enclave_key.is_some() {
+            // Authentication of the reference and native reconstruction happen
+            // before a caller may open the database. No software fallback.
+            secrets
+                .enclave_signer(installation_id, device_vault_id)?
+                .public_key()?;
+        }
+        Ok(secrets)
     }
 
     #[cfg(feature = "vault-store")]
@@ -142,7 +292,9 @@ impl InstallationSecrets {
         unwrap_key(
             self.root_key(),
             &installation_key_aad(installation_id, device_vault_id, b"signing-seed"),
-            &self.wrapped_signing_seed,
+            self.wrapped_signing_seed.as_ref().ok_or_else(|| {
+                VaultError::Protection("Secure Enclave signing keys have no exportable seed".into())
+            })?,
             "operational signing seed",
         )
     }
@@ -199,7 +351,22 @@ fn retain_keys(
 
 impl WrappedInstallationSecrets {
     pub(crate) fn validate(&self) -> VaultResult<()> {
-        self.signing_seed.validate()
+        match (&self.signing_seed, &self.enclave_mldsa65) {
+            (Some(seed), None) => seed.validate(),
+            (None, Some(reference))
+                if reference.encryption_algorithm == EncryptionAlgorithm::Aes256Gcm
+                    && (17..=32768 + 16).contains(&reference.ciphertext.len()) =>
+            {
+                Ok(())
+            }
+            _ => Err(VaultError::Protection(
+                "installation must contain exactly one valid signing provider".into(),
+            )),
+        }
+    }
+
+    pub(crate) const fn uses_enclave_signer(&self) -> bool {
+        self.enclave_mldsa65.is_some()
     }
 }
 
@@ -313,6 +480,71 @@ fn append_bytes(target: &mut Vec<u8>, value: &[u8]) {
 #[cfg(all(test, feature = "key-protection", feature = "vault-store"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signing_metadata_rejects_missing_ambiguous_and_unsupported_providers() {
+        let installation = InstallationId::from_bytes([7; 16]);
+        let vault = VaultId::from_bytes([8; 16]);
+        let (_, mut wrapped) = InstallationSecrets::generate(
+            installation,
+            vault,
+            LockedKey::from_slice(&[10; 32]).unwrap(),
+            &[11; 32],
+        )
+        .unwrap();
+        let reference = WrappedSigningReference {
+            encryption_algorithm: EncryptionAlgorithm::Aes256Gcm,
+            nonce: [0; 12],
+            ciphertext: vec![0; 32],
+        };
+        wrapped.enclave_mldsa65 = Some(reference);
+        assert!(
+            wrapped.validate().is_err(),
+            "two providers must not select one implicitly"
+        );
+        wrapped.signing_seed = None;
+        assert!(wrapped.validate().is_ok());
+        #[cfg(not(all(feature = "hardware", target_os = "macos")))]
+        assert!(
+            InstallationSecrets::open(
+                installation,
+                vault,
+                LockedKey::from_slice(&[10; 32]).unwrap(),
+                &wrapped
+            )
+            .is_err()
+        );
+        wrapped.enclave_mldsa65 = None;
+        assert!(wrapped.validate().is_err());
+    }
+
+    #[test]
+    fn software_provider_preserves_identity_and_authenticates_before_signing() {
+        use crate::vault::signature::{self, SigningProvider as _};
+        let installation = InstallationId::from_bytes([7; 16]);
+        let vault = VaultId::from_bytes([8; 16]);
+        let (keys, wrapped) = InstallationSecrets::generate(
+            installation,
+            vault,
+            LockedKey::from_slice(&[10; 32]).unwrap(),
+            &[11; 32],
+        )
+        .unwrap();
+        let legacy = serde_json::to_value(&wrapped).unwrap();
+        assert_eq!(legacy.as_object().unwrap().len(), 1);
+        assert!(legacy.get("signing_seed").is_some());
+        let signer = keys.signer(installation, vault).unwrap();
+        let public = signer.public_key().unwrap();
+        assert_eq!(public, signature::public_key_for_seed(&[11; 32]));
+        let proof = signer.sign(b"provider transcript").unwrap();
+        signature::verify(&public, b"provider transcript", &proof).unwrap();
+        // A wrong installation cannot even build the signer: the seed is
+        // authenticated once when the capability is selected.
+        assert!(
+            keys.signer(InstallationId::from_bytes([1; 16]), vault)
+                .is_err()
+        );
+    }
 
     #[test]
     fn operational_keys_are_identity_bound() {

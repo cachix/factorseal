@@ -15,6 +15,7 @@ rustPlatform.buildRustPackage {
     fileset = lib.fileset.unions [
       ../Cargo.lock
       ../Cargo.toml
+      ../build.rs
       ../crates
       ../factorseal-desktop
       ../src
@@ -31,8 +32,10 @@ rustPlatform.buildRustPackage {
 
   cargoBuildFlags = [
     "--no-default-features"
-    "--features=vault,cli,hardware,secretspec-provider"
+    "--features=vault,cli,hardware,secretspec-provider,personal-sync-network"
     "--bin=factorseal"
+    "--bin=factorseal-parser"
+    "--bin=factorseal-network"
   ];
 
   doCheck = false;
@@ -45,6 +48,10 @@ rustPlatform.buildRustPackage {
 
     install -Dm0755 target/${stdenv.hostPlatform.rust.rustcTarget}/release/factorseal \
       "$out/bin/factorseal"
+    for helper in factorseal-parser factorseal-network; do
+      install -Dm0755 target/${stdenv.hostPlatform.rust.rustcTarget}/release/$helper \
+        "$out/bin/$helper"
+    done
     install -Dm0755 ${../packaging/linux/factorseal-start} \
       "$out/bin/factorseal-start"
     substitute ${../packaging/linux/factorseal.service.in} \

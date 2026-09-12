@@ -54,6 +54,8 @@ impl Device {
             apply_cursor: Mutex::new(None),
             view: Mutex::new(View::default()),
             gate: tokio::sync::Mutex::new(()),
+            refresh: tokio::sync::Notify::new(),
+            progress: tokio::sync::watch::Sender::new(Progress::default()),
             peers: Mutex::new(std::collections::BTreeMap::default()),
         });
         let task = tokio::spawn(Arc::clone(&inner).listen());
@@ -160,6 +162,51 @@ impl Drop for Device {
         let _ = self.service.seal();
     }
 }
+
+#[test]
+fn refresh_returns_only_after_a_pass_that_began_after_the_request() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let device = runtime.block_on(Device::new(None));
+    let inner = Arc::clone(&device.inner);
+    runtime.spawn(Arc::clone(&inner).poll());
+    // Holding the gate stops any new background pass from starting, so a
+    // refresh that returned before the gate is released would report a pass
+    // count at or below the one observed here.
+    let guard = runtime.block_on(inner.gate.lock());
+    let mut progress = inner.progress.subscribe();
+    let before = *progress.borrow();
+    let manager = Arc::new(Manager {
+        runtime: Some(runtime),
+        inner: Arc::clone(&inner),
+    });
+    let workers: Vec<_> = (0..3)
+        .map(|_| {
+            let manager = Arc::clone(&manager);
+            std::thread::spawn(move || {
+                let view = manager.action(Action::Refresh).unwrap();
+                let completed = manager.inner.progress.borrow().completed;
+                (view, completed)
+            })
+        })
+        .collect();
+    manager
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(progress.wait_for(|progress| progress.requested >= before.requested + 3))
+        .unwrap();
+    drop(guard);
+    for worker in workers {
+        let (view, completed) = worker.join().unwrap();
+        assert_eq!(view.endpoint, *inner.endpoint.id().as_bytes());
+        assert!(view.error.is_none(), "{:?}", view.error);
+        assert!(
+            completed > before.started,
+            "refresh returned before a pass that began after the request completed"
+        );
+    }
+}
+
 #[tokio::test]
 async fn approved_pairing_and_sealed_courier_deliver_after_sender_disconnects() {
     let item =

@@ -270,6 +270,14 @@ impl Service {
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretServiceError> {
+        // A host without an entry dialog, such as the CLI agent, answers at
+        // once so the caller can fall back to a permission-approved write
+        // instead of waiting on a prompt that nothing will show.
+        if !self.shared.prompter.supports_input() {
+            return Err(SecretServiceError::NotSupported(
+                "this Secret Service host cannot take secret input".to_owned(),
+            ));
+        }
         let context = access_context(&attributes, &header, connection).await;
         if self.shared.locked() {
             self.shared.unlock_for_search(context.clone()).await?;

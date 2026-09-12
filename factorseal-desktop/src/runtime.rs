@@ -12,6 +12,8 @@ use factorseal::{
 };
 use zeroize::Zeroizing;
 
+use factorseal::isolation::network::ProcessManager as SyncManager;
+
 use factorseal::transfer::{PersonalSecret, TransferFormat, export_manager, import_manager};
 
 const METADATA_FILE: &str = "factorseal.json";
@@ -132,7 +134,7 @@ pub(crate) struct DesktopRuntime {
     unlock_in_progress: AtomicBool,
     sync_output: Mutex<Option<std::process::ChildStdout>>,
     sync_io: Mutex<()>,
-    sync_manager: Mutex<Option<Arc<factorseal::desktop_worker::sync::network::Manager>>>,
+    sync_manager: Mutex<Option<Arc<SyncManager>>>,
 }
 
 impl DesktopRuntime {
@@ -1062,9 +1064,7 @@ impl DesktopRuntime {
         }
         self.sync_manager().map(|manager| manager.view())
     }
-    pub(crate) fn sync_manager(
-        self: &Arc<Self>,
-    ) -> Result<Arc<factorseal::desktop_worker::sync::network::Manager>, String> {
+    pub(crate) fn sync_manager(self: &Arc<Self>) -> Result<Arc<SyncManager>, String> {
         let mut manager = self
             .sync_manager
             .lock()
@@ -1080,10 +1080,17 @@ impl DesktopRuntime {
             let runtime = weak.upgrade().ok_or("Desktop is closing")?;
             runtime.sync_command(&command)
         });
-        let created = Arc::new(factorseal::desktop_worker::sync::network::Manager::open(
-            &self.config.root.join("personal-sync"),
-            host,
-        )?);
+        let created = {
+            let desktop = std::env::current_exe().map_err(|error| error.to_string())?;
+            let cli = cli_executable(&desktop)?.ok_or("Factorseal CLI is not installed")?;
+            let helper = factorseal::isolation::helper_executable(&cli, "factorseal-network")
+                .map_err(|error| format!("Factorseal network helper is not installed: {error}"))?;
+            Arc::new(SyncManager::open(
+                &helper,
+                &self.config.root.join("personal-sync"),
+                host,
+            )?)
+        };
         *manager = Some(Arc::clone(&created));
         Ok(created)
     }

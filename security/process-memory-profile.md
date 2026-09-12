@@ -14,12 +14,17 @@ inspection or code execution inside an unlocked process.
 | Android/iOS core | Unix locked allocation, guards, and Android dump exclusion where available | Allocation errors propagate to the embedder. Physical mobile acceptance and host lifecycle/process hardening remain separate; no claim of native mobile production assurance. |
 
 Root and index capabilities share one dedicated locked page during a lease.
-Each live document DEK or unwrapped signing seed uses another page, released at
+Each live document DEK or unwrapped software signing seed uses another page, released at
 operation end. Fixed-size key unwrap decrypts directly into protected memory.
 All key bytes are zeroized before unlocking, unregistering exclusions and
 unmapping. Guard pages protect the allocation boundary, not every byte within
 the usable page. Allocations are never shared with the general-purpose heap,
 so dropping one cannot unlock another key's page.
+
+New macOS 26+ vaults instead use Secure Enclave ML-DSA-65 signing. Their opaque
+key references are root-encrypted and temporarily held in zeroizing heap
+buffers while calling CryptoKit; they are capabilities but do not contain an
+exportable private key. The installation root still authorizes their use.
 
 Retained bootstrap keys, CLI/Desktop passwords, wire values, store responses,
 archive payloads and bounded IPC frames also use locked, guarded allocations.

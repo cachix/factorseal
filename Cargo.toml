@@ -39,6 +39,7 @@ vault-store = [
 secret-service-host = ["vault-client", "dep:secret-service-protocol", "dep:tokio", "dep:zbus"]
 
 vault = [
+    "helper-isolation",
     "vault-client",
     "vault-store",
     "secret-service-host",
@@ -66,7 +67,8 @@ cli = [
 ]
 diagnostics = ["dep:directories", "transfer"]
 personal = ["dep:anyhow", "dep:uuid"]
-personal-sync-network = ["personal-sync", "dep:iroh", "dep:qrcode", "tokio/net", "tokio/rt-multi-thread", "tokio/io-util"]
+personal-sync-network = ["personal-sync", "helper-isolation", "dep:iroh", "dep:qrcode", "tokio/net", "tokio/rt-multi-thread", "tokio/io-util"]
+helper-isolation = ["vault-client", "dep:ciborium", "dep:seccompiler", "dep:landlock"]
 personal-sync = ["vault-store", "key-protection", "dep:hpke", "dep:aes-gcm-hpke", "dep:tempfile"]
 transfer = ["personal", "dep:csv", "dep:tempfile", "dep:nt-token", "dep:zip"]
 secretspec-provider = [
@@ -97,6 +99,16 @@ name = "factorseal"
 path = "src/bin/factorseal.rs"
 required-features = ["vault", "cli", "hardware"]
 
+[[bin]]
+name = "factorseal-parser"
+path = "src/bin/factorseal-parser.rs"
+required-features = ["helper-isolation"]
+
+[[bin]]
+name = "factorseal-network"
+path = "src/bin/factorseal-network.rs"
+required-features = ["personal-sync-network"]
+
 [dependencies]
 # `aes-gcm` does not forward `zeroize` to its dependencies. The `aes`, `ghash`,
 # and `polyval` entries exist only to wipe the expanded key schedule and the
@@ -109,6 +121,7 @@ async-trait = { version = "0.1.89", optional = true }
 # Validate bundle counter encoding and lengths before expansion; upstream PR #1540.
 automerge = { git = "https://github.com/domenkozar/automerge.git", rev = "78cf972a705661b572f7427ff404600e05331b5e", version = "0.11.0", optional = true }
 base64 = "0.22.1"
+ciborium = { version = "0.2.2", optional = true }
 clap = { version = "4.5.41", features = ["derive", "env"], optional = true }
 clap_complete = { version = "4.6.9", features = ["unstable-dynamic"], optional = true }
 clap_complete_nushell = { version = "4.6.2", optional = true }
@@ -153,6 +166,8 @@ libc = "0.2"
 tempfile = "3.20.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = { version = "0.5.0", default-features = false, optional = true }
+landlock = { version = "0.4.7", optional = true }
 dbus = { version = "0.9.12", optional = true }
 zbus = { version = "5.14.0", default-features = false, features = ["tokio"], optional = true }
 nix = { version = "0.31.3", features = ["socket", "user", "process", "resource", "poll"], optional = true }
@@ -173,18 +188,27 @@ widestring = { version = "1.2.1", optional = true }
 windows = { version = "0.61.3", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
+    "Win32_System_Com",
     "Win32_System_Memory",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_WindowsProgramming",
     "Win32_System_SystemInformation",
     "Win32_System_ErrorReporting",
     "Win32_System_Power",
+    "Win32_System_ProcessStatus",
     "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
 ] }
 
 [lints.rust]
@@ -218,6 +242,8 @@ opt-level = 3
 opt-level = 3
 
 [patch.crates-io]
+# Windows route discovery without WMI: https://github.com/n0-computer/net-tools/pull/226
+netwatch = { git = "https://github.com/domenkozar/net-tools.git", rev = "0b252c90a768cae2aacba8d304e1de5a4ed062db" }
 gpui = { git = "https://github.com/domenkozar/zed-gpui.git", rev = "8d58cb6c5d5bbc24361c9b3aaf2905b7956b942f", version = "=0.2.2" }
 
 [patch."https://github.com/zed-industries/zed.git"]

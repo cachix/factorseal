@@ -23,6 +23,7 @@
   "gpui_windows-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "http_client-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "media-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
+  "netwatch-0.19.3" = "sha256-ENNj4P7OSxA6no19kRoJK/eBUneLLhkAQgAa0ZhyrEU=";
   "perf-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "refineable-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";
   "scheduler-0.1.0" = "sha256-KC4lHmqAKHTFXzR5eH0bdzAgFVg0f4HjOCDP3kvzPv8=";

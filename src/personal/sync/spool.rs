@@ -33,8 +33,22 @@ impl CiphertextSpool {
         }
         validate_root(root)?;
         let path = root.join(".lock");
+        #[cfg(windows)]
+        {
+            // An elevated/AppContainer token can have a default owner other
+            // than its user SID. Give the persistent lock file the same
+            // explicit owner and private ACL as the rest of the spool, so a
+            // fresh helper identity can validate and reopen it on restart.
+            match security::windows::create_private_file(&path) {
+                Ok(file) => drop(file),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(storage(error)),
+            }
+        }
         let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
+        options.read(true).write(true);
+        #[cfg(not(windows))]
+        options.create(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;

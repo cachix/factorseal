@@ -133,3 +133,18 @@ fn native_winner_resolution_is_valid_but_register_deletion_is_not() {
         "a later put cannot disguise deletion of the whole register"
     );
 }
+
+#[test]
+fn a_change_whose_checksum_does_not_match_its_hash_is_rejected() {
+    let item = PersonalSecret::generic("Original".into(), "first password".into());
+    let mut a = PersonalReplica::new(&item.id, b"a").unwrap();
+    a.set(Some(&item), None).unwrap();
+    let update = a.update().unwrap();
+    assert!(PersonalUpdate::new(item.id.clone(), update.changes.clone()).is_ok());
+    // Automerge loads a change with a wrong header checksum, but its change
+    // graph later looks the change up by the declared hash and panics in
+    // debug builds. The fuzzer found exactly that input.
+    let mut corrupted = update.changes.clone();
+    corrupted[0][4] ^= 0x01;
+    assert!(PersonalUpdate::new(item.id.clone(), corrupted).is_err());
+}

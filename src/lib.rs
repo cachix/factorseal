@@ -27,6 +27,10 @@ mod timing;
 #[cfg(feature = "vault-client")]
 pub mod keyring;
 
+#[cfg(feature = "helper-isolation")]
+#[doc(hidden)]
+pub mod isolation;
+
 #[cfg(feature = "personal")]
 pub mod personal;
 

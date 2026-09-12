@@ -221,10 +221,10 @@ impl FactorsealProvider {
         context: &RequestContext,
         address: &factorseal::SecretSpecAddress,
         initial: WireSecret,
-    ) -> RpcResult<WireSecret> {
+    ) -> RpcResult<Option<WireSecret>> {
         #[cfg(test)]
         if self.test_input {
-            return Ok(initial);
+            return Ok(Some(initial));
         }
         let mut attributes = self.desktop_attributes();
         attributes.insert(
@@ -270,6 +270,9 @@ impl FactorsealProvider {
             result = tokio::time::timeout_at(context.deadline, input) => match result {
                 Err(_) => Err(RpcError::new(ErrorKind::DeadlineExceeded)),
                 Ok(Ok(())) => Ok(()),
+                // The CLI agent hosts the service without an entry dialog and
+                // says so at once; the caller then writes through an approval.
+                Ok(Err(zbus::Error::MethodError(name, _, _))) if name.as_str().ends_with(".NotSupported") => return Ok(None),
                 Ok(Err(zbus::Error::MethodError(name, _, _))) if name.as_str().ends_with(".AccessDenied") => Err(RpcError::new(ErrorKind::PermissionDenied)),
                 Ok(Err(zbus::Error::MethodError(name, _, _))) if name.as_str().ends_with(".TimedOut") => Err(RpcError::new(ErrorKind::DeadlineExceeded)),
                 Ok(Err(zbus::Error::MethodError(name, _, _))) if name.as_str().ends_with(".Cancelled") => Err(RpcError::new(ErrorKind::Cancelled)),
@@ -282,6 +285,7 @@ impl FactorsealProvider {
             result = tokio::time::timeout_at(context.deadline, exchange) => result
                 .map_err(|_| RpcError::new(ErrorKind::DeadlineExceeded))?
                 .map_err(|_| RpcError::new(ErrorKind::Internal))?
+                .map(Some)
                 .map_err(|_| RpcError::new(ErrorKind::OperationFailed)),
         }
     }
@@ -299,38 +303,37 @@ impl FactorsealProvider {
         {
             let initial = WireSecret::new(value.expose().as_bytes().to_vec())
                 .map_err(|error| map_vault_error(&error))?;
-            let value = self.edit_secret(context, &address, initial).await?;
-            check_request_live(context)?;
-            // The trusted CLI already has manager authority. Each write here is
-            // individually confirmed in Desktop; it does not authorize future writes.
-            let response = self
-                .request_once(VaultAction::WriteCacheFromDialog {
-                    project,
-                    address,
-                    value,
-                    evict_at,
-                })
-                .await?;
-            matches!(response, VaultResponseBody::Stored)
-                .then_some(())
-                .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let response = self
-                .request(context, || {
-                    Ok(VaultAction::PutCache {
-                        project: project.clone(),
-                        address: address.clone(),
-                        value: WireSecret::new(value.expose().as_bytes().to_vec())?,
+            // A Desktop confirms each write in its entry dialog; that does not
+            // authorize future writes. Without a Desktop, the CLI agent hosts
+            // the service and the write goes through an approved permission.
+            if let Some(value) = self.edit_secret(context, &address, initial).await? {
+                check_request_live(context)?;
+                let response = self
+                    .request_once(VaultAction::WriteCacheFromDialog {
+                        project,
+                        address,
+                        value,
                         evict_at,
                     })
-                })
-                .await?;
-            matches!(response, VaultResponseBody::Stored)
-                .then_some(())
-                .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
+                    .await?;
+                return matches!(response, VaultResponseBody::Stored)
+                    .then_some(())
+                    .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed));
+            }
         }
+        let response = self
+            .request(context, || {
+                Ok(VaultAction::PutCache {
+                    project: project.clone(),
+                    address: address.clone(),
+                    value: WireSecret::new(value.expose().as_bytes().to_vec())?,
+                    evict_at,
+                })
+            })
+            .await?;
+        matches!(response, VaultResponseBody::Stored)
+            .then_some(())
+            .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
     }
 
     async fn wait_for_permission(
@@ -427,10 +430,11 @@ impl ProviderHandler for FactorsealProvider {
             .map_or_else(std::env::current_dir, Ok)
             .and_then(std::fs::canonicalize)
             .map_err(|_| RpcError::new(ErrorKind::InvalidParams))?;
-        let folder = folder
-            .to_str()
-            .ok_or_else(|| RpcError::new(ErrorKind::InvalidParams))?
-            .to_owned();
+        let folder = without_verbatim_prefix(
+            folder
+                .to_str()
+                .ok_or_else(|| RpcError::new(ErrorKind::InvalidParams))?,
+        );
         let application_context = VaultApplicationContext::new(
             application.context.project,
             application.context.profile,
@@ -651,8 +655,10 @@ fn unix_time_ms() -> RpcResult<u64> {
 
 pub(super) fn serve(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
     let provider = FactorsealProvider::new(root, socket)?;
+    // The Desktop unlock and entry dialog requests go over D-Bus, which
+    // needs the IO driver as well as timers.
     let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
+        .enable_all()
         .build()
         .map_err(|error| CliError::ProviderProtocol(error.to_string()))?;
     runtime
@@ -668,3 +674,18 @@ pub(super) fn serve(root: &Path, socket: Option<&Path>) -> Result<(), CliError> 
 #[cfg(test)]
 #[path = "provider/tests.rs"]
 mod tests;
+
+/// Windows canonicalization yields verbatim paths (`\\?\C:\dir` and
+/// `\\?\UNC\host\share`). The base directory scopes grants and is shown to
+/// the user, so keep the ordinary spelling the rest of the system uses.
+fn without_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\")
+        && rest.as_bytes().get(1) == Some(&b':')
+    {
+        return rest.to_owned();
+    }
+    path.to_owned()
+}

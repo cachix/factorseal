@@ -124,6 +124,11 @@ instance. On Linux, the Desktop package registers D-Bus activation for
 `org.freedesktop.secrets`. Desktop keeps answering while sealed, but credential
 searches open a compact access dialog and resume after approval and authentication. Native
 socket and SecretSpec clients also require Desktop to be unsealed first.
+Request parsing and personal sync run in separate confined helper processes
+installed beside the CLI. On Linux the sync helper requires Landlock ABI 3, so
+personal sync needs kernel 6.2 or later; distributions such as Debian 12 and
+Ubuntu 22.04 ship older kernels and cannot run it. The parser helper works on
+every supported kernel.
 Sealing removes the native service endpoint and all unwrapped vault keys.
 
 If the vault does not exist yet, `factorseal agent` stays alive, logs the
@@ -301,13 +306,17 @@ the persisted FIPS profile, and encrypts the wrapped payload with AES-256-GCM.
 Hardware-protector operations are not in the database write path, and
 unsealing costs one hardware operation. Once unsealed, only the installation
 root and the document-index key derived from it remain in zeroizing worker
-memory for the lease. A document DEK and exportable signing seed are unwrapped
+memory for the lease. Document DEKs and signing capabilities are unwrapped
 only for the operation that needs them and zeroized immediately afterward.
+New vaults on macOS 26+ use non-exportable Secure Enclave ML-DSA-65 keys;
+their opaque references are root-encrypted. Existing vaults, older macOS, and
+other platforms use root-encrypted software signing seeds. Enclave signing
+adds a native operation to each signature; it never falls back on failure.
 
 ### Creation and unsealing
 
 Creation generates distinct random installation and device-vault IDs, a
-256-bit installation root, and a separate ML-DSA-65 signing seed; the
+256-bit installation root, and a separate ML-DSA-65 signing identity; the
 document-index key is derived from the root and both IDs.
 The signing identity also determines the permanent `DeviceKeyId`
 and stable Automerge actor ID. Each document generation is encrypted under its
@@ -320,8 +329,8 @@ encrypt the installation root with AES-256-GCM before one hardware-backed key
 wraps it. Biometric-only groups wrap the root directly with a key whose use
 requires platform biometric approval, so unsealing needs one native ceremony.
 
-Unsealing reverses those layers, derives the public signing identity from the
-root-wrapped seed, and rejects any mismatch before opening the database.
+Unsealing reverses those layers, reconstructs the selected signing provider,
+and rejects any public-identity mismatch before opening the database.
 The store then verifies its schema, installation/device-vault identity, signed
 commit chain, wrapped document-key digests, and current document heads before
 serving requests.
@@ -418,7 +427,7 @@ context redacted unless the reader holds the `manage-permissions` grant.
 
 One worker thread owns the Turso connection, exclusive `factorseal.lock`, and
 lease-scoped installation root/index capability. It unwraps only the requested
-document DEK and the signing seed while processing an operation. A mutation
+document DEK and the signing capability while processing an operation. A mutation
 uses one transaction to compare-and-swap the document generation, append its
 encrypted state, append a signed protected commit, and advance the global head.
 The protected commit chain is periodically compacted to the current state of
@@ -627,9 +636,11 @@ Platform biometric paths inherit the algorithms and certification properties
 of their TPM, Secure Enclave, or Windows Hello components and are not
 claimed to be completely post-quantum certified.
 
-The signing seed is root-wrapped, but must briefly exist in
-zeroizing process memory for each signature; signing is not yet performed by a
-non-exportable native signing primitive. The retained installation root can
+Software signing seeds briefly exist in zeroizing process memory for each
+signature. New macOS 26+ vaults instead use non-exportable enclave signing
+keys, with root-wrapped opaque references. Existing identities remain unchanged
+on upgrade; see the [migration design](security/macos-crypto-and-isolation.md).
+The retained installation root can
 unwrap any local document during an active lease, so this hierarchy reduces
 passive key retention rather than defeating code execution in the unsealed
 process. Hardware binding also cannot stop an authorized or compromised client

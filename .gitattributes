@@ -1,0 +1,2 @@
+# Transfer fixtures must keep their exact bytes on every checkout platform.
+tests/fixtures/transfer/** -text

@@ -92,7 +92,11 @@ impl PersonalReplica {
                 return Err(invalid());
             }
             let change = Change::from_bytes(bytes.clone()).map_err(|_| invalid())?;
-            if change.raw_bytes() != bytes {
+            // Automerge does not check the chunk checksum against the content
+            // hash on load, and its change graph later looks a corrupted
+            // change up by the declared hash and panics in debug builds.
+            // The checksum is the hash prefix, so compare it here.
+            if change.raw_bytes() != bytes || bytes.get(4..8) != Some(&change.hash().0[..4]) {
                 return Err(invalid());
             }
             if validate_change(&update.item_id, &change)? {

@@ -21,7 +21,7 @@ const GROUP_ALPN: &[u8] = b"factorseal/personal-membership/1";
 const PAIR_ALPN: &[u8] = b"factorseal/personal-pairing/1";
 const FRAME: usize = 12 * 1024 * 1024;
 type Host = dyn Fn(Command) -> Result<Reply, String> + Send + Sync;
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct View {
     pub devices: Vec<crate::personal::sync::TransportBinding>,
     pub endpoint: [u8; 32],
@@ -30,16 +30,34 @@ pub struct View {
     pub last_exchange: Option<u64>,
     pub error: Option<String>,
 }
+#[derive(Serialize, Deserialize)]
 pub enum Action {
     Refresh,
     Invite(String),
     Join {
+        #[serde(with = "ticket_string")]
         ticket: zeroize::Zeroizing<String>,
         name: String,
     },
     Approve([u8; 32]),
     ApproveJoin([u8; 32]),
     Cancel,
+}
+
+mod ticket_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+    pub(super) fn serialize<S: Serializer>(
+        value: &Zeroizing<String>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(value)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Zeroizing<String>, D::Error> {
+        String::deserialize(deserializer).map(Zeroizing::new)
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct Ticket(String);
@@ -71,8 +89,18 @@ struct Inner {
     apply_cursor: Mutex<Option<crate::personal::sync::PacketId>>,
     view: Mutex<View>,
     gate: tokio::sync::Mutex<()>,
+    refresh: tokio::sync::Notify,
+    progress: tokio::sync::watch::Sender<Progress>,
     #[cfg(test)]
     peers: Mutex<std::collections::BTreeMap<[u8; 32], EndpointAddr>>,
+}
+/// Counters of background passes, so a refresh can wait for one that began
+/// after it was requested instead of returning the view of an older pass.
+#[derive(Clone, Copy, Default)]
+struct Progress {
+    requested: u64,
+    started: u64,
+    completed: u64,
 }
 pub struct Manager {
     runtime: Option<tokio::runtime::Runtime>,
@@ -128,6 +156,8 @@ impl Manager {
             apply_cursor: Mutex::new(None),
             view: Mutex::new(View::default()),
             gate: tokio::sync::Mutex::new(()),
+            refresh: tokio::sync::Notify::new(),
+            progress: tokio::sync::watch::Sender::new(Progress::default()),
             #[cfg(test)]
             peers: Mutex::new(std::collections::BTreeMap::default()),
         });
@@ -165,7 +195,6 @@ impl Manager {
             .as_ref()
             .ok_or("sync is closing")?
             .block_on(async {
-                let _guard = self.inner.gate.lock().await;
                 self.inner.action(action).await?;
                 Ok(self.view())
             })
@@ -233,7 +262,24 @@ impl Inner {
         Ok(())
     }
     async fn action(&self, action: Action) -> Result<(), String> {
-        let refresh = matches!(action, Action::Refresh);
+        // Refresh schedules one background pass and returns once a pass that
+        // began after this request has completed, so the caller's view holds
+        // the pulled packets and the desktop spinner covers the wait. Notify
+        // coalesces repeated clicks into one pass; every waiter sees it.
+        if matches!(action, Action::Refresh) {
+            let mut progress = self.progress.subscribe();
+            let target = progress.borrow().started.saturating_add(1);
+            self.progress
+                .send_modify(|progress| progress.requested += 1);
+            self.refresh.notify_one();
+            progress
+                .wait_for(|progress| progress.completed >= target)
+                .await
+                .map_err(|_| "sync is closing".to_owned())?;
+            let error = self.view.lock().map_err(err)?.error.clone();
+            return error.map_or(Ok(()), Err);
+        }
+        let _guard = self.gate.lock().await;
         match action {
             Action::Refresh => {}
             Action::Invite(name) => {
@@ -282,10 +328,6 @@ impl Inner {
             }
         }
         self.local().await?;
-        if refresh {
-            self.exchange().await;
-            self.local().await?;
-        }
         Ok(())
     }
     async fn local(&self) -> Result<(), String> {
@@ -379,6 +421,7 @@ impl Inner {
         loop {
             {
                 let _guard = self.gate.lock().await;
+                self.progress.send_modify(|progress| progress.started += 1);
                 if let Err(error) = self.local().await {
                     let mut view = self.view.lock().expect("sync view");
                     // Clear capability/approval material immediately when sealed.
@@ -388,7 +431,12 @@ impl Inner {
                 }
             }
             self.exchange().await;
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            self.progress
+                .send_modify(|progress| progress.completed += 1);
+            tokio::select! {
+                () = self.refresh.notified() => {},
+                () = tokio::time::sleep(Duration::from_secs(5)) => {},
+            }
         }
     }
     async fn exchange(&self) {

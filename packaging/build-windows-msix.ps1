@@ -102,7 +102,7 @@ try {
     New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
     $outputRoot = (Resolve-Path -LiteralPath $outputRoot).Path
 
-    cargo build --locked --release --no-default-features --features vault,cli,hardware --bin factorseal
+    cargo build --locked --release --no-default-features --features vault,cli,hardware,personal-sync-network --bin factorseal --bin factorseal-parser --bin factorseal-network
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
     $metadataJson = cargo metadata --locked --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
@@ -117,6 +117,9 @@ try {
     $verify = Join-Path $stageRoot 'verify'
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     Copy-Item -LiteralPath $factorseal, 'LICENSE', 'README.md' -Destination $stage
+    foreach ($helper in 'factorseal-parser', 'factorseal-network') {
+        Copy-Item -LiteralPath (Join-Path $metadata.target_directory "release\$helper.exe") -Destination $stage
+    }
     Copy-Item -LiteralPath 'packaging\windows\msix\Assets' -Destination $stage -Recurse
 
     $manifestTemplate = Get-Content -LiteralPath 'packaging\windows\msix\AppxManifest.xml.in' -Raw

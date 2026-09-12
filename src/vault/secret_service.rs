@@ -680,6 +680,9 @@ pub(super) enum SecretServiceError {
     AccessDenied(String),
     Cancelled(String),
     TimedOut(String),
+    /// The host has no way to satisfy the request, such as an entry dialog
+    /// on a host without a user interface.
+    NotSupported(String),
 }
 
 impl From<fdo::Error> for SecretServiceError {
@@ -1349,6 +1352,49 @@ mod tests {
             assert!(
                 permissions.is_empty(),
                 "saving must not create a persistent write permission"
+            );
+        });
+    }
+
+    #[cfg(feature = "key-protection")]
+    #[test]
+    fn a_host_without_an_entry_dialog_refuses_input_at_once() {
+        runtime().block_on(async {
+            let Some(server) = free_session_bus().await else {
+                return;
+            };
+            let (_directory, vault, manager) = test_service_unprivileged();
+            let shared = Arc::new(Shared::new(Arc::new(NoPrompter)));
+            shared
+                .set_agent(Some(Arc::new(
+                    Agent::load(Store::in_process(vault, manager)).unwrap(),
+                )))
+                .unwrap();
+            server
+                .object_server()
+                .at(SERVICE_PATH, Service { shared })
+                .await
+                .unwrap();
+            let client = Connection::session().await.unwrap();
+            let service = Proxy::new(
+                &client,
+                BUS_NAME,
+                SERVICE_PATH,
+                "org.freedesktop.Secret.Service",
+            )
+            .await
+            .unwrap();
+            let (_local, remote) = std::os::unix::net::UnixStream::pair().unwrap();
+            let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
+            // The CLI agent has no dialog; the provider relies on this answer
+            // arriving immediately so it can write through an approval.
+            let refused = service
+                .call::<_, _, ()>("InputForIpc", &(HashMap::from([("project", "test")]), fd))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&refused, zbus::Error::MethodError(name, ..) if name.as_str().ends_with(".NotSupported")),
+                "{refused:?}"
             );
         });
     }
