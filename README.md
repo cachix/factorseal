@@ -531,78 +531,6 @@ Release packaging still depends on publishing and pinning that API, then
 passing installed end-to-end conformance on Linux,
 macOS, and Windows.
 
-### SSH agent
-
-The unsealed CLI agent or Desktop worker serves an SSH agent on Linux, macOS,
-and Windows. Save an **SSH key** item with an OpenSSH Ed25519, RSA (2048–8192 bits), or ECDSA
-(P-256/P-384/P-521) private key in its **Private key** field. For an encrypted
-OpenSSH key, save its passphrase in the item's **Passphrase** field. Both fields
-remain encrypted in the vault. Archived, conflicted, malformed, and ambiguous
-items are excluded. Legacy PEM/PKCS#1 keys must first be converted to OpenSSH
-format. RSA signatures use SHA-256 or SHA-512; SHA-1 and DSA are rejected.
-
-Point SSH at the endpoint, then list available public keys:
-
-```sh
-export SSH_AUTH_SOCK="$(factorseal ssh-agent-socket)"
-ssh-add -L
-```
-
-On Windows, use Windows OpenSSH and PowerShell:
-
-```powershell
-$env:SSH_AUTH_SOCK = factorseal ssh-agent-socket
-ssh-add -L
-```
-
-When a client first requests a signature, Factorseal creates an access request
-for the authenticated local executable and the key's SHA-256 fingerprint.
-Open **Access** in Desktop to review the request, approve it with a fresh unlock
-factor, choose a duration, deny it, or revoke an existing grant. The list updates
-live. The equivalent terminal approval flow is:
-
-```sh
-factorseal permissions watch --prompt
-```
-
-The SSH request waits up to 60 seconds; retry if confirmation takes longer.
-`factorseal permissions deny ID` and `factorseal permissions revoke ID` also
-manage access. Replacing a key or changing the executable requires fresh
-approval. Grants allow signing only and end at expiry or sealing; private keys
-are never returned over the SSH endpoint.
-
-Modern OpenSSH supplies signed session bindings. Factorseal verifies them and
-limits each grant to the SSH username and ordered host-key fingerprints shown
-in the approval. A different user, destination, or forwarding path needs another
-grant. Verify the displayed fingerprints against host keys you trust. Host
-certificates are pinned as complete certificate blobs, so renewal also needs
-fresh approval. Forwarding with `ssh -A` requires OpenSSH's host-bound public-key
-authentication on the final server. Forwarded raw signing and forwarded ordinary
-`publickey` authentication are rejected. Intermediate host bindings represent
-delegation through those host keys, not proof of a physical network path.
-
-Clients without session bindings, including `ssh-add -T`, request a separate
-**unrestricted signing** grant. The approval explicitly identifies this scope:
-it allows that local executable to sign arbitrary data with the selected key.
-A destination grant never authorizes unrestricted signing.
-
-Public-key discovery exposes titles and public keys to authenticated same-user
-clients without a signing grant and does not extend the idle lease. Forwarded
-connections cannot list keys until they provide a final session binding; once
-bound, they can discover public keys to request destination approval.
-
-The Unix endpoint is `factorseal.ssh.sock` alongside the native socket; Windows
-uses the vault's named pipe with `-ssh` appended. The path command respects
-`--root`, `--socket`, and their environment overrides. Sealing and lifecycle
-shutdown stop signing and close the endpoint. Key addition/removal and
-lock/unlock through `ssh-add` are unsupported; manage keys in the vault.
-
-Protocol references: [SSH Agent Protocol](https://www.rfc-editor.org/rfc/rfc9987.html)
-and [OpenSSH destination restrictions](https://www.openssh.org/agent-restrict.html).
-To run the disposable two-host forwarding test on Unix, set
-`FACTORSEAL_TEST_SSHD` to the absolute `sshd` path and run
-`cargo test --lib ssh_openssh_forwarding -- --nocapture`.
-
 ### Linux Secret Service
 
 On Linux, Factorseal Desktop registers `org.freedesktop.secrets` for D-Bus
@@ -735,10 +663,6 @@ $ devenv shell cargo fmt --all -- --check
 ```
 
 On macOS and Windows with Rust 1.91 or newer:
-
-Install the platform C/C++ build tools as well. Windows builds require NASM on
-`PATH` for the AWS-LC RSA backend; the Linux devenv shell includes NASM and LLVM
-tools for `cargo xwin check`.
 
 ```console
 $ cargo test --workspace --all-targets --all-features

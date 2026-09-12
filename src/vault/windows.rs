@@ -157,33 +157,7 @@ pub fn serve_windows_vault_with_ready(
     // Every exit from the loop discards the hardware-unwrapped keys, including
     // the error exits. Returning `?` straight out of the loop skipped the lock
     // and left them to whatever the caller did next.
-    let ssh_listener = private_listener(Path::new(&format!("{}-ssh", options.pipe_name)))?;
-    let cache = CallerIdentityCache::default();
-    let served = std::thread::scope(|scope| {
-        let ssh = scope.spawn(|| {
-            let result = super::ssh_agent::serve_listener(
-                service,
-                &stopping,
-                || {
-                    let stream = ssh_listener.accept()?;
-                    stream.set_nonblocking(true)?;
-                    Ok(stream)
-                },
-                &|stream| caller_identity(stream, &cache),
-            );
-            if result.is_err() {
-                stopping.store(true, Ordering::Release);
-            }
-            result
-        });
-        let result =
-            ready().and_then(|()| accept_until_sealed(service, options, &listener, &stopping));
-        stopping.store(true, Ordering::Release);
-        let ssh_result = ssh
-            .join()
-            .map_err(|_| VaultError::Protocol("SSH agent thread panicked".into()))?;
-        result.and(ssh_result)
-    });
+    let served = ready().and_then(|()| accept_until_sealed(service, options, &listener, &stopping));
     let sealed = service.seal();
     served.and(sealed)
 }
@@ -903,17 +877,8 @@ mod tests {
         };
         let server_service = Arc::clone(&service);
         let server = std::thread::spawn(move || serve_windows_vault(&server_service, &options));
-        let ssh_pipe = format!("{pipe_name}-ssh");
         let client = WindowsVaultClient::new(pipe_name);
         let server = wait_until_ready(&client, server);
-
-        let mut ssh = BytePipe::connect_by_path(ssh_pipe.as_str()).unwrap();
-        ssh.set_nonblocking(true).unwrap();
-        write_frame(&mut ssh, &[11], IoBudget::new(Duration::from_secs(5))).unwrap();
-        assert_eq!(
-            &*read_frame(&mut ssh, IoBudget::new(Duration::from_secs(5))).unwrap(),
-            &[12, 0, 0, 0, 0]
-        );
 
         let address = WireSecretAddress::new("project/default/TOKEN", None);
         let stored = client
@@ -953,7 +918,6 @@ mod tests {
             .unwrap();
         assert!(matches!(sealed.result, Ok(VaultResponseBody::Sealed)));
         server.join().unwrap().unwrap();
-        assert!(read_frame(&mut ssh, IoBudget::new(Duration::from_secs(1))).is_err());
     }
 
     /// Wait for the server thread to reach its accept loop.

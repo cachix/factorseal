@@ -39,13 +39,6 @@ vault-store = [
 secret-service-host = ["vault-client", "dep:secret-service-protocol", "dep:tokio", "dep:zbus"]
 
 vault = [
-    "dep:ed25519-dalek",
-    "dep:ssh-key",
-    "dep:aws-lc-rs",
-    "dep:crypto-bigint",
-    "dep:bcrypt-pbkdf",
-    "dep:blowfish",
-    "dep:signature",
     "helper-isolation",
     "vault-client",
     "vault-store",
@@ -117,9 +110,6 @@ path = "src/bin/factorseal-network.rs"
 required-features = ["personal-sync-network"]
 
 [dependencies]
-# RSA operations use AWS-LC; ssh-key's RustCrypto RSA backend has RUSTSEC-2023-0071.
-aws-lc-rs = { version = "1.18.1", optional = true }
-crypto-bigint = { version = "0.7.5", default-features = false, features = ["alloc", "zeroize"], optional = true }
 # `aes-gcm` does not forward `zeroize` to its dependencies. The `aes`, `ghash`,
 # and `polyval` entries exist only to wipe the expanded key schedule and the
 # GHASH authentication key when a cipher instance is dropped.
@@ -129,11 +119,8 @@ argon2 = { version = "0.5.3", features = ["zeroize"], optional = true }
 anyhow = { version = "1.0", optional = true }
 async-trait = { version = "0.1.89", optional = true }
 # Validate bundle counter encoding and lengths before expansion; upstream PR #1540.
-automerge = { git = "https://github.com/domenkozar/automerge.git", rev = "76746a304deecf001b4a78d6625dd0eb1ab48ddd", version = "0.11.0", optional = true }
+automerge = { git = "https://github.com/domenkozar/automerge.git", rev = "78cf972a705661b572f7427ff404600e05331b5e", version = "0.11.0", optional = true }
 base64 = "0.22.1"
-# Wipe encrypted OpenSSH key KDF state, including the Blowfish key schedule.
-bcrypt-pbkdf = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
-blowfish = { version = "0.10", features = ["zeroize"], optional = true }
 ciborium = { version = "0.2.2", optional = true }
 clap = { version = "4.5.41", features = ["derive", "env"], optional = true }
 clap_complete = { version = "4.6.9", features = ["unstable-dynamic"], optional = true }
@@ -141,9 +128,6 @@ clap_complete_nushell = { version = "4.6.2", optional = true }
 ctrlc = { version = "3.5.1", features = ["termination"], optional = true }
 csv = { version = "1.3", optional = true }
 directories = { version = "6.0.0", optional = true }
-# ssh-key disables dalek's defaults; wipe temporary signing keys even in
-# vault-only builds that do not enable the sync network's crypto features.
-ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"], optional = true }
 getrandom = "0.3.3"
 getrandom_04 = { package = "getrandom", version = "0.4.3", features = ["sys_rng"], optional = true }
 ghash = { version = "0.5.1", features = ["zeroize"], optional = true }
@@ -166,9 +150,6 @@ secret-service-protocol = { path = "crates/secret-service-protocol", optional = 
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"
 sha2 = "0.10.9"
-# The 0.6 line locks vulnerable RSA 0.9 even when RSA signing is disabled.
-ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["std", "ed25519", "p256", "p384", "p521", "encryption"], optional = true }
-signature = { version = "3", optional = true }
 thiserror = "2.0.12"
 tempfile = { version = "3.20.0", optional = true }
 tokio = { version = "1.47.1", features = ["macros", "rt", "sync", "time"], optional = true }

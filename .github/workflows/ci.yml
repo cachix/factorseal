@@ -28,9 +28,6 @@ jobs:
   linux:
     name: Linux
     runs-on: ubuntu-latest
-    env:
-      # Serialize integration tests that share the session bus.
-      RUST_TEST_THREADS: 1
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v31
@@ -43,7 +40,7 @@ jobs:
       - name: Install native Linux package dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libdbus-1-dev libsecret-tools pkg-config openssh-server
+          sudo apt-get install --yes libdbus-1-dev libsecret-tools pkg-config
       - name: Install devenv
         run: nix profile add nixpkgs#devenv
       - name: Check formatting
@@ -55,8 +52,8 @@ jobs:
           devenv shell -- cargo build -p factorseal --all-features --bins
           devenv shell -- sh -c '
             set -eu
-            dbus_config="$PWD/tests/dbus-session.conf"
-            FACTORSEAL_TEST_SSHD=/usr/sbin/sshd dbus-run-session --config-file "$dbus_config" -- cargo test --workspace --all-targets --all-features
+            dbus_config="$(dirname "$(command -v dbus-daemon)")/../share/dbus-1/session.conf"
+            dbus-run-session --config-file "$dbus_config" -- cargo test --workspace --all-targets --all-features
             dbus-run-session --config-file "$dbus_config" -- env FACTORSEAL_TEST_SECRET_TOOL=/usr/bin/secret-tool cargo test --lib libsecret_store_seal_lookup
           '
       - name: Check the feature combinations packagers and embedders build
@@ -156,7 +153,6 @@ jobs:
       RUST_TEST_THREADS: 1
     steps:
       - uses: actions/checkout@v5
-      - uses: ilammy/setup-nasm@v1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt

@@ -4,13 +4,6 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
-- Serve an SSH agent alongside the unsealed vault on Linux, macOS, and Windows.
-  Support OpenSSH Ed25519, RSA/SHA-2, and ECDSA keys, including encrypted keys.
-  Bind signing grants to executable and key fingerprints, verified SSH users,
-  destinations, and forwarding paths. Add live Desktop approval, denial, and
-  revocation with fresh factor confirmation, plus `factorseal ssh-agent-socket`
-  for endpoint setup. Native IPC is now v16; update the CLI and Desktop together.
-
 - Connect Desktop's Devices panel to iroh pairing and encrypted sync. Show QR
   tickets, comparison codes, explicit approval/cancellation, enrolled devices,
   reachability and publication/conflict counts. Keep forwarding while sealed
