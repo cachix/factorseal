@@ -72,6 +72,26 @@ This crate deliberately sits outside the main Cargo workspace (own
 affect `factorseal`'s build, lints, or CI, and so nobody mistakes it for
 product code.
 
+## One-time setup on the Windows host
+
+Hyper-V Sockets require every `ServiceId` a host application uses to be
+registered before connections are permitted — Microsoft's guide states this
+unconditionally ("In order to use Hyper-V sockets, the application must be
+registered with the Hyper-V Host's registry"), and it holds in both
+directions: this spike originally assumed registration was only needed when
+the *host* connects out to a *guest* listener, and that assumption was wrong.
+
+Register this spike's `ServiceId` (the port-template GUID for `PORT =
+0x00005A17`) in an elevated PowerShell:
+
+```powershell
+$serviceId = "00005a17-facb-11e6-bd58-64006a7986d3"
+New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices" -Name $serviceId -Force
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\$serviceId" -Name "ElementName" -Value "wsl2-hyperv-socket-bridge-spike"
+```
+
+Do this once per host, then start the listener as below.
+
 ## How to run it
 
 **On the Windows host** (needs Rust 1.91+; matches `docs/development.md`):
@@ -96,15 +116,21 @@ with no virtual network involved.
 ## If it doesn't connect
 
 Hyper-V Sockets fail silently (connection just times out) rather than with a
-clear error when the two ends disagree on GUIDs. In order of likelihood:
+clear error when the two ends disagree on GUIDs, or when the `ServiceId`
+isn't registered. In order of likelihood:
 
-1. The Windows Defender Firewall or an AV product is blocking Hyper-V socket
+1. The one-time registry setup above hasn't been done yet. This produced a
+   real, reproduced timeout (WSL2's `wsl-client` reports
+   `Os { code: 110, kind: TimedOut }` with the listener still blocked in
+   `accept()`, never printing `client connected`) before the registration
+   step was added to this README.
+2. The Windows Defender Firewall or an AV product is blocking Hyper-V socket
    traffic (rare, but some endpoint security products intercept `AF_HYPERV`).
-2. The WSL2 kernel lacks `hv_sock` support. Check with
+3. The WSL2 kernel lacks `hv_sock` support. Check with
    `zgrep HYPERV_VSOCKETS /proc/config.gz` — it needs to report `y` or `m`
    (confirmed `y` on the kernel this spike was written against:
    `6.18.33.2-microsoft-standard-WSL2`).
-3. The `ServiceId`/`VmId` GUID byte layout is wrong after all. The values in
+4. The `ServiceId`/`VmId` GUID byte layout is wrong after all. The values in
    `windows_listener.rs` were cross-checked against a public copy of
    `hvsocket.h` and the binary cross-compiles and links cleanly, but neither
    proves the bytes are right at runtime — only running it does.
