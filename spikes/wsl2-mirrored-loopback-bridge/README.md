@@ -2,14 +2,30 @@
 
 ## Status
 
-Not yet run. This is the follow-up to
-`spikes/wsl2-hyperv-socket-bridge`, built after that spike settled its own
-open question the wrong way for a real design: Hyper-V Sockets work, but the
-host side needs *standing* Administrator privilege to resolve the WSL2
-utility VM's ID on every restart, with no lower-privilege path
-(`microsoft/WSL#5751`, corroborated by the independently-maintained `wsld`
-project). That's an ongoing privilege cost a same-host named pipe or Unix
-socket transport never had.
+**Confirmed working, on the first attempt, with no elevation anywhere.** This
+is the follow-up to `spikes/wsl2-hyperv-socket-bridge`, built after that
+spike settled its own open question the wrong way for a real design:
+Hyper-V Sockets work, but the host side needs *standing* Administrator
+privilege to resolve the WSL2 utility VM's ID on every restart, with no
+lower-privilege path (`microsoft/WSL#5751`, corroborated by the
+independently-maintained `wsld` project). That's an ongoing privilege cost a
+same-host named pipe or Unix socket transport never had.
+
+`wsl-client` connected to `windows-listener.exe` over genuine `127.0.0.1` and
+completed a full round trip:
+
+```console
+$ cargo run --bin wsl-client
+connecting to 127.0.0.1:51027...
+sent: hello from wsl2 over mirrored loopback
+received: host-echo: hello from wsl2 over mirrored loopback
+```
+
+No Windows Firewall prompt appeared, and neither binary needed elevation —
+unlike the Hyper-V Sockets spike, which needed a registry write, a specific
+non-wildcard VM ID, and (for any real integration) standing admin. Mirrored
+networking's `127.0.0.1` symmetry claim holds up in practice, not just in
+the docs.
 
 ## Why this question matters
 
