@@ -27,6 +27,28 @@ non-wildcard VM ID, and (for any real integration) standing admin. Mirrored
 networking's `127.0.0.1` symmetry claim holds up in practice, not just in
 the docs.
 
+**Token authentication also confirmed working, first attempt.** After
+extending both binaries per `TOKEN-DESIGN.md`, `wsl-client` read the token
+straight from `/mnt/c/Users/<user>/AppData/Local/Factorseal-spike/wsl-bridge-token`
+with no extra configuration on either side, and the full round trip
+(including a passing token check on the Windows side) succeeded:
+
+```console
+$ cargo run --bin wsl-client -- /mnt/c/Users/tarci/AppData/Local/Factorseal-spike/wsl-bridge-token
+read token from /mnt/c/Users/tarci/AppData/Local/Factorseal-spike/wsl-bridge-token
+connecting to 127.0.0.1:51027...
+sent: hello from wsl2 over mirrored loopback
+received: host-echo: hello from wsl2 over mirrored loopback
+```
+
+The client only ever receives a reply if the server's token check passed —
+a mismatch closes the connection with no response (see
+`windows_listener.rs`) — so getting the echo back is itself proof the check
+succeeded, not just that the transport works. This settles
+`TOKEN-DESIGN.md`'s one empirical claim: a WSL2 process really can read a
+token file written by a native Windows process under that user's profile,
+transparently, with no special setup.
+
 ## Why this question matters
 
 Same underlying need as the other spike: Factorseal's Windows desktop app
