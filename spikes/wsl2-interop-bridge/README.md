@@ -25,7 +25,25 @@ interop-launched process is not a special case to that code: it would
 authenticate exactly as any other Windows client does today, with zero
 changes to the existing transport or authentication logic.
 
-Option 2 (launch-time capability delegation) is not yet run. This supersedes the framing (not the findings) of
+**Option 2 (launch-time capability delegation) confirmed, first attempt:**
+
+```console
+minted capability: fa87192d42a7319f7bc9c568844f1019dda0e1ea816ae77890edd891ed9704da
+received back: fa87192d42a7319f7bc9c568844f1019dda0e1ea816ae77890edd891ed9704da
+MATCH: the capability round-tripped through wsl.exe's redirected stdio
+```
+
+A 32-byte capability minted by a Windows process survived being written to
+`wsl.exe`'s redirected stdin, read by `capability-receiver` running inside
+the WSL2 distro, and echoed back out through redirected stdout, byte for
+byte. This confirms the achievable, corrected version of "hand the process
+something at launch time" — ordinary stdio redirection through `wsl.exe`,
+not literal file-descriptor inheritance — actually works end to end, with
+nothing the launched process needed to discover, connect to, or
+authenticate against.
+
+Both mechanisms this spike set out to check are now confirmed against real
+Windows/WSL2 behavior, not just architecture. A POC can build on either. This supersedes the framing (not the findings) of
 `spikes/wsl2-hyperv-socket-bridge` and `spikes/wsl2-mirrored-loopback-bridge`.
 Those two spikes answered "can bytes cross the VM boundary" and "can we
 authenticate the peer that sends them" by building a new transport and a new
