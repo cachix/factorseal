@@ -17,6 +17,7 @@ pub struct Prompt {
     pub key: String,
     pub state: String,
     pub candidates: Vec<Candidate>,
+    pub save_username: Option<String>,
 }
 #[derive(Clone)]
 pub struct Work {
@@ -34,6 +35,7 @@ struct Flow {
     started: Instant,
     context_deadline: Option<Instant>,
     generation: u64,
+    save_username: Option<String>,
 }
 struct Session {
     key: Option<String>,
@@ -165,7 +167,7 @@ impl Hub {
                     .get_mut(&command.session)
                     .ok_or_else(invalid)?;
                 let site = match &action {
-                    Action::Detect { origin, .. } => origin.clone(),
+                    Action::Detect { origin, .. } | Action::Save { origin, .. } => origin.clone(),
                     Action::Pair => "Pair browser profile".into(),
                     Action::Revoke => "Disconnect browser profile".into(),
                     _ => return Err(invalid()),
@@ -181,6 +183,10 @@ impl Hub {
                     started: Instant::now(),
                     context_deadline: None,
                     generation: self.generation,
+                    save_username: match action {
+                        Action::Save { username, .. } => Some(username),
+                        _ => None,
+                    },
                 });
                 Ok(Response::state("awaiting_unseal"))
             }
@@ -222,7 +228,7 @@ impl Hub {
                 && f.phase == "awaiting_unseal"
             {
                 match f.signed.verify().map(|c| c.action) {
-                    Ok(Action::Detect { .. }) => {
+                    Ok(Action::Detect { .. } | Action::Save { .. }) => {
                         f.phase = "matching".into();
                         self.work.push(Work {
                             session: id.clone(),
@@ -247,6 +253,7 @@ impl Hub {
                 key: f.signed.key.clone(),
                 state: f.phase.clone(),
                 candidates: f.candidates.clone(),
+                save_username: f.save_username.clone(),
             })
         })
     }
@@ -290,11 +297,41 @@ impl Hub {
                     f.context_deadline = Some(Instant::now() + Duration::from_secs(5));
                 }
             }
+            Action::Save { .. } => {
+                let candidate = match index {
+                    Some(index) => {
+                        let Some(candidate) = f.candidates.get(index) else {
+                            return;
+                        };
+                        Some(candidate.clone())
+                    }
+                    None => None,
+                };
+                self.work.push(Work {
+                    session: id.into(),
+                    generation: f.generation,
+                    action: WorkerAction::Save {
+                        ticket: f.ticket.clone(),
+                        candidate,
+                        request: f.signed.clone(),
+                    },
+                });
+                f.phase = "saving".into();
+            }
             _ => {}
         }
     }
     pub fn take_work(&mut self) -> Vec<Work> {
+        self.expire();
         std::mem::take(&mut self.work)
+            .into_iter()
+            .filter(|work| {
+                self.sessions
+                    .get(&work.session)
+                    .and_then(|s| s.flow.as_ref())
+                    .is_some_and(|f| f.generation == work.generation)
+            })
+            .collect()
     }
     pub fn complete(&mut self, work: &Work, result: Result<WorkerReply, String>) {
         self.expire();
@@ -309,7 +346,9 @@ impl Hub {
             return;
         }
         match result {
-            Ok(WorkerReply::Candidates { ticket, candidates }) if !candidates.is_empty() => {
+            Ok(WorkerReply::Candidates { ticket, candidates })
+                if !candidates.is_empty() || f.save_username.is_some() =>
+            {
                 f.ticket = ticket;
                 f.candidates = candidates;
                 f.phase = "awaiting_approval".into();
@@ -321,6 +360,10 @@ impl Hub {
             Ok(WorkerReply::Fill { username, password }) => {
                 s.flow = None;
                 s.result = Some(Response::Fill { username, password });
+            }
+            Ok(WorkerReply::AlreadySaved) => {
+                s.flow = None;
+                s.result = Some(Response::finished("already_saved"));
             }
             Ok(WorkerReply::Done) => {
                 match &work.action {
@@ -337,7 +380,13 @@ impl Hub {
             }
             Err(_) => {
                 s.flow = None;
-                s.result = Some(Response::finished("vault_rejected"));
+                s.result = Some(Response::finished(
+                    if matches!(work.action, WorkerAction::Save { .. }) {
+                        "save_failed"
+                    } else {
+                        "vault_rejected"
+                    },
+                ));
             }
         }
     }
@@ -371,6 +420,42 @@ mod tests {
             Response::Hello { session, .. } => session,
             _ => panic!("hello"),
         }
+    }
+    #[test]
+    fn browser_save_waits_for_review_and_cancel_discards_queued_write() {
+        let mut h = Hub::default();
+        let s = session(&mut h);
+        h.paired
+            .insert(hex::encode(key().verifying_key().as_bytes()));
+        send(
+            &mut h,
+            &s,
+            1,
+            Action::Save {
+                origin: "https://example.com".into(),
+                document: "doc".into(),
+                username: "alice".into(),
+                password: WireSecret::new(b"password".to_vec()).unwrap(),
+            },
+        );
+        assert_eq!(h.prompt().unwrap().save_username.as_deref(), Some("alice"));
+        assert!(h.take_work().is_empty());
+        h.snapshot(true);
+        let lookup = h.take_work().pop().unwrap();
+        assert!(matches!(lookup.action, WorkerAction::Lookup { .. }));
+        h.complete(
+            &lookup,
+            Ok(WorkerReply::Candidates {
+                ticket: "t".repeat(64),
+                candidates: vec![],
+            }),
+        );
+        assert_eq!(h.prompt().unwrap().state, "awaiting_approval");
+        assert!(h.take_work().is_empty());
+        let generation = h.prompt().unwrap().generation;
+        h.approve(&s, generation, None);
+        send(&mut h, &s, 2, Action::Cancel);
+        assert!(h.take_work().is_empty());
     }
     fn send(h: &mut Hub, s: &str, n: u32, a: Action) -> Response {
         h.handle(Request::Signed {

@@ -39,3 +39,13 @@ supported browser. Automated DOM/protocol tests do not replace this acceptance.
 11. Repeat platform registration, upgrade, and uninstall on Linux, macOS, and
     Windows. Validate Nix wrappers separately. Record browser/OS/build revisions
     and results before making a release-support claim.
+12. Submit the login and registration fixtures with new test credentials. Verify
+    Desktop names the original origin and username, masks the password, and saves
+    only after approval. Confirm the new Personal Login appears without reopening
+    Desktop and can subsequently be filled. Repeat unchanged credentials: no save
+    prompt or duplicate. Change the password: explicitly update the correct account
+    and retain its other fields. Change the record during review: the update must fail.
+13. Exercise save navigation, denial, tab closure, pairing revocation, and expiry.
+    Check that extension storage contains no submitted credentials. Mismatched
+    confirmation, hidden fields, and cross-origin actions must not offer saves.
+    Test **Save login from this page** and editing/retrying a failed submission.

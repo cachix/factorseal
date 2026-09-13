@@ -23,6 +23,7 @@ struct Ticket {
     origin: String,
     candidates: Vec<Candidate>,
     expires: Instant,
+    save_digest: Option<String>,
 }
 fn denied() -> VaultError {
     VaultError::AuthorizationRequired
@@ -102,7 +103,19 @@ impl BrowserState {
                 self.tickets.retain(|_, t| t.key != key);
                 Ok(WorkerReply::Done)
             }
-            WorkerAction::Lookup { request } => self.lookup(store, request, now),
+            WorkerAction::Lookup { request } => self.lookup(store, &request, now),
+            WorkerAction::Save {
+                ticket,
+                candidate,
+                request,
+            } => self.save(
+                store,
+                &ticket,
+                candidate.as_ref(),
+                &request,
+                now,
+                provenance,
+            ),
             WorkerAction::Release {
                 ticket,
                 candidate,
@@ -110,6 +123,9 @@ impl BrowserState {
             } => {
                 // Consume before any validation. A failed release cannot be retried.
                 let pending = self.tickets.remove(&ticket).ok_or_else(denied)?;
+                if pending.save_digest.is_some() {
+                    return Err(denied());
+                }
                 paired(store, &pending.key, now)?;
                 let confirmed = confirmation.verify()?;
                 if confirmation.key != pending.key
@@ -154,17 +170,27 @@ impl BrowserState {
     fn lookup(
         &mut self,
         store: &VaultStore,
-        request: Signed,
+        request: &Signed,
         now: u64,
     ) -> VaultResult<WorkerReply> {
         let command = request.verify()?;
         paired(store, &request.key, now)?;
-        let Action::Detect { origin: site, .. } = command.action else {
-            return Err(denied());
+        let (site, saving) = match &command.action {
+            Action::Detect { origin, .. } => (origin, None),
+            Action::Save {
+                origin,
+                username,
+                password,
+                ..
+            } => (origin, Some((username, password))),
+            _ => return Err(denied()),
         };
         let fingerprint = hex::encode(Sha256::digest(request.payload.as_bytes()));
         // Exhaustion fails closed for this lease, rather than evicting replay evidence.
-        if self.seen.len() >= 4096 || self.tickets.len() >= 32 || !self.seen.insert(fingerprint) {
+        if self.seen.len() >= 4096
+            || self.tickets.len() >= 32
+            || !self.seen.insert(fingerprint.clone())
+        {
             return Err(denied());
         }
         let mut candidates = vec![];
@@ -185,10 +211,20 @@ impl BrowserState {
                 let Ok(item) = PersonalSecret::decode_current(&secret) else {
                     continue;
                 };
-                if !matches(&item, &site) {
+                if !matches(&item, site) {
                     continue;
                 }
                 let (username, _) = fields(&item).ok_or_else(denied)?;
+                if let Some((submitted_username, password)) = saving {
+                    if username != submitted_username {
+                        continue;
+                    }
+                    if fields(&item)
+                        .is_some_and(|(_, stored)| stored.as_bytes() == password.expose())
+                    {
+                        return Ok(WorkerReply::AlreadySaved);
+                    }
+                }
                 if candidates.len() >= 32 || item.title.len() > 512 || username.len() > 512 {
                     return Err(VaultError::Protocol(
                         "too many or oversized browser candidates".into(),
@@ -207,12 +243,13 @@ impl BrowserState {
                 self.tickets.insert(
                     ticket.clone(),
                     Ticket {
-                        key: request.key,
+                        key: request.key.clone(),
                         session: command.session,
                         sequence: command.sequence,
-                        origin: site,
+                        origin: site.clone(),
                         candidates: candidates.clone(),
                         expires: Instant::now() + Duration::from_mins(5),
+                        save_digest: saving.map(|_| fingerprint),
                     },
                 );
                 return Ok(WorkerReply::Candidates { ticket, candidates });
@@ -221,5 +258,87 @@ impl BrowserState {
         Err(VaultError::Protocol(
             "browser lookup inventory limit exceeded".into(),
         ))
+    }
+    fn save(
+        &mut self,
+        store: &VaultStore,
+        ticket: &str,
+        candidate: Option<&Candidate>,
+        request: &Signed,
+        now: u64,
+        provenance: &Provenance,
+    ) -> VaultResult<WorkerReply> {
+        let pending = self.tickets.remove(ticket).ok_or_else(denied)?;
+        paired(store, &pending.key, now)?;
+        let command = request.verify()?;
+        if pending.key != request.key
+            || pending.session != command.session
+            || pending.sequence != command.sequence
+            || pending.save_digest.as_deref()
+                != Some(hex::encode(Sha256::digest(request.payload.as_bytes())).as_str())
+        {
+            return Err(denied());
+        }
+        let Action::Save {
+            origin: site,
+            username,
+            password,
+            ..
+        } = command.action
+        else {
+            return Err(denied());
+        };
+        let mut item = if let Some(candidate) = candidate {
+            if !pending
+                .candidates
+                .iter()
+                .any(|c| c.id == candidate.id && c.digest == candidate.digest)
+            {
+                return Err(denied());
+            }
+            let bytes = store
+                .get_at(
+                    DocumentKind::LocalKeyring,
+                    PERSONAL_SECRET_NAMESPACE,
+                    &SecretAddress::new(&candidate.id, None)?,
+                    now,
+                )?
+                .ok_or_else(denied)?;
+            if hex::encode(Sha256::digest(&bytes)) != candidate.digest {
+                return Err(VaultError::Conflict);
+            }
+            let item = PersonalSecret::decode_current(&bytes).map_err(|_| denied())?;
+            if !matches(&item, &site) || fields(&item).is_none_or(|(name, _)| name != username) {
+                return Err(denied());
+            }
+            item
+        } else {
+            let mut item = PersonalSecret::template(PersonalSecretKind::Login, site.clone());
+            for field in &mut item.sections[0].fields {
+                if field.id == "username" {
+                    field.value = username.clone().into();
+                }
+                if field.id == "url-0" {
+                    field.value = site.clone().into();
+                }
+            }
+            item
+        };
+        let value = std::str::from_utf8(password.expose()).map_err(|_| denied())?;
+        for field in item.sections.iter_mut().flat_map(|s| &mut s.fields) {
+            if field.id == "password" {
+                field.value = value.into();
+            }
+        }
+        store.put_at(
+            DocumentKind::LocalKeyring,
+            PERSONAL_SECRET_NAMESPACE,
+            &SecretAddress::new(&item.id, None)?,
+            &item.encode().map_err(|_| denied())?,
+            None,
+            provenance,
+            now,
+        )?;
+        Ok(WorkerReply::Done)
     }
 }

@@ -50,6 +50,12 @@ pub(super) fn sync(request: Option<Prompt>, cx: &mut App) {
         return;
     };
     let snapshot = cx.global::<DesktopWindow>().snapshot.clone();
+    if request.save_username.is_some()
+        && request.state == "matching"
+        && cx.global::<BrowserWindow>().0.is_none()
+    {
+        return;
+    }
     if let Some((_, view)) = cx.global::<BrowserWindow>().0.clone() {
         if view.read(cx).request.session == request.session
             && view.read(cx).request.generation == request.generation
@@ -202,16 +208,24 @@ impl Render for BrowserView {
         let reviewing = self.request.state == "awaiting_approval";
         let pairing = self.request.site == "Pair browser profile";
         let revoking = self.request.site == "Disconnect browser profile";
+        let saving = self.request.save_username.is_some();
         let title = if pairing {
             "Pair browser profile"
         } else if revoking {
             "Disconnect browser profile"
+        } else if saving {
+            "Save login"
         } else {
             "Fill a login"
         };
         let mut summary = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted)
             .child(div().text_lg().font_semibold().child(if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() }))
-            .child(if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else { "Choose one account to fill once. The browser will check the original page again." });
+            .child(if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." });
+        if let Some(username) = &self.request.save_username {
+            summary = summary
+                .child(div().child(format!("Username: {username}")))
+                .child(div().child("Password: ••••••••"));
+        }
         if pairing || revoking {
             summary = summary.child(
                 div()
@@ -244,7 +258,12 @@ impl Render for BrowserView {
             for (index, candidate) in self.request.candidates.iter().enumerate() {
                 requests = requests.child(
                     Button::new(("browser-account", index))
-                        .label(format!("{} · {}", candidate.title, candidate.username))
+                        .label(format!(
+                            "{}{} · {}",
+                            if saving { "Update password: " } else { "" },
+                            candidate.title,
+                            candidate.username
+                        ))
                         .on_click(cx.listener(move |view, _, _, cx| view.approve(Some(index), cx))),
                 );
             }
@@ -381,7 +400,7 @@ impl Render for BrowserView {
                                     cx.defer(move |cx| deny(&session, generation, cx));
                                 }),
                             ))
-                            .when(!unsealed || pairing || revoking, |element| {
+                            .when(!unsealed || pairing || revoking || saving, |element| {
                                 element.child(
                                     Button::new("approve-browser")
                                         .primary()
@@ -406,6 +425,12 @@ impl Render for BrowserView {
                                             "Saving…"
                                         } else if revoking {
                                             "Disconnect profile"
+                                        } else if saving {
+                                            if self.request.candidates.is_empty() {
+                                                "Save login"
+                                            } else {
+                                                "Save as new login"
+                                            }
                                         } else {
                                             "Pair browser"
                                         })

@@ -18,28 +18,56 @@ test('strict responses and UTF-8 field decoding',()=>{
   assert.throws(()=>validateResponse({type:'context',nonce:'short'}));
 });
 const script=await readFile(new URL('./content.js',import.meta.url),'utf8');
-function page({hidden=false,crossOrigin=false,newPassword=false}={}) {
+function page({hidden=false,crossOrigin=false,newPassword=false,confirmation=false}={}) {
   let listener, detected=0;
+  const events={},messages=[];
   class Input {
     constructor(type){this.type=type;this.disabled=false;this.readOnly=false;this.autocomplete='';this._value='';}
     get value(){return this._value;} set value(v){this._value=v;}
     getClientRects(){return this.hidden?[]:[{}];}
-    getBoundingClientRect(){return {left:10,top:this.type==='password'?50:10,right:210,bottom:this.type==='password'?80:40,width:200,height:30};}
+    getBoundingClientRect(){const top=this.top??(this.type==='password'?50:10);return {left:10,top,right:210,bottom:top+30,width:200,height:30};}
     dispatchEvent(){this.onInput?.();}
   }
   const username=new Input('text'),password=new Input('password');
+  const confirm=confirmation?new Input('password'):null;
+  if(confirm){confirm.top=90;confirm.autocomplete='new-password';}
   password.hidden=hidden;password.autocomplete=newPassword?'new-password':'';
-  const owner={action:crossOrigin?'https://evil.test/post':'https://example.com/post',querySelectorAll:()=>[username,password]};
+  const owner={action:crossOrigin?'https://evil.test/post':'https://example.com/post',querySelectorAll:()=>[username,password,...(confirm?[confirm]:[])]};
   password.form=owner;
-  const doc={visibilityState:'visible',documentElement:{},querySelectorAll:()=>[password],addEventListener:()=>{},elementFromPoint:(_x,y)=>y>45?password:username};
+  const doc={visibilityState:'visible',documentElement:{},querySelectorAll:()=>[password,...(confirm?[confirm]:[])],addEventListener:(name,fn)=>{events[name]=fn;},elementFromPoint:(_x,y)=>y>85?confirm:y>45?password:username};
   const window={addEventListener:()=>{}};window.top=window;
-  const context={crypto:webcrypto,URL,Event,HTMLInputElement:Input,document:doc,innerWidth:1000,innerHeight:800,location:{protocol:'https:',origin:'https://example.com',href:'https://example.com/login'},window,
+  const context={crypto:webcrypto,URL,Event,TextEncoder,HTMLInputElement:Input,document:doc,innerWidth:1000,innerHeight:800,location:{protocol:'https:',origin:'https://example.com',href:'https://example.com/login'},window,
     getComputedStyle:()=>({visibility:'visible',display:'block',opacity:'1'}),setTimeout:fn=>{queueMicrotask(fn);},MutationObserver:class{observe(){}},
-    browser:{runtime:{id:'test',sendMessage:async()=>{detected++;return {accepted:true};},onMessage:{addListener:f=>{listener=f;}}}}};
+    browser:{runtime:{id:'test',sendMessage:async message=>{messages.push(message);if(message.type==='detected')detected++;return {accepted:true};},onMessage:{addListener:f=>{listener=f;}}}}};
   vm.runInNewContext(script,context);
   const message=payload=>{let result;listener(payload,{id:'test'},r=>result=r);return result;};
-  return {username,password,owner,context,message,get detected(){return detected;}};
+  return {username,password,confirm,owner,context,message,messages,edit:()=>events.input({isTrusted:true}),submit:(trusted=true)=>events.submit({isTrusted:trusted,target:owner}),get detected(){return detected;}};
 }
+for(const registration of [false,true])test(`offers submitted ${registration?'registration':'login'} credentials once`,async()=>{
+  const p=page({newPassword:registration,confirmation:registration});
+  p.username.value='alice';p.password.value='secret';if(p.confirm)p.confirm.value='secret';
+  await new Promise(r=>setImmediate(r));
+  assert.equal(p.messages.filter(m=>m.type==='save').length,0);
+  p.submit();p.submit();
+  const saves=p.messages.filter(m=>m.type==='save');
+  assert.equal(saves.length,1);
+  assert.equal(saves[0].username,'alice');assert.equal(saves[0].password,'secret');
+});
+test('save ignores forged submits, hidden fields, cross-origin actions, and mismatched confirmation',()=>{
+  for(const options of [{},{hidden:true},{crossOrigin:true},{newPassword:true,confirmation:true}]){
+    const p=page(options);p.username.value='alice';p.password.value='secret';
+    if(p.confirm)p.confirm.value='different';
+    p.submit(Object.keys(options).length>0);
+    assert.equal(p.messages.filter(m=>m.type==='save').length,0);
+  }
+});
+test('explicit save and corrected submissions use the current fields',()=>{
+  const p=page({newPassword:true});p.username.value='alice';p.password.value='first';
+  assert.equal(p.message({type:'save-current'}).offered,true);
+  p.password.value='corrected';p.edit();p.submit();
+  const saves=p.messages.filter(m=>m.type==='save');
+  assert.equal(saves.length,2);assert.equal(saves[1].password,'corrected');
+});
 test('hidden, cross-origin, and signup forms do not prompt',async()=>{
   for(const options of [{hidden:true},{crossOrigin:true},{newPassword:true}]){const p=page(options);await new Promise(r=>setImmediate(r));assert.equal(p.detected,0);}
 });

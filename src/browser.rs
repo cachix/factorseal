@@ -34,17 +34,33 @@ fn invalid() -> VaultError {
 }
 
 /// The exact UTF-8 payload is signed; no cross-language JSON canonicalization.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Signed {
     pub key: String,
     pub payload: String,
     pub signature: String,
 }
+impl std::fmt::Debug for Signed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Signed")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+impl Drop for Signed {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.payload.zeroize();
+    }
+}
 impl Signed {
     pub fn verify(&self) -> VaultResult<Command> {
         use ed25519_dalek::{Signature, VerifyingKey};
-        if self.payload.len() > 8192 || self.key.len() != 64 || self.signature.len() != 128 {
+        if self.payload.len() > MAX_FRAME - 1024
+            || self.key.len() != 64
+            || self.signature.len() != 128
+        {
             return Err(invalid());
         }
         let key: [u8; 32] = hex::decode(&self.key)
@@ -65,7 +81,7 @@ impl Signed {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Command {
     pub version: u16,
@@ -81,21 +97,51 @@ impl Command {
         if let Action::Detect {
             origin: site,
             document,
+        }
+        | Action::Save {
+            origin: site,
+            document,
+            ..
         } = &self.action
-            && (origin(site)? != *site || document.is_empty() || document.len() > 128)
+            && (site.len() > 2048
+                || origin(site)? != *site
+                || document.is_empty()
+                || document.len() > 128)
+        {
+            return Err(invalid());
+        }
+        if let Action::Save {
+            username, password, ..
+        } = &self.action
+            && (username.is_empty()
+                || username.len() > 512
+                || password.expose().is_empty()
+                || password.expose().len() > 4096
+                || std::str::from_utf8(password.expose()).is_err())
         {
             return Err(invalid());
         }
         Ok(())
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     Pair,
-    Detect { origin: String, document: String },
+    Detect {
+        origin: String,
+        document: String,
+    },
+    Save {
+        origin: String,
+        document: String,
+        username: String,
+        password: WireSecret,
+    },
     Poll,
-    Confirm { nonce: String },
+    Confirm {
+        nonce: String,
+    },
     Cancel,
     Revoke,
 }
@@ -168,11 +214,17 @@ pub enum WorkerAction {
         candidate: Candidate,
         confirmation: Signed,
     },
+    Save {
+        ticket: String,
+        candidate: Option<Candidate>,
+        request: Signed,
+    },
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerReply {
     Done,
+    AlreadySaved,
     Candidates {
         ticket: String,
         candidates: Vec<Candidate>,

@@ -10,6 +10,7 @@ struct BrowserGlobal {
     hub: Arc<Mutex<Hub>>,
     cache: std::path::PathBuf,
     registration_error: Arc<Mutex<bool>>,
+    saved: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Global for BrowserGlobal {}
 
@@ -18,6 +19,7 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
     prompt::setup(cx);
     let hub = Hub::shared();
     let registration_error = Arc::new(Mutex::new(false));
+    let saved = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cache = root.join("browser-pairings.json");
     if std::fs::metadata(&cache).is_ok_and(|m| m.len() <= 64 * 1024)
         && let Ok(bytes) = std::fs::read(&cache)
@@ -32,6 +34,7 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
         hub: Arc::clone(&hub),
         cache: cache.clone(),
         registration_error: Arc::clone(&registration_error),
+        saved: Arc::clone(&saved),
     });
     let registration_root = root.to_path_buf();
     std::thread::spawn(move || {
@@ -105,6 +108,11 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
                 .unwrap_or_default();
             for work in work {
                 let result = runtime.browser_request(work.action.clone());
+                if matches!(work.action, WorkerAction::Save { .. })
+                    && matches!(result, Ok(factorseal::browser::WorkerReply::Done))
+                {
+                    saved.store(true, std::sync::atomic::Ordering::Release);
+                }
                 if let Ok(mut h) = worker_hub.lock() {
                     h.complete(&work, result);
                     if matches!(
@@ -122,6 +130,13 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
         loop {
             smol::Timer::after(std::time::Duration::from_millis(200)).await;
             cx.update(|cx| {
+                if cx
+                    .global::<BrowserGlobal>()
+                    .saved
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    refresh_desktop_snapshot(Arc::clone(&cx.global::<RuntimeGlobal>().0), cx);
+                }
                 let unsealed = matches!(
                     &cx.global::<DesktopWindow>().snapshot,
                     Snapshot::Unsealed { owned: true, .. }

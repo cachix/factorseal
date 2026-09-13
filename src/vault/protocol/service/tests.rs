@@ -2562,6 +2562,147 @@ mod browser_integration {
     use super::*;
     use crate::browser::{Action, Command, Signed, WorkerAction, WorkerReply};
     use ed25519_dalek::{Signer, SigningKey};
+    fn submitted(sequence: u32, username: &str, password: &str) -> Signed {
+        signed(
+            sequence,
+            Action::Save {
+                origin: "https://example.com".into(),
+                document: "doc".into(),
+                username: username.into(),
+                password: WireSecret::new(password.as_bytes().to_vec()).unwrap(),
+            },
+        )
+    }
+    #[test]
+    fn browser_saves_new_logins_only_after_manager_approval_and_suppresses_duplicates() {
+        let (_dir, service, manager) = setup();
+        let submission = submitted(1, "bob", "new password");
+        assert!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::Lookup {
+                    request: submission.clone()
+                }
+            )
+            .is_err()
+        );
+        request(
+            &service,
+            &manager,
+            WorkerAction::Pair {
+                key: submission.key.clone(),
+            },
+        )
+        .unwrap();
+        let WorkerReply::Candidates { ticket, candidates } = request(
+            &service,
+            &manager,
+            WorkerAction::Lookup {
+                request: submission.clone(),
+            },
+        )
+        .unwrap() else {
+            panic!("review");
+        };
+        assert!(candidates.is_empty());
+        let save = WorkerAction::Save {
+            ticket,
+            candidate: None,
+            request: submission,
+        };
+        assert!(matches!(
+            request(&service, &manager, save.clone()).unwrap(),
+            WorkerReply::Done
+        ));
+        assert!(request(&service, &manager, save).is_err());
+        assert!(matches!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::Lookup {
+                    request: submitted(2, "bob", "new password")
+                }
+            )
+            .unwrap(),
+            WorkerReply::AlreadySaved
+        ));
+        let WorkerReply::Candidates { candidates, .. } = request(
+            &service,
+            &manager,
+            WorkerAction::Lookup {
+                request: signed(
+                    3,
+                    Action::Detect {
+                        origin: "https://example.com".into(),
+                        document: "doc".into(),
+                    },
+                ),
+            },
+        )
+        .unwrap() else {
+            panic!("saved login");
+        };
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|c| c.username == "bob"));
+    }
+    #[test]
+    #[allow(clippy::too_many_lines)] // Preserve the review/update/revocation sequence in one regression.
+    fn browser_updates_only_the_reviewed_version_and_rechecks_pairing() {
+        let (_dir, service, manager) = setup();
+        let first = submitted(1, "alice", "replacement password");
+        request(
+            &service,
+            &manager,
+            WorkerAction::Pair {
+                key: first.key.clone(),
+            },
+        )
+        .unwrap();
+        let review = |submission: Signed| {
+            let WorkerReply::Candidates { ticket, candidates } = request(
+                &service,
+                &manager,
+                WorkerAction::Lookup {
+                    request: submission.clone(),
+                },
+            )
+            .unwrap() else {
+                panic!("review");
+            };
+            assert_eq!(candidates.len(), 1);
+            WorkerAction::Save {
+                ticket,
+                candidate: Some(candidates[0].clone()),
+                request: submission,
+            }
+        };
+        let approved = review(first);
+        let stale = review(submitted(2, "alice", "stale replacement"));
+        request(&service, &manager, approved).unwrap();
+        assert!(request(&service, &manager, stale).is_err());
+        assert!(matches!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::Lookup {
+                    request: submitted(3, "alice", "replacement password")
+                }
+            )
+            .unwrap(),
+            WorkerReply::AlreadySaved
+        ));
+        let revoked = review(submitted(4, "alice", "revoked replacement"));
+        request(
+            &service,
+            &manager,
+            WorkerAction::Revoke {
+                key: submitted(5, "alice", "unused").key.clone(),
+            },
+        )
+        .unwrap();
+        assert!(request(&service, &manager, revoked).is_err());
+    }
     fn signed(sequence: u32, action: Action) -> Signed {
         let key = SigningKey::from_bytes(&[11; 32]);
         let payload = serde_json::to_string(&Command {
@@ -2730,7 +2871,9 @@ mod browser_integration {
         request(
             &service,
             &manager,
-            WorkerAction::Revoke { key: detection.key },
+            WorkerAction::Revoke {
+                key: detection.key.clone(),
+            },
         )
         .unwrap();
         let next = signed(
@@ -2777,7 +2920,9 @@ mod browser_integration {
         request(
             &service,
             &manager,
-            WorkerAction::Revoke { key: detection.key },
+            WorkerAction::Revoke {
+                key: detection.key.clone(),
+            },
         )
         .unwrap();
         assert!(

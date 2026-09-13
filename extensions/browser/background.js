@@ -85,7 +85,7 @@ async function run(action,context) {
     const deadline=Date.now()+300000;
     while (active===flow && Date.now()<deadline) {
       if (response.type==='finished') {
-        status=response.reason;
+        status=response.reason==='done' && action.type==='save'?'saved':response.reason;
         if(response.reason==='done' && action.type==='pair'){
           await api.storage.local.set({paired:true});
           await register().catch(()=>{});
@@ -136,7 +136,7 @@ void register().catch(()=>{});
 api.tabs.onRemoved.addListener(tab=>{if(active?.tab===tab)void cancel();});
 api.tabs.onActivated.addListener(({tabId})=>{if(active?.tab!=null && active.tab!==tabId)void cancel();});
 api.windows.onFocusChanged.addListener(windowId=>{if(windowId>=0 && active?.window!=null && active.window!==windowId)void cancel();});
-api.tabs.onUpdated.addListener((tab,change)=>{if(active?.tab===tab && (change.status==='loading'||change.url))void cancel();});
+api.tabs.onUpdated.addListener((tab,change)=>{if(active?.tab===tab && active.kind!=='save' && (change.status==='loading'||change.url))void cancel();});
 api.runtime.onMessage.addListener((message,sender,reply)=>{
   (async()=>{
     if (sender.url===api.runtime.getURL('popup.html') && !sender.tab) {
@@ -152,6 +152,14 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
       if (message.type==='pair') {void run({type:'pair'});return {status:'Approve pairing in Desktop'};}
       if (message.type==='revoke') {void run({type:'revoke'});return {status:'Approve disconnection in Desktop'};}
       if (message.type==='cancel') {await cancel();return {status:'Cancelled'};}
+      if(message.type==='save-page'){
+        const [tab]=await api.tabs.query({active:true,currentWindow:true});
+        core.origin(tab?.url);
+        await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
+        const result=await api.tabs.sendMessage(tab.id,{type:'save-current'},{frameId:0});
+        if(!result?.offered)status='No complete login form found on this page.';
+        return {status};
+      }
       if (message.type==='retry') {const [tab]=await api.tabs.query({active:true,currentWindow:true});await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});await api.tabs.sendMessage(tab.id,{type:'retry'},{frameId:0});return {status:'Checking page'};}
       if (message.type==='pause') {
         const [tab]=await api.tabs.query({active:true,currentWindow:true});
@@ -160,15 +168,26 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
       }
       throw new Error('unknown_action');
     }
-    if (sender.id!==api.runtime.id || sender.frameId!==0 || !sender.tab || !['detected','invalidated'].includes(message.type) || typeof message.document!=='string' || message.document.length>128) throw new Error('invalid_sender');
+    if (sender.id!==api.runtime.id || sender.frameId!==0 || !sender.tab || !['detected','invalidated','save'].includes(message.type) || typeof message.document!=='string' || message.document.length>128) throw new Error('invalid_sender');
     if (message.type==='invalidated') {
-      if(active?.tab===sender.tab.id && active.document===message.document)await cancel();
+      if(active?.kind!=='save' && active?.tab===sender.tab.id && active.document===message.document)await cancel();
       return {accepted:true};
     }
     const tab=await api.tabs.get(sender.tab.id);const win=await api.windows.get(tab.windowId);
     if (!tab.active || !win.focused) return {accepted:false};
     const site=core.origin(sender.url);if(core.origin(tab.url)!==site)return {accepted:false};
     if (((await api.storage.local.get('paused')).paused||[]).includes(site)) return {accepted:false};
+    if(message.type==='save'){
+      if((await api.storage.local.get('paired')).paired!==true || typeof message.username!=='string' || typeof message.password!=='string'
+        || !message.username || !message.password || new TextEncoder().encode(message.username).length>512 || new TextEncoder().encode(message.password).length>4096)return {accepted:false};
+      if(active){
+        if(active.kind!=='detect' || active.tab!==tab.id || active.document!==message.document)return {accepted:false};
+        await cancel();
+      }
+      const password=btoa(String.fromCharCode(...new TextEncoder().encode(message.password)));
+      void run({type:'save',origin:site,document:message.document,username:message.username,password},{tab:tab.id,window:tab.windowId,origin:site,document:message.document});
+      return {accepted:true};
+    }
     if(active)return {accepted:false};
     void run({type:'detect',origin:site,document:message.document},{tab:tab.id,window:tab.windowId,origin:site,document:message.document});
     return {accepted:true};

@@ -68,11 +68,24 @@ window as access grants, including in-dialog unsealing and the Wayland overlay
 with a normal dialog fallback. Closing that approval window or pressing Escape
 denies the request. The main Desktop window can stay closed.
 
+Submitting a login or registration form offers to save its credentials in Desktop.
+If sealed, unlock there first. Desktop offers **Save login**, or an explicit
+**Update password** choice for existing logins with the same origin and username.
+Unchanged credentials are skipped. Updates preserve the item's other fields and
+reject records changed since review. A save survives the submission's navigation;
+closing the tab, canceling, expiry, or sealing cancels pending review. Submission
+does not prove that login or registration succeeded.
+
+For pages that do not emit a standard form submission, choose **Save login from
+this page** in the popup while the completed form is still visible. Captured
+credentials are kept only in memory during review, never in extension storage.
+
 ## Current boundaries
 
-- Only HTTPS top-level forms with exactly one visible password and an unambiguous
-  username field are supported. Password-change/signup forms, cross-origin form
-  actions, frames, form-less widgets, and shadow DOM are intentionally excluded.
+- Filling supports HTTPS top-level forms with exactly one visible password and
+  an unambiguous username field. Saving also supports matching password and
+  confirmation fields, preferring fields marked `new-password`. Cross-origin
+  form actions, frames, form-less widgets, and shadow DOM are excluded.
 - Matching uses exact parsed origin, including port. Login records must contain
   `username`, `password`, and URL fields. Imported records with ambiguous field
   mappings fail closed. Filling never submits a form.
@@ -82,13 +95,13 @@ denies the request. The main Desktop window can stay closed.
 - The extension remembers pairing completion for its popup only; it grants no
   credential access. Desktop and the worker still validate every request.
 - The private public-key cache only controls sealed prompt eligibility. The worker
-  checks the protected pairing registry again before lookup and release.
+  checks the protected pairing registry again before lookup, release, and saving.
 - Desktop/bridge executable authentication and bounded IPC reuse the vault's
   platform routines. Windows currently checks the server's user SID using the
   existing client routine; Unix also checks the Desktop executable identity.
 - The page can read filled credentials. A compromised authorized browser or
   extension is outside the website-origin boundary. JavaScript cannot guarantee
-  secret zeroization. No secrets are intentionally logged or persisted.
+  secret zeroization. No secrets are intentionally logged or persisted in the extension.
 - No store publication, signed extension packages, Safari adapter, or sandboxed
   browser installation support is provided here. Native hardware/browser release
   acceptance and independent security review remain required.

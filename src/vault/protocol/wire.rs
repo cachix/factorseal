@@ -14,8 +14,8 @@ use crate::vault::{
     DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
 };
 
-// Version 15 adds the optional, manager-only browser operation boundary.
-pub(super) const PROTOCOL_VERSION: u8 = 15;
+// Version 16 adds reviewed browser credential saves to the manager-only boundary.
+pub(super) const PROTOCOL_VERSION: u8 = 16;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -717,9 +717,11 @@ impl VaultAction {
         match self {
             #[cfg(feature = "browser")]
             Self::Browser { action } => {
-                if serde_json::to_vec(action)
-                    .map_err(|_| VaultError::Protocol("invalid browser action".into()))?
-                    .len()
+                if Zeroizing::new(
+                    serde_json::to_vec(action)
+                        .map_err(|_| VaultError::Protocol("invalid browser action".into()))?,
+                )
+                .len()
                     > crate::browser::MAX_FRAME
                 {
                     return Err(VaultError::Protocol("browser action too large".into()));

@@ -46,10 +46,35 @@
     try {const r=await api.runtime.sendMessage({type:'detected',document:documentId});if(!r?.accepted)attempted=false;}catch{}
   }
   const schedule=()=>{if(!scheduled){scheduled=true;setTimeout(()=>void detect(),300);}};
+  let submitted=false;
+  function offerSave(owner){
+    if(submitted || location.protocol!=='https:' || window.top!==window)return false;
+    if(!owner?.querySelectorAll || new URL(owner.action||location.href,location.href).origin!==location.origin)return false;
+    const inputs=[...owner.querySelectorAll('input')].filter(visible);
+    const passwords=inputs.filter(i=>i.type==='password');
+    const fresh=passwords.filter(i=>i.autocomplete==='new-password');
+    const chosen=fresh.length?fresh:passwords;
+    if(chosen.length<1 || chosen.length>2 || chosen.some(i=>!i.value || i.value!==chosen[0].value))return false;
+    const names=inputs.filter(i=>['text','email'].includes(i.type));
+    const preferred=names.filter(i=>i.autocomplete==='username');
+    const username=preferred.length===1?preferred[0]:names.length===1?names[0]:null;
+    if(!username?.value || new TextEncoder().encode(username.value).length>512 || new TextEncoder().encode(chosen[0].value).length>4096)return false;
+    submitted=true;
+    // Only capture an intentional submission. Never persist form values.
+    void api.runtime.sendMessage({type:'save',document:documentId,username:username.value,password:chosen[0].value}).catch(()=>{});
+    return true;
+  }
+  document.addEventListener('submit',event=>{if(event.isTrusted)offerSave(event.target);},true);
+  document.addEventListener('input',event=>{if(event.isTrusted)submitted=false;},true);
   new MutationObserver(schedule).observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['type','style','class','disabled','readonly','action']});
   document.addEventListener('visibilitychange',schedule);window.addEventListener('focus',schedule);schedule();
   api.runtime.onMessage.addListener((message,sender,reply)=>{
     if(sender.id!==api.runtime.id)return;
+    if(message.type==='save-current'){
+      const forms=[...new Set([...document.querySelectorAll('input[type="password"]')].filter(visible).map(i=>i.form).filter(Boolean))];
+      submitted=false;
+      reply({offered:forms.length===1 && offerSave(forms[0])});return;
+    }
     if(message.type==='retry'){attempted=false;schedule();reply({ok:true});return;}
     const ok=message.document===documentId && valid();
     if(message.type==='check'){reply({valid:ok,document:documentId});return;}

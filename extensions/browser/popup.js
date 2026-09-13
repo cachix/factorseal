@@ -1,7 +1,7 @@
 const api=globalThis.browser||globalThis.chrome;
 const element=id=>document.getElementById(id);
 const status=element('status');
-const labels={awaiting_unseal:'Unseal FactorSeal in Desktop to continue.',matching:'Checking for matching logins…',awaiting_approval:'Approve this request in Desktop.',awaiting_context:'Checking the login page…',releasing:'Filling your login…',saving:'Saving approval…',pair_required:'Pair this browser profile with Desktop first.',no_match:'No matching login found.',denied:'Request denied.',cancelled:'Request cancelled.',expired:'Request expired. Try again.',sealed:'Vault sealed.',revoked:'Browser profile disconnected.',done:'',busy:'Another request is pending.',vault_rejected:'The vault rejected this request. Pair with Desktop to try again.',desktop_unavailable:'Open FactorSeal Desktop, then try again.',native_disconnected:'Could not connect. Open FactorSeal Desktop and try again.',unauthorized:'Connection expired. Try again.',idle:'',Disconnected:'',Cancelled:'Request cancelled.'};
+const labels={save_failed:'Login could not be saved. It may have changed; try again.',saved:'Login saved in FactorSeal.',already_saved:'This login is already saved.',awaiting_unseal:'Unseal FactorSeal in Desktop to continue.',matching:'Checking for matching logins…',awaiting_approval:'Approve this request in Desktop.',awaiting_context:'Checking the login page…',releasing:'Filling your login…',saving:'Saving approval…',pair_required:'Pair this browser profile with Desktop first.',no_match:'No matching login found.',denied:'Request denied.',cancelled:'Request cancelled.',expired:'Request expired. Try again.',sealed:'Vault sealed.',revoked:'Browser profile disconnected.',done:'',busy:'Another request is pending.',vault_rejected:'The vault rejected this request. Pair with Desktop to try again.',desktop_unavailable:'Open FactorSeal Desktop, then try again.',native_disconnected:'Could not connect. Open FactorSeal Desktop and try again.',unauthorized:'Connection expired. Try again.',idle:'',Disconnected:'',Cancelled:'Request cancelled.'};
 let busy=false,notice='',previousStatus;
 function render(state) {
   const paired=state.paired===true;
@@ -18,6 +18,8 @@ function render(state) {
   element('pair').textContent=unavailable?'Try again':'Pair with Desktop';
   element('pair').hidden=pending;
   element('cancel').hidden=!pending;
+  element('save-page').hidden=!paired||!state.detection||pending;
+  element('save-page').disabled=busy||!state.site;
   element('detection').hidden=!paired||state.detection;
   element('site-controls').hidden=!paired||!state.detection;
   element('pause').textContent=state.paused?'Resume on this site':'Pause on this site';

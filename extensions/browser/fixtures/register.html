@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>FactorSeal registration test</title>
+<style>body{font:18px system-ui;max-width:32rem;margin:4rem auto}label,input,button{display:block;margin:1rem 0}input{padding:.5rem;width:20rem}</style>
+<h1>FactorSeal registration test</h1><p>Serve over HTTPS. Use test credentials only.</p>
+<form action="/register" method="post" onsubmit="event.preventDefault()">
+<label>Email<input name="username" type="email" autocomplete="username"></label>
+<label>Password<input name="password" type="password" autocomplete="new-password"></label>
+<label>Confirm password<input name="confirmation" type="password" autocomplete="new-password"></label>
+<button type="submit">Submit test registration</button></form>
+<p>Submission stays on this page; no credentials are sent to a server.</p>
+</html>

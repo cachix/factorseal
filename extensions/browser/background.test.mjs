@@ -6,8 +6,8 @@ import {webcrypto} from 'node:crypto';
 const core=await readFile(new URL('./core.js',import.meta.url),'utf8');
 const background=await readFile(new URL('./background.js',import.meta.url),'utf8');
 const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);}});
-async function harness({navigate=false,chrome=false,pairReason="done",nativeError}={}) {
-  let stored={},polls=0,signatures=0,connects=0;
+async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false}={}) {
+  let stored=paired?{paired:true}:{},polls=0,signatures=0,connects=0,saving=false;
   const fills=[],commands=[],registrations=[],injections=[];
   const tab={id:1,windowId:1,active:true,url:'https://example.com/login'};
   const runtime={id:'factorseal-test',getURL:p=>`extension://factorseal/${p}`,onMessage:event(),onInstalled:event(),connectNative(){
@@ -25,9 +25,14 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
           if(command.action.type==='pair')response={type:'finished',reason:pairReason};
           else if(command.action.type==='revoke')response={type:'finished',reason:'done'};
           else if(command.action.type==='detect'){response={type:'state',state:'awaiting_unseal'};}
+          else if(command.action.type==='save'){
+            saving=true;response={type:'state',state:'awaiting_approval'};
+            if(navigate){tab.url='https://example.com/account';for(const fn of api.tabs.onUpdated.listeners)fn(tab.id,{url:tab.url,status:'loading'});}
+          }
           else if(command.action.type==='poll') {
             polls++;
-            if(polls===1)response={type:'state',state:'matching'};
+            if(saving)response={type:'finished',reason:'done'};
+            else if(polls===1)response={type:'state',state:'matching'};
             else if(polls===2)response={type:'state',state:'awaiting_approval'};
             else if(polls===3){if(navigate)tab.url='https://evil.test/';response={type:'context',nonce:'c'.repeat(64)};}
             else response={type:'fill',username:Buffer.from('alice').toString('base64'),password:Buffer.from('secret').toString('base64')};
@@ -44,7 +49,7 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
     scripting:{getRegisteredContentScripts:async()=>registrations,registerContentScripts:async scripts=>registrations.push(...scripts),executeScript:async options=>injections.push(options),unregisterContentScripts:async()=>{}},
     tabs:{query:async()=>[tab],get:async()=>tab,sendMessage:async(_tab,m)=>{if(m.type==='check')return {valid:true,document:m.document};fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
     windows:{get:async()=>({focused:true}),onFocusChanged:event()}};
-  const context={crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,setTimeout:(fn,ms)=>setTimeout(fn,ms===350?1:ms),clearTimeout,console};
+  const context={crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,btoa,setTimeout:(fn,ms)=>setTimeout(fn,ms===350?1:ms),clearTimeout,console};
   context[chrome?'chrome':'browser']=api;
   vm.runInNewContext(core,context);vm.runInNewContext(background,context);
   const message=(m,sender)=>new Promise(resolve=>runtime.onMessage.listeners[0](m,sender,resolve));
@@ -52,6 +57,25 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
   return {message,sender,fills,commands,registrations,injections,setNativeError(value){nativeError=value;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
 }
 async function until(condition){for(let i=0;i<300;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw new Error('timed out');}
+test('submitted save survives navigation and never persists credentials in extension storage',async()=>{
+  const h=await harness({paired:true,navigate:true});
+  assert.equal((await h.message({type:'save',document:'doc',username:'alice',password:'秘密'},h.sender)).accepted,true);
+  await until(()=>h.commands.some(c=>c.action.type==='poll'));
+  const save=h.commands.find(c=>c.action.type==='save').action;
+  assert.equal(save.origin,'https://example.com');
+  assert.equal(Buffer.from(save.password,'base64').toString(),'秘密');
+  assert.equal(h.commands.some(c=>c.action.type==='cancel'),false);
+  assert.equal(h.fills.length,0);
+  assert.deepEqual(Object.keys(h.stored).sort(),['paired','pairing']);
+});
+test('unpaired and cross-origin senders cannot offer saves',async()=>{
+  for(const paired of [false,true]){
+    const h=await harness({paired});
+    const sender=paired?{...h.sender,url:'https://evil.test'}:h.sender;
+    assert.equal((await h.message({type:'save',document:'doc',username:'alice',password:'secret'},sender)).accepted,false);
+    assert.equal(h.connects,0);
+  }
+});
 test('popup recovers after Desktop starts without submitting another pairing request',async()=>{
   const h=await harness({nativeError:'Specified native messaging host not found.'});
   const sender={url:'extension://factorseal/popup.html'};

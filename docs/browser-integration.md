@@ -25,7 +25,7 @@ Support automatic login-form detection with Desktop-authorized filling:
 6. Seal or revoke the pairing and verify that subsequent requests fail.
 
 Start with top-level pages and explicit Desktop approval. Unapproved filling,
-cross-origin frames, HTTP sites, wildcard URL matching, save/update prompts,
+cross-origin frames, HTTP sites, wildcard URL matching,
 password generation, TOTP, and passkeys are subsequent milestones. Firefox and
 Chromium are intended targets; their packaging and permission behavior must be
 validated separately before claiming support.
@@ -281,3 +281,26 @@ and lost acknowledgments. Do not test only the happy-path login form.
 Desktop now registers the native host automatically on startup for the bundled
 Firefox and Chromium identities. Registration is unconditional; there is no global
 disable setting. Pairing, individual profile revocation, and per-fill approval remain.
+
+### Saving website credentials
+
+The shared extension offers a save on login/registration form submission, with
+an explicit popup action for completed forms that do not emit submit events.
+Only top-level HTTPS, same-origin forms with unambiguous username/password fields
+qualify. Matching new-password confirmation fields must agree. Submission is not
+proof of successful authentication.
+
+A signed `save` request binds the original origin, document, username, and password.
+Desktop retains the bounded request in memory while asking to unseal if necessary.
+The worker finds exact-origin, same-username records; unchanged credentials end
+without another prompt. Otherwise Desktop explicitly approves creation or selects
+one record to update. A single-use worker ticket binds the complete submitted
+payload and reviewed record digest. Saving rechecks pairing and rejects stale
+records; updates preserve other personal fields and use the normal personal
+storage/history path. The extension receives only completion status.
+
+Save review survives submission navigation because it writes captured credentials
+for the original site; it never releases a password back to the navigated page.
+Tab closure, cancellation, sealing, and deadlines invalidate pending review.
+No submitted credentials are stored in extension storage or logged. Rust signed
+payload buffers are wiped on drop; JavaScript cannot guarantee memory zeroization.
