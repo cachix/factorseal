@@ -110,6 +110,55 @@ This crate sits outside the main Cargo workspace, same as the other two
 spikes, for the same reason: nothing here should affect `factorseal`'s
 build, lints, or CI.
 
+## How to run it
+
+### Validating the interop broker (option 1)
+
+**On Windows**, build or copy `identity-probe-listener.exe` and
+`identity-probe-client.exe`, then start the listener:
+
+```powershell
+.\identity-probe-listener.exe
+```
+
+Run the client **natively first**, as a baseline:
+
+```powershell
+.\identity-probe-client.exe
+```
+
+Note the reported PID, SID, path, and hash, then restart the listener and
+run the **same** `identity-probe-client.exe` a second time, this time from
+inside WSL2 via interop:
+
+```console
+$ /mnt/c/path/to/identity-probe-client.exe
+```
+
+Compare the two reports. The SID should be identical both times (same
+Windows user); the path and hash should be identical (same file); only the
+PID and any timestamp should differ. That's the empirical claim from
+`SECURITY.md`'s framing being checked directly: an interop-launched process
+is not a special case to this identification logic.
+
+### Validating launch-time delegation (option 2)
+
+**On Windows**, build or copy `capability-delegator.exe`. `capability-receiver`
+needs to be built *inside* WSL2 (`cargo build --bin capability-receiver`
+from this directory, already done natively above) since it's a Linux binary
+`wsl.exe` will execute directly inside the distro — copying a
+cross-compiled Windows binary here would defeat the point.
+
+```powershell
+.\capability-delegator.exe NixOS /home/<you>/projects/factorseal/spikes/wsl2-interop-bridge/target/debug/capability-receiver
+```
+
+Expected: the delegator prints the capability it minted, then "received
+back" the same value, then `MATCH`. That confirms a capability handed to a
+`wsl.exe`-launched process via redirected stdio survives the round trip with
+nothing the launched process needed to discover, connect to, or
+authenticate against.
+
 ## Non-goals
 
 - No attempt to reuse Factorseal's actual vault wire protocol or named-pipe
