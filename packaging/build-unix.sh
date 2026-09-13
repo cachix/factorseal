@@ -73,8 +73,12 @@ fi
 cargo build --locked --profile "$build_profile" --no-default-features \
     --features vault,cli,hardware,personal-sync-network,browser \
     --bin factorseal --bin factorseal-parser --bin factorseal-network --bin factorseal-browser
-if [ "$exchange" = 1 ]; then
-    cargo build --locked --profile "$build_profile" -p factorseal-desktop --features apple-credential-exchange
+if [ "$platform" = macos ]; then
+    if [ "$exchange" = 1 ]; then
+        cargo build --locked --profile "$build_profile" -p factorseal-desktop --features apple-credential-exchange
+    else
+        cargo build --locked --profile "$build_profile" -p factorseal-desktop
+    fi
 fi
 target_dir=$(cargo metadata --locked --no-deps --format-version 1 |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
@@ -107,6 +111,7 @@ else
     app="$stage/$archive/Factorseal.app/Contents"
     mkdir -p "$app/MacOS" "$app/Resources" "$stage/$archive/Library/LaunchAgents"
     cp "$target_dir/$profile_dir/factorseal" "$app/MacOS/"
+    cp "$target_dir/$profile_dir/factorseal-desktop" "$app/MacOS/"
     cp "$target_dir/$profile_dir/factorseal-parser" "$target_dir/$profile_dir/factorseal-network" "$target_dir/$profile_dir/factorseal-browser" "$app/MacOS/"
     cp packaging/macos/factorseal-askpass "$app/Resources/"
     sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Info.plist"
@@ -114,10 +119,7 @@ else
     chmod 0755 "$app/MacOS/factorseal" "$app/Resources/factorseal-askpass"
     if [ "$exchange" = 1 ]; then
         mkdir -p "$app/Frameworks"
-        cp "$target_dir/$profile_dir/factorseal-desktop" "$app/MacOS/"
         cp "$FACTORSEAL_APPLE_BRIDGE_DIR/libFactorSealAppleBridge.dylib" "$app/Frameworks/"
-        /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable factorseal-desktop' "$app/Info.plist"
-        /usr/libexec/PlistBuddy -c 'Set :LSUIElement false' "$app/Info.plist"
         /usr/libexec/PlistBuddy -c 'Add :LSMinimumSystemVersion string 26.0' "$app/Info.plist"
         /usr/libexec/PlistBuddy -c 'Add :FactorSealExperimentalCredentialExchange bool true' "$app/Info.plist"
         /usr/libexec/PlistBuddy -c 'Add :NSUserActivityTypes array' "$app/Info.plist"

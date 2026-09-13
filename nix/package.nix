@@ -3,7 +3,6 @@
   rustPlatform,
   stdenv,
   pkg-config,
-  dbus,
 }:
 
 rustPlatform.buildRustPackage {
@@ -28,7 +27,6 @@ rustPlatform.buildRustPackage {
   };
 
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [ dbus ];
 
   cargoBuildFlags = [
     "--no-default-features"

@@ -11,13 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use dbus::Path as DbusPath;
-use dbus::arg::{OwnedFd, PropMap};
-use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
-use dbus::blocking::{Connection, Proxy};
-use dbus::message::MatchRule;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::getuid;
+use zbus::zvariant::{OwnedFd, OwnedObjectPath, OwnedValue};
+use zbus::{Connection, MessageStream, Proxy};
 
 use super::transport::unix_socket::{
     accept_until_sealed, bind_listener, install_shutdown_signal_handler, validate_socket_options,
@@ -188,26 +185,39 @@ impl LinuxVaultLifecycle {
         let thread = std::thread::Builder::new()
             .name("factorseal-linux-lifecycle".to_owned())
             .spawn(move || {
-                let monitor = match LinuxLifecycleConnection::new(Arc::clone(&thread_signal)) {
-                    Ok(monitor) => {
-                        if ready_sender.send(Ok(())).is_err() {
-                            return;
-                        }
-                        monitor
-                    }
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
                     Err(error) => {
                         let _ = ready_sender.send(Err(error.to_string()));
                         return;
                     }
                 };
-                while !thread_stopping.load(Ordering::Acquire) {
-                    if monitor.process(DEFAULT_POLL_INTERVAL).is_err() {
-                        // Losing lifecycle monitoring is itself fail closed.
-                        thread_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
-                        abort_if_unsealed(&thread_signal);
-                        break;
+                runtime.block_on(async {
+                    let mut monitor =
+                        match LinuxLifecycleConnection::new(Arc::clone(&thread_signal)).await {
+                            Ok(monitor) => {
+                                if ready_sender.send(Ok(())).is_err() {
+                                    return;
+                                }
+                                monitor
+                            }
+                            Err(error) => {
+                                let _ = ready_sender.send(Err(error.to_string()));
+                                return;
+                            }
+                        };
+                    while !thread_stopping.load(Ordering::Acquire) {
+                        if monitor.process(DEFAULT_POLL_INTERVAL).await.is_err() {
+                            // Losing lifecycle monitoring is itself fail closed.
+                            thread_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
+                            abort_if_unsealed(&thread_signal);
+                            break;
+                        }
                     }
-                }
+                });
             })
             .map_err(|error| {
                 VaultError::Protocol(format!("could not start Linux lifecycle monitor: {error}"))
@@ -254,163 +264,178 @@ impl Drop for LinuxVaultLifecycle {
 
 struct LinuxLifecycleConnection {
     connection: Connection,
+    messages: MessageStream,
+    owner_changes: MessageStream,
     _delay_inhibitor: OwnedFd,
     signal: Arc<LifecycleSignal>,
-    session_paths: Arc<Mutex<HashSet<String>>>,
-    sessions_changed: Arc<AtomicBool>,
+    session_paths: Mutex<HashSet<String>>,
+    owner: zbus::names::OwnedUniqueName,
 }
 
 impl LinuxLifecycleConnection {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keeping all logind registrations together makes their fail-closed setup auditable"
-    )]
-    fn new(signal: Arc<LifecycleSignal>) -> VaultResult<Self> {
-        let connection = Connection::new_system().map_err(|error| lifecycle_error(&error))?;
-        let session_paths = Arc::new(Mutex::new(HashSet::new()));
-        let sessions_changed = Arc::new(AtomicBool::new(false));
-        let (delay_inhibitor,): (OwnedFd,) = connection
-            .with_proxy(
-                "org.freedesktop.login1",
-                "/org/freedesktop/login1",
-                LIFECYCLE_DBUS_TIMEOUT,
+    async fn new(signal: Arc<LifecycleSignal>) -> VaultResult<Self> {
+        let connection = zbus::connection::Builder::system()
+            .map_err(|error| lifecycle_error(&error))?
+            .method_timeout(LIFECYCLE_DBUS_TIMEOUT)
+            .build()
+            .await
+            .map_err(|error| lifecycle_error(&error))?;
+        Self::with_connection(connection, signal).await
+    }
+
+    async fn with_connection(
+        connection: Connection,
+        signal: Arc<LifecycleSignal>,
+    ) -> VaultResult<Self> {
+        let bus = zbus::fdo::DBusProxy::new(&connection)
+            .await
+            .map_err(|error| lifecycle_error(&error))?;
+        let owner_rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender("org.freedesktop.DBus")
+            .map_err(|error| lifecycle_error(&error))?
+            .path("/org/freedesktop/DBus")
+            .map_err(|error| lifecycle_error(&error))?
+            .interface("org.freedesktop.DBus")
+            .map_err(|error| lifecycle_error(&error))?
+            .member("NameOwnerChanged")
+            .map_err(|error| lifecycle_error(&error))?
+            .add_arg("org.freedesktop.login1")
+            .map_err(|error| lifecycle_error(&error))?
+            .build();
+        let owner_changes = MessageStream::for_match_rule(owner_rule, &connection, Some(8))
+            .await
+            .map_err(|error| lifecycle_error(&error))?;
+        let owner = bus
+            .get_name_owner(
+                zbus::names::BusName::try_from("org.freedesktop.login1")
+                    .map_err(|error| lifecycle_error(&error.into()))?,
             )
-            .method_call(
-                "org.freedesktop.login1.Manager",
+            .await
+            .map_err(|error| lifecycle_error(&error.into()))?;
+        // Bind calls and signals to the same bus-authenticated logind instance.
+        // Subscribe before inspecting sessions so startup cannot miss a lock.
+        let rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender(owner.clone())
+            .map_err(|error| lifecycle_error(&error))?
+            .build();
+        let messages = MessageStream::for_match_rule(rule, &connection, Some(64))
+            .await
+            .map_err(|error| lifecycle_error(&error))?;
+        let manager = Proxy::new(
+            &connection,
+            owner.as_str(),
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+        )
+        .await
+        .map_err(|error| lifecycle_error(&error))?;
+        let delay_inhibitor: OwnedFd = manager
+            .call(
                 "Inhibit",
-                (
+                &(
                     "sleep:shutdown",
                     "Factorseal",
                     "Lock hardware-unwrapped secrets",
                     "delay",
                 ),
             )
+            .await
             .map_err(|error| lifecycle_error(&error))?;
-
-        let sleep_signal = Arc::clone(&signal);
-        connection
-            .add_match::<(bool,), _>(
-                MatchRule::new_signal("org.freedesktop.login1.Manager", "PrepareForSleep")
-                    .with_sender("org.freedesktop.login1")
-                    .with_path("/org/freedesktop/login1"),
-                move |(starting,), _, _| {
-                    // The false edge is a resume fallback if the pre-sleep
-                    // edge was lost. A correctly handled true edge has
-                    // already stopped the process before this can arrive.
-                    if starting {
-                        start_logind_deadline(Arc::clone(&sleep_signal));
-                    }
-                    sleep_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
-                    if !starting {
-                        abort_if_unsealed(&sleep_signal);
-                    }
-                    true
-                },
-            )
-            .map_err(|error| lifecycle_error(&error))?;
-
-        let shutdown_signal = Arc::clone(&signal);
-        connection
-            .add_match::<(bool,), _>(
-                MatchRule::new_signal("org.freedesktop.login1.Manager", "PrepareForShutdown")
-                    .with_sender("org.freedesktop.login1")
-                    .with_path("/org/freedesktop/login1"),
-                move |(starting,), _, _| {
-                    if starting {
-                        start_logind_deadline(Arc::clone(&shutdown_signal));
-                        shutdown_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
-                    }
-                    true
-                },
-            )
-            .map_err(|error| lifecycle_error(&error))?;
-
-        let lock_signal = Arc::clone(&signal);
-        let lock_paths = Arc::clone(&session_paths);
-        connection
-            .add_match::<(), _>(
-                MatchRule::new_signal("org.freedesktop.login1.Session", "Lock")
-                    .with_sender("org.freedesktop.login1"),
-                move |(), _, message| {
-                    if message_path_is_tracked(
-                        message.path().map(|path| path.to_string()),
-                        &lock_paths,
-                    ) {
-                        lock_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
-                        abort_if_unsealed(&lock_signal);
-                    }
-                    true
-                },
-            )
-            .map_err(|error| lifecycle_error(&error))?;
-
-        let hint_signal = Arc::clone(&signal);
-        let hint_paths = Arc::clone(&session_paths);
-        connection
-            .add_match::<(String, PropMap, Vec<String>), _>(
-                MatchRule::new_signal("org.freedesktop.DBus.Properties", "PropertiesChanged")
-                    .with_sender("org.freedesktop.login1"),
-                move |(interface, changed, _invalidated), _, message| {
-                    if interface == "org.freedesktop.login1.Session"
-                        && locked_hint_is_true(&changed)
-                        && message_path_is_tracked(
-                            message.path().map(|path| path.to_string()),
-                            &hint_paths,
-                        )
-                    {
-                        hint_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
-                        abort_if_unsealed(&hint_signal);
-                    }
-                    true
-                },
-            )
-            .map_err(|error| lifecycle_error(&error))?;
-
-        for member in ["SessionNew", "SessionRemoved"] {
-            let changed = Arc::clone(&sessions_changed);
-            let removed_paths = Arc::clone(&session_paths);
-            let removed_signal = Arc::clone(&signal);
-            connection
-                .add_match::<(String, DbusPath<'static>), _>(
-                    MatchRule::new_signal("org.freedesktop.login1.Manager", member)
-                        .with_sender("org.freedesktop.login1")
-                        .with_path("/org/freedesktop/login1"),
-                    move |(_, path), _, _| {
-                        if member == "SessionRemoved"
-                            && message_path_is_tracked(Some(path.to_string()), &removed_paths)
-                        {
-                            removed_signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
-                        }
-                        changed.store(true, Ordering::Release);
-                        true
-                    },
-                )
-                .map_err(|error| lifecycle_error(&error))?;
-        }
-
         let monitor = Self {
-            connection,
+            messages,
+            owner_changes,
             _delay_inhibitor: delay_inhibitor,
             signal,
-            session_paths,
-            sessions_changed,
+            session_paths: Mutex::new(HashSet::new()),
+            owner: owner.clone(),
+            connection: connection.clone(),
         };
-        let manager = monitor.connection.with_proxy(
-            "org.freedesktop.login1",
-            "/org/freedesktop/login1",
-            LIFECYCLE_DBUS_TIMEOUT,
-        );
-        monitor.refresh_sessions(&manager)?;
+        monitor.refresh_sessions(&manager).await?;
         Ok(monitor)
+    }
+
+    fn handle_message(&self, message: &zbus::Message) -> VaultResult<bool> {
+        let header = message.header();
+        if header.sender().map(zbus::names::UniqueName::as_str) != Some(self.owner.as_str()) {
+            return Ok(false);
+        }
+        let interface = header.interface().map(zbus::names::InterfaceName::as_str);
+        let member = header.member().map(zbus::names::MemberName::as_str);
+        let path = header.path().map(ToString::to_string);
+        let manager = path.as_deref() == Some("/org/freedesktop/login1");
+        match (interface, member) {
+            (
+                Some("org.freedesktop.login1.Manager"),
+                Some("PrepareForSleep" | "PrepareForShutdown"),
+            ) if manager => {
+                let starting: bool = message
+                    .body()
+                    .deserialize()
+                    .map_err(|error| lifecycle_error(&error))?;
+                let sleep = member == Some("PrepareForSleep");
+                if starting {
+                    start_logind_deadline(Arc::clone(&self.signal));
+                }
+                // The false sleep edge is a resume fallback if the pre-sleep edge was lost.
+                if starting || sleep {
+                    self.signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
+                    if !starting {
+                        abort_if_unsealed(&self.signal);
+                    }
+                }
+            }
+            (Some("org.freedesktop.login1.Session"), Some("Lock")) => {
+                if message_path_is_tracked(path, &self.session_paths) {
+                    self.signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
+                    abort_if_unsealed(&self.signal);
+                }
+            }
+            (Some("org.freedesktop.DBus.Properties"), Some("PropertiesChanged")) => {
+                let (interface, changed, _invalidated): (
+                    String,
+                    std::collections::HashMap<String, OwnedValue>,
+                    Vec<String>,
+                ) = message
+                    .body()
+                    .deserialize()
+                    .map_err(|error| lifecycle_error(&error))?;
+                if interface == "org.freedesktop.login1.Session"
+                    && locked_hint_is_true(&changed)
+                    && message_path_is_tracked(path, &self.session_paths)
+                {
+                    self.signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
+                    abort_if_unsealed(&self.signal);
+                }
+            }
+            (Some("org.freedesktop.login1.Manager"), Some("SessionNew" | "SessionRemoved"))
+                if manager =>
+            {
+                let (_, path): (String, OwnedObjectPath) = message
+                    .body()
+                    .deserialize()
+                    .map_err(|error| lifecycle_error(&error))?;
+                if member == Some("SessionRemoved")
+                    && message_path_is_tracked(Some(path.to_string()), &self.session_paths)
+                {
+                    self.signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
+                }
+                return Ok(true);
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 
     /// Track every logind session for this user, plus an explicitly selected
     /// session. `LockedHint` is the actual lock state; `Lock` remains an eager
     /// fallback for compositors that update the property late.
-    fn refresh_sessions(&self, manager: &Proxy<'_, &Connection>) -> VaultResult<()> {
-        type Session = (String, u32, String, String, DbusPath<'static>);
-        let (sessions,): (Vec<Session>,) = manager
-            .method_call("org.freedesktop.login1.Manager", "ListSessions", ())
+    async fn refresh_sessions(&self, manager: &Proxy<'_>) -> VaultResult<()> {
+        type Session = (String, u32, String, String, OwnedObjectPath);
+        let sessions: Vec<Session> = manager
+            .call("ListSessions", &())
+            .await
             .map_err(|error| lifecycle_error(&error))?;
         let expected_uid = getuid().as_raw();
         let mut paths: HashSet<String> = sessions
@@ -425,12 +450,9 @@ impl LinuxLifecycleConnection {
                 .filter(|session_id| !session_id.is_empty())
         });
         if let Some(session_id) = explicit_session {
-            let (session_path,): (DbusPath<'static>,) = manager
-                .method_call(
-                    "org.freedesktop.login1.Manager",
-                    "GetSession",
-                    (session_id,),
-                )
+            let session_path: OwnedObjectPath = manager
+                .call("GetSession", &(session_id,))
+                .await
                 .map_err(|error| lifecycle_error(&error))?;
             paths.insert(session_path.to_string());
         }
@@ -447,13 +469,17 @@ impl LinuxLifecycleConnection {
         }
 
         for path in &paths {
-            let session = self.connection.with_proxy(
-                "org.freedesktop.login1",
+            let session = Proxy::new(
+                &self.connection,
+                self.owner.as_str(),
                 path.as_str(),
-                LIFECYCLE_DBUS_TIMEOUT,
-            );
+                "org.freedesktop.login1.Session",
+            )
+            .await
+            .map_err(|error| lifecycle_error(&error))?;
             let locked: bool = session
-                .get("org.freedesktop.login1.Session", "LockedHint")
+                .get_property("LockedHint")
+                .await
                 .map_err(|error| lifecycle_error(&error))?;
             if locked {
                 self.signal.trigger_bounded(LOGIND_SEAL_DEADLINE);
@@ -463,22 +489,38 @@ impl LinuxLifecycleConnection {
             .session_paths
             .lock()
             .map_err(|_| VaultError::WorkerUnavailable)? = paths;
-        self.sessions_changed.store(false, Ordering::Release);
         Ok(())
     }
 
-    fn process(&self, timeout: Duration) -> VaultResult<()> {
-        self.connection
-            .process(timeout)
-            .map(|_| ())
-            .map_err(|error| lifecycle_error(&error))?;
-        if self.sessions_changed.load(Ordering::Acquire) {
-            let manager = self.connection.with_proxy(
-                "org.freedesktop.login1",
+    async fn process(&mut self, timeout: Duration) -> VaultResult<()> {
+        use zbus::export::futures_core::Stream;
+        let next = async {
+            tokio::select! {
+                message = std::future::poll_fn(|cx| std::pin::Pin::new(&mut self.messages).poll_next(cx)) => message,
+                _ = std::future::poll_fn(|cx| std::pin::Pin::new(&mut self.owner_changes).poll_next(cx)) => {
+                    Some(Err(zbus::Error::Failure("logind owner changed or its bus disconnected".to_owned())))
+                }
+            }
+        };
+        let message = match tokio::time::timeout(timeout, next).await {
+            Err(_) => return Ok(()),
+            Ok(None) => {
+                return Err(VaultError::Protocol(
+                    "Linux lifecycle bus disconnected".to_owned(),
+                ));
+            }
+            Ok(Some(message)) => message.map_err(|error| lifecycle_error(&error))?,
+        };
+        if self.handle_message(&message)? {
+            let manager = Proxy::new(
+                &self.connection,
+                self.owner.as_str(),
                 "/org/freedesktop/login1",
-                LIFECYCLE_DBUS_TIMEOUT,
-            );
-            self.refresh_sessions(&manager)?;
+                "org.freedesktop.login1.Manager",
+            )
+            .await
+            .map_err(|error| lifecycle_error(&error))?;
+            self.refresh_sessions(&manager).await?;
         }
         Ok(())
     }
@@ -497,11 +539,11 @@ fn message_path_is_tracked(path: Option<String>, paths: &Mutex<HashSet<String>>)
         .map_or(true, |paths| paths.contains(path.as_str()))
 }
 
-fn locked_hint_is_true(changed: &PropMap) -> bool {
+fn locked_hint_is_true(changed: &std::collections::HashMap<String, OwnedValue>) -> bool {
     changed
         .get("LockedHint")
-        .and_then(|value| value.0.as_i64())
-        .is_some_and(|value| value != 0)
+        .and_then(|value| bool::try_from(value).ok())
+        .unwrap_or(false)
 }
 
 fn abort_if_unsealed(signal: &LifecycleSignal) {
@@ -523,7 +565,7 @@ fn start_logind_deadline(signal: Arc<LifecycleSignal>) {
     }
 }
 
-fn lifecycle_error(error: &dbus::Error) -> VaultError {
+fn lifecycle_error(error: &zbus::Error) -> VaultError {
     VaultError::Protocol(format!(
         "could not monitor Linux session lifecycle: {error}"
     ))
@@ -559,26 +601,39 @@ pub(crate) fn caller_identity(
 }
 
 pub(crate) fn dbus_caller_identity(name: &str) -> VaultResult<(CallerIdentity, String)> {
+    // The synchronous vault API can also be called from an async embedder.
+    // zbus's blocking facade runs its own Tokio runtime, so keep that runtime
+    // off the caller's executor thread.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("factorseal-dbus-identity".to_owned())
+            .spawn_scoped(scope, || dbus_caller_identity_blocking(name))
+            .map_err(|_| VaultError::WorkerUnavailable)?
+            .join()
+            .map_err(|_| VaultError::WorkerUnavailable)?
+    })
+}
+
+fn dbus_caller_identity_blocking(name: &str) -> VaultResult<(CallerIdentity, String)> {
     static CACHE: std::sync::OnceLock<CallerIdentityCache> = std::sync::OnceLock::new();
     if !name.starts_with(':') {
         return Err(VaultError::AuthorizationRequired);
     }
-    let connection =
-        Connection::new_session().map_err(|error| VaultError::Protocol(error.to_string()))?;
-    let proxy = connection.with_proxy(
+    let connection = zbus::blocking::connection::Builder::session()
+        .and_then(|builder| builder.method_timeout(Duration::from_secs(2)).build())
+        .map_err(|error| VaultError::Protocol(error.to_string()))?;
+    let proxy = zbus::blocking::Proxy::new(
+        &connection,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
-        Duration::from_secs(2),
-    );
-    let (uid,): (u32,) = proxy
-        .method_call("org.freedesktop.DBus", "GetConnectionUnixUser", (name,))
+        "org.freedesktop.DBus",
+    )
+    .map_err(|_| VaultError::AuthorizationRequired)?;
+    let uid: u32 = proxy
+        .call("GetConnectionUnixUser", &(name,))
         .map_err(|_| VaultError::AuthorizationRequired)?;
-    let (pid,): (u32,) = proxy
-        .method_call(
-            "org.freedesktop.DBus",
-            "GetConnectionUnixProcessID",
-            (name,),
-        )
+    let pid: u32 = proxy
+        .call("GetConnectionUnixProcessID", &(name,))
         .map_err(|_| VaultError::AuthorizationRequired)?;
     let identity = process_identity(
         uid,
@@ -586,12 +641,8 @@ pub(crate) fn dbus_caller_identity(name: &str) -> VaultResult<(CallerIdentity, S
         CACHE.get_or_init(CallerIdentityCache::default),
     )?;
     // The unique bus name must still refer to the same live connection.
-    let current: Result<(u32,), _> = proxy.method_call(
-        "org.freedesktop.DBus",
-        "GetConnectionUnixProcessID",
-        (name,),
-    );
-    if current.ok() != Some((pid,)) {
+    let current: Result<u32, _> = proxy.call("GetConnectionUnixProcessID", &(name,));
+    if current.ok() != Some(pid) {
         return Err(VaultError::AuthorizationRequired);
     }
     let cwd = fs::canonicalize(format!("/proc/{pid}/cwd"))
@@ -1172,3 +1223,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "linux_lifecycle_tests.rs"]
+mod lifecycle_tests;

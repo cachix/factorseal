@@ -11,14 +11,25 @@ artifact is ready to release:
 
 - `build-unix.sh linux` creates a tarball with the binaries, systemd user unit,
   interactive session-agent helper, and one-command physical acceptance runner;
-- `build-unix.sh macos` creates a tarball and an unsigned `.pkg`. The app is
+- `build-unix.sh macos` creates a Desktop app tarball and an unsigned `.pkg`.
+  Opening `Factorseal.app` launches Desktop; its login launcher starts Desktop
+  in the background. The app is
   signed locally unless an Apple identity and profile are supplied;
-- `build-windows.ps1` creates a ZIP containing the executables, the askpass
-  helper, Scheduled Task installer, and one-command physical acceptance runner;
-- `build-windows-msix.ps1` creates the CLI-oriented MSIX submitted to the
-  Microsoft Store. It installs a `factorseal.exe` execution alias and stays out
-  of the Start menu. The Store package intentionally does not install the
-  interim PowerShell askpass helper or a login-start task.
+- `build-windows.ps1` creates a ZIP containing Desktop, the CLI and helper
+  executables, the askpass helper, Scheduled Task installer, and one-command
+  physical acceptance runner;
+- `build-windows-msix.ps1` creates the Desktop MSIX submitted to the
+  Microsoft Store. Its Start menu entry opens Desktop, and its `factorseal.exe`
+  execution alias opens the CLI. The Store package intentionally does not install
+  the interim PowerShell askpass helper or a login-start task.
+
+All macOS and Windows packages include Desktop, the CLI, parser, and network
+helper from the same build. For the Windows ZIP, extract the entire archive
+and run `factorseal-desktop.exe`. The optional Scheduled Task installer runs
+the headless CLI agent; do not enable it when using Desktop to host the vault.
+Regular CI uploads `factorseal-macos` and `factorseal-windows` artifacts after
+package checks pass. Apple credential exchange remains an opt-in feature of
+the experimental macOS package, rather than a requirement for shipping Desktop.
 
 SecretSpec cache permissions are granted per project through `factorseal permissions`;
 there is no installation-wide provider grant. The endpoint, not the SecretSpec
@@ -38,16 +49,17 @@ Official macOS releases still require installer signing and notarization.
 Directly distributed Windows ZIP releases require platform signing credentials;
 the Microsoft Store signs an accepted MSIX. Linux release jobs must
 build against the supported deployment baseline and publish checksums and
-provenance. The Linux binaries dynamically require glibc and D-Bus; they are
-not universal static binaries and must not be published from a Nix development
-shell whose loader paths point into `/nix/store`. Physical TPM/Secure Enclave
+provenance. The Linux CLI binaries currently dynamically require glibc; D-Bus
+protocol support uses zbus without linking libdbus. They are not universal static
+binaries and must not be published from a Nix development shell whose loader
+paths point into `/nix/store`. Physical TPM/Secure Enclave
 acceptance is separate from archive smoke testing.
 Use the release-candidate runners in [`acceptance/`](../acceptance/README.md)
 on physical hosts and attach their redacted output to the release approval.
 
-A Windows release build signs `factorseal.exe` with `signtool.exe`, requires an
-RFC 3161 timestamp URL, and verifies the resulting Authenticode signature before
-packaging it:
+A Windows ZIP release build signs Desktop, the CLI, and both helpers with
+`signtool.exe`, requires an RFC 3161 timestamp URL, and verifies the resulting
+Authenticode signatures before packaging them:
 
 ```powershell
 .\packaging\build-windows.ps1 `
@@ -112,10 +124,10 @@ certificate whose subject exactly matches `-Publisher`:
 
 That test certificate must be trusted on the test machine. A locally signed
 package is for development only; the release acceptance path is a package
-installed from a private Store flight. After installation, open a fresh
-terminal and run `factorseal --version`, `factorseal init`, and then
-`factorseal agent`. Automatic login startup is deferred until the interim
-PowerShell password dialog has been replaced by a native prompt.
+installed from a private Store flight. After installation, open Factorseal from
+the Start menu to initialize and unlock the vault in Desktop. The CLI is also
+available from a fresh terminal as `factorseal`. The Store package does not
+configure automatic login startup.
 
 For physical macOS testing, provide an Apple Development identity and a
 matching profile for `dev.factorseal`:
@@ -132,6 +144,10 @@ also requires signing the `.pkg` and notarization.
 
 ## Obtaining a password factor
 
+Desktop collects factors in its own interface and passes them to its CLI worker
+over private inherited pipes. The macOS login launcher starts this Desktop host
+in the background. The following options apply to the standalone CLI agent.
+
 The default unlock policy contains a password in addition to its platform key,
 so the service needs a way to obtain that password when unsealing. Biometric-only
 groups skip this input. Password groups accept three sources, in order:
@@ -144,11 +160,12 @@ groups skip this input. Password groups accept three sources, in order:
 With none of these available the vault stops with a message naming the missing
 source, rather than failing inside a terminal prompt it could never show.
 
-A service started by launchd, a logon task, or a systemd unit has no terminal,
+A CLI agent started by a logon task or a systemd unit has no terminal,
 so it must use one of the first two. The askpass helper is preferred: the
-secret crosses a pipe and is never written beside the vault it protects. macOS
-and Windows packages ship their own helper and pass `--askpass` for exactly
-this reason, which is why both can keep unsealing the vault at login.
+secret crosses a pipe and is never written beside the vault it protects. The
+Windows ZIP's optional CLI Scheduled Task passes its bundled `--askpass` helper.
+The macOS app retains an askpass helper for explicit CLI use; Desktop uses its
+own password and biometric prompts.
 `factorseal agent` waits for initialization by default: before a vault exists,
 the process logs the `factorseal init` instruction and waits. As soon as
 initialization creates the vault metadata, the same process continues into the

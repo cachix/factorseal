@@ -214,23 +214,26 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
-    use dbus::blocking::Connection;
+    use zbus::blocking::{Proxy, connection::Builder};
 
-    let connection = Connection::new_session()
+    let connection = Builder::session()
+        .and_then(|builder| {
+            builder
+                .method_timeout(std::time::Duration::from_secs(2))
+                .build()
+        })
         .map_err(|error| format!("could not monitor Secret Service activation: {error}"))?;
-    let proxy = connection.with_proxy(
+    let proxy = Proxy::new(
+        &connection,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
-        std::time::Duration::from_secs(2),
-    );
+        "org.freedesktop.DBus",
+    )
+    .map_err(|error| format!("could not monitor Secret Service activation: {error}"))?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let (has_owner,): (bool,) = proxy
-            .method_call(
-                "org.freedesktop.DBus",
-                "NameHasOwner",
-                (SECRET_SERVICE_NAME,),
-            )
+        let has_owner: bool = proxy
+            .call("NameHasOwner", &(SECRET_SERVICE_NAME,))
             .map_err(|error| format!("could not inspect Secret Service activation: {error}"))?;
         if has_owner {
             return Ok(());

@@ -880,14 +880,15 @@ fn load_permissions(
 
 #[cfg(target_os = "linux")]
 fn secret_service_error() -> Option<String> {
-    use dbus::blocking::Connection;
-    use dbus::blocking::stdintf::org_freedesktop_dbus::Properties as _;
+    use zbus::blocking::{Proxy, connection::Builder};
 
     const BUS_NAME: &str = "org.freedesktop.secrets";
     const SERVICE_PATH: &str = "/org/freedesktop/secrets";
     const SERVICE_INTERFACE: &str = "org.freedesktop.Secret.Service";
 
-    let connection = match Connection::new_session() {
+    let connection = match Builder::session()
+        .and_then(|builder| builder.method_timeout(Duration::from_secs(2)).build())
+    {
         Ok(connection) => connection,
         Err(error) => {
             return Some(format!(
@@ -895,16 +896,16 @@ fn secret_service_error() -> Option<String> {
             ));
         }
     };
-    let bus = connection.with_proxy(
+    let owner: Result<bool, zbus::Error> = Proxy::new(
+        &connection,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
-        Duration::from_secs(2),
-    );
-    let owner: Result<(bool,), dbus::Error> =
-        bus.method_call("org.freedesktop.DBus", "NameHasOwner", (BUS_NAME,));
+        "org.freedesktop.DBus",
+    )
+    .and_then(|bus| bus.call("NameHasOwner", &(BUS_NAME,)));
     match owner {
-        Ok((false,)) => return None,
-        Ok((true,)) => {}
+        Ok(false) => return None,
+        Ok(true) => {}
         Err(error) => {
             return Some(format!(
                 "System keyring integration could not inspect the session D-Bus: {error}. FactorSeal's vault is still available."
@@ -912,9 +913,9 @@ fn secret_service_error() -> Option<String> {
         }
     }
 
-    let service = connection.with_proxy(BUS_NAME, SERVICE_PATH, Duration::from_secs(2));
-    let collections: Result<Vec<dbus::Path<'static>>, dbus::Error> =
-        service.get(SERVICE_INTERFACE, "Collections");
+    let collections: Result<Vec<zbus::zvariant::OwnedObjectPath>, zbus::Error> =
+        Proxy::new(&connection, BUS_NAME, SERVICE_PATH, SERVICE_INTERFACE)
+            .and_then(|service| service.get_property("Collections"));
     match collections {
         Ok(collections) if factorseal_secret_service(&collections) => None,
         Ok(_) => Some(
@@ -928,10 +929,10 @@ fn secret_service_error() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn factorseal_secret_service(collections: &[dbus::Path<'_>]) -> bool {
+fn factorseal_secret_service(collections: &[zbus::zvariant::OwnedObjectPath]) -> bool {
     collections
         .iter()
-        .any(|path| path == "/org/freedesktop/secrets/collection/factorseal")
+        .any(|path| path.as_str() == "/org/freedesktop/secrets/collection/factorseal")
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1170,11 +1171,57 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn recognizes_factorseal_as_the_secret_service_provider() {
-        let factorseal = dbus::Path::new("/org/freedesktop/secrets/collection/factorseal").unwrap();
-        let other = dbus::Path::new("/org/freedesktop/secrets/collection/login").unwrap();
+        let factorseal = zbus::zvariant::OwnedObjectPath::try_from(
+            "/org/freedesktop/secrets/collection/factorseal",
+        )
+        .unwrap();
+        let other =
+            zbus::zvariant::OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/login")
+                .unwrap();
 
         assert!(factorseal_secret_service(&[factorseal]));
         assert!(!factorseal_secret_service(&[other]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keyring_probe_and_activation_use_the_session_bus() {
+        use super::secret_service_error;
+        use std::time::Duration;
+
+        struct Keyring(bool);
+        #[zbus::interface(name = "org.freedesktop.Secret.Service")]
+        impl Keyring {
+            #[zbus(property)]
+            fn collections(&self) -> Vec<zbus::zvariant::OwnedObjectPath> {
+                vec![
+                    zbus::zvariant::OwnedObjectPath::try_from(if self.0 {
+                        "/org/freedesktop/secrets/collection/factorseal"
+                    } else {
+                        "/org/freedesktop/secrets/collection/login"
+                    })
+                    .unwrap(),
+                ]
+            }
+        }
+        if std::env::var_os("FACTORSEAL_TEST_PRIVATE_DBUS").is_none() {
+            return;
+        }
+        assert!(secret_service_error().is_none());
+        assert!(crate::wait_for_secret_service(Duration::ZERO).is_err());
+        for factorseal in [true, false] {
+            let service = zbus::blocking::connection::Builder::session()
+                .unwrap()
+                .name("org.freedesktop.secrets")
+                .unwrap()
+                .serve_at("/org/freedesktop/secrets", Keyring(factorseal))
+                .unwrap()
+                .build()
+                .unwrap();
+            assert!(crate::wait_for_secret_service(Duration::ZERO).is_ok());
+            assert_eq!(secret_service_error().is_none(), factorseal);
+            service.release_name("org.freedesktop.secrets").unwrap();
+        }
     }
 
     #[test]

@@ -40,7 +40,7 @@ zeroize = "1.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "settings"] }
-dbus = "0.9.12"
+zbus = { version = "5.14.0", default-features = false, features = ["tokio", "blocking-api"] }
 detect-desktop-environment = "=1.3.0"
 futures-util = "0.3"
 native-theme-gtk = "=0.1.1"

@@ -102,8 +102,10 @@ try {
     New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
     $outputRoot = (Resolve-Path -LiteralPath $outputRoot).Path
 
-    cargo build --locked --release --no-default-features --features vault,cli,hardware,personal-sync-network --bin factorseal --bin factorseal-parser --bin factorseal-network
+    cargo build --locked --release --no-default-features --features vault,cli,hardware,personal-sync-network,browser --bin factorseal --bin factorseal-parser --bin factorseal-network --bin factorseal-browser
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+    cargo build --locked --release -p factorseal-desktop
+    if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed' }
     $metadataJson = cargo metadata --locked --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
     $metadata = $metadataJson | ConvertFrom-Json
@@ -117,7 +119,7 @@ try {
     $verify = Join-Path $stageRoot 'verify'
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     Copy-Item -LiteralPath $factorseal, 'LICENSE', 'README.md' -Destination $stage
-    foreach ($helper in 'factorseal-parser', 'factorseal-network') {
+    foreach ($helper in 'factorseal-desktop', 'factorseal-parser', 'factorseal-network', 'factorseal-browser') {
         Copy-Item -LiteralPath (Join-Path $metadata.target_directory "release\$helper.exe") -Destination $stage
     }
     Copy-Item -LiteralPath 'packaging\windows\msix\Assets' -Destination $stage -Recurse
@@ -175,13 +177,30 @@ try {
     [xml]$verifiedManifest = Get-Content -LiteralPath (Join-Path $verify 'AppxManifest.xml') -Raw
     $namespace = [System.Xml.XmlNamespaceManager]::new($verifiedManifest.NameTable)
     $namespace.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+    $namespace.AddNamespace('uap', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')
     $namespace.AddNamespace('uap5', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/5')
+    $application = $verifiedManifest.SelectSingleNode('/f:Package/f:Applications/f:Application', $namespace)
+    if ($null -eq $application -or $application.Executable -ne 'factorseal-desktop.exe') {
+        throw 'The completed MSIX does not launch Desktop'
+    }
+    $visuals = $application.SelectSingleNode('uap:VisualElements', $namespace)
+    if ($null -eq $visuals -or $visuals.AppListEntry -eq 'none') {
+        throw 'The completed MSIX does not expose Desktop in the Start menu'
+    }
+    foreach ($binary in 'factorseal', 'factorseal-desktop', 'factorseal-parser', 'factorseal-network', 'factorseal-browser') {
+        if (-not (Test-Path -LiteralPath (Join-Path $verify "$binary.exe") -PathType Leaf)) {
+            throw "The completed MSIX is missing $binary.exe"
+        }
+    }
     $alias = $verifiedManifest.SelectSingleNode(
         '/f:Package/f:Applications/f:Application/f:Extensions/uap5:Extension/uap5:AppExecutionAlias/uap5:ExecutionAlias',
         $namespace
     )
     if ($null -eq $alias -or $alias.Alias -ne 'factorseal.exe') {
         throw 'The completed MSIX does not expose the factorseal.exe execution alias'
+    }
+    if ($alias.ParentNode.ParentNode.Executable -ne 'factorseal.exe') {
+        throw 'The completed MSIX execution alias does not launch the CLI'
     }
 
     Write-Output $msix

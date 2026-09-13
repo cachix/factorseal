@@ -27,10 +27,13 @@ $stage = Join-Path $stageRoot $archive
 try {
     cargo build --locked --release --no-default-features --features vault,cli,hardware,personal-sync-network,browser --bin factorseal --bin factorseal-parser --bin factorseal-network --bin factorseal-browser
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+    cargo build --locked --release -p factorseal-desktop
+    if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed' }
     $metadataJson = cargo metadata --locked --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
     $metadata = $metadataJson | ConvertFrom-Json
     $factorseal = Join-Path $metadata.target_directory "release/factorseal.exe"
+    $desktop = Join-Path $metadata.target_directory 'release/factorseal-desktop.exe'
     $helpers = @('factorseal-parser', 'factorseal-network', 'factorseal-browser') | ForEach-Object { Join-Path $metadata.target_directory "release/$_.exe" }
     if (-not [string]::IsNullOrWhiteSpace($SigningCertificateThumbprint)) {
         $thumbprint = $SigningCertificateThumbprint.Replace(' ', '')
@@ -48,7 +51,7 @@ try {
         if (-not (Test-Path -LiteralPath $SignTool -PathType Leaf)) {
             throw "signtool.exe is missing: $SignTool"
         }
-        foreach ($binary in @($factorseal) + $helpers) {
+        foreach ($binary in @($factorseal, $desktop) + $helpers) {
             & $SignTool sign /sha1 $thumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $binary
             if ($LASTEXITCODE -ne 0) { throw "signtool.exe failed to sign $binary" }
             $signature = Get-AuthenticodeSignature -LiteralPath $binary
@@ -61,7 +64,7 @@ try {
     }
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-    Copy-Item $factorseal, "LICENSE", "README.md" -Destination $stage
+    Copy-Item $factorseal, $desktop, "LICENSE", "README.md" -Destination $stage
     Copy-Item -LiteralPath $helpers -Destination $stage
     Copy-Item "packaging/windows/factorseal-task.xml.in", "packaging/windows/factorseal-askpass.ps1", "packaging/windows/factorseal-askpass.cmd", "packaging/windows/install-factorseal-task.ps1" -Destination $stage
     Copy-Item "acceptance/windows.ps1" -Destination (Join-Path $stage "run-acceptance.ps1")

@@ -169,8 +169,8 @@ Run against `/Applications/Factorseal.app/Contents/MacOS/factorseal` on a
 physical Secure Enclave-capable Mac. By default the runner asks you to lock and
 then sleep the Mac, checking a fresh unseal between events. Separately validate
 the signed and notarized app by logging in with its LaunchAgent enabled and
-confirming the
-askpass dialog works without a terminal.
+confirming Desktop starts in the background and can initialize and unlock the
+vault through its own prompts without a terminal or a competing CLI agent.
 
 ```console
 ./run-acceptance.sh \

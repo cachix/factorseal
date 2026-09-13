@@ -40,7 +40,7 @@ jobs:
       - name: Install native Linux package dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libdbus-1-dev libsecret-tools pkg-config
+          sudo apt-get install --yes dbus libsecret-tools pkg-config
       - name: Install devenv
         run: nix profile add nixpkgs#devenv
       - name: Check formatting
@@ -120,6 +120,11 @@ jobs:
           tar -xzf "$archive" -C "$unpacked"
           app=$(find "$unpacked" -name Factorseal.app -type d -print -quit)
 
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")" = factorseal-desktop
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$app/Contents/Info.plist")" = false
+          "$app/Contents/MacOS/factorseal-desktop" --help
+          pkg=$(find dist -name 'factorseal-*-macos-*.pkg' -print -quit)
+          pkgutil --payload-files "$pkg" | grep 'Applications/Factorseal.app/Contents/MacOS/factorseal-desktop$'
           codesign --verify --deep --strict "$app"
           codesign -dvv "$app" 2>&1 | grep '^Signature=adhoc$'
           test ! -e "$app/Contents/embedded.provisionprofile"
@@ -148,6 +153,11 @@ jobs:
               exit 1
             fi
           done < <(find "$app/Contents" -type f -print)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: factorseal-macos
+          path: dist/*
+          if-no-files-found: error
 
   windows:
     name: Windows
@@ -185,6 +195,7 @@ jobs:
           $entries = [System.IO.Compression.ZipFile]::OpenRead($archive.FullName)
           try {
             if (-not ($entries.Entries.FullName -match 'factorseal.exe$')) { throw 'Factorseal executable missing from package' }
+            if (-not ($entries.Entries.FullName -match 'factorseal-desktop.exe$')) { throw 'Desktop executable missing from package' }
             if (-not ($entries.Entries.FullName -match 'factorseal-parser.exe$')) { throw 'Parser helper missing from package' }
             if (-not ($entries.Entries.FullName -match 'factorseal-network.exe$')) { throw 'Network helper missing from package' }
             if (-not ($entries.Entries.FullName -match 'factorseal-task.xml.in$')) { throw 'task template missing from package' }
@@ -193,6 +204,11 @@ jobs:
             if (-not ($entries.Entries.FullName -match 'factorseal-askpass.ps1$')) { throw 'askpass helper missing from package' }
             if (-not ($entries.Entries.FullName -match 'run-acceptance.ps1$')) { throw 'acceptance runner missing from package' }
           } finally { $entries.Dispose() }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'factorseal-windows-package'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $unpacked -Force
+          $desktop = Get-ChildItem -LiteralPath $unpacked -Filter factorseal-desktop.exe -Recurse | Select-Object -First 1
+          & $desktop.FullName --help
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Desktop could not start' }
           [xml](Get-Content packaging/windows/factorseal-task.xml.in) | Out-Null
       - name: Build and inspect Microsoft Store MSIX
         shell: pwsh

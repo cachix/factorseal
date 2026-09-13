@@ -79,9 +79,9 @@ jobs:
         run: |
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { throw 'cargo fmt failed' }
-          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'cargo clippy failed' }
-          cargo test --locked --all-targets --all-features
+          cargo test --locked --workspace --all-targets --all-features
           if ($LASTEXITCODE -ne 0) { throw 'cargo test failed' }
           $errors = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile(

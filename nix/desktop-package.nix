@@ -5,7 +5,6 @@
   stdenv,
   pkg-config,
   wrapGAppsHook4,
-  dbus,
   gtk4,
   libxkbcommon,
   qt6,
@@ -47,7 +46,6 @@ rustPlatform.buildRustPackage {
     wrapGAppsHook4
   ];
   buildInputs = [
-    dbus
     gtk4
     libxkbcommon
     qt6.qtbase

@@ -31,17 +31,17 @@
   <Applications>
     <Application
       Id="Factorseal"
-      Executable="factorseal.exe"
+      Executable="factorseal-desktop.exe"
       EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="Factorseal"
         Description="A hardware-bound local secrets vault"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
-        Square44x44Logo="Assets\Square44x44Logo.png"
-        AppListEntry="none" />
+        Square44x44Logo="Assets\Square44x44Logo.png" />
       <Extensions>
-        <uap5:Extension Category="windows.appExecutionAlias">
+        <uap5:Extension Category="windows.appExecutionAlias"
+          Executable="factorseal.exe" EntryPoint="Windows.FullTrustApplication">
           <uap5:AppExecutionAlias>
             <uap5:ExecutionAlias Alias="factorseal.exe" />
           </uap5:AppExecutionAlias>

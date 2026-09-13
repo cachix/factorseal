@@ -9,7 +9,7 @@
   packages = with pkgs; [
     nodejs
     cargo-xwin
-    dbus
+    dbus # dbus-run-session for integration tests; Rust uses zbus.
     gtk4
     libxkbcommon
     pkg-config

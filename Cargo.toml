@@ -46,7 +46,6 @@ vault = [
     "secret-service-host",
     "dep:block2",
     "dep:ctrlc",
-    "dep:dbus",
     "dep:secret-service-protocol",
     "dep:zbus",
     "dep:nix",
@@ -176,8 +175,7 @@ tempfile = "3.20.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = { version = "0.5.0", default-features = false, optional = true }
 landlock = { version = "0.4.7", optional = true }
-dbus = { version = "0.9.12", optional = true }
-zbus = { version = "5.14.0", default-features = false, features = ["tokio"], optional = true }
+zbus = { version = "5.14.0", default-features = false, features = ["tokio", "blocking-api"], optional = true }
 nix = { version = "0.31.3", features = ["socket", "user", "process", "resource", "poll"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
