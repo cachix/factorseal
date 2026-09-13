@@ -25,13 +25,13 @@ $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetR
 $stage = Join-Path $stageRoot $archive
 
 try {
-    cargo build --locked --release --no-default-features --features vault,cli,hardware,personal-sync-network --bin factorseal --bin factorseal-parser --bin factorseal-network
+    cargo build --locked --release --no-default-features --features vault,cli,hardware,personal-sync-network,browser --bin factorseal --bin factorseal-parser --bin factorseal-network --bin factorseal-browser
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
     $metadataJson = cargo metadata --locked --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
     $metadata = $metadataJson | ConvertFrom-Json
     $factorseal = Join-Path $metadata.target_directory "release/factorseal.exe"
-    $helpers = @('factorseal-parser', 'factorseal-network') | ForEach-Object { Join-Path $metadata.target_directory "release/$_.exe" }
+    $helpers = @('factorseal-parser', 'factorseal-network', 'factorseal-browser') | ForEach-Object { Join-Path $metadata.target_directory "release/$_.exe" }
     if (-not [string]::IsNullOrWhiteSpace($SigningCertificateThumbprint)) {
         $thumbprint = $SigningCertificateThumbprint.Replace(' ', '')
         if ($thumbprint -notmatch '^[0-9A-Fa-f]{40}$') {

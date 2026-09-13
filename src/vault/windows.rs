@@ -60,8 +60,8 @@ use super::{VaultClient, VaultRequest, WindowsVaultClient};
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const WINDOWS_SUSPEND_SEAL_DEADLINE: Duration = Duration::from_millis(1_500);
 
-type BytePipe = DuplexPipeStream<pipe_mode::Bytes>;
-type ByteListener = PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>;
+pub(crate) type BytePipe = DuplexPipeStream<pipe_mode::Bytes>;
+pub(crate) type ByteListener = PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>;
 
 /// Windows per-user named-pipe configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,7 +211,7 @@ fn accept_until_sealed(
     })
 }
 
-fn private_listener(path: &Path) -> VaultResult<ByteListener> {
+pub(crate) fn private_listener(path: &Path) -> VaultResult<ByteListener> {
     PipeListenerOptions::new()
         .path(path)
         .nonblocking(true)
@@ -598,7 +598,10 @@ fn handle_connection(
     )
 }
 
-fn caller_identity(stream: &BytePipe, cache: &CallerIdentityCache) -> VaultResult<CallerIdentity> {
+pub(crate) fn caller_identity(
+    stream: &BytePipe,
+    cache: &CallerIdentityCache,
+) -> VaultResult<CallerIdentity> {
     let process_id = stream
         .client_process_id()
         .map_err(|error| io_error("read named-pipe client PID", &error))?;

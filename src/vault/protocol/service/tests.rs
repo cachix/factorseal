@@ -2556,3 +2556,241 @@ fn dialog_cache_write_is_manager_only_and_does_not_grant_future_writes() {
     };
     assert_eq!(value.expose(), b"entered-in-dialog");
 }
+
+#[cfg(feature = "browser")]
+mod browser_integration {
+    use super::*;
+    use crate::browser::{Action, Command, Signed, WorkerAction, WorkerReply};
+    use ed25519_dalek::{Signer, SigningKey};
+    fn signed(sequence: u32, action: Action) -> Signed {
+        let key = SigningKey::from_bytes(&[11; 32]);
+        let payload = serde_json::to_string(&Command {
+            version: 1,
+            session: "a".repeat(64),
+            sequence,
+            action,
+        })
+        .unwrap();
+        Signed {
+            key: hex::encode(key.verifying_key().as_bytes()),
+            signature: hex::encode(key.sign(payload.as_bytes()).to_bytes()),
+            payload,
+        }
+    }
+    fn request(
+        service: &VaultService,
+        caller: &CallerIdentity,
+        action: WorkerAction,
+    ) -> Result<WorkerReply, VaultResponseError> {
+        service
+            .handle(
+                caller,
+                VaultRequest::new(VaultAction::Browser { action }).unwrap(),
+                100,
+            )
+            .result
+            .map(|body| match body {
+                VaultResponseBody::Browser { reply } => reply,
+                _ => panic!("browser reply"),
+            })
+    }
+    fn setup() -> (tempfile::TempDir, VaultService, CallerIdentity) {
+        let (dir, service) = service(100, UnsealLeasePolicy::default());
+        let caller = caller();
+        service.authorize_permission_manager(&caller, 100).unwrap();
+        let mut item = crate::personal::PersonalSecret::template(
+            crate::personal::PersonalSecretKind::Login,
+            "Example".into(),
+        );
+        for field in &mut item.sections[0].fields {
+            field.value = serde_json::Value::String(
+                match field.id.as_str() {
+                    "username" => "alice",
+                    "password" => "correct horse",
+                    "url-0" => "https://example.com/login",
+                    _ => "not-for-browser",
+                }
+                .into(),
+            );
+        }
+        {
+            let state = service.state.lock_live(Instant::now()).unwrap();
+            state
+                .store()
+                .put_at(
+                    DocumentKind::LocalKeyring,
+                    crate::personal::PERSONAL_SECRET_NAMESPACE,
+                    &SecretAddress::new(&item.id, None).unwrap(),
+                    &item.encode().unwrap(),
+                    None,
+                    &Provenance::caller(&caller, None),
+                    100,
+                )
+                .unwrap();
+        }
+        (dir, service, caller)
+    }
+    #[test]
+    #[allow(clippy::too_many_lines)] // Exercise the complete authorization flow in one regression.
+    fn browser_requires_manager_pairing_origin_and_single_use_release() {
+        let (_dir, service, manager) = setup();
+        let detection = signed(
+            1,
+            Action::Detect {
+                origin: "https://example.com".into(),
+                document: "doc".into(),
+            },
+        );
+        let stranger =
+            CallerIdentity::new(CallerPlatform::Linux, "uid:1000", "bridge", [8; 32], None)
+                .unwrap();
+        assert!(
+            request(
+                &service,
+                &stranger,
+                WorkerAction::Pair {
+                    key: detection.key.clone()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::Lookup {
+                    request: detection.clone()
+                }
+            )
+            .is_err()
+        );
+        request(
+            &service,
+            &manager,
+            WorkerAction::Pair {
+                key: detection.key.clone(),
+            },
+        )
+        .unwrap();
+        let wrong = signed(
+            2,
+            Action::Detect {
+                origin: "https://evil.example.com".into(),
+                document: "doc".into(),
+            },
+        );
+        assert!(
+            matches!(request(&service,&manager,WorkerAction::Lookup{request:wrong}).unwrap(),WorkerReply::Candidates{candidates,..} if candidates.is_empty())
+        );
+        let WorkerReply::Candidates {
+            ticket,
+            mut candidates,
+        } = request(
+            &service,
+            &manager,
+            WorkerAction::Lookup {
+                request: detection.clone(),
+            },
+        )
+        .unwrap()
+        else {
+            panic!("candidates")
+        };
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].username, "alice");
+        assert!(
+            !serde_json::to_string(&candidates)
+                .unwrap()
+                .contains("correct horse")
+        );
+        assert!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::Lookup {
+                    request: detection.clone()
+                }
+            )
+            .is_err()
+        );
+        let release = WorkerAction::Release {
+            ticket: ticket.clone(),
+            candidate: candidates.remove(0),
+            confirmation: signed(3, Action::Confirm { nonce: ticket }),
+        };
+        assert!(request(&service, &stranger, release.clone()).is_err());
+        match request(&service, &manager, release.clone()).unwrap() {
+            WorkerReply::Fill { username, password } => {
+                assert_eq!(username.expose(), b"alice");
+                assert_eq!(password.expose(), b"correct horse");
+            }
+            _ => panic!("fill"),
+        }
+        assert!(request(&service, &manager, release).is_err());
+        request(
+            &service,
+            &manager,
+            WorkerAction::Revoke { key: detection.key },
+        )
+        .unwrap();
+        let next = signed(
+            4,
+            Action::Detect {
+                origin: "https://example.com".into(),
+                document: "doc".into(),
+            },
+        );
+        assert!(request(&service, &manager, WorkerAction::Lookup { request: next }).is_err());
+    }
+    #[test]
+    fn browser_rechecks_revocation_before_release() {
+        let (_dir, service, manager) = setup();
+        let detection = signed(
+            1,
+            Action::Detect {
+                origin: "https://example.com".into(),
+                document: "doc".into(),
+            },
+        );
+        request(
+            &service,
+            &manager,
+            WorkerAction::Pair {
+                key: detection.key.clone(),
+            },
+        )
+        .unwrap();
+        let WorkerReply::Candidates {
+            ticket,
+            mut candidates,
+        } = request(
+            &service,
+            &manager,
+            WorkerAction::Lookup {
+                request: detection.clone(),
+            },
+        )
+        .unwrap()
+        else {
+            panic!("candidates")
+        };
+        request(
+            &service,
+            &manager,
+            WorkerAction::Revoke { key: detection.key },
+        )
+        .unwrap();
+        assert!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::Release {
+                    ticket: ticket.clone(),
+                    candidate: candidates.remove(0),
+                    confirmation: signed(2, Action::Confirm { nonce: ticket })
+                }
+            )
+            .is_err()
+        );
+    }
+}

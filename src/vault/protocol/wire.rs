@@ -14,8 +14,8 @@ use crate::vault::{
     DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
 };
 
-// Version 12 adds revision-bound permission pages and logical keyring transfers.
-pub(super) const PROTOCOL_VERSION: u8 = 14;
+// Version 15 adds the optional, manager-only browser operation boundary.
+pub(super) const PROTOCOL_VERSION: u8 = 15;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -515,6 +515,10 @@ impl io::Write for BoundedMessageWriter {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VaultAction {
+    #[cfg(feature = "browser")]
+    Browser {
+        action: crate::browser::WorkerAction,
+    },
     /// Trusted Secret Service bridge. The vault resolves the unique D-Bus
     /// sender itself; the bridge cannot supply an executable identity.
     /// The trusted keyring host verifies that an IPC input recipient is a manager.
@@ -711,6 +715,17 @@ impl VaultAction {
     #[allow(clippy::too_many_lines)]
     pub(super) fn validate(&self) -> VaultResult<()> {
         match self {
+            #[cfg(feature = "browser")]
+            Self::Browser { action } => {
+                if serde_json::to_vec(action)
+                    .map_err(|_| VaultError::Protocol("invalid browser action".into()))?
+                    .len()
+                    > crate::browser::MAX_FRAME
+                {
+                    return Err(VaultError::Protocol("browser action too large".into()));
+                }
+                Ok(())
+            }
             Self::AuthorizeSecretInput { sender } => {
                 if sender.starts_with(':') && sender.len() <= 255 {
                     Ok(())
@@ -1011,6 +1026,10 @@ impl VaultResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VaultResponseBody {
+    #[cfg(feature = "browser")]
+    Browser {
+        reply: crate::browser::WorkerReply,
+    },
     /// Only a live, unsealed vault answers this: `Status` is served behind the
     /// live-state lock, which fails closed once the lease expires or the vault
     /// seals.

@@ -8,6 +8,8 @@
 //! receive its keys.
 //!
 mod algorithm;
+#[cfg(feature = "browser")]
+pub mod browser;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod crypto;
 #[cfg(all(feature = "vault-client", feature = "key-protection"))]

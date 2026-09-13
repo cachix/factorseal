@@ -351,7 +351,7 @@ pub fn macos_caller_identity_for_executable(
     )
 }
 
-fn caller_identity(
+pub(crate) fn caller_identity(
     stream: &UnixStream,
     cache: &CallerIdentityCache,
 ) -> VaultResult<CallerIdentity> {

@@ -45,6 +45,10 @@ jobs:
         run: nix profile add nixpkgs#devenv
       - name: Check formatting
         run: devenv shell -- cargo fmt --all -- --check
+      - name: Build and test shared browser extension
+        run: |
+          devenv shell -- node extensions/browser/build.mjs
+          devenv shell -- node --test extensions/browser/*.test.mjs
       - name: Run Clippy
         run: devenv shell -- cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run tests

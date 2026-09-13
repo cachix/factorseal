@@ -71,8 +71,8 @@ if [ "$platform" = macos ]; then
 fi
 
 cargo build --locked --profile "$build_profile" --no-default-features \
-    --features vault,cli,hardware,personal-sync-network \
-    --bin factorseal --bin factorseal-parser --bin factorseal-network
+    --features vault,cli,hardware,personal-sync-network,browser \
+    --bin factorseal --bin factorseal-parser --bin factorseal-network --bin factorseal-browser
 if [ "$exchange" = 1 ]; then
     cargo build --locked --profile "$build_profile" -p factorseal-desktop --features apple-credential-exchange
 fi
@@ -91,7 +91,7 @@ chmod 0755 "$stage/$archive/run-acceptance.sh"
 if [ "$platform" = linux ]; then
     mkdir -p "$stage/$archive/bin" "$stage/$archive/share/systemd/user"
     cp "$target_dir/$profile_dir/factorseal" "$stage/$archive/bin/"
-    cp "$target_dir/$profile_dir/factorseal-parser" "$target_dir/$profile_dir/factorseal-network" "$stage/$archive/bin/"
+    cp "$target_dir/$profile_dir/factorseal-parser" "$target_dir/$profile_dir/factorseal-network" "$target_dir/$profile_dir/factorseal-browser" "$stage/$archive/bin/"
     cp packaging/linux/factorseal-start "$stage/$archive/bin/"
     # systemd needs an absolute ExecStart, so the unit is written for the
     # documented install prefix. Unpacking the tarball somewhere else means
@@ -107,7 +107,7 @@ else
     app="$stage/$archive/Factorseal.app/Contents"
     mkdir -p "$app/MacOS" "$app/Resources" "$stage/$archive/Library/LaunchAgents"
     cp "$target_dir/$profile_dir/factorseal" "$app/MacOS/"
-    cp "$target_dir/$profile_dir/factorseal-parser" "$target_dir/$profile_dir/factorseal-network" "$app/MacOS/"
+    cp "$target_dir/$profile_dir/factorseal-parser" "$target_dir/$profile_dir/factorseal-network" "$target_dir/$profile_dir/factorseal-browser" "$app/MacOS/"
     cp packaging/macos/factorseal-askpass "$app/Resources/"
     sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Info.plist"
     cp packaging/macos/dev.factorseal.plist "$stage/$archive/Library/LaunchAgents/"

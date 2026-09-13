@@ -23,6 +23,8 @@ mod approvals;
 #[cfg(feature = "vault-store")]
 mod authorization;
 pub use authorization::{GrantAuthorization, GrantAuthorizationTarget};
+#[cfg(feature = "browser")]
+mod browser;
 #[cfg(feature = "vault-store")]
 mod state;
 #[cfg(feature = "personal-sync")]
@@ -62,6 +64,8 @@ impl From<VaultError> for RequestFailure {
 #[cfg(feature = "vault-store")]
 pub struct VaultService {
     state: ServiceState,
+    #[cfg(feature = "browser")]
+    browser: std::sync::Mutex<browser::BrowserState>,
 }
 
 #[cfg(feature = "vault-store")]
@@ -87,6 +91,8 @@ impl VaultService {
     pub(crate) fn new(store: VaultStore, now: u64, policy: UnsealLeasePolicy) -> VaultResult<Self> {
         Ok(Self {
             state: ServiceState::new(store, now, policy)?,
+            #[cfg(feature = "browser")]
+            browser: std::sync::Mutex::new(browser::BrowserState::default()),
         })
     }
 
@@ -224,6 +230,19 @@ impl VaultService {
         let now = clock.wall();
         state.consume(request.request_id())?;
         let result = match request.action {
+            #[cfg(feature = "browser")]
+            VaultAction::Browser { action } => {
+                require_live_manager(&state, caller, clock, valid_until)?;
+                let reply = self
+                    .browser
+                    .lock()
+                    .map_err(|_| VaultError::WorkerUnavailable)?
+                    .execute(state.store(), action, now, &provenance)?;
+                clock.check(valid_until.get())?;
+                let (now, monotonic_now) = clock.sample();
+                state.touch(now, monotonic_now)?;
+                return Ok(VaultResponseBody::Browser { reply });
+            }
             VaultAction::ExportRevision => {
                 require_live_manager(&state, caller, clock, valid_until)?;
                 state.store().purge_expired_at(now)?;

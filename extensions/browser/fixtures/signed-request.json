@@ -1,0 +1,5 @@
+{
+  "key": "f9b8c8fc63e1cb4ad4246e82b8773f513b7c515d0439ede326c9b58547568426",
+  "payload": "{\"version\":1,\"session\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"sequence\":1,\"action\":{\"type\":\"detect\",\"origin\":\"https://example.com\",\"document\":\"fixture-document\"}}",
+  "signature": "45e48201d5da7e32ee306a7fee14ebde7f4e18f51e80f345b3994159e800841d5cb72fff4fc22bb2feb37190e96d5d26ed57a3c80ae01d8a9ed05c5fa9619c0b"
+}

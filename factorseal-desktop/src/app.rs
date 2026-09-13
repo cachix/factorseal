@@ -1,6 +1,8 @@
 use crate::secret_input::SecretInputState;
 #[cfg(target_os = "linux")]
 mod access;
+mod approval_window;
+mod browser;
 mod devices;
 mod personal_actions;
 mod personal_detail;
@@ -3759,6 +3761,7 @@ impl Render for DesktopView {
         v_flex()
             .size_full()
             .px_6()
+            .child(self.render_browser(cx))
             .bg(theme.background)
             .text_color(theme.foreground)
             .font_family(theme.font_family.clone())
@@ -4196,6 +4199,7 @@ pub(crate) fn setup(
     cx.on_action(seal_vault);
     cx.on_action(quit);
 
+    let browser_root = config.root.clone();
     let (runtime, receiver) = DesktopRuntime::new(config);
     let initial = runtime.inspect();
     cx.set_global(RuntimeGlobal(Arc::clone(&runtime)));
@@ -4236,6 +4240,7 @@ pub(crate) fn setup(
     }
     #[cfg(feature = "apple-credential-exchange")]
     system_transfer::setup(cx);
+    browser::setup(&browser_root, Arc::clone(&runtime), cx);
 
     let task = cx.spawn(async move |cx| {
         while let Ok(snapshot) = receiver.recv().await {

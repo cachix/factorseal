@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "137",
+  "name": "FactorSeal",
+  "version": "0.1.0",
+  "description": "Fill personal logins with approval in FactorSeal Desktop.",
+  "permissions": [
+    "nativeMessaging",
+    "storage",
+    "scripting",
+    "activeTab"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "128": "icon.png"
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoiJ17/tnJnEx64TQZmmW5YCK7gX9QDFzMeULxBi5jzBL4WUsWB1nNT+pFFhmBBIYG0hJ6ztAIU82P+qPoa0KISvfF/c4wI1fDS9xJCA2JnQotXMqFFlu/bWp/xnlF6uqXK/z03JWb2OAXeNZ+sQYTiuFG7rsQwI07ZUBClRdfLeuoghlF519CnImMtA5f91AL7zkFk+KS55B5c7EQnCPbaCNsfmwDoF/v8Cct7sfPL+FOlYGtNVAAXEPGem/EMZEIkU4JHBCEFjG82gXOnreBXHYmKId0bo3+IymtEI7YpSZF9I4J+lrmhL/x5LL/2R9vKuz7zhGpm/HmQy2T8Q4HQIDAQAB",
+  "icons": {
+    "128": "icon.png"
+  }
+}

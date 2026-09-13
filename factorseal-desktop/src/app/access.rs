@@ -349,30 +349,12 @@ fn open(event: AccessEvent, cx: &mut App) {
 }
 
 fn window_options(layered: bool, cx: &App) -> WindowOptions {
-    use gpui::layer_shell::{KeyboardInteractivity, Layer, LayerShellOptions};
-    let bounds = Bounds::centered(None, size(px(500.), px(640.)), cx);
-    WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(420.), px(420.))),
-        titlebar: (!layered).then(|| gpui::TitlebarOptions {
-            title: Some("FactorSeal — Secret access".into()),
-            ..Default::default()
-        }),
-        app_id: Some("dev.factorseal.Access".to_owned()),
-        kind: if layered {
-            gpui::WindowKind::LayerShell(LayerShellOptions {
-                namespace: "dev.factorseal.Access".to_owned(),
-                layer: Layer::Overlay,
-                // No anchors: center the requested size without reserving space
-                // or changing the layout of the user's tiled windows.
-                keyboard_interactivity: KeyboardInteractivity::Exclusive,
-                ..Default::default()
-            })
-        } else {
-            gpui::WindowKind::Dialog
-        },
-        ..Default::default()
-    }
+    super::approval_window::options(
+        layered,
+        "FactorSeal — Secret access",
+        "dev.factorseal.Access",
+        cx,
+    )
 }
 
 fn approval_in_progress(cx: &App) -> bool {

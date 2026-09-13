@@ -7,6 +7,7 @@
   '';
 
   packages = with pkgs; [
+    nodejs
     cargo-xwin
     dbus
     gtk4

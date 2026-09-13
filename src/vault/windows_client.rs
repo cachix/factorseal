@@ -34,7 +34,7 @@ const PIPE_PREFIX: &str = r"\\.\pipe\factorseal-";
 
 /// Synchronous PIPE_NOWAIT handle. Opening it ourselves sets identification-
 /// only SQOS atomically and avoids a dependency reopening it with weaker SQOS.
-struct ClientPipe(File);
+pub(crate) struct ClientPipe(File);
 
 fn nonblocking_error(error: io::Error) -> io::Error {
     if error.raw_os_error().is_some_and(|code| {
@@ -61,7 +61,7 @@ impl Write for ClientPipe {
     }
 }
 
-fn connect_pipe(path: &str) -> io::Result<ClientPipe> {
+pub(crate) fn connect_pipe(path: &str) -> io::Result<ClientPipe> {
     let deadline = Instant::now() + super::transport::IPC_RESPONSE_TIMEOUT;
     loop {
         let opened = OpenOptions::new()
@@ -97,7 +97,7 @@ fn connect_pipe(path: &str) -> io::Result<ClientPipe> {
 /// Keep the process handle alive through the exchange. Pipe ownership is
 /// checked independently, so PID reuse cannot turn another user's pipe into
 /// a same-user endpoint.
-fn authenticate_server(pipe: &ClientPipe) -> VaultResult<OwnedHandle> {
+pub(crate) fn authenticate_server(pipe: &ClientPipe) -> VaultResult<OwnedHandle> {
     let expected = OwnedToken::from_current_process(TOKEN_QUERY)
         .and_then(|token| token.user())
         .map_err(server_authentication_error)?;

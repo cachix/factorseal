@@ -132,6 +132,7 @@ in
 
     environment.variables = lib.mkIf (cfg.mode == "desktop") {
       FACTORSEAL_DESKTOP_EXECUTABLE = "${desktopPackage}/bin/factorseal-desktop";
+      FACTORSEAL_DESKTOP_IDENTITY = "${cfg.desktopPackage}/bin/.factorseal-desktop-wrapped";
       FACTORSEAL_CLI_EXECUTABLE = "${cfg.package}/bin/factorseal";
       FACTORSEAL_IDLE_SECONDS = toString cfg.idleSeconds;
       FACTORSEAL_MAXIMUM_SECONDS = toString cfg.maximumSeconds;

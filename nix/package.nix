@@ -32,10 +32,11 @@ rustPlatform.buildRustPackage {
 
   cargoBuildFlags = [
     "--no-default-features"
-    "--features=vault,cli,hardware,secretspec-provider,personal-sync-network"
+    "--features=vault,cli,hardware,secretspec-provider,personal-sync-network,browser"
     "--bin=factorseal"
     "--bin=factorseal-parser"
     "--bin=factorseal-network"
+    "--bin=factorseal-browser"
   ];
 
   doCheck = false;
@@ -48,7 +49,7 @@ rustPlatform.buildRustPackage {
 
     install -Dm0755 target/${stdenv.hostPlatform.rust.rustcTarget}/release/factorseal \
       "$out/bin/factorseal"
-    for helper in factorseal-parser factorseal-network; do
+    for helper in factorseal-parser factorseal-network factorseal-browser; do
       install -Dm0755 target/${stdenv.hostPlatform.rust.rustcTarget}/release/$helper \
         "$out/bin/$helper"
     done

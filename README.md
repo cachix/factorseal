@@ -36,8 +36,9 @@ on Linux and Windows or Apple's Secure Enclave on macOS.
 - **Experimental personal sync:** pair devices in Desktop and exchange encrypted
   personal-item changes. See the [sync limitations](docs/usage.md#personal-sync-experimental).
 
-Browser autofill, usable passkeys, auto-type, TOTP code generation, and SSH-agent
-integration are not currently provided.
+An experimental [browser extension](extensions/browser/README.md) detects login
+forms and fills credentials after Desktop approval. Usable passkeys, auto-type,
+TOTP code generation, and SSH-agent integration are not currently provided.
 
 ## Quick start
 

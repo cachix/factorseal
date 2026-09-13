@@ -6,6 +6,8 @@
 
 #[cfg(all(feature = "key-protection", feature = "vault-client"))]
 mod archive;
+#[cfg(feature = "browser")]
+pub mod browser_transport;
 #[cfg(feature = "vault-store")]
 mod document;
 mod encoding;

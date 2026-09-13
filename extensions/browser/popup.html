@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>FactorSeal</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+<header><img src="mark.svg" width="28" height="28" alt=""><span class="wordmark">FactorSeal</span></header>
+<main>
+  <section id="onboarding">
+    <h1 id="heading">Connect to Desktop</h1>
+    <p id="intro" class="muted">Fill logins with your approval.</p>
+    <button id="pair" class="primary">Pair with Desktop</button>
+  </section>
+  <section id="controls" hidden>
+    <div id="detection" hidden><p class="muted">Allow site access to detect login forms.</p><button id="enable" class="primary">Enable login detection</button></div>
+    <div id="site-controls" hidden><button id="retry" class="primary">Check this page</button><button id="pause" class="secondary">Pause on this site</button></div>
+  </section>
+  <p id="status" role="status" aria-live="polite"></p>
+  <a id="install" class="install" href="https://factorseal.dev/downloads" target="_blank" rel="noopener noreferrer" hidden>Get FactorSeal Desktop</a>
+  <button id="cancel" class="secondary" hidden>Cancel request</button>
+  <details id="pairing-key" hidden><summary>Profile details</summary><p id="pending-profile-key" class="fingerprint"></p></details>
+  <details id="profile" hidden><summary>Browser profile</summary><p id="profile-key" class="fingerprint"></p><button id="revoke" class="secondary">Disconnect profile</button></details>
+</main>
+<script src="popup.js"></script>
+</body></html>

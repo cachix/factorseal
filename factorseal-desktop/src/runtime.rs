@@ -151,6 +151,18 @@ pub(crate) struct DesktopRuntime {
 }
 
 impl DesktopRuntime {
+    pub(crate) fn browser_request(
+        &self,
+        action: factorseal::browser::WorkerAction,
+    ) -> Result<factorseal::browser::WorkerReply, String> {
+        let metadata = Vault::inspect(&self.config.root).map_err(|e| e.to_string())?;
+        let request =
+            VaultRequest::new(VaultAction::Browser { action }).map_err(|e| e.to_string())?;
+        match self.request_live(&metadata, &request)? {
+            VaultResponseBody::Browser { reply } => Ok(reply),
+            _ => Err("unexpected browser worker response".into()),
+        }
+    }
     pub(crate) fn new(config: RuntimeConfig) -> (Arc<Self>, smol::channel::Receiver<Snapshot>) {
         let (events, receiver) = smol::channel::bounded(16);
         (

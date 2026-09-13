@@ -33,6 +33,7 @@ struct ActionContext<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // Exhaustive action dispatcher.
 pub(super) fn execute_action(
     store: &VaultStore,
     caller: &CallerIdentity,
@@ -54,6 +55,8 @@ pub(super) fn execute_action(
         base_dir,
     };
     match action {
+        #[cfg(feature = "browser")]
+        VaultAction::Browser { .. } => unreachable!("browser action handled before execution"),
         VaultAction::Status => {
             let (idle_deadline, absolute_deadline) = lease_deadlines;
             Ok((
