@@ -16,5 +16,15 @@
     if (value.type === 'context' && !/^[a-f0-9]{64}$/.test(value.nonce)) throw new Error('invalid_response');
     return value;
   }
-  globalThis.FactorSealCore = {hex,origin,decode,validateResponse};
+  function browserKind(navigator,firefox=false) {
+    if(firefox)return 'firefox';
+    const brands=navigator?.userAgentData?.brands?.map(b=>b.brand)||[];
+    const agent=navigator?.userAgent||'';
+    if(brands.includes('Microsoft Edge')||/Edg\//.test(agent))return 'edge';
+    if(brands.includes('Google Chrome'))return 'chrome';
+    if(/Firefox\//.test(agent))return 'firefox';
+    if(brands.includes('Chromium')||/Chrom(?:e|ium)\//.test(agent))return 'chromium';
+    return undefined;
+  }
+  globalThis.FactorSealCore = {hex,origin,decode,validateResponse,browserKind};
 })();

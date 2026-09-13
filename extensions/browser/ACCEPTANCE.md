@@ -49,3 +49,10 @@ supported browser. Automated DOM/protocol tests do not replace this acceptance.
     Check that extension storage contains no submitted credentials. Mismatched
     confirmation, hidden fields, and cross-origin actions must not offer saves.
     Test **Save login from this page** and editing/retrying a failed submission.
+14. Enter an unlocked vault with Firefox and Chromium installed. Verify each has
+    its own pairing status and preview installation link. Pair one: only that
+    browser's install action disappears. Pair multiple profiles, disconnect one,
+    restart Desktop, and verify counts persist correctly. Reload an older paired
+    extension to identify it without re-pairing. Browser host registration alone
+    must not make an absent browser appear installed. Sealed vaults show no setup
+    panel; all-paired vaults keep browser management available in Settings.

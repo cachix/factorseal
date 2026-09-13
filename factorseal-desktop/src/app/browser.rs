@@ -1,5 +1,6 @@
 //! Desktop owns all browser consent; the native bridge never receives manager authority.
 use super::*;
+use factorseal::browser::discovery::Browser;
 use factorseal::browser::{
     WorkerAction,
     desktop::{Hub, Prompt},
@@ -11,6 +12,7 @@ struct BrowserGlobal {
     cache: std::path::PathBuf,
     registration_error: Arc<Mutex<bool>>,
     saved: Arc<std::sync::atomic::AtomicBool>,
+    installed: Arc<Mutex<Vec<Browser>>>,
 }
 impl Global for BrowserGlobal {}
 
@@ -21,6 +23,8 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
     let registration_error = Arc::new(Mutex::new(false));
     let saved = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cache = root.join("browser-pairings.json");
+    let profiles = root.join("browser-profiles.json");
+    let installed = Arc::new(Mutex::new(Vec::new()));
     if std::fs::metadata(&cache).is_ok_and(|m| m.len() <= 64 * 1024)
         && let Ok(bytes) = std::fs::read(&cache)
         && let Ok(mut keys) = serde_json::from_slice::<std::collections::HashSet<String>>(&bytes)
@@ -30,14 +34,29 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
             h.paired = keys;
         }
     }
+    if std::fs::metadata(&profiles).is_ok_and(|m| m.len() <= 64 * 1024)
+        && let Ok(bytes) = std::fs::read(&profiles)
+        && let Ok(labels) =
+            serde_json::from_slice::<std::collections::HashMap<String, Browser>>(&bytes)
+        && let Ok(mut h) = hub.lock()
+    {
+        h.browsers = labels
+            .into_iter()
+            .filter(|(key, _)| h.paired.contains(key))
+            .collect();
+    }
     cx.set_global(BrowserGlobal {
         hub: Arc::clone(&hub),
         cache: cache.clone(),
         registration_error: Arc::clone(&registration_error),
         saved: Arc::clone(&saved),
+        installed: Arc::clone(&installed),
     });
     let registration_root = root.to_path_buf();
     std::thread::spawn(move || {
+        if let Ok(mut found) = installed.lock() {
+            *found = factorseal::browser::discovery::installed();
+        }
         let Ok(identity) = std::env::current_exe() else {
             return;
         };
@@ -100,12 +119,27 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
     });
     let worker_hub = Arc::clone(&hub);
     std::thread::spawn(move || {
+        let mut last_profiles = Some(std::collections::HashMap::new());
         loop {
             std::thread::sleep(std::time::Duration::from_millis(50));
             let work = worker_hub
                 .lock()
                 .map(|mut h| h.take_work())
                 .unwrap_or_default();
+            let labels = worker_hub.lock().ok().map(|h| {
+                h.browsers
+                    .iter()
+                    .filter(|(key, _)| h.paired.contains(*key))
+                    .map(|(key, browser)| (key.clone(), *browser))
+                    .collect::<std::collections::HashMap<_, _>>()
+            });
+            if labels != last_profiles
+                && let Some(labels) = &labels
+                && let Ok(bytes) = serde_json::to_vec(labels)
+                && factorseal::transfer::write_private_file(&profiles, &bytes).is_ok()
+            {
+                last_profiles = Some(labels.clone());
+            }
             for work in work {
                 let result = runtime.browser_request(work.action.clone());
                 if matches!(work.action, WorkerAction::Save { .. })
@@ -127,6 +161,7 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
         }
     });
     cx.spawn(async move |cx| {
+        let mut was_unsealed = false;
         loop {
             smol::Timer::after(std::time::Duration::from_millis(200)).await;
             cx.update(|cx| {
@@ -141,6 +176,16 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
                     &cx.global::<DesktopWindow>().snapshot,
                     Snapshot::Unsealed { owned: true, .. }
                 );
+                if unsealed && !was_unsealed {
+                    let installed = Arc::clone(&cx.global::<BrowserGlobal>().installed);
+                    std::thread::spawn(move || {
+                        let found = factorseal::browser::discovery::installed();
+                        if let Ok(mut installed) = installed.lock() {
+                            *installed = found;
+                        }
+                    });
+                }
+                was_unsealed = unsealed;
                 let external = matches!(
                     &cx.global::<DesktopWindow>().snapshot,
                     Snapshot::Unsealed { owned: false, .. }
@@ -179,12 +224,86 @@ impl DesktopView {
         };
         let hub = Arc::clone(&global.hub);
         let cache = global.cache.clone();
-        if self.settings_open && matches!(self.snapshot, Snapshot::Unsealed { owned: true, .. }) {
+        if !matches!(self.snapshot, Snapshot::Unsealed { owned: true, .. }) {
+            return div();
+        }
+        let installed = global
+            .installed
+            .lock()
+            .map(|b| b.clone())
+            .unwrap_or_default();
+        let (paired, labels) = hub
+            .lock()
+            .map(|h| (h.paired.clone(), h.browsers.clone()))
+            .unwrap_or_default();
+        let count = |browser| {
+            paired
+                .iter()
+                .filter(|key| labels.get(*key) == Some(&browser))
+                .count()
+        };
+        let unknown = paired.iter().any(|key| !labels.contains_key(key));
+        if !self.settings_open && installed.iter().all(|browser| count(*browser) > 0) {
+            return div();
+        }
+        let mut panel = v_flex()
+            .py_3()
+            .gap_2()
+            .flex_none()
+            .child(div().font_semibold().child("Connect your browsers"));
+        for (index, browser) in Browser::ALL.into_iter().enumerate() {
+            let paired_count = count(browser);
+            if !(installed.contains(&browser) || self.settings_open && paired_count > 0) {
+                continue;
+            }
+            let state = if paired_count > 0 {
+                format!(
+                    "{paired_count} paired {}",
+                    if paired_count == 1 {
+                        "profile"
+                    } else {
+                        "profiles"
+                    }
+                )
+            } else if unknown {
+                "Pairing not identified".into()
+            } else {
+                "Not paired".into()
+            };
+            panel = panel.child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(div().child(format!("{} · {state}", browser.name())))
+                    .when(paired_count == 0, |row| {
+                        row.child(
+                            Button::new(("install-browser-extension", index))
+                                .small()
+                                .label("Install extension")
+                                .on_click(move |_, _, cx| cx.open_url(browser.install_url())),
+                        )
+                    }),
+            );
+        }
+        if unknown {
+            panel = panel.child(
+                div()
+                    .text_sm()
+                    .child("Reload existing extensions to identify their paired browsers."),
+            );
+        }
+        if installed.iter().any(|browser| count(*browser) == 0) {
+            panel = panel.child(div().text_sm().child(
+                "Developer preview · Install the extension, then choose Pair with Desktop.",
+            ));
+        }
+        if self.settings_open {
             let keys = hub
                 .lock()
                 .map(|h| h.paired.iter().cloned().collect::<Vec<_>>())
                 .unwrap_or_default();
-            let mut panel = v_flex().gap_2().child("Paired browser profiles");
+            panel = panel.child(div().font_semibold().child("Paired browser profiles"));
             if global.registration_error.lock().is_ok_and(|failed| *failed) {
                 panel = panel.child("Browser setup failed. Check that the bridge is installed, then restart Desktop to retry.");
             }
@@ -192,7 +311,8 @@ impl DesktopView {
                 let runtime = Arc::clone(&self.runtime);
                 let hub = Arc::clone(&hub);
                 let cache = cache.clone();
-                let label = format!("Disconnect {}…", &key[..key.len().min(16)]);
+                let browser = labels.get(&key).map_or("Browser", |browser| browser.name());
+                let label = format!("Disconnect {browser} · {}…", &key[..key.len().min(16)]);
                 panel = panel.child(
                     Button::new(("browser-revoke", index))
                         .label(label)
@@ -224,6 +344,6 @@ impl DesktopView {
             }
             return panel;
         }
-        div()
+        panel
     }
 }

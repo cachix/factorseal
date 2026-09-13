@@ -2706,6 +2706,7 @@ mod browser_integration {
     fn signed(sequence: u32, action: Action) -> Signed {
         let key = SigningKey::from_bytes(&[11; 32]);
         let payload = serde_json::to_string(&Command {
+            browser: None,
             version: 1,
             session: "a".repeat(64),
             sequence,

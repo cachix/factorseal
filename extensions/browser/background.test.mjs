@@ -49,7 +49,8 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
     scripting:{getRegisteredContentScripts:async()=>registrations,registerContentScripts:async scripts=>registrations.push(...scripts),executeScript:async options=>injections.push(options),unregisterContentScripts:async()=>{}},
     tabs:{query:async()=>[tab],get:async()=>tab,sendMessage:async(_tab,m)=>{if(m.type==='check')return {valid:true,document:m.document};fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
     windows:{get:async()=>({focused:true}),onFocusChanged:event()}};
-  const context={crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,btoa,setTimeout:(fn,ms)=>setTimeout(fn,ms===350?1:ms),clearTimeout,console};
+  const navigator=chrome?{userAgentData:{brands:[{brand:'Chromium'}]}}:{userAgent:'Firefox/129'};
+  const context={navigator,crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,btoa,setTimeout:(fn,ms)=>setTimeout(fn,ms===350?1:ms),clearTimeout,console};
   context[chrome?'chrome':'browser']=api;
   vm.runInNewContext(core,context);vm.runInNewContext(background,context);
   const message=(m,sender)=>new Promise(resolve=>runtime.onMessage.listeners[0](m,sender,resolve));
@@ -112,6 +113,7 @@ for(const chrome of [false,true])test(`${chrome?'Chromium':'Firefox'} adapter si
   const h=await harness({chrome});assert.equal((await h.message({type:'detected',document:'doc'},h.sender)).accepted,true);
   await until(()=>h.fills.length===1);
   assert.equal(h.fills[0].password,'secret');assert.equal(h.fills[0].document,'doc');
+  assert.equal(h.commands[0].browser,chrome?'chromium':'firefox');
   assert.ok(h.commands.find(c=>c.action.type==='confirm'));
   assert.equal(new Set(h.commands.map(c=>c.sequence)).size,h.commands.length);
   assert.ok(h.signatures>=6);assert.deepEqual(Object.keys(h.stored),['pairing']);

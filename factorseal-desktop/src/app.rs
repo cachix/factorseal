@@ -3761,7 +3761,6 @@ impl Render for DesktopView {
         v_flex()
             .size_full()
             .px_6()
-            .child(self.render_browser(cx))
             .bg(theme.background)
             .text_color(theme.foreground)
             .font_family(theme.font_family.clone())
@@ -3823,6 +3822,7 @@ impl Render for DesktopView {
                             }),
                     ),
             )
+            .child(self.render_browser(cx))
             .child(self.render_content(compact, cx))
             .child(self.render_footer(cx))
             .children(dialog_layer)

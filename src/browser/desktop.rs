@@ -48,6 +48,8 @@ struct Session {
 pub struct Hub {
     sessions: HashMap<String, Session>,
     pub paired: HashSet<String>,
+    /// Signed, self-reported display metadata; never an authorization decision.
+    pub browsers: HashMap<String, super::discovery::Browser>,
     work: Vec<Work>,
     unsealed: bool,
     generation: u64,
@@ -115,6 +117,12 @@ impl Hub {
         session.key = Some(message.key.clone());
         session.sequence = command.sequence;
         session.touched = Instant::now();
+        if let Some(browser) = command.browser
+            && (self.paired.contains(&message.key) || matches!(command.action, Action::Pair))
+            && (self.browsers.len() < 128 || self.browsers.contains_key(&message.key))
+        {
+            self.browsers.insert(message.key.clone(), browser);
+        }
         match command.action {
             Action::Cancel => {
                 session.flow = None;
@@ -403,6 +411,7 @@ mod tests {
     fn signed(session: &str, sequence: u32, action: Action) -> Signed {
         let key = key();
         let payload = serde_json::to_string(&Command {
+            browser: None,
             version: 1,
             session: session.into(),
             sequence,
@@ -420,6 +429,36 @@ mod tests {
             Response::Hello { session, .. } => session,
             _ => panic!("hello"),
         }
+    }
+    #[test]
+    fn browser_label_is_signed_metadata_and_does_not_grant_pairing() {
+        let mut h = Hub::default();
+        let s = session(&mut h);
+        let key = key();
+        let public = hex::encode(key.verifying_key().as_bytes());
+        let mut message = signed(&s, 1, Action::Pair);
+        let mut command: super::super::Command = serde_json::from_str(&message.payload).unwrap();
+        command.browser = Some(super::super::discovery::Browser::Firefox);
+        message.payload = serde_json::to_string(&command).unwrap();
+        h.handle(Request::Signed {
+            message: message.clone(),
+        });
+        assert!(h.browsers.is_empty());
+        message.signature = hex::encode(key.sign(message.payload.as_bytes()).to_bytes());
+        h.handle(Request::Signed { message });
+        assert_eq!(
+            h.browsers.get(&public),
+            Some(&super::super::discovery::Browser::Firefox)
+        );
+        assert!(h.paired.is_empty());
+        h.snapshot(true);
+        let generation = h.prompt().unwrap().generation;
+        h.approve(&s, generation, None);
+        let work = h.take_work().pop().unwrap();
+        h.complete(&work, Ok(WorkerReply::Done));
+        assert!(h.paired.contains(&public));
+        h.revoked(&public);
+        assert!(!h.paired.contains(&public));
     }
     #[test]
     fn browser_save_waits_for_review_and_cancel_discards_queued_write() {

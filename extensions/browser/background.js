@@ -57,11 +57,14 @@ function recoverConnection() {
     }
   }).finally(()=>{recovery=null;});
 }
-function send(action) {
+function send(action,idleOnly=false) {
   return serialized(async()=>{
+    if(idleOnly&&active)return;
     await connect(); const pair=await keys();
-    const payload=JSON.stringify({version:1,session,sequence:++sequence,action});
+    const browser=core.browserKind(globalThis.navigator,typeof api.runtime.getBrowserInfo==='function');
+    const payload=JSON.stringify({version:1,session,sequence:++sequence,action,browser});
     const signature=core.hex(await crypto.subtle.sign('Ed25519',pair.key,new TextEncoder().encode(payload)));
+    if(idleOnly&&active)return;
     return rpc({type:'signed',message:{key:pair.public,payload,signature}});
   });
 }
@@ -132,7 +135,9 @@ async function register() {
 api.permissions.onAdded.addListener(()=>{void register().catch(()=>{});});
 api.permissions.onRemoved.addListener(()=>{void cancel();void api.scripting.unregisterContentScripts({ids:['factorseal-login']}).catch(()=>{});});
 api.runtime.onInstalled.addListener(()=>{void register().catch(()=>{});});
-void register().catch(()=>{});
+void register().then(async()=>{
+  if((await api.storage.local.get('paired')).paired===true)await send({type:'poll'},true);
+}).catch(()=>{});
 api.tabs.onRemoved.addListener(tab=>{if(active?.tab===tab)void cancel();});
 api.tabs.onActivated.addListener(({tabId})=>{if(active?.tab!=null && active.tab!==tabId)void cancel();});
 api.windows.onFocusChanged.addListener(windowId=>{if(windowId>=0 && active?.window!=null && active.window!==windowId)void cancel();});

@@ -26,11 +26,15 @@ No installer, registration command, administrator access, or extension ID copyin
 is needed. Registration also records the selected vault and Desktop executable,
 so the browser can start that Desktop even when it does not inherit shell variables.
 
-**Firefox 129+:** open `about:debugging#/runtime/this-firefox`, choose Load
+### Firefox
+
+Firefox 129+: open `about:debugging#/runtime/this-firefox`, choose Load
 Temporary Add-on, and select `dist/firefox/manifest.json`. Temporary add-ons must
 be loaded again after restarting Firefox.
 
-**Chromium/Chrome/Edge 137+:** open the browser's extensions page, enable developer
+### Chromium, Chrome, and Edge
+
+Chromium/Chrome/Edge 137+: open the browser's extensions page, enable developer
 mode, and load `dist/chromium` unpacked. Its development ID is fixed by the
 manifest public key ([Chrome documentation](https://developer.chrome.com/docs/extensions/reference/manifest/key)).
 If you loaded the earlier build, remove it and load this one again, then pair it;
@@ -40,6 +44,14 @@ will need the store-assigned identity and corresponding native-host allowlist.
 Desktop refreshes registration on every startup. There is no global disable
 setting. Extension installation and pairing still require the user’s actions.
 Individual profiles can be disconnected, requests denied, and sites paused.
+
+When you enter an unlocked vault, Desktop detects supported browser executables
+and offers installation instructions for browsers without an identified paired
+profile. Settings retains all detected browsers and paired profiles. Pairing is
+per profile; a paired browser does not imply every profile is paired or online.
+Browser names are signed, self-reported display metadata, not authorization.
+Reload extensions paired with an older build to identify their browser names.
+Discovery is best effort; portable or sandboxed installations may not be found.
 
 All registered browsers use the vault selected by the most recently started Desktop.
 A standalone `factorseal agent` cannot supply Desktop consent; stop it and launch

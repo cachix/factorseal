@@ -5,6 +5,14 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 await import('./core.js');
 const {origin,validateResponse,decode}=globalThis.FactorSealCore;
+test('identifies supported browser labels without claiming an unknown client is Chrome',()=>{
+  const kind=globalThis.FactorSealCore.browserKind;
+  assert.equal(kind({},true),'firefox');
+  assert.equal(kind({userAgentData:{brands:[{brand:'Chromium'},{brand:'Google Chrome'}]}}),'chrome');
+  assert.equal(kind({userAgentData:{brands:[{brand:'Chromium'},{brand:'Microsoft Edge'}]}}),'edge');
+  assert.equal(kind({userAgent:'Chromium/137.0'}),'chromium');
+  assert.equal(kind({}),undefined);
+});
 test('origin boundaries include scheme, subdomain, credentials, and port',()=>{
   assert.equal(origin('https://EXAMPLE.com:443/login?q=x'),'https://example.com');
   assert.notEqual(origin('https://example.com:444'),origin('https://example.com'));

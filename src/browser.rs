@@ -5,6 +5,7 @@ use std::io::{self, Read, Write};
 use zeroize::Zeroizing;
 
 pub mod desktop;
+pub mod discovery;
 pub mod registration;
 pub use crate::vault::browser_transport as transport;
 
@@ -88,6 +89,8 @@ pub struct Command {
     pub session: String,
     pub sequence: u32,
     pub action: Action,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<discovery::Browser>,
 }
 impl Command {
     fn validate(&self) -> VaultResult<()> {
