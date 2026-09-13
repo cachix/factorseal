@@ -199,19 +199,48 @@ Hyper-V Sockets don't provide, and its own threat-model writeup alongside
 `security/personal-sync-wire.md`. None of that is in scope here — this spike
 only proves or disproves the transport.
 
-## Open problem this spike surfaced
+## Open problem this spike surfaced — now settled, negatively
 
 The `HV_GUID_CHILDREN` wildcard not working for WSL2 guests
 ([microsoft/WSL#5751](https://github.com/microsoft/WSL/issues/5751)) is more
 than a spike inconvenience — it changes the shape of any real integration.
 "Bind once with a wildcard VmId, accept from any WSL2 distro" is not
-available; the host side would instead need to resolve the *current* WSL2
-utility VM ID (via `hcsdiag list` or its underlying HCS API) and rebind every
-time that VM restarts, and `hcsdiag` itself requires Administrator. A
-production Factorseal Windows service would either need to run with enough
-privilege to do that resolution itself, or shell out to something that can —
-neither is free, and it's a meaningfully worse operational story than "listen
-once, accept from any child" that the earlier design discussion assumed. This
-is worth resolving (find the underlying HCS API call and its actual privilege
-requirement, distinct from the `hcsdiag` CLI's) before committing to Hyper-V
-Sockets as the transport in a real design, not just in this spike.
+available; the host side has to resolve the *current* WSL2 utility VM ID and
+rebind every time that VM restarts (`wsl --shutdown`, reboot, or the first
+`wsl` launch after either).
+
+Checked whether that resolution has a non-admin path, since `hcsdiag list`
+requiring admin is just one tool's default posture, not necessarily a proof
+that the underlying capability needs it. It does need it:
+[`wsld`](https://github.com/nbdd0121/wsld) — a project built specifically to
+bridge a Windows host and a WSL2 guest over Hyper-V Sockets, actively
+maintained (last commit July 2026) — documents using the same
+`HcsEnumerateComputeSystems` API `hcsdiag` wraps, and states plainly both
+methods it knows of "require administrator privilege." Two independent
+sources (the WSL team's own issue tracker and a third-party project that had
+every incentive to find a lower-privilege path if one existed) agree there
+isn't one.
+
+Practical consequence: a production Factorseal Windows service using Hyper-V
+Sockets for this can't just listen and accept — it needs standing
+Administrator privilege (or a privileged helper it can call into) to
+re-resolve the VM ID on every WSL2 restart, and (per `wsld`'s design) some
+polling or event mechanism to notice the restart happened at all, since the
+utility VM's lifecycle isn't push-notified to arbitrary listeners. That's a
+real, ongoing privilege-escalation cost, not a one-time install-time
+elevation like the `ServiceId` registration above.
+
+This tips the earlier three-option comparison (Hyper-V Sockets vs. loopback
+TCP vs. a named-pipe relay) back toward reconsidering loopback TCP: WSL2's
+mirrored networking mode (`networkingMode=mirrored` in `.wslconfig`,
+graduated from experimental in 2024, stable as of this writing though still
+opt-in rather than default) makes a loopback port genuinely bidirectional
+without a virtual network hop, and needs no elevation at all on either side.
+Its peer-identity weakness relative to Hyper-V Sockets was the original
+objection to it — but Hyper-V Sockets turned out to have no peer identity
+either, and now costs standing admin privilege on top of that. The
+application-layer token this spike already calls for (see "Non-goals" above)
+would have to do the same authentication work regardless of which transport
+carries it, which narrows the actual advantage of Hyper-V Sockets to "not
+reachable over a network interface" — worth weighing against "requires an
+elevated service" before picking a transport for a real design.
