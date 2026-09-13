@@ -109,6 +109,15 @@ clear error when the two ends disagree on GUIDs. In order of likelihood:
    `hvsocket.h` and the binary cross-compiles and links cleanly, but neither
    proves the bytes are right at runtime — only running it does.
 
+Already hit and fixed once: `socket()` returning `WSAEPROTONOSUPPORT`
+(`Os { code: -2147014855, .. }`, decodes to `HRESULT_FROM_WIN32(10041)`).
+Cross-compiling doesn't catch this because `0` ("family/type default") is a
+perfectly valid *argument*, it's just semantically wrong for `AF_HYPERV` —
+Hyper-V's provider never registers a default protocol. Per Microsoft's own
+sample, the protocol argument must be `HV_PROTOCOL_RAW` (`1`) on the Windows
+side (the Linux `AF_VSOCK` side does keep using plain `0`, since that
+asymmetry is part of the documented API).
+
 ## Non-goals
 
 - No authentication, no framing beyond a bare byte echo, no encryption.
