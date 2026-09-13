@@ -26,6 +26,9 @@ pub(super) enum CompletionShell {
 pub(super) enum TransferFormat {
     #[value(name = "factorseal")]
     FactorSeal,
+    /// CXF 1.0 credentials in an age passphrase-encrypted file.
+    #[value(name = "cxf-age")]
+    CxfAge,
     #[value(name = "bitwarden-json")]
     BitwardenJson,
     #[value(name = "1password-csv")]
@@ -40,6 +43,7 @@ impl From<TransferFormat> for factorseal::transfer::TransferFormat {
     fn from(format: TransferFormat) -> Self {
         match format {
             TransferFormat::FactorSeal => Self::FactorSeal,
+            TransferFormat::CxfAge => Self::CxfAge,
             TransferFormat::BitwardenJson => Self::BitwardenJson,
             TransferFormat::OnePasswordCsv => Self::OnePasswordCsv,
             TransferFormat::OnePasswordPux => Self::OnePasswordPux,
@@ -234,13 +238,17 @@ pub(super) enum Command {
         #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,
 
-        /// Export format. Password-manager formats are plaintext and include personal secrets only.
+        /// Export format. Manager formats include Personal secrets; cxf-age is encrypted.
         #[arg(long, value_enum, default_value_t = TransferFormat::FactorSeal)]
         format: TransferFormat,
 
-        /// Read the native archive passphrase from a private regular file.
-        #[arg(long, value_hint = ValueHint::FilePath)]
+        /// Read the archive passphrase from a private regular file.
+        #[arg(long, value_hint = ValueHint::FilePath, conflicts_with = "recipient_file")]
         passphrase_file: Option<PathBuf>,
+
+        /// Encrypt cxf-age to one hybrid post-quantum age public key in this file.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        recipient_file: Option<PathBuf>,
     },
 
     /// Import an encrypted backup or personal secrets from a password manager.
@@ -253,13 +261,21 @@ pub(super) enum Command {
         #[arg(long, value_enum, default_value_t = TransferFormat::FactorSeal)]
         format: TransferFormat,
 
-        /// Read the native archive passphrase from a private regular file.
-        #[arg(long, value_hint = ValueHint::FilePath)]
+        /// Read the archive passphrase from a private regular file.
+        #[arg(long, value_hint = ValueHint::FilePath, conflicts_with = "identity_file")]
         passphrase_file: Option<PathBuf>,
+
+        /// Decrypt cxf-age with one hybrid age identity in a private, unencrypted key file.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        identity_file: Option<PathBuf>,
 
         /// Replace entries whose vault address already exists.
         #[arg(long)]
         replace_existing: bool,
+
+        /// Authenticate and validate the complete input, then show counts without vault writes.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Remove this vault and backend-owned keys; retained TPM backups are not revoked.

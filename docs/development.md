@@ -7,7 +7,7 @@
 The repository uses [devenv](https://devenv.sh/) on Linux:
 
 ```console
-$ devenv shell cargo test --workspace --all-targets --all-features
+$ devenv shell -- bash scripts/test-with-dbus.sh cargo test --workspace --all-targets --all-features
 $ devenv shell cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ devenv shell cargo fmt --all -- --check
 ```
@@ -19,6 +19,11 @@ $ cargo test --workspace --all-targets --all-features
 $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo fmt --all -- --check
 ```
+
+For Apple credential-exchange SDK and Rust interoperability checks on macOS 26+
+with Xcode 26+, run `bash scripts/test-apple-exchange.sh`. See the
+[Apple test setup](../platform/apple/README.md) for CI artifacts and the separate
+signed-app acceptance procedure.
 
 The feature split is intentional:
 

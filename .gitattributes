@@ -1,2 +1,4 @@
-# Transfer fixtures must keep their exact bytes on every checkout platform.
-tests/fixtures/transfer/** -text
+# Fixtures are byte-for-byte references, including embedded newlines and
+# encrypted plaintext. Preserve their original bytes on every checkout.
+tests/fixtures/** -text
+platform/apple/Tests/**/Fixtures/** -text

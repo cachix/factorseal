@@ -8,6 +8,10 @@ license = "Apache-2.0"
 repository = "https://github.com/domenkozar/factorseal"
 publish = false
 
+[features]
+# macOS 26 integration under development; ordinary builds keep file transfer.
+apple-credential-exchange = []
+
 [dependencies]
 anyhow = "1.0"
 bip39 = { version = "2.2", features = ["zeroize"] }
