@@ -56,10 +56,17 @@ of which of the two transports wins. This spike is only about the transport.
 
 ## What's here
 
-- `src/bin/windows_listener.rs` — binds `127.0.0.1:51027`, accepts one
-  connection, echoes back whatever it reads with a fixed prefix, then exits.
-- `src/bin/wsl_client.rs` — connects to `127.0.0.1:51027`, sends one message,
-  prints the echo, then exits.
+- `src/bin/windows_listener.rs` — generates a 32-byte token, writes it to
+  `%LOCALAPPDATA%\Factorseal-spike\wsl-bridge-token`, binds
+  `127.0.0.1:51027`, accepts one connection, checks the first 32 bytes it
+  reads against the token (constant-time compare, closes silently on
+  mismatch), then echoes back whatever it reads next with a fixed prefix.
+- `src/bin/wsl_client.rs` — reads the token from a path given as its first
+  argument, connects to `127.0.0.1:51027`, sends the token followed by one
+  message, prints the echo, then exits.
+
+See `TOKEN-DESIGN.md` for why this token exists and what it does and doesn't
+protect against.
 
 Both are plain `std::net::{TcpListener, TcpStream}` — no `unsafe`, no
 platform-specific dependencies, no hand-transcribed constants from an SDK
@@ -111,15 +118,23 @@ Mirrored networking is a per-user setting in `.wslconfig`.
 cargo run --bin windows-listener
 ```
 
-**Inside WSL2**, from this directory:
+It prints the path it wrote the token to, e.g.
+`C:\Users\<you>\AppData\Local\Factorseal-spike\wsl-bridge-token`, then blocks
+waiting for a connection.
+
+**Inside WSL2**, from this directory, pass the same path translated to its
+`/mnt/c` equivalent:
 
 ```console
-$ cargo run --bin wsl-client
+$ cargo run --bin wsl-client -- /mnt/c/Users/<you>/AppData/Local/Factorseal-spike/wsl-bridge-token
 ```
 
-Expected: `wsl-client` prints the echoed message back from the Windows host,
-having reached it via literal `127.0.0.1` — no NAT gateway IP, no Hyper-V
-GUID gymnastics.
+Expected: `wsl-client` reads the token with no extra setup on either side,
+connects, sends it, and prints the echoed message back from the Windows
+host — reached via literal `127.0.0.1`, no NAT gateway IP, no Hyper-V GUID
+gymnastics. That the read "just works" is the empirical part of
+`TOKEN-DESIGN.md` this exists to check; everything else there is a policy
+choice, not something a spike proves.
 
 ## If it doesn't connect
 
