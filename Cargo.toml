@@ -110,6 +110,11 @@ name = "factorseal-network"
 path = "src/bin/factorseal-network.rs"
 required-features = ["personal-sync-network"]
 
+[[bin]]
+name = "factorseal-wsl-broker"
+path = "src/bin/factorseal-wsl-broker.rs"
+required-features = ["vault-client"]
+
 [dependencies]
 ed25519-dalek = { version = "3.0.0", optional = true }
 url = { version = "2.5", optional = true }

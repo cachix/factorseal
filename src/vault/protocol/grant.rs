@@ -21,6 +21,10 @@ const GRANT_TARGET_DOMAIN: &[u8] = b"factorseal/grant-target/v3\0";
 const PERMISSION_REGISTRY_VERSION: u8 = 1;
 #[cfg(target_os = "linux")]
 const EXCLUSIVE_HOLDER_VERSION: u8 = 1;
+/// Maximum lifetime for a grant created from a WSL-relayed request,
+/// regardless of the duration requested or approved. See
+/// `VaultApplicationContext::declared_wsl_origin`.
+pub(super) const MAX_WSL_GRANT_SECONDS: u64 = 300;
 
 /// Permission persisted in one caller grant.
 #[cfg(feature = "vault-store")]
@@ -412,6 +416,26 @@ pub(super) fn promote_permission(
     if expires_at.is_some_and(|deadline| deadline <= now) {
         return Err(VaultError::Expired);
     }
+    // A request relayed from WSL carries no equivalent of the
+    // executable-identity hint a native caller gets (see
+    // `VaultApplicationContext::declared_wsl_origin`): the grant this
+    // approval creates still works exactly like any native grant (the
+    // normal retry-after-approval flow depends on that), but its lifetime
+    // is capped far below whatever duration was requested or approved,
+    // regardless of an explicit "until revoked" choice. Both the persisted
+    // grant and the permission record shown in the Desktop UI reflect the
+    // same clamped deadline, so neither one overstates how long access
+    // actually lasts.
+    let expires_at = if permission.application.declared_wsl_origin.is_some() {
+        let capped = now + MAX_WSL_GRANT_SECONDS;
+        let clamped = expires_at.map_or(capped, |deadline| deadline.min(capped));
+        if let PermissionState::Granted { expires_at, .. } = &mut permission.state {
+            *expires_at = Some(clamped);
+        }
+        Some(clamped)
+    } else {
+        expires_at
+    };
     let caller_fingerprint = caller.fingerprint();
     let target_digest = grant_target_digest(&target);
     let address = grant_address(caller_fingerprint, target_digest, grant_permission)?;
@@ -425,6 +449,11 @@ pub(super) fn promote_permission(
     let grant_bytes = Zeroizing::new(
         serde_json::to_vec(&grant).map_err(|error| VaultError::Protocol(error.to_string()))?,
     );
+    let operations = vec![DocumentOperation::Put {
+        address,
+        value: grant_bytes,
+        evict_at: grant.expires_at,
+    }];
 
     permission.scope = Some(match target {
         GrantTarget::Kind { kind } => kind,
@@ -444,17 +473,7 @@ pub(super) fn promote_permission(
         target_digest,
         grant_permission,
     });
-    write_registry(
-        store,
-        &registry,
-        vec![DocumentOperation::Put {
-            address,
-            value: grant_bytes,
-            evict_at: grant.expires_at,
-        }],
-        provenance,
-        now,
-    )
+    write_registry(store, &registry, operations, provenance, now)
 }
 
 pub(super) fn list_granted_permissions(
