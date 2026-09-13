@@ -220,6 +220,11 @@ fn main() -> std::io::Result<()> {
     let n = stream.read(&mut buf)?;
     println!("received: {}", String::from_utf8_lossy(&buf[..n]));
 
+    // Only now let the client exit -- it's blocked on this since sending
+    // its message, precisely so it can't disappear mid-lookup above.
+    use std::io::Write;
+    stream.write_all(&[1])?;
+
     Ok(())
 }
 
