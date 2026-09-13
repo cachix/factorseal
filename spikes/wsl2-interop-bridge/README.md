@@ -2,7 +2,15 @@
 
 ## Status
 
-Not yet run. This supersedes the framing (not the findings) of
+Native baseline confirmed; WSL2-interop comparison not yet run. The
+identity probe's first attempt failed with `ERROR_GEN_FAILURE` because
+`identity-probe-client` exited immediately after sending its message,
+likely before the listener finished querying it — fixed by having the
+client block on a one-byte ack the listener sends only after finishing.
+After that fix, a native run resolved PID, SID, executable path, and
+SHA-256 hash correctly on the first attempt: the `GetExtendedTcpTable`
+byte-order decoding (the riskiest untested part going in) was right both
+times it was exercised. This supersedes the framing (not the findings) of
 `spikes/wsl2-hyperv-socket-bridge` and `spikes/wsl2-mirrored-loopback-bridge`.
 Those two spikes answered "can bytes cross the VM boundary" and "can we
 authenticate the peer that sends them" by building a new transport and a new
