@@ -2,13 +2,20 @@
 
 ## Status
 
-Throwaway validation code. Nothing here is wired into `factorseal`, and none
-of it should be imported by product crates. It exists to answer one narrow
-question before any real design work starts:
+**Confirmed working.** Throwaway validation code — nothing here is wired
+into `factorseal`, and none of it should be imported by product crates. It
+exists to answer one narrow question before any real design work starts:
 
 > Can a process inside a WSL2 distro open a byte-stream connection to a
 > listener on its Windows host without a virtual network, a TCP port, or a
 > kernel module the user has to install by hand?
+
+Yes, with one caveat. `wsl-client` connected to `windows-listener.exe` and
+completed a full round trip (`sent: hello from wsl2` /
+`received: windows-host-echo: hello from wsl2`) once the listener was bound
+to the WSL2 utility VM's actual ID rather than the `HV_GUID_CHILDREN`
+wildcard — see "One-time setup" and "Open problem this spike surfaced"
+below for why that's a caveat worth taking seriously, not a footnote.
 
 ## Why this question matters
 
@@ -131,7 +138,15 @@ $ cargo run --bin wsl-client
 
 Expected: the WSL2 side prints the echoed message it got back from Windows.
 That confirms a live, working byte-stream connection crossed the VM boundary
-with no virtual network involved.
+with no virtual network involved. Confirmed on
+`6.18.33.2-microsoft-standard-WSL2` against a Windows host:
+
+```console
+$ cargo run --bin wsl-client
+connecting to host over AF_VSOCK, port 0x00005A17...
+sent: hello from wsl2
+received: windows-host-echo: hello from wsl2
+```
 
 ## If it doesn't connect
 
