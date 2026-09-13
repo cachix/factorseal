@@ -31,8 +31,12 @@ fn main() -> std::io::Result<()> {
         service_id: GUID,
     }
 
-    /// Accept connections from any child partition (i.e. any WSL2 distro on
-    /// this host), per `HV_GUID_CHILDREN` in `hvsocket.h`.
+    /// Documented as "accept from any child partition" in `hvsocket.h`, and
+    /// correct for a regular Hyper-V VM — but WSL2 specifically does not
+    /// honor this wildcard for guest-initiated connections
+    /// (https://github.com/microsoft/WSL/issues/5751). Kept only as the
+    /// fallback used when no concrete VM ID is passed on the command line;
+    /// see `README.md` for how to obtain the real one via `hcsdiag list`.
     const HV_GUID_CHILDREN: GUID = GUID::from_values(
         0x90db_8b89,
         0x0d35,
@@ -73,10 +77,26 @@ fn main() -> std::io::Result<()> {
     let sock: SOCKET = unsafe { socket(i32::from(AF_HYPERV), SOCK_STREAM, HV_PROTOCOL_RAW) }
         .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))?;
 
+    let (vm_id, vm_id_label) = match std::env::args().nth(1) {
+        Some(arg) => {
+            let guid = GUID::try_from(arg.as_str())
+                .map_err(|_| std::io::Error::other("argument is not a 36-character GUID"))?;
+            (guid, arg)
+        }
+        None => {
+            eprintln!(
+                "no VM ID given; falling back to HV_GUID_CHILDREN, which is known not to work \
+                 for WSL2 guests (see the comment above HV_GUID_CHILDREN). Pass the WSL2 utility \
+                 VM's ID from `hcsdiag list` as the first argument instead."
+            );
+            (HV_GUID_CHILDREN, "HV_GUID_CHILDREN".to_string())
+        }
+    };
+
     let addr = SockaddrHv {
         family: AF_HYPERV,
         reserved: 0,
-        vm_id: HV_GUID_CHILDREN,
+        vm_id,
         service_id: service_id_from_port(PORT),
     };
     let addr_ptr = std::ptr::from_ref(&addr).cast::<SOCKADDR>();
@@ -89,7 +109,7 @@ fn main() -> std::io::Result<()> {
     }
 
     println!(
-        "listening on AF_HYPERV, HV_GUID_CHILDREN, service id for port 0x{PORT:08X}; waiting for one connection..."
+        "listening on AF_HYPERV, VmId {vm_id_label}, service id for port 0x{PORT:08X}; waiting for one connection..."
     );
 
     let client: SOCKET = unsafe { accept(sock, None, None) }
