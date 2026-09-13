@@ -49,9 +49,23 @@ Both sides agree on a single `u32` port (`PORT` constant, currently
 `0x0000_5A17`, duplicated in both files since a shared crate isn't worth it
 for one constant). The Windows side turns that port into a Hyper-V Sockets
 `ServiceId` GUID using Microsoft's well-known port-compatibility template
-(`xxxxxxxx-FACB-11E6-BD58-64006A7986D3`); the Linux `AF_VSOCK` transport does
-that same translation internally, so the Linux side just uses the port
-directly.
+(`xxxxxxxx-FACB-11E6-BD58-64006A7986D3`, `HV_GUID_VSOCK_TEMPLATE` in
+`hvsocket.h`); the Linux `AF_VSOCK` transport does that same translation
+internally, so the Linux side just uses the port directly.
+
+`windows-rs` 0.61's win32metadata does not carry `hvsocket.h` at all — it
+exposes only the bare `AF_HYPERV` constant, not `SOCKADDR_HV` or the
+`HV_GUID_*` well-known GUIDs. `windows_listener.rs` hand-defines those from
+[the public Windows 10 SDK header](https://github.com/tpn/winsdk-10/blob/master/Include/10.0.16299.0/shared/hvsocket.h),
+cross-checked against Microsoft Learn's "Make your own integration services"
+guide. The Windows binary was cross-compiled and linked for real with
+`cargo xwin build --target x86_64-pc-windows-msvc` from WSL2 (this repo's
+`devenv.nix` already provides `cargo-xwin` and the MSVC target), producing a
+valid PE32+ executable — so the WinSock API usage type-checks and links
+against the real Windows import libraries. What that build can't validate is
+runtime behavior: whether `HV_GUID_CHILDREN` actually matches what the
+current Windows Hyper-V platform driver expects. That can only be confirmed
+by running it.
 
 This crate deliberately sits outside the main Cargo workspace (own
 `[workspace]` table, not listed in the root `Cargo.toml` members) so it can't
@@ -84,16 +98,16 @@ with no virtual network involved.
 Hyper-V Sockets fail silently (connection just times out) rather than with a
 clear error when the two ends disagree on GUIDs. In order of likelihood:
 
-1. The `ServiceId` GUID template byte layout is wrong. Verify the constant
-   against the Windows SDK's `hvsocket.h` or Microsoft's own
-   `GuestCommunicationSample`; this code was written from memory of that
-   template and hasn't been checked against the header.
-2. The Windows Defender Firewall or an AV product is blocking Hyper-V socket
+1. The Windows Defender Firewall or an AV product is blocking Hyper-V socket
    traffic (rare, but some endpoint security products intercept `AF_HYPERV`).
-3. The WSL2 kernel lacks `hv_sock` support. Check with
+2. The WSL2 kernel lacks `hv_sock` support. Check with
    `zgrep HYPERV_VSOCKETS /proc/config.gz` — it needs to report `y` or `m`
    (confirmed `y` on the kernel this spike was written against:
    `6.18.33.2-microsoft-standard-WSL2`).
+3. The `ServiceId`/`VmId` GUID byte layout is wrong after all. The values in
+   `windows_listener.rs` were cross-checked against a public copy of
+   `hvsocket.h` and the binary cross-compiles and links cleanly, but neither
+   proves the bytes are right at runtime — only running it does.
 
 ## Non-goals
 
