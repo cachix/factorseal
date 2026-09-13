@@ -2,15 +2,30 @@
 
 ## Status
 
-Native baseline confirmed; WSL2-interop comparison not yet run. The
-identity probe's first attempt failed with `ERROR_GEN_FAILURE` because
+**Option 1 (interop reverse-connect broker) confirmed.** The identity
+probe's first attempt failed with `ERROR_GEN_FAILURE` because
 `identity-probe-client` exited immediately after sending its message,
 likely before the listener finished querying it — fixed by having the
 client block on a one-byte ack the listener sends only after finishing.
-After that fix, a native run resolved PID, SID, executable path, and
-SHA-256 hash correctly on the first attempt: the `GetExtendedTcpTable`
-byte-order decoding (the riskiest untested part going in) was right both
-times it was exercised. This supersedes the framing (not the findings) of
+After that fix:
+
+| | Native (PowerShell) | WSL2 interop |
+| --- | --- | --- |
+| PID | 37324 | 28884 |
+| Executable path | `C:\Users\tarci\Projects\factorseal-test\identity-probe-client.exe` | identical |
+| SID | `S-1-5-21-859851242-740958402-337579408-1001` | identical |
+| SHA-256 | `eba00c2d71907bd144caaa7e3f8489fe48be5628c25d2b250baaea6b81782a22` | identical |
+
+Only the PID differs, exactly as expected for two separate process
+launches. Every field `caller_identity()` in `src/vault/windows.rs:601-639`
+actually checks (SID, then the PID-resolved executable's path and hash) came
+back identical between a native launch and a WSL2-interop launch of the same
+binary. This confirms directly, not just architecturally, that an
+interop-launched process is not a special case to that code: it would
+authenticate exactly as any other Windows client does today, with zero
+changes to the existing transport or authentication logic.
+
+Option 2 (launch-time capability delegation) is not yet run. This supersedes the framing (not the findings) of
 `spikes/wsl2-hyperv-socket-bridge` and `spikes/wsl2-mirrored-loopback-bridge`.
 Those two spikes answered "can bytes cross the VM boundary" and "can we
 authenticate the peer that sends them" by building a new transport and a new
