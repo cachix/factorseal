@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "wsl2-mirrored-loopback-bridge-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "windows-listener"
+path = "src/bin/windows_listener.rs"
+
+[[bin]]
+name = "wsl-client"
+path = "src/bin/wsl_client.rs"
+
+[lints.rust]
+unsafe_code = "deny"
