@@ -59,12 +59,18 @@ fn main() -> std::io::Result<()> {
         std::io::Error::from_raw_os_error(unsafe { WSAGetLastError() }.0)
     }
 
+    /// `HV_PROTOCOL_RAW` from `hvsocket.h` — the only protocol value valid
+    /// for `AF_HYPERV`/`SOCK_STREAM`. Passing `0` ("use the family/type
+    /// default") fails with `WSAEPROTONOSUPPORT`, since Hyper-V's provider
+    /// never registers a default protocol.
+    const HV_PROTOCOL_RAW: i32 = 1;
+
     let mut wsa_data = WSADATA::default();
     if unsafe { WSAStartup(0x0202, &mut wsa_data) } != 0 {
         return Err(last_error());
     }
 
-    let sock: SOCKET = unsafe { socket(i32::from(AF_HYPERV), SOCK_STREAM, 0) }
+    let sock: SOCKET = unsafe { socket(i32::from(AF_HYPERV), SOCK_STREAM, HV_PROTOCOL_RAW) }
         .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))?;
 
     let addr = SockaddrHv {
