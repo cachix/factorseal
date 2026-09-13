@@ -14,5 +14,9 @@ path = "src/bin/windows_listener.rs"
 name = "wsl-client"
 path = "src/bin/wsl_client.rs"
 
+[dependencies]
+getrandom = "0.3.3"
+hex = "0.4.3"
+
 [lints.rust]
 unsafe_code = "deny"
