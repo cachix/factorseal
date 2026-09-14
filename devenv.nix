@@ -2,8 +2,14 @@
   # GTK and Qt expose their own linker flags through pkg-config. Keeping the
   # aggregate Nix linker list would exceed Linux's argument-size limit once
   # both SDKs and their propagated dependencies are present.
+  #
+  # RC is ambient (from the outer Nix profile) and set to "windres", a GNU
+  # target's resource compiler. embed-resource's build-time detection
+  # (crates/gpui's build.rs) trusts an explicit RC unconditionally, so this
+  # stale value pre-empts its own correct default of llvm-rc for msvc
+  # targets and fails outright rather than falling through.
   enterShell = ''
-    unset NIX_CFLAGS_COMPILE NIX_LDFLAGS
+    unset NIX_CFLAGS_COMPILE NIX_LDFLAGS RC
   '';
 
   packages = with pkgs; [
