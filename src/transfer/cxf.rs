@@ -7,9 +7,11 @@ use std::io::{Read as _, Write as _};
 
 use anyhow::{Context as _, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use credential_exchange_format as cxf;
+use serde::Deserialize as _;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{MAX_MANAGER_FILE_BYTES, MAX_MANAGER_ITEMS, SensitiveJson};
 use crate::personal::{
@@ -127,16 +129,7 @@ fn export_native_json(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Ve
     if secrets.len() > MAX_MANAGER_ITEMS {
         bail!("too many CXF items");
     }
-    let mut root = SensitiveJson(json!({
-        "version":{"major":1,"minor":0},
-        "exporterRpId":"factorseal.local",
-        "exporterDisplayName":"FactorSeal",
-        "timestamp":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
-        "accounts":[{"id":URL_SAFE_NO_PAD.encode(uuid::Uuid::new_v4().as_bytes()),"username":"","email":"","collections":[],"items":[]}]
-    }));
-    let items = root.0["accounts"][0]["items"]
-        .as_array_mut()
-        .context("invalid generated CXF account")?;
+    let mut root = Zeroizing::new(new_header()?);
     let mut ids = std::collections::HashSet::new();
     for (index, secret) in secrets.iter().enumerate() {
         secret.encode()?;
@@ -149,12 +142,42 @@ fn export_native_json(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Ve
         if !ids.insert(&secret.id) {
             bail!("duplicate personal-item ID in CXF export");
         }
-        items.push(
-            export_item(secret)
+        root.accounts[0].items.push(
+            export_typed_item(secret)
                 .map_err(|e| anyhow::anyhow!("cannot export CXF item {}: {e}", index + 1))?,
         );
     }
-    let bytes = serde_json::to_vec_pretty(&root.0).map(Zeroizing::new)?;
+    encode_header(&root)
+}
+
+fn new_header() -> anyhow::Result<cxf::Header> {
+    Ok(cxf::Header {
+        version: cxf::Version {
+            major: 1,
+            minor: 0,
+            additional_fields: cxf::AdditionalFields::default(),
+        },
+        exporter_rp_id: "factorseal.local".into(),
+        exporter_display_name: "FactorSeal".into(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+        accounts: vec![cxf::Account {
+            id: uuid::Uuid::new_v4().as_bytes().as_slice().into(),
+            username: String::new(),
+            email: String::new(),
+            full_name: None,
+            collections: Vec::new(),
+            items: Vec::new(),
+            extensions: None,
+            additional_fields: cxf::AdditionalFields::default(),
+        }],
+        additional_fields: cxf::AdditionalFields::default(),
+    })
+}
+
+fn encode_header(root: &cxf::Header) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let bytes = serde_json::to_vec_pretty(root).map(Zeroizing::new)?;
     if bytes.len() > MAX_MANAGER_FILE_BYTES {
         bail!("CXF payload is larger than 128 MiB");
     }
@@ -162,27 +185,25 @@ fn export_native_json(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Ve
 }
 
 fn export_item(secret: &PersonalSecret) -> anyhow::Result<Value> {
-    let mut item = SensitiveJson(json!({
-        "id":identifier("item", &secret.id), "title":secret.title,
-        "credentials":[],
-        "extensions":[{"name":ITEM_EXTENSION,"version":1,"id":secret.id,
+    let item = Zeroizing::new(export_typed_item(secret)?);
+    serde_json::to_value(&*item).context("cannot encode CXF item")
+}
+
+fn export_typed_item(secret: &PersonalSecret) -> anyhow::Result<cxf::Item> {
+    let mut metadata = SensitiveJson(json!({"name":ITEM_EXTENSION,"version":1,"id":secret.id,
             "kind":secret.kind,"archived":secret.archived,"folder":secret.folder,
-            "sections":secret.sections.iter().map(|s| json!({"id":s.id,"label":s.label,"fields":s.fields.iter().map(|f| &f.id).collect::<Vec<_>>()})).collect::<Vec<_>>()}]
+            "sections":secret.sections.iter().map(|s| json!({"id":s.id,"label":s.label,"fields":s.fields.iter().map(|f| &f.id).collect::<Vec<_>>()})).collect::<Vec<_>>()
     }));
-    if secret.favorite {
-        item.0["favorite"] = true.into();
-    }
-    if !secret.tags.is_empty() {
-        item.0["tags"] = json!(secret.tags);
-    }
-    let credentials = item.0["credentials"]
-        .as_array_mut()
-        .expect("constructed array");
+    let mut credentials = Zeroizing::new(Vec::new());
     let mut totp_fields = SensitiveJson(json!([]));
     for section in &secret.sections {
-        let mut custom = SensitiveJson(
-            json!({"type":"custom-fields","id":identifier(&secret.id, &section.id),"label":section.label,"fields":[]}),
-        );
+        let mut custom = Zeroizing::new(cxf::CustomFieldsCredential {
+            id: Some(decode_id(&identifier(&secret.id, &section.id))?.into()),
+            label: Some(section.label.clone()),
+            fields: Vec::new(),
+            extensions: Vec::new(),
+            additional_fields: cxf::AdditionalFields::default(),
+        });
         let mut primary = std::collections::BTreeMap::new();
         for field in &section.fields {
             if field.field_type == PersonalFieldType::Totp
@@ -194,7 +215,9 @@ fn export_item(secret: &PersonalSecret) -> anyhow::Result<Value> {
                     .as_array_mut()
                     .expect("array")
                     .push(json!({"index":credentials.len(),"field":without(&encoded,"value")?}));
-                credentials.push(totp::export(field.text().context("invalid TOTP value")?)?);
+                credentials.push(totp::export_credential(
+                    field.text().context("invalid TOTP value")?,
+                )?);
                 continue;
             }
             let encoded = export_field(field, section, &secret.id)?;
@@ -207,22 +230,42 @@ fn export_item(secret: &PersonalSecret) -> anyhow::Result<Value> {
                     continue;
                 }
             }
-            custom.0["fields"]
-                .as_array_mut()
-                .expect("constructed array")
-                .push(encoded);
+            let encoded = SensitiveJson(encoded);
+            custom.fields.push(
+                cxf::EditableFieldValue::deserialize(&encoded.0)
+                    .map_err(|_| anyhow::anyhow!("cannot encode CXF field"))?,
+            );
         }
         for credential in primary.values_mut() {
-            credentials.push(credential.0.take());
+            let mut decoded = cxf::Credential::deserialize(&credential.0)
+                .map_err(|_| anyhow::anyhow!("cannot encode CXF credential"))?;
+            // Upstream's Unknown fallback also accepts malformed known types.
+            // Never silently export a native credential through that fallback.
+            if matches!(decoded, cxf::Credential::Unknown { .. }) {
+                decoded.zeroize();
+                bail!("cannot encode CXF credential");
+            }
+            credentials.push(decoded);
         }
         // Keep empty sections as well: empty required fields arrays are valid CXF.
-        credentials.push(custom.0.take());
+        credentials.push(cxf::Credential::CustomFields(Box::new(std::mem::take(
+            &mut *custom,
+        ))));
     }
     if let Some(notes) = &secret.notes {
-        credentials.push(json!({"type":"note","content":{"fieldType":"string","value":notes}}));
+        credentials.push(cxf::Credential::Note(Box::new(cxf::NoteCredential {
+            content: cxf::EditableField {
+                id: None,
+                value: cxf::EditableFieldString(notes.clone()).into(),
+                label: None,
+                extensions: None,
+                additional_fields: cxf::AdditionalFields::default(),
+            },
+            additional_fields: cxf::AdditionalFields::default(),
+        })));
     }
     if !totp_fields.0.as_array().expect("array").is_empty() {
-        item.0["extensions"][0]["totpFields"] = totp_fields.0.take();
+        metadata.0["totpFields"] = totp_fields.0.take();
     }
     let urls: Vec<_> = secret
         .sections
@@ -231,11 +274,25 @@ fn export_item(secret: &PersonalSecret) -> anyhow::Result<Value> {
         .filter(|f| f.field_type == PersonalFieldType::Url)
         .filter_map(PersonalField::text)
         .filter(|s| !s.is_empty())
+        .map(str::to_owned)
         .collect();
-    if !urls.is_empty() {
-        item.0["scope"] = json!({"urls":urls,"androidApps":[]});
-    }
-    Ok(item.0.take())
+    Ok(cxf::Item {
+        id: decode_id(&identifier("item", &secret.id))?.into(),
+        title: secret.title.clone(),
+        creation_at: None,
+        modified_at: None,
+        subtitle: None,
+        favorite: secret.favorite.then_some(true),
+        tags: (!secret.tags.is_empty()).then(|| secret.tags.clone()),
+        scope: (!urls.is_empty()).then_some(cxf::CredentialScope {
+            urls,
+            android_apps: Vec::new(),
+            additional_fields: cxf::AdditionalFields::default(),
+        }),
+        credentials: std::mem::take(&mut *credentials),
+        extensions: Some(vec![cxf::Extension::<()>::Unknown(metadata.0.take())]),
+        additional_fields: cxf::AdditionalFields::default(),
+    })
 }
 
 fn primary_field(
@@ -267,21 +324,6 @@ fn export_field(
     section: &PersonalSection,
     item_id: &str,
 ) -> anyhow::Result<Value> {
-    let ty = if field.concealed {
-        "concealed-string"
-    } else {
-        match field.field_type {
-            PersonalFieldType::Boolean
-                if field.value.is_boolean() || matches!(field.text(), Some("true" | "false")) =>
-            {
-                "boolean"
-            }
-            PersonalFieldType::Email => "email",
-            // Native dates may be empty or use a vendor-specific spelling.
-            // Keep those strings intact; the extension retains their native type.
-            _ => "string",
-        }
-    };
     let value = Zeroizing::new(match &field.value {
         Value::String(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
@@ -292,12 +334,36 @@ fn export_field(
     if matches!(field.field_type, PersonalFieldType::Unknown(_)) {
         bail!("unrecognized fields cannot yet be exported to CXF; use a FactorSeal archive");
     }
-    Ok(
-        json!({"id":identifier(&identifier(item_id, &section.id), &field.id),"label":field.label,"fieldType":ty,"value":value.as_str(),
-        "extensions":[{"name":FIELD_EXTENSION,"version":1,"id":field.id,
+    let metadata = json!({"name":FIELD_EXTENSION,"version":1,"id":field.id,
             "fieldType":field.field_type,"concealed":field.concealed,
-            "booleanValue":field.value.is_boolean(),"sectionId":section.id,"sectionLabel":section.label}]}),
-    )
+            "booleanValue":field.value.is_boolean(),"sectionId":section.id,"sectionLabel":section.label});
+    macro_rules! encoded {
+        ($value:expr) => {
+            serde_json::to_value(&*Zeroizing::new(cxf::EditableField {
+                id: Some(cxf::B64Url::from(decode_id(&identifier(
+                    &identifier(item_id, &section.id),
+                    &field.id,
+                ))?)),
+                label: Some(field.label.clone()),
+                value: $value.into(),
+                extensions: Some(vec![cxf::Extension::<()>::Unknown(metadata)]),
+                additional_fields: cxf::AdditionalFields::default(),
+            }))
+            .context("cannot encode CXF field")
+        };
+    }
+    if field.concealed {
+        return encoded!(cxf::EditableFieldConcealedString(value.to_string()));
+    }
+    match field.field_type {
+        PersonalFieldType::Boolean if matches!(value.as_str(), "true" | "false") => {
+            encoded!(cxf::EditableFieldBoolean(value.as_str() == "true"))
+        }
+        PersonalFieldType::Email => encoded!(cxf::EditableFieldEmail(value.to_string())),
+        // Native dates may be empty or use a vendor-specific spelling.
+        // The FactorSeal extension retains their native type.
+        _ => encoded!(cxf::EditableFieldString(value.to_string())),
+    }
 }
 
 /// Read a CXF 1.0 JSON header. Unknown data is retained as encrypted source
@@ -307,36 +373,32 @@ pub fn import_json(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
         bail!("CXF payload is larger than 128 MiB");
     }
     let root = SensitiveJson(serde_json::from_slice(bytes).context("invalid CXF JSON")?);
-    if root["version"]["major"].as_u64() != Some(1) || root["version"]["minor"].as_u64() != Some(0)
-    {
+    // Retain the input during projection to enforce our stricter identifier
+    // checks before the crate normalizes base64 spellings. Unknown members are
+    // also carried by the typed model's AdditionalFields.
+    let header = Zeroizing::new(
+        cxf::Header::<()>::deserialize(&root.0)
+            .map_err(|_| anyhow::anyhow!("invalid CXF document"))?,
+    );
+    if header.version.major != 1 || header.version.minor != 0 {
         bail!("unsupported CXF version; expected 1.0");
     }
-    text(&root, "exporterRpId")?;
-    text(&root, "exporterDisplayName")?;
-    root["timestamp"]
-        .as_u64()
-        .context("invalid CXF timestamp")?;
     let accounts = array(&root, "accounts")?;
     let mut output = Vec::new();
     let mut account_ids = std::collections::HashSet::new();
-    for account in accounts {
+    for (account, decoded_account) in accounts.iter().zip(&header.accounts) {
         let account_id = valid_id(account, "id")?;
         if !account_ids.insert(account_id.clone()) {
             bail!("duplicate CXF account ID");
         }
-        text(account, "username")?;
-        text(account, "email")?;
-        let collections = array(account, "collections")?;
         let items = array(account, "items")?;
-        if items.is_empty()
-            && (!collections.is_empty()
-                || !text(account, "username")?.is_empty()
-                || !text(account, "email")?.is_empty()
-                || has_unknown(
-                    account,
-                    &["id", "username", "email", "collections", "items"],
-                ))
-        {
+        let account_has_metadata = !decoded_account.collections.is_empty()
+            || !decoded_account.username.is_empty()
+            || !decoded_account.email.is_empty()
+            || decoded_account.full_name.is_some()
+            || decoded_account.extensions.is_some()
+            || !decoded_account.additional_fields.0.is_empty();
+        if items.is_empty() && account_has_metadata {
             bail!(
                 "CXF contains an empty account with metadata that cannot be stored without an item; no items were imported"
             );
@@ -345,43 +407,20 @@ pub fn import_json(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
             bail!("too many CXF items");
         }
         let mut ids = std::collections::HashSet::new();
-        for (index, original) in items.iter().enumerate() {
+        for (index, (original, decoded)) in items.iter().zip(&decoded_account.items).enumerate() {
             let id = valid_id(original, "id")?;
             if !ids.insert(id.clone()) {
                 bail!("duplicate CXF item ID");
             }
-            let (mut item, bindings) = import_item(original, &account_id, &id)
+            let (mut item, bindings) = import_item(original, decoded, &account_id, &id)
                 .map_err(|e| anyhow::anyhow!("invalid CXF item {}: {e}", index + 1))?;
             // Collections, account attributes and future header fields are retained
             // when they cannot be mapped, instead of quietly discarded.
             if extension(original, ITEM_EXTENSION)?.is_none_or(|meta| meta["version"] == 2)
                 || item.source.is_some()
-                || !collections.is_empty()
-                || account["username"].as_str().is_some_and(|s| !s.is_empty())
-                || account["email"].as_str().is_some_and(|s| !s.is_empty())
-                || account.get("fullName").is_some()
-                || account.get("extensions").is_some()
-                || has_unknown(
-                    account,
-                    &[
-                        "id",
-                        "username",
-                        "email",
-                        "fullName",
-                        "collections",
-                        "items",
-                    ],
-                )
-                || has_unknown(
-                    &root,
-                    &[
-                        "version",
-                        "exporterRpId",
-                        "exporterDisplayName",
-                        "timestamp",
-                        "accounts",
-                    ],
-                )
+                || account_has_metadata
+                || !header.additional_fields.0.is_empty()
+                || !header.version.additional_fields.0.is_empty()
             {
                 let metadata = SensitiveJson(without(account, "items")?);
                 let header = SensitiveJson(without(&root, "accounts")?);
@@ -404,43 +443,24 @@ pub fn import_json(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
 #[allow(clippy::too_many_lines)]
 fn import_item(
     original: &Value,
+    decoded: &cxf::Item,
     account_id: &[u8],
     id: &[u8],
 ) -> anyhow::Result<(PersonalSecret, Vec<roundtrip::Binding>)> {
     let mut bindings = Vec::new();
-    let mut item = PersonalSecret::new(
-        PersonalSecretKind::Generic,
-        text(original, "title")?.to_owned(),
-    );
+    let mut item = PersonalSecret::new(PersonalSecretKind::Generic, decoded.title.clone());
     let mut digest = Sha256::new();
     digest.update(b"factorseal/cxf-item/v1\0");
     digest.update((account_id.len() as u64).to_be_bytes());
     digest.update(account_id);
     digest.update(id);
     item.id = format!("cxf-{}", hex::encode(digest.finalize()));
-    if let Some(v) = original.get("favorite") {
-        item.favorite = v.as_bool().context("invalid CXF favorite")?;
-    }
-    if let Some(tags) = original.get("tags") {
-        item.tags = tags
-            .as_array()
-            .context("invalid CXF tags")?
-            .iter()
-            .map(|v| v.as_str().map(str::to_owned).context("invalid CXF tag"))
-            .collect::<anyhow::Result<_>>()?;
-    }
-    let mut unmapped = has_unknown(
-        original,
-        &[
-            "id",
-            "title",
-            "favorite",
-            "credentials",
-            "tags",
-            "scope",
-            "extensions",
-        ],
-    );
+    item.favorite = decoded.favorite.unwrap_or(false);
+    item.tags = decoded.tags.clone().unwrap_or_default();
+    let mut unmapped = !decoded.additional_fields.0.is_empty()
+        || decoded.creation_at.is_some()
+        || decoded.modified_at.is_some()
+        || decoded.subtitle.is_some();
     let native = extension(original, ITEM_EXTENSION)?;
     if let Some(meta) = native {
         unmapped |= has_unknown(
@@ -501,8 +521,34 @@ fn import_item(
     for (index, credential) in array(original, "credentials")?.iter().enumerate() {
         let ty = text(credential, "type")?;
         let section_id = format!("cxf-{index}");
-        match ty {
-            "custom-fields" => {
+        // File transport is unsupported even if upstream treats a malformed
+        // file credential as Unknown. Do not turn missing attachments into a
+        // seemingly successful import.
+        if ty == "file" {
+            bail!("CXF file references require an attachment transport; no items were imported");
+        }
+        let typed = &decoded.credentials[index];
+        if matches!(typed, cxf::Credential::Unknown { .. })
+            && matches!(
+                ty,
+                "basic-auth"
+                    | "api-key"
+                    | "credit-card"
+                    | "person-name"
+                    | "address"
+                    | "passport"
+                    | "identity-document"
+                    | "drivers-license"
+                    | "wifi"
+                    | "note"
+                    | "generated-password"
+                    | "totp"
+            )
+        {
+            bail!("invalid CXF credential");
+        }
+        match typed {
+            cxf::Credential::CustomFields(_) => {
                 let label = credential
                     .get("label")
                     .map(|v| v.as_str().context("invalid CXF section label"))
@@ -528,8 +574,15 @@ fn import_item(
                 }
                 unmapped |= has_unknown(credential, &["type", "id", "label", "fields"]);
             }
-            "basic-auth" | "api-key" | "credit-card" | "person-name" | "address" | "passport"
-            | "identity-document" | "drivers-license" | "wifi" => {
+            cxf::Credential::BasicAuth(_)
+            | cxf::Credential::ApiKey(_)
+            | cxf::Credential::CreditCard(_)
+            | cxf::Credential::PersonName(_)
+            | cxf::Credential::Address(_)
+            | cxf::Credential::Passport(_)
+            | cxf::Credential::IdentityDocument(_)
+            | cxf::Credential::DriversLicense(_)
+            | cxf::Credential::Wifi(_) => {
                 if native.is_none() {
                     item.kind = credential_kind(ty);
                 }
@@ -550,7 +603,7 @@ fn import_item(
                     }
                 }
             }
-            "note" => {
+            cxf::Credential::Note(_) => {
                 let content = &credential["content"];
                 if item.notes.is_none()
                     && content["fieldType"] == "string"
@@ -569,7 +622,7 @@ fn import_item(
                 }
                 unmapped |= has_unknown(credential, &["type", "content"]);
             }
-            "generated-password" => {
+            cxf::Credential::GeneratedPassword(_) => {
                 let field =
                     json!({"fieldType":"concealed-string","value":text(credential,"password")?});
                 let field = SensitiveJson(field);
@@ -581,7 +634,7 @@ fn import_item(
                 import_field(&mut item, &field, &section_id, "Password", "password")?;
                 unmapped |= has_unknown(credential, &["type", "password"]);
             }
-            "totp" => {
+            cxf::Credential::Totp(_) => {
                 let uri = totp::import(credential)?;
                 if let Some(meta) = totp::field_metadata(native, index)? {
                     let mut field = SensitiveJson(meta["field"].clone());
@@ -615,9 +668,6 @@ fn import_item(
                         "issuer",
                     ],
                 );
-            }
-            "file" => {
-                bail!("CXF file references require an attachment transport; no items were imported")
             }
             _ => {
                 let projection = native
@@ -720,28 +770,30 @@ fn import_field(
     section_label: &str,
     default_id: &str,
 ) -> anyhow::Result<bool> {
-    let ty = text(field, "fieldType")?;
+    // EditableFieldString accepts unexpected/future field types without
+    // discarding their value. The crate owns the standard field schema.
+    let decoded = Zeroizing::new(
+        cxf::EditableField::<cxf::EditableFieldString>::deserialize(field)
+            .map_err(|_| anyhow::anyhow!("invalid CXF field"))?,
+    );
+    let ty = Zeroizing::new(decoded.value.field_type());
     let value = text(field, "value")?;
     if let Some(id) = field.get("id") {
         decode_id(id.as_str().context("invalid CXF field ID")?)?;
     }
-    let label = field
-        .get("label")
-        .map(|v| v.as_str().context("invalid CXF field label"))
-        .transpose()?
-        .unwrap_or(default_id);
-    let field_type = match ty {
-        "string"
-        | "number"
-        | "country-code"
-        | "subdivision-code"
-        | "wifi-network-security-type" => PersonalFieldType::Text,
-        "concealed-string" => PersonalFieldType::Concealed,
-        "email" => PersonalFieldType::Email,
-        "boolean" => PersonalFieldType::Boolean,
-        "date" => PersonalFieldType::Date,
-        "year-month" => PersonalFieldType::MonthYear,
-        _ => PersonalFieldType::Unknown(format!("cxf-{ty}")),
+    let label = decoded.label.as_deref().unwrap_or(default_id);
+    let field_type = match &*ty {
+        cxf::FieldType::String
+        | cxf::FieldType::Number
+        | cxf::FieldType::CountryCode
+        | cxf::FieldType::SubdivisionCode
+        | cxf::FieldType::WifiNetworkSecurityType => PersonalFieldType::Text,
+        cxf::FieldType::ConcealedString => PersonalFieldType::Concealed,
+        cxf::FieldType::Email => PersonalFieldType::Email,
+        cxf::FieldType::Boolean => PersonalFieldType::Boolean,
+        cxf::FieldType::Date => PersonalFieldType::Date,
+        cxf::FieldType::YearMonth => PersonalFieldType::MonthYear,
+        _ => PersonalFieldType::Unknown(format!("cxf-{}", text(field, "fieldType")?)),
     };
     let mut result = PersonalField::new(default_id, label, field_type, value);
     let sensitive_role = matches!(
@@ -783,7 +835,7 @@ fn import_field(
         }
         sid = text(meta, "sectionId")?;
         slabel = text(meta, "sectionLabel")?;
-        if ty == "concealed-string" {
+        if matches!(*ty, cxf::FieldType::ConcealedString) {
             result.concealed = true;
         }
     }
@@ -792,7 +844,7 @@ fn import_field(
     }
     let unmapped = unmapped_metadata
         || matches!(result.field_type, PersonalFieldType::Unknown(_))
-        || has_unknown(field, &["id", "label", "fieldType", "value", "extensions"])
+        || !decoded.additional_fields.0.is_empty()
         || other_extensions(field, FIELD_EXTENSION)?;
     push_field(item, sid, slabel, result)?;
     Ok(unmapped)

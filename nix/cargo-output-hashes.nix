@@ -1,6 +1,7 @@
 { lib }:
 
 {
+  "credential-exchange-format-0.4.0" = "sha256-hO6KBtHuPZLlE77UF02Ya8ybXF6DYBd4F3mkWKnfvFY=";
   "age-0.12.1" = "sha256-CNYGypRocOTPj454fLOr0xGA2zFj54PKPEC6opGE9f4=";
   "age-core-0.12.0" = "sha256-CNYGypRocOTPj454fLOr0xGA2zFj54PKPEC6opGE9f4=";
   "i18n-config-0.4.8" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";

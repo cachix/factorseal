@@ -306,7 +306,105 @@ fn import(value: &Value) -> anyhow::Result<Vec<PersonalSecret>> {
 }
 
 #[test]
-fn native_fields_round_trip_through_independent_cxf_reader() {
+fn wifi_unknown_members_survive_edits_and_password_deletion() {
+    let mut source = fixture(json!([{
+        "type":"wifi", "futureCredential":{"nested":["keep me"]},
+        "ssid":{"fieldType":"string","value":"Office","futureField":true},
+        "passphrase":{"fieldType":"concealed-string","value":"synthetic password"}
+    }]));
+    source["futureHeader"] = json!({"keep":true});
+    source["version"]["futureVersion"] = "keep me".into();
+    source["accounts"][0]["futureAccount"] = 42.into();
+    source["accounts"][0]["items"][0]["futureItem"] = true.into();
+    let mut items = import(&source).unwrap();
+    for section in &mut items[0].sections {
+        section.fields.retain(|field| field.id != "passphrase");
+        if let Some(field) = section.fields.iter_mut().find(|field| field.id == "ssid") {
+            field.value = "Renamed".into();
+        }
+    }
+    let bytes = export_json(&items).unwrap();
+    let decoded = Zeroizing::new(serde_json::from_slice::<cxf::Header>(&bytes).unwrap());
+    assert_eq!(
+        decoded.additional_fields.0["futureHeader"],
+        source["futureHeader"]
+    );
+    assert_eq!(
+        decoded.version.additional_fields.0["futureVersion"],
+        "keep me"
+    );
+    assert_eq!(decoded.accounts[0].additional_fields.0["futureAccount"], 42);
+    let item = &decoded.accounts[0].items[0];
+    assert_eq!(item.additional_fields.0["futureItem"], true);
+    let cxf::Credential::Wifi(wifi) = &item.credentials[0] else {
+        panic!("expected a typed Wi-Fi credential");
+    };
+    assert!(wifi.passphrase.is_none());
+    assert_eq!(
+        wifi.ssid.as_ref().unwrap().value.as_expected().unwrap().0,
+        "Renamed"
+    );
+    assert_eq!(
+        wifi.ssid.as_ref().unwrap().additional_fields.0["futureField"],
+        true
+    );
+    assert_eq!(
+        wifi.additional_fields.0["futureCredential"],
+        source["accounts"][0]["items"][0]["credentials"][0]["futureCredential"]
+    );
+    let restored = import_json(&bytes).unwrap();
+    assert_eq!(restored[0].sections, items[0].sections);
+}
+
+#[test]
+fn native_item_preserves_future_version_members() {
+    let item = PersonalSecret::template(PersonalSecretKind::Login, "Example".into());
+    let mut source: Value = serde_json::from_slice(&export_json(&[item]).unwrap()).unwrap();
+    source["version"]["future"] = "version metadata".into();
+    let imported = import(&source).unwrap();
+    assert!(imported[0].source.is_some());
+    let output: Value = serde_json::from_slice(&export_json(&imported).unwrap()).unwrap();
+    assert_eq!(output["version"]["future"], "version metadata");
+}
+
+#[test]
+fn conflicting_future_version_metadata_blocks_export() {
+    let mut source = fixture(json!([]));
+    source["version"]["future"] = "first".into();
+    let mut items = import(&source).unwrap();
+    source["accounts"][0]["id"] = "Aw".into();
+    source["version"]["future"] = "second".into();
+    items.extend(import(&source).unwrap());
+    assert!(
+        export_json(&items)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting CXF source header")
+    );
+}
+
+#[test]
+fn typed_totp_keeps_strict_input_checks() {
+    for secret in [
+        "",
+        "ABC",
+        "AB",
+        "jbswy3dpehpk3pxp",
+        "JBSWY3DP-EHPK3PXP",
+        "JBSWY3DPEHPK3PXP=",
+    ] {
+        assert!(totp::export(secret).is_err());
+        let source = fixture(
+            json!([{"type":"totp","secret":secret,"period":30,"digits":6,"algorithm":"sha1"}]),
+        );
+        assert!(import(&source).is_err());
+    }
+    assert!(totp::export("otpauth://totp/Example?period=30").is_err());
+    assert!(totp::export("otpauth://totp/Example?secret=JBSWY3DPEHPK3PXP&period=256").is_err());
+}
+
+#[test]
+fn native_fields_round_trip_through_typed_cxf_model() {
     let mut login = PersonalSecret::template(PersonalSecretKind::Login, "Example".into());
     login.sections[0].fields[0].value = "alice".into();
     login.sections[0].fields[1].value = "synthetic password".into();
@@ -350,7 +448,7 @@ fn native_fields_round_trip_through_independent_cxf_reader() {
 }
 
 #[test]
-fn personal_templates_are_accepted_by_independent_reader() {
+fn personal_templates_are_accepted_by_typed_cxf_model() {
     for kind in PersonalSecretKind::ALL {
         let item = PersonalSecret::template(kind, "Template".into());
         let json = export_json(std::slice::from_ref(&item)).unwrap();

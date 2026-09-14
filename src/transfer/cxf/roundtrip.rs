@@ -94,10 +94,9 @@ pub(super) fn export(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Vec
     if secrets.len() > MAX_MANAGER_ITEMS {
         bail!("too many CXF items");
     }
-    let mut root = SensitiveJson(serde_json::from_slice(&export_native_json(&[])?)?);
-    let native_account = root.0["accounts"][0].take();
-    root.0["accounts"] = json!([]);
-    let mut accounts: Vec<SensitiveJson> = Vec::new();
+    let mut root = Zeroizing::new(new_header()?);
+    let native_account = Zeroizing::new(root.accounts.pop().expect("native account"));
+    let mut account_metadata: Vec<SensitiveJson> = Vec::new();
     let mut origins: HashMap<String, usize> = HashMap::new();
     let mut item_ids = HashSet::new();
     let mut account_ids = HashSet::new();
@@ -114,78 +113,97 @@ pub(super) fn export(secrets: &[PersonalSecret]) -> anyhow::Result<Zeroizing<Vec
                     index + 1
                 );
             }
-            let account = source
-                .get("account")
-                .cloned()
-                .unwrap_or_else(|| native_account.clone());
+            let account = if let Some(metadata) = source.get("account") {
+                valid_id(metadata, "id")?;
+                let mut value = SensitiveJson(metadata.clone());
+                // Stored metadata intentionally omits the items array.
+                value.0["items"] = json!([]);
+                Zeroizing::new(
+                    cxf::Account::deserialize(&value.0)
+                        .map_err(|_| anyhow::anyhow!("invalid CXF source account"))?,
+                )
+            } else {
+                native_account.clone()
+            };
             let origin = format!(
                 "{}:{}",
                 source["header"]["exporterRpId"].as_str().unwrap_or(""),
-                text(&account, "id")?
+                account.id
             );
             if let Some(header) = source.get("header") {
-                for (key, value) in header.as_object().context("invalid CXF source header")? {
-                    if [
-                        "version",
-                        "exporterRpId",
-                        "exporterDisplayName",
-                        "timestamp",
-                        "accounts",
-                    ]
-                    .contains(&key.as_str())
-                    {
-                        continue;
-                    }
-                    if let Some(existing) = root.0.get(key) {
-                        if existing != value {
-                            bail!("conflicting CXF source header metadata");
-                        }
-                    } else {
-                        root.0[key] = value.clone();
-                    }
+                let mut value = SensitiveJson(header.clone());
+                value.0["accounts"] = json!([]);
+                let header = Zeroizing::new(
+                    cxf::Header::<()>::deserialize(&value.0)
+                        .map_err(|_| anyhow::anyhow!("invalid CXF source header"))?,
+                );
+                if header.version.major != 1 || header.version.minor != 0 {
+                    bail!("unsupported CXF source version");
                 }
+                merge_additional_fields(&mut root.additional_fields, &header.additional_fields)?;
+                merge_additional_fields(
+                    &mut root.version.additional_fields,
+                    &header.version.additional_fields,
+                )?;
             }
-            (
-                origin,
-                account,
-                merge_item(item, &source["item"], &valid_id(&source["account"], "id")?)
+            let encoded = SensitiveJson(
+                merge_item(item, &source["item"], account.id.as_ref())
                     .map_err(|e| anyhow::anyhow!("cannot export CXF item {}: {e}", index + 1))?,
-            )
+            );
+            (origin, account, encoded)
         } else {
-            (String::new(), native_account.clone(), export_item(item)?)
+            (
+                String::new(),
+                native_account.clone(),
+                SensitiveJson(export_item(item)?),
+            )
         };
+        let metadata = SensitiveJson(serde_json::to_value(&*account)?);
         let account_index = if let Some(existing) = origins.get(&origin) {
-            if without(&accounts[*existing], "items")? != without(&account, "items")? {
+            if account_metadata[*existing].0 != metadata.0 {
                 bail!("conflicting CXF account metadata; export the source accounts separately");
             }
             *existing
         } else {
-            let id = valid_id(&account, "id")?;
+            let id = account.id.as_ref().to_vec();
+            if id.is_empty() || id.len() > 64 {
+                bail!("invalid CXF account ID");
+            }
             if !account_ids.insert(id) {
                 bail!("CXF source accounts have colliding IDs; export them separately");
             }
-            let index = accounts.len();
-            let mut account = SensitiveJson(account);
-            account.0["items"] = json!([]);
-            accounts.push(account);
+            let index = root.accounts.len();
+            root.accounts.push((*account).clone());
+            account_metadata.push(metadata);
             origins.insert(origin, index);
             index
         };
-        let items = accounts[account_index].0["items"]
-            .as_array_mut()
-            .context("invalid CXF account")?;
         let id = valid_id(&encoded, "id")?;
         if !source_ids.insert((account_index, id)) {
             bail!("duplicate CXF source item ID");
         }
-        items.push(encoded);
+        root.accounts[account_index].items.push(
+            cxf::Item::deserialize(&encoded.0)
+                .map_err(|_| anyhow::anyhow!("invalid merged CXF item"))?,
+        );
     }
-    root.0["accounts"] = accounts.iter_mut().map(|a| a.0.take()).collect();
-    let encoded = Zeroizing::new(serde_json::to_vec_pretty(&root.0)?);
-    if encoded.len() > MAX_MANAGER_FILE_BYTES {
-        bail!("CXF payload is larger than 128 MiB");
+    encode_header(&root)
+}
+
+fn merge_additional_fields(
+    target: &mut cxf::AdditionalFields,
+    source: &cxf::AdditionalFields,
+) -> anyhow::Result<()> {
+    for (key, value) in &source.0 {
+        if let Some(existing) = target.0.get(key) {
+            if existing != value {
+                bail!("conflicting CXF source header metadata");
+            }
+        } else {
+            target.0.insert(key.clone(), value.clone());
+        }
     }
-    Ok(encoded)
+    Ok(())
 }
 
 fn field_map(item: &PersonalSecret) -> HashMap<(&str, &str), (&PersonalSection, &PersonalField)> {
@@ -207,7 +225,12 @@ fn merge_item(
     account_id: &[u8],
 ) -> anyhow::Result<Value> {
     // Re-derive bindings from the validated source, never trust stored JSON pointers.
-    let (baseline, bindings) = import_item(original, account_id, &valid_id(original, "id")?)?;
+    let decoded = Zeroizing::new(
+        cxf::Item::<()>::deserialize(original)
+            .map_err(|_| anyhow::anyhow!("invalid CXF source item"))?,
+    );
+    let (baseline, bindings) =
+        import_item(original, &decoded, account_id, &valid_id(original, "id")?)?;
     if baseline.id != current.id {
         bail!("CXF source identity changed; cannot preserve references");
     }

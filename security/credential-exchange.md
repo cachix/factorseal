@@ -54,6 +54,23 @@ the same backup schema.
 
 ## Mapping and preservation
 
+Production parsing and serialization use `credential-exchange-format`, pinned in
+Cargo.toml to the shared
+[`integration/factorseal-cxf` branch](https://github.com/domenkozar/credential-exchange/tree/integration/factorseal-cxf).
+It combines upstream [PR #153](https://github.com/bitwarden/credential-exchange/pull/153)
+(`zeroize`) and [PR #154](https://github.com/bitwarden/credential-exchange/pull/154)
+(`preserve-unknown`). The integration branch permits Factorseal's newer zeroize
+dependencies and requires Rust 1.85; the upstream proposals retain Rust 1.75 support.
+Cargo pins an immutable commit, so advancing the branch does not change builds.
+These APIs are pending upstream review; replace the git pin with a release after acceptance.
+
+The crate owns CXF headers, accounts, items, credentials, editable fields, and
+TOTP/base32 serialization. `AdditionalFields` retains unknown members on known
+objects. Factorseal owns the personal-item mapping, vendor extensions, size limits,
+strict input spelling checks, and application-level edit/conflict handling. Typed
+models use `Zeroizing` guards, with the crate's default extension type so unknown
+extension payloads also participate in cleanup.
+
 The encoder writes a versioned CXF header, one personal account, and stable
 hashed item identifiers. Standard `basic-auth`, `api-key`, `credit-card`,
 `person-name`, `totp`, and `note`
@@ -112,6 +129,7 @@ signing remain prerequisites for enabling system transfer.
   Imports cap log N at 18 (256 MiB). Excessive work factors fail without
   performing that work. Unit tests lower the export cost using `cfg(test)`.
 - JSON trees and plaintext output buffers use the existing zeroizing wrappers.
+  Owned CXF models use the shared crate's optional zeroization support.
   Passphrases use age's secret-string type. This does not claim that every
   allocation inside third-party parsers and cryptographic libraries is locked
   or zeroized.
@@ -122,13 +140,15 @@ the phishing resistance of an OS-controlled recipient selection ceremony.
 
 ## Validation
 
-Tests decode exported synthetic records using the independent
-`credential-exchange-format` crate, then import its serialized output. That
-crate is test-only because its types do not zeroize secrets. Tests also cover
+Tests inspect the typed models used in production and import their serialized
+output; this is no longer an independent codec check. Tests also cover
 editing third-party login data, TOTP parameters, unknown metadata, invalid
 identifiers/versions, missing files, record size limits, wrong passphrases,
-truncation, and ciphertext tampering. These establish format compatibility;
-they do not establish compatibility with every vendor's product UI.
+truncation, and ciphertext tampering. Wi-Fi regression tests preserve nested
+unknown members while editing SSIDs and deleting passphrases. Additional checks
+cover future version members and conflicting source-header metadata. These
+establish format compatibility; they do not establish compatibility with every
+vendor's product UI.
 
 An age 1.3.1 Go CLI fixture independently verifies decryption. During initial
 implementation, the same Go CLI also decrypted a production-cost FactorSeal

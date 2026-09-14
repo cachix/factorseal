@@ -1,12 +1,28 @@
-use super::{SensitiveJson, Value, array, text};
+use super::{Value, array, cxf, text};
 use anyhow::{Context as _, bail};
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
-use serde_json::json;
+use serde::Deserialize as _;
 use zeroize::Zeroizing;
 
 pub(super) fn export(value: &str) -> anyhow::Result<Value> {
-    let mut result =
-        SensitiveJson(json!({"type":"totp","secret":"","period":30,"digits":6,"algorithm":"sha1"}));
+    let credential = Zeroizing::new(export_credential(value)?);
+    serde_json::to_value(&*credential).context("cannot encode TOTP")
+}
+
+fn empty_totp() -> cxf::TotpCredential {
+    cxf::TotpCredential {
+        secret: Vec::new().into(),
+        period: 30,
+        digits: 6,
+        algorithm: cxf::OTPHashAlgorithm::Sha1,
+        username: None,
+        issuer: None,
+        additional_fields: cxf::AdditionalFields::default(),
+    }
+}
+
+pub(super) fn export_credential(value: &str) -> anyhow::Result<cxf::Credential> {
+    let mut result = Zeroizing::new(empty_totp());
     if let Some(uri) = value.strip_prefix("otpauth://totp/") {
         let (label, query) = uri
             .split_once('?')
@@ -16,10 +32,10 @@ pub(super) fn export(value: &str) -> anyhow::Result<Value> {
             .split_once(':')
             .map_or((None, label.as_str()), |(i, u)| (Some(i), u));
         if !username.is_empty() {
-            result.0["username"] = username.into();
+            result.username = Some(username.into());
         }
         if let Some(issuer) = issuer {
-            result.0["issuer"] = issuer.into();
+            result.issuer = Some(issuer.into());
         }
         let mut keys = std::collections::HashSet::new();
         for pair in query.split('&') {
@@ -29,62 +45,80 @@ pub(super) fn export(value: &str) -> anyhow::Result<Value> {
             }
             let value = decode(value)?;
             match key {
-                "secret" => result.0["secret"] = value.as_str().into(),
+                "secret" => result.secret = parse_secret(&value)?,
                 "issuer" => {
                     if issuer.is_some_and(|i| i != value.as_str()) {
                         bail!("conflicting TOTP issuer");
                     }
-                    result.0["issuer"] = value.as_str().into();
+                    result.issuer = Some(value.to_string());
                 }
-                "algorithm" => result.0["algorithm"] = value.to_ascii_lowercase().into(),
+                "algorithm" => {
+                    result.algorithm = match value.to_ascii_lowercase().as_str() {
+                        "sha1" => cxf::OTPHashAlgorithm::Sha1,
+                        "sha256" => cxf::OTPHashAlgorithm::Sha256,
+                        "sha512" => cxf::OTPHashAlgorithm::Sha512,
+                        _ => bail!("unsupported TOTP algorithm"),
+                    }
+                }
                 "period" | "digits" => {
-                    result.0[key] = value
-                        .parse::<u16>()
-                        .context("invalid TOTP numeric parameter")?
-                        .into();
+                    let number = value
+                        .parse::<u8>()
+                        .context("invalid TOTP numeric parameter")?;
+                    if key == "period" {
+                        result.period = number;
+                    } else {
+                        result.digits = number;
+                    }
                 }
                 _ => bail!("unsupported TOTP URI parameter; use a FactorSeal archive"),
             }
         }
     } else {
-        result.0["secret"] = value.into();
+        result.secret = parse_secret(value)?;
     }
     validate(&result)?;
-    Ok(result.0.take())
+    Ok(cxf::Credential::Totp(Box::new(std::mem::replace(
+        &mut *result,
+        empty_totp(),
+    ))))
 }
 
 pub(super) fn import(value: &Value) -> anyhow::Result<Zeroizing<String>> {
-    validate(value)?;
+    // Enforce our input policy before the crate's permissive base32 parser
+    // normalizes spelling. The crate validates the encoding and field schema.
+    let _secret = Zeroizing::new(parse_secret(text(value, "secret")?)?);
+    let credential = Zeroizing::new(
+        cxf::Credential::<()>::deserialize(value)
+            .map_err(|_| anyhow::anyhow!("invalid TOTP credential"))?,
+    );
+    let cxf::Credential::Totp(totp) = &*credential else {
+        bail!("invalid TOTP credential");
+    };
+    validate(totp)?;
     let mut uri = Zeroizing::new(String::from("otpauth://totp/"));
-    if let Some(issuer) = value.get("issuer") {
-        uri.push_str(
-            &utf8_percent_encode(
-                issuer.as_str().context("invalid TOTP issuer")?,
-                NON_ALPHANUMERIC,
-            )
-            .to_string(),
-        );
+    if let Some(issuer) = &totp.issuer {
+        uri.push_str(&utf8_percent_encode(issuer, NON_ALPHANUMERIC).to_string());
         uri.push(':');
     }
-    let username = value
-        .get("username")
-        .map(|v| v.as_str().context("invalid TOTP username"))
-        .transpose()?
-        .unwrap_or("");
+    let username = totp.username.as_deref().unwrap_or("");
     uri.push_str(&utf8_percent_encode(username, NON_ALPHANUMERIC).to_string());
     uri.push_str("?secret=");
     uri.push_str(text(value, "secret")?);
     uri.push_str("&period=");
-    uri.push_str(&value["period"].to_string());
+    uri.push_str(&totp.period.to_string());
     uri.push_str("&digits=");
-    uri.push_str(&value["digits"].to_string());
+    uri.push_str(&totp.digits.to_string());
     uri.push_str("&algorithm=");
-    uri.push_str(&text(value, "algorithm")?.to_ascii_uppercase());
+    uri.push_str(match totp.algorithm {
+        cxf::OTPHashAlgorithm::Sha1 => "SHA1",
+        cxf::OTPHashAlgorithm::Sha256 => "SHA256",
+        cxf::OTPHashAlgorithm::Sha512 => "SHA512",
+        _ => bail!("unsupported TOTP algorithm"),
+    });
     Ok(uri)
 }
 
-fn validate(value: &Value) -> anyhow::Result<()> {
-    let secret = text(value, "secret")?;
+fn parse_secret(secret: &str) -> anyhow::Result<cxf::B32> {
     if secret.is_empty()
         || !secret
             .bytes()
@@ -92,33 +126,18 @@ fn validate(value: &Value) -> anyhow::Result<()> {
     {
         bail!("TOTP secret must be unpadded uppercase base32");
     }
-    let unused = match secret.len() % 8 {
-        0 => 0,
-        2 => 2,
-        4 => 4,
-        5 => 1,
-        7 => 3,
-        _ => bail!("invalid TOTP base32 length"),
-    };
-    let last = secret.as_bytes()[secret.len() - 1];
-    let digit = if last.is_ascii_uppercase() {
-        last - b'A'
-    } else {
-        last - b'2' + 26
-    };
-    if digit & ((1 << unused) - 1) != 0 {
-        bail!("invalid TOTP base32 trailing bits");
-    }
-    if !matches!(text(value, "algorithm")?, "sha1" | "sha256" | "sha512") {
+    cxf::B32::try_from(secret).map_err(|_| anyhow::anyhow!("invalid TOTP base32"))
+}
+
+fn validate(value: &cxf::TotpCredential) -> anyhow::Result<()> {
+    if !matches!(
+        value.algorithm,
+        cxf::OTPHashAlgorithm::Sha1 | cxf::OTPHashAlgorithm::Sha256 | cxf::OTPHashAlgorithm::Sha512
+    ) {
         bail!("unsupported TOTP algorithm");
     }
-    for key in ["period", "digits"] {
-        if !value[key]
-            .as_u64()
-            .is_some_and(|n| n > 0 && u16::try_from(n).is_ok())
-        {
-            bail!("invalid TOTP parameters");
-        }
+    if value.secret.as_ref().is_empty() || value.period == 0 || value.digits == 0 {
+        bail!("invalid TOTP parameters");
     }
     Ok(())
 }

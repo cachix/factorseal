@@ -70,7 +70,7 @@ personal = ["dep:anyhow", "dep:uuid"]
 personal-sync-network = ["personal-sync", "helper-isolation", "dep:iroh", "dep:qrcode", "tokio/net", "tokio/rt-multi-thread", "tokio/io-util"]
 helper-isolation = ["vault-client", "dep:ciborium", "dep:seccompiler", "dep:landlock"]
 personal-sync = ["vault-store", "key-protection", "dep:hpke", "dep:aes-gcm-hpke", "dep:tempfile"]
-transfer = ["personal", "dep:age", "dep:age-core", "dep:hpke", "hpke/chacha", "hpke/x25519", "dep:csv", "dep:percent-encoding", "dep:tempfile", "dep:nt-token", "dep:zip"]
+transfer = ["personal", "dep:age", "dep:age-core", "dep:credential-exchange-format", "dep:hpke", "hpke/chacha", "hpke/x25519", "dep:csv", "dep:percent-encoding", "dep:tempfile", "dep:nt-token", "dep:zip"]
 secretspec-provider = [
     "dep:async-trait",
     "dep:percent-encoding",
@@ -162,6 +162,8 @@ tokio = { version = "1.47.1", features = ["macros", "rt", "sync", "time"], optio
 turso = { version = "0.8.0-pre.4", default-features = false, optional = true }
 uuid = { version = "1.0", features = ["v4"], optional = true }
 zeroize = "1.8.1"
+# Shared integration/factorseal-cxf branch for upstream PRs #153 and #154.
+credential-exchange-format = { git = "https://github.com/domenkozar/credential-exchange", rev = "886ff4641b86da458d467185532b8b8e222f6060", features = ["zeroize", "preserve-unknown"], optional = true }
 zip = { version = "8.6", default-features = false, features = ["deflate"], optional = true }
 zxcvbn = { version = "3.1.1", optional = true }
 
@@ -169,7 +171,6 @@ zxcvbn = { version = "3.1.1", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
-credential-exchange-format = "0.4.0"
 tempfile = "3.20.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
