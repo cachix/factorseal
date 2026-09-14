@@ -45,7 +45,8 @@ mod secret_service;
 #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 pub use secret_service::{
     NAMESPACE as SECRET_SERVICE_NAMESPACE, SecretServiceAccessContext, SecretServiceAccessRequest,
-    SecretServiceHost, SecretServiceInputRequest, SecretServicePrompter,
+    SecretServiceHost, SecretServiceInputRequest, SecretServicePrompter, WifiMigrationEntry,
+    WifiMigrationReport,
 };
 
 #[cfg(all(feature = "vault", target_os = "macos"))]

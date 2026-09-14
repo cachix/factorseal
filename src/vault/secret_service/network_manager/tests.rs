@@ -2,7 +2,7 @@ use super::*;
 use crate::vault::secret_service::{SecretServiceInputRequest, SecretServicePrompter};
 use tokio::sync::mpsc;
 
-const UUID: &str = "01234567-89ab-cdef-0123-456789abcdef";
+pub(super) const UUID: &str = "01234567-89ab-cdef-0123-456789abcdef";
 const PATH: &str = "/org/freedesktop/NetworkManager/Settings/1";
 
 struct Prompter(mpsc::UnboundedSender<SecretServiceInputRequest>);
@@ -38,7 +38,7 @@ impl Manager {
     }
 }
 
-fn wifi(key_management: &str, flags: u32, secret: Option<&str>) -> Settings {
+pub(super) fn wifi(key_management: &str, flags: u32, secret: Option<&str>) -> Settings {
     let mut security = BTreeMap::from([
         ("key-mgmt".into(), string_variant(key_management)),
         ("psk-flags".into(), OwnedValue::from(flags)),
@@ -59,7 +59,7 @@ fn wifi(key_management: &str, flags: u32, secret: Option<&str>) -> Settings {
     ])
 }
 
-fn enterprise(secret: Option<Vec<u8>>, flags: u32) -> Settings {
+pub(super) fn enterprise(secret: Option<Vec<u8>>, flags: u32) -> Settings {
     let mut profile = wifi("wpa-eap", 0, None);
     let mut settings = BTreeMap::from([
         (
@@ -269,13 +269,33 @@ fn network_manager_dbus_vault_lifecycle() {
                 (target.clone(), IDENTIFIER.into(), 0)
             );
 
-            save(
-                &manager,
-                &target,
-                wifi("wpa-psk", 1, Some("first-password")),
-            )
-            .await
-            .unwrap();
+            // Update2's asynchronous SaveSecrets notification must wait for
+            // migration to finish, rather than fail or clear its verified copy.
+            let write = shared.wifi_writes.lock().await;
+            shared
+                .wifi_migrations
+                .lock()
+                .unwrap()
+                .insert(UUID.into(), (1, true));
+            shared.wifi_generation.fetch_add(1, Ordering::SeqCst);
+            let saving_manager = manager.clone();
+            let saving_target = target.clone();
+            let mut saving = tokio::spawn(async move {
+                save(
+                    &saving_manager,
+                    &saving_target,
+                    wifi("wpa-psk", 1, Some("first-password")),
+                )
+                .await
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut saving)
+                    .await
+                    .is_err()
+            );
+            shared.wifi_migrations.lock().unwrap().remove(UUID);
+            drop(write);
+            saving.await.unwrap().unwrap();
             let reply = get(&manager, &target, wifi("wpa-psk", 1, None), 0)
                 .await
                 .unwrap();

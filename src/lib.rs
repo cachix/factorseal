@@ -106,7 +106,8 @@ pub use vault::{
 #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 pub use vault::{
     SECRET_SERVICE_NAMESPACE, SecretServiceAccessContext, SecretServiceAccessRequest,
-    SecretServiceHost, SecretServiceInputRequest, SecretServicePrompter,
+    SecretServiceHost, SecretServiceInputRequest, SecretServicePrompter, WifiMigrationEntry,
+    WifiMigrationReport,
 };
 
 #[cfg(all(feature = "vault-client", target_os = "macos"))]

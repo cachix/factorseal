@@ -37,6 +37,7 @@ use super::{VaultClient, VaultError, VaultResult};
 mod agent;
 mod interfaces;
 mod network_manager;
+pub use network_manager::migration::{WifiMigrationEntry, WifiMigrationReport};
 
 pub use agent::NAMESPACE;
 use agent::{Agent, Store};
@@ -180,6 +181,15 @@ pub struct SecretServiceHost {
 }
 
 impl SecretServiceHost {
+    /// Move saved Wi-Fi credentials into this vault and update NetworkManager.
+    /// Requires an unlocked vault and permission to update the profiles. The
+    /// receiver contains metadata only; credentials stay on the adapter thread.
+    pub fn migrate_wifi(&self) -> VaultResult<oneshot::Receiver<VaultResult<WifiMigrationReport>>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::MigrateWifi { reply })?;
+        Ok(receiver)
+    }
+
     /// Start serving on the session bus from a dedicated thread.
     pub fn start(prompter: Arc<dyn SecretServicePrompter>) -> VaultResult<Self> {
         Self::start_with(prompter, TAKEOVER_POLL)
@@ -306,6 +316,9 @@ impl SecretServicePrompter for NoPrompter {
 }
 
 enum Command {
+    MigrateWifi {
+        reply: oneshot::Sender<VaultResult<WifiMigrationReport>>,
+    },
     Install {
         store: Store,
         reply: Option<oneshot::Sender<VaultResult<()>>>,
@@ -317,6 +330,9 @@ enum Command {
 
 /// State shared between the interface objects and the host.
 struct Shared {
+    wifi_writes: tokio::sync::Mutex<()>,
+    wifi_generation: std::sync::atomic::AtomicU64,
+    wifi_migrations: Mutex<HashMap<String, (u64, bool)>>,
     agent: RwLock<Option<Arc<Agent>>>,
     sessions: Mutex<HashMap<String, SessionState>>,
     prompts: Mutex<HashMap<String, PromptState>>,
@@ -333,6 +349,9 @@ enum PromptState {
 impl Shared {
     fn new(prompter: Arc<dyn SecretServicePrompter>) -> Self {
         Self {
+            wifi_writes: tokio::sync::Mutex::new(()),
+            wifi_generation: std::sync::atomic::AtomicU64::new(0),
+            wifi_migrations: Mutex::new(HashMap::new()),
             agent: RwLock::new(None),
             sessions: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
@@ -830,6 +849,13 @@ async fn claim_name(
 
 async fn apply(shared: &Arc<Shared>, server: &ObjectServer, command: Command) {
     match command {
+        Command::MigrateWifi { reply } => {
+            let shared = Arc::clone(shared);
+            tokio::spawn(async move {
+                let result = network_manager::migration::run(shared).await;
+                let _ = reply.send(result);
+            });
+        }
         Command::Install { store, reply } => {
             let result = install(shared, server, store).await;
             match reply {

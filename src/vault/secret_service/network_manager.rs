@@ -21,6 +21,7 @@ use crate::vault::{
     VaultAction, VaultMutation, VaultRequest, VaultResponseBody, WireSecret, WireSecretAddress,
 };
 
+pub(super) mod migration;
 mod profile;
 use profile::{NAME_FIELD, NAMESPACE, PROPERTIES, Profile};
 
@@ -220,6 +221,34 @@ async fn existing_value(
 }
 
 impl Agent {
+    fn check_generation(&self, uuid: &str, generation: u64) -> Result<(), Error> {
+        if self
+            .shared
+            .wifi_migrations
+            .lock()
+            .map_err(|_| Error::failed())?
+            .get(uuid)
+            .is_some_and(|(changed, _)| *changed > generation)
+        {
+            return Err(Error::AgentCanceled(
+                "Wi-Fi storage changed; retry the connection".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn check_migration(&self, uuid: &str) -> Result<(), Error> {
+        if self
+            .shared
+            .wifi_migrations
+            .lock()
+            .map_err(|_| Error::failed())?
+            .get(uuid)
+            .is_some_and(|(_, active)| *active)
+        {
+            return Err(Error::no_secrets());
+        }
+        Ok(())
+    }
     async fn store(
         &self,
         context: SecretServiceAccessContext,
@@ -239,6 +268,7 @@ impl Agent {
         profile: Profile,
         flags: GetSecretsFlags,
         context: SecretServiceAccessContext,
+        generation: u64,
     ) -> Result<Settings, Error> {
         let store = self
             .store(context.clone(), flags.allows_interaction())
@@ -313,6 +343,9 @@ impl Agent {
                 address: WireSecretAddress::new(&profile.uuid, Some(NAME_FIELD.into())),
             });
         }
+        let _write = self.shared.wifi_writes.lock().await;
+        self.check_migration(&profile.uuid)?;
+        self.check_generation(&profile.uuid, generation)?;
         mutate(store, writes).await?;
         // Do not deliver credentials if the desktop sealed while a prompt or
         // vault operation was pending. The backend also enforces delivery expiry.
@@ -345,8 +378,10 @@ impl Agent {
         #[zbus(connection)] bus: &Connection,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<Settings, Error> {
+        let generation = self.shared.wifi_generation.load(Ordering::SeqCst);
         let sender = authenticate(bus, &header).await?;
         let profile = Profile::parse(&connection, &hints)?;
+        self.check_migration(&profile.uuid)?;
         if setting_name != profile.setting {
             return Err(Error::no_secrets());
         }
@@ -392,7 +427,7 @@ impl Agent {
         let result = tokio::select! {
             biased;
             _ = canceled => Err(Error::AgentCanceled("NetworkManager canceled the request".into())),
-            result = tokio::time::timeout(Duration::from_mins(2), self.get(profile, GetSecretsFlags::from_bits_retain(flags), context)) => {
+            result = tokio::time::timeout(Duration::from_mins(2), self.get(profile, GetSecretsFlags::from_bits_retain(flags), context, generation)) => {
                 result.unwrap_or_else(|_| Err(Error::AgentCanceled("Wi-Fi request timed out".into())))
             }
         }?;
@@ -420,6 +455,7 @@ impl Agent {
         #[zbus(connection)] bus: &Connection,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), Error> {
+        let generation = self.shared.wifi_generation.load(Ordering::SeqCst);
         let sender = authenticate(bus, &header).await?;
         let _ = connection_path;
         let profile = Profile::parse(&connection, &[])?;
@@ -470,6 +506,10 @@ impl Agent {
                 address: WireSecretAddress::new(&profile.uuid, Some(NAME_FIELD.into())),
             });
         }
+        let _write = self.shared.wifi_writes.lock().await;
+        // NM sends SaveSecrets asynchronously after Update2. Queue those
+        // notifications behind migration, but reject an older snapshot.
+        self.check_generation(&profile.uuid, generation)?;
         mutate(store, writes).await
     }
 
@@ -480,6 +520,7 @@ impl Agent {
         #[zbus(connection)] bus: &Connection,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), Error> {
+        let generation = self.shared.wifi_generation.load(Ordering::SeqCst);
         let sender = authenticate(bus, &header).await?;
         let uuid = Profile::uuid(&connection)?;
         // A late response to an earlier prompt must not recreate a deleted
@@ -504,8 +545,10 @@ impl Agent {
             })
             .collect();
         deletes.push(VaultMutation::Delete {
-            address: WireSecretAddress::new(uuid, Some(NAME_FIELD.into())),
+            address: WireSecretAddress::new(&uuid, Some(NAME_FIELD.into())),
         });
+        let _write = self.shared.wifi_writes.lock().await;
+        self.check_generation(&uuid, generation)?;
         mutate(store, deletes).await
     }
 }

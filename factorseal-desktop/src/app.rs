@@ -9,6 +9,7 @@ mod personal_detail;
 mod personal_templates;
 #[cfg(feature = "apple-credential-exchange")]
 mod system_transfer;
+mod wifi;
 
 pub(crate) enum AccessEvent {
     #[cfg(target_os = "linux")]
@@ -564,7 +565,7 @@ fn category_guidance(kind: factorseal::DocumentKind) -> CategoryGuidance {
             instructions: &[
                 "Keep FactorSeal running while connecting to Wi-Fi. Unlock the vault when asked to make saved passwords available.",
                 "In your network connection editor, choose to store the password for this user. Enter the password in FactorSeal when connecting.",
-                "Existing passwords are not moved automatically. Reconnect and confirm a saved entry here before removing an old keyring copy.",
+                "Use Move existing Wi-Fi passwords to copy and verify saved credentials, update their storage settings, and remove matching old keyring copies.",
                 "Enterprise connections also support certificate passwords and PINs. Credentials marked to ask every time are not saved.",
             ],
         },
@@ -693,6 +694,8 @@ struct PersonalDraftField {
 
 #[allow(clippy::struct_excessive_bools)]
 struct DesktopView {
+    #[cfg(target_os = "linux")]
+    wifi_migration: wifi::State,
     settings_open: bool,
     issue_report_busy: bool,
     issue_report_notice: Option<&'static str>,
@@ -1021,6 +1024,8 @@ impl DesktopView {
             #[cfg(feature = "apple-credential-exchange")]
             system_transfer: system_transfer::State::default(),
             system_integrations_expanded: false,
+            #[cfg(target_os = "linux")]
+            wifi_migration: wifi::State::default(),
             _subscriptions: vec![password_submit, vault_search_change],
         }
     }
@@ -2596,6 +2601,7 @@ impl DesktopView {
                 .when_some(integration_error, |element, error| {
                     element.child(error_banner(error, theme.danger))
                 })
+                .child(self.render_wifi_migration(kind, cx))
                 .child(div().font_semibold().child("Items"))
                 .child(item_rows)
                 .child(div().font_semibold().child("How to use it"))

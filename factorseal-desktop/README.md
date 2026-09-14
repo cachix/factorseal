@@ -39,9 +39,12 @@ To use it, configure the connection to store its password for the current user
 (agent-owned). For personal Wi-Fi, this is
 `802-11-wireless-security.psk-flags=1`; for enterprise passwords it is
 `802-1x.password-flags=1`. Each certificate password or PIN has its own flags.
-Existing passwords in NetworkManager's system profiles or another keyring are
-not imported automatically. Other running NetworkManager agents may also answer
-requests; use one credential agent for predictable routing.
+Use **Move existing Wi-Fi passwords** to migrate saved credentials from system
+profiles and the current Secret Service keyring. The action copies and verifies
+credentials before changing storage flags and cleaning up matching old keyring
+entries. It requires NetworkManager 1.44+ and reports failures per connection.
+Other running NetworkManager agents may also answer requests; use one credential
+agent for predictable routing.
 
 See the [Linux Wi-Fi guide](../docs/network-manager.md) for the migration steps
 and checks before removing an older saved password.
@@ -51,8 +54,8 @@ password using the existing masked input dialog. Noninteractive requests fail
 while sealed. `REQUEST_NEW` prompts for replacement credentials, `NOT_SAVED`
 prevents persistence, and cancellation dismisses pending requests. Raw binary
 passwords can be saved/retrieved through the API; interactive entry is text-only.
-Registration retries after NetworkManager or the system bus restarts. No network
-profiles are changed automatically. Certificate configuration and verification
+Registration retries after NetworkManager or the system bus restarts. Network
+profiles change only through the explicit migration action. Certificate configuration and verification
 remain NetworkManager's responsibility.
 
 The Access list distinguishes System keyring from the native SecretSpec provider

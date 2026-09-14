@@ -12,30 +12,51 @@ WEP, VPN authentication, and wired 802.1X are not handled by this adapter.
 
 ## Move an existing connection
 
-Migration is currently manual, one connection at a time. There is no automatic
-scan or deletion of passwords in system profiles or another keyring.
+1. Start FactorSeal Desktop and unlock the vault. Unlock the previous keyring
+   too if it holds your Wi-Fi passwords.
+2. Open **System integrations → Wi-Fi passwords** and select **Move existing
+   Wi-Fi passwords**. Use this with FactorSeal as your only Wi-Fi secret agent.
+3. Review the result for each connection. NetworkManager may require system
+   authorization to read credentials or update profiles. Resolve reported
+   permission, locked-keyring, or conflicting-value errors and retry.
+4. When convenient, reconnect with FactorSeal unlocked to verify authentication
+   against your access point. Migration itself does not disconnect devices.
 
-1. Make sure you can recover or re-enter the existing password before changing
-   its storage settings. Keep your current connection active during setup.
-2. Start FactorSeal Desktop and unlock the vault.
-3. In your network connection editor, choose **Store the password only for this
-   user** (the wording depends on the editor), then save the connection. This
-   sets the secret's NetworkManager flags to `agent-owned`. For personal Wi-Fi
-   the property is `802-11-wireless-security.psk-flags=1`; for an enterprise
-   password it is `802-1x.password-flags=1`. Certificate passwords and PINs each
-   have independent flags. Preserve the existing EAP and certificate settings.
-4. Reconnect when a brief network interruption is acceptable. If FactorSeal
-   requests the password, enter it there. Confirm that the credential appears
-   under **System integrations → Wi-Fi passwords**.
-5. Reconnect again with FactorSeal unlocked to verify that the saved credential
-   works. Only then remove any leftover copy from the previous keyring using
-   that keyring's UI. Changing flags alone does not prove an old copy was erased.
+Migration reads the Wi-Fi profiles visible to your user and obtains existing
+secrets through NetworkManager and the current Secret Service keyring. Keyring
+lookup is limited to NetworkManager's `connection-uuid`, `setting-name`, and
+`setting-key` attributes. Other formats, including KWallet-native entries not
+exposed through Secret Service, need to be imported or entered separately.
+
+For each profile, FactorSeal copies eligible secrets into the vault and reads
+them back to verify the values. It then updates the profile's per-secret flags
+to `agent-owned` and persists the profile through NetworkManager. NetworkManager's
+settings plugin omits agent-owned secrets from its persistent profile. After
+verifying the flags and vault values again, FactorSeal removes matching old
+keyring entries. It rechecks each entry's identity and value before deletion.
+If the previous keyring is unavailable, the result explicitly reports that its
+copies were not checked. Locked collections and deletion prompts are reported
+for the user to resolve; they are not silently approved.
+
+This requires NetworkManager 1.44 or newer: migration uses `Update2` with a
+nonzero `VersionId` to reject concurrent profile edits. Unsaved profiles are
+left alone. Updates use `to-disk | no-reapply`, preserving EAP, certificate,
+network, and other non-secret settings. One-time, not-required, and unknown
+secret flags remain unchanged. A different existing vault value is a conflict,
+not an instruction to overwrite it.
+
+A rejected or timed-out profile update keeps the verified vault copy. A cleanup
+failure keeps the old keyring copy too. Retrying verifies these copies again
+before completing migration; there is no rollback that deletes the recovery
+copy. Sealing the vault stops subsequent migration work. This verifies storage
+and routing flags, not a live connection or removal from historical backups.
 
 Other desktop components may register their own Wi-Fi agents. NetworkManager's
 agent-owned flag chooses agent storage, not a named provider. If another agent
 answers instead, configure that desktop component's Wi-Fi agent where supported;
 confirm FactorSeal receives the request before removing existing credentials.
-FactorSeal does not disable other agents or change network profiles itself.
+FactorSeal does not disable other agents. Network profiles change only when you
+select the migration action or edit them in your connection editor.
 
 ## Unlocking and temporary credentials
 
@@ -62,6 +83,8 @@ control ownership and persistence separately for every property.
 
 Local tests use a mock NetworkManager on a private D-Bus session to exercise
 registration, owner replacement, cancellation, storage, and enterprise wire
-types. They do not change the host's network profiles or establish real EAP
+types. Migration tests cover copy-before-update ordering, rejected updates,
+retries, concurrent edits, conflicts, temporary credentials, and keyring cleanup.
+They do not change the host's network profiles or establish real EAP
 authentication. A real access-point check should cover personal Wi-Fi and the
 enterprise EAP methods used by the deployment.
