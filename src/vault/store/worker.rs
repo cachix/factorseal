@@ -1028,6 +1028,13 @@ impl StoreWorker {
             }
             let partition = document.partition().to_vec();
             for (storage_key, address) in document.addresses()? {
+                if document_kind == DocumentKind::NetworkManagerWifi
+                    && address
+                        .as_local()
+                        .is_some_and(|(_, field)| field == Some("connection-name"))
+                {
+                    continue;
+                }
                 if document_kind == DocumentKind::LinuxSecretService
                     && address.as_local()
                         == Some((crate::vault::secret_service_data::INDEX_ITEM, None))
@@ -1035,9 +1042,19 @@ impl StoreWorker {
                     continue;
                 }
                 let summary = document.personal_summary(&address, now)?;
-                let (display_name, display_type, updated_at) = summary
+                let (mut display_name, display_type, updated_at) = summary
                     .map(|(title, kind, updated)| (Some(title), Some(kind), Some(updated)))
                     .unwrap_or_default();
+                if document_kind == DocumentKind::NetworkManagerWifi
+                    && let Some((uuid, _)) = address.as_local()
+                {
+                    let name = SecretAddress::new(uuid, Some("connection-name".into()))?;
+                    if let crate::vault::document::SecretRead::Value(value) =
+                        document.get(&name, now)?
+                    {
+                        display_name = std::str::from_utf8(&value).ok().map(str::to_owned);
+                    }
+                }
                 entries.push((
                     self.vault_entry_cursor(document_kind, document_id, &storage_key),
                     VaultEntryMetadata {

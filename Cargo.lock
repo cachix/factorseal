@@ -2830,6 +2830,7 @@ dependencies = [
  "landlock",
  "libc",
  "ml-dsa",
+ "network-manager-protocol",
  "nix",
  "nt-token",
  "objc2 0.6.4",
@@ -6815,6 +6816,15 @@ dependencies = [
  "web-sys",
  "windows 0.62.2",
  "windows-result 0.4.1",
+]
+
+[[package]]
+name = "network-manager-protocol"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "thiserror 2.0.20",
+ "zeroize",
 ]
 
 [[package]]

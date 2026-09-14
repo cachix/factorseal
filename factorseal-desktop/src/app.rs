@@ -375,6 +375,12 @@ fn vault_entry_label(entry: &factorseal::VaultEntryMetadata) -> (String, String)
                 .to_owned(),
         );
     }
+    if entry.document_kind == factorseal::DocumentKind::NetworkManagerWifi {
+        return (
+            entry.display_name.as_deref().unwrap_or(item).to_owned(),
+            wifi_credential_label(field).to_owned(),
+        );
+    }
     if entry.document_kind == factorseal::DocumentKind::LinuxSecretService {
         (
             "System keyring item".to_owned(),
@@ -389,10 +395,28 @@ fn vault_entry_label(entry: &factorseal::VaultEntryMetadata) -> (String, String)
     }
 }
 
+fn wifi_credential_label(field: Option<&str>) -> &str {
+    match field.and_then(|field| field.rsplit('/').next()) {
+        Some("psk") => "Wi-Fi password",
+        Some("password" | "password-raw") => "Enterprise password",
+        Some("pin") => "Token PIN",
+        Some("private-key-password") => "Private key password",
+        Some("phase2-private-key-password") => "Inner authentication private key password",
+        Some("ca-cert-password") => "CA certificate token password",
+        Some("phase2-ca-cert-password") => "Inner authentication CA certificate token password",
+        Some("client-cert-password") => "Client certificate token password",
+        Some("phase2-client-cert-password") => {
+            "Inner authentication client certificate token password"
+        }
+        _ => "Wi-Fi credential",
+    }
+}
+
 fn vault_category_label(kind: factorseal::DocumentKind) -> &'static str {
     match kind {
         factorseal::DocumentKind::SecretSpecProject => "Project secret",
         factorseal::DocumentKind::LinuxSecretService => "System keyring",
+        factorseal::DocumentKind::NetworkManagerWifi => "Wi-Fi password",
         factorseal::DocumentKind::LocalKeyring => "Application keyring",
         factorseal::DocumentKind::SecretSpecProviderCache => "Provider cache",
         factorseal::DocumentKind::Authorization => "Access",
@@ -442,6 +466,7 @@ fn hex_digest(digest: &[u8; 32]) -> String {
 fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static str {
     match scope {
         Some(factorseal::DocumentKind::LinuxSecretService) => "System keyring",
+        Some(factorseal::DocumentKind::NetworkManagerWifi) => "Wi-Fi passwords",
         Some(factorseal::DocumentKind::SecretSpecProviderCache) => "SecretSpec provider",
         Some(factorseal::DocumentKind::LocalKeyring) => "Application keyring",
         Some(_) => "Vault access",
@@ -533,6 +558,16 @@ struct CategoryGuidance {
 
 fn category_guidance(kind: factorseal::DocumentKind) -> CategoryGuidance {
     match kind {
+        factorseal::DocumentKind::NetworkManagerWifi => CategoryGuidance {
+            title: "Wi-Fi passwords",
+            description: "Personal and enterprise Wi-Fi credentials stored for NetworkManager.",
+            instructions: &[
+                "Keep FactorSeal running while connecting to Wi-Fi. Unlock the vault when asked to make saved passwords available.",
+                "In your network connection editor, choose to store the password for this user. Enter the password in FactorSeal when connecting.",
+                "Existing passwords are not moved automatically. Reconnect and confirm a saved entry here before removing an old keyring copy.",
+                "Enterprise connections also support certificate passwords and PINs. Credentials marked to ask every time are not saved.",
+            ],
+        },
         factorseal::DocumentKind::SecretSpecProject => CategoryGuidance {
             title: "Projects",
             description: "Secrets declared by your SecretSpec projects and profiles.",
@@ -590,6 +625,11 @@ fn category_documentation(
     kind: factorseal::DocumentKind,
 ) -> Option<(&'static str, &'static str, &'static str)> {
     match kind {
+        factorseal::DocumentKind::NetworkManagerWifi => Some((
+            "wifi-passwords-documentation",
+            "Read the Wi-Fi setup and migration guide",
+            "https://github.com/cachix/factorseal/blob/main/docs/network-manager.md",
+        )),
         factorseal::DocumentKind::SecretSpecProject => Some((
             "secretspec-projects-documentation",
             "Open the SecretSpec Quick Start",
@@ -2046,6 +2086,10 @@ impl DesktopView {
         let child_query = if group_matches { "" } else { query };
         let has_matches = [
             (
+                factorseal::DocumentKind::NetworkManagerWifi,
+                "Wi-Fi passwords",
+            ),
+            (
                 factorseal::DocumentKind::LinuxSecretService,
                 "System keyring",
             ),
@@ -2084,6 +2128,14 @@ impl DesktopView {
             )
             .when(expanded, |section| {
                 section
+                    .child(self.render_sidebar_section(
+                        contents,
+                        factorseal::DocumentKind::NetworkManagerWifi,
+                        "Wi-Fi passwords",
+                        4,
+                        child_query,
+                        cx,
+                    ))
                     .child(self.render_sidebar_section(
                         contents,
                         factorseal::DocumentKind::LinuxSecretService,

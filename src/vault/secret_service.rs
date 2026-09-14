@@ -36,6 +36,7 @@ use super::{VaultClient, VaultError, VaultResult};
 
 mod agent;
 mod interfaces;
+mod network_manager;
 
 pub use agent::NAMESPACE;
 use agent::{Agent, Store};
@@ -283,6 +284,7 @@ pub(crate) fn serve_secret_service(
         SECRET_SERVICE_PERMISSIONS,
         unix_time(),
     )?;
+    service.authorize_network_manager_host(&caller, unix_time())?;
     let host = SecretServiceHost::start(Arc::new(NoPrompter))?;
     host.install_store(Store::in_process(Arc::clone(&service), caller))?
         .blocking_recv()
@@ -702,6 +704,10 @@ fn run_frontend(
             VaultError::Protocol(format!("could not start Secret Service runtime: {error}"))
         })?;
     runtime.block_on(async move {
+        // This task also runs while another process owns the session keyring.
+        // Dropping the runtime stops it and disconnects the registered agent.
+        #[cfg(not(test))]
+        tokio::spawn(network_manager::run(Arc::clone(shared)));
         let connection = Connection::session().await.map_err(dbus_error)?;
         let bus = fdo::DBusProxy::new(&connection).await.map_err(dbus_error)?;
         // Subscribe before publishing the service, including clients which
@@ -1079,7 +1085,8 @@ mod tests {
         }
     }
 
-    fn test_service_unprivileged() -> (tempfile::TempDir, Arc<VaultService>, CallerIdentity) {
+    pub(super) fn test_service_unprivileged()
+    -> (tempfile::TempDir, Arc<VaultService>, CallerIdentity) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("factorseal");
         let unsealed = Vault::create_for_test(&root).unwrap();

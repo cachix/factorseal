@@ -596,6 +596,7 @@ impl fmt::Display for DeviceKeyId {
 pub enum DocumentKind {
     Authorization,
     LinuxSecretService,
+    NetworkManagerWifi,
     LocalKeyring,
     SecretSpecProject,
     SecretSpecProviderCache,
@@ -607,6 +608,7 @@ impl DocumentKind {
         match self {
             Self::Authorization => "authorization",
             Self::LinuxSecretService => "linux-secret-service",
+            Self::NetworkManagerWifi => "network-manager-wifi",
             Self::LocalKeyring => "local-keyring",
             Self::SecretSpecProject => "secretspec-project",
             Self::SecretSpecProviderCache => "secretspec-provider-cache",
@@ -618,6 +620,7 @@ impl DocumentKind {
         match value {
             "authorization" => Ok(Self::Authorization),
             "linux-secret-service" => Ok(Self::LinuxSecretService),
+            "network-manager-wifi" => Ok(Self::NetworkManagerWifi),
             "local-keyring" => Ok(Self::LocalKeyring),
             "secretspec-project" => Ok(Self::SecretSpecProject),
             "secretspec-provider-cache" => Ok(Self::SecretSpecProviderCache),

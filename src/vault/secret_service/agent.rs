@@ -52,7 +52,6 @@ pub(super) struct Store {
 }
 
 impl Store {
-    #[cfg(any(test, feature = "key-protection"))]
     pub(super) fn backend_request(&self, request: VaultRequest) -> VaultResult<VaultResponse> {
         self.backend.request(request)
     }

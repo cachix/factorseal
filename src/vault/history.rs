@@ -411,13 +411,14 @@ impl DocumentKind {
                 max_bytes: 1024 * 1024,
                 record_unchanged: true,
             },
-            Self::Authorization | Self::LinuxSecretService | Self::LocalKeyring => {
-                HistoryRetention {
-                    max_entries: 1024,
-                    max_bytes: 512 * 1024,
-                    record_unchanged: true,
-                }
-            }
+            Self::Authorization
+            | Self::LinuxSecretService
+            | Self::NetworkManagerWifi
+            | Self::LocalKeyring => HistoryRetention {
+                max_entries: 1024,
+                max_bytes: 512 * 1024,
+                record_unchanged: true,
+            },
             Self::SecretSpecProviderCache => HistoryRetention {
                 max_entries: 64,
                 max_bytes: 64 * 1024,

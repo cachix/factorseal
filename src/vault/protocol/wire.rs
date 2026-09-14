@@ -1143,7 +1143,9 @@ impl VaultEntryMetadata {
                     ));
                 }
             }
-            DocumentKind::LinuxSecretService | DocumentKind::LocalKeyring => {
+            DocumentKind::LinuxSecretService
+            | DocumentKind::NetworkManagerWifi
+            | DocumentKind::LocalKeyring => {
                 if self.address.as_local().is_none() {
                     return Err(VaultError::Protocol(
                         "keyring transfer entry has a project address".to_owned(),

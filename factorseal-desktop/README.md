@@ -28,6 +28,33 @@ the worker authenticates the executable independently. Denial, dismissal, and
 timeout return distinct D-Bus errors. The dialog only offers unlock-method
 buttons when the vault has multiple methods configured.
 
+Wi-Fi passwords appear under **System integrations → Wi-Fi passwords**. On
+Linux, the desktop registers a NetworkManager secret agent on the system bus
+and stores its credentials in a separate encrypted vault namespace. Personal
+WPA-PSK/SAE and enterprise 802.1X passwords, raw password bytes, private-key
+passwords, and token PINs are supported. Stored credentials are keyed by the
+connection UUID, setting, and property; network names are encrypted metadata.
+
+To use it, configure the connection to store its password for the current user
+(agent-owned). For personal Wi-Fi, this is
+`802-11-wireless-security.psk-flags=1`; for enterprise passwords it is
+`802-1x.password-flags=1`. Each certificate password or PIN has its own flags.
+Existing passwords in NetworkManager's system profiles or another keyring are
+not imported automatically. Other running NetworkManager agents may also answer
+requests; use one credential agent for predictable routing.
+
+See the [Linux Wi-Fi guide](../docs/network-manager.md) for the migration steps
+and checks before removing an older saved password.
+
+When interaction is allowed, FactorSeal asks to unlock and, if needed, enter a
+password using the existing masked input dialog. Noninteractive requests fail
+while sealed. `REQUEST_NEW` prompts for replacement credentials, `NOT_SAVED`
+prevents persistence, and cancellation dismisses pending requests. Raw binary
+passwords can be saved/retrieved through the API; interactive entry is text-only.
+Registration retries after NetworkManager or the system bus restarts. No network
+profiles are changed automatically. Certificate configuration and verification
+remain NetworkManager's responsibility.
+
 The Access list distinguishes System keyring from the native SecretSpec provider
 and shows the project folder and requesting executable. Grant details include
 the executable digest and grant ID. Older grants recover their access type by

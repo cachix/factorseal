@@ -1,0 +1,22 @@
+[package]
+name = "network-manager-protocol"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "Apache-2.0"
+description = "Pure-Rust NetworkManager secret-agent protocol types and Wi-Fi secrets"
+repository = "https://github.com/domenkozar/factorseal"
+
+[dependencies]
+bitflags = "2.13.1"
+thiserror = "2.0.12"
+zeroize = "1.8.1"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+missing_errors_doc = "allow"

@@ -175,6 +175,28 @@ impl VaultService {
             crate::vault::SECRET_SERVICE_NAMESPACE,
             crate::vault::secret_service::SECRET_SERVICE_PERMISSIONS,
             now,
+        )?;
+        self.authorize_network_manager_host(caller, now)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn authorize_network_manager_host(
+        &self,
+        caller: &CallerIdentity,
+        now: u64,
+    ) -> VaultResult<()> {
+        self.authorize_exclusive(
+            caller,
+            GrantTarget::Namespace {
+                scope: DocumentKind::NetworkManagerWifi,
+                namespace: b"factorseal/network-manager/v1",
+            },
+            [
+                GrantPermission::Get,
+                GrantPermission::Put,
+                GrantPermission::Delete,
+            ],
+            now,
         )
     }
 

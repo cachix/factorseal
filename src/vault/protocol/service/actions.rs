@@ -556,6 +556,17 @@ pub(super) fn scope_action(action: VaultAction) -> ScopedAction {
         {
             DocumentKind::LinuxSecretService
         }
+        VaultAction::Get { ref namespace, .. }
+        | VaultAction::Put { ref namespace, .. }
+        | VaultAction::Mutate { ref namespace, .. }
+        | VaultAction::Delete { ref namespace, .. }
+        | VaultAction::Clear { ref namespace }
+        | VaultAction::Seal { ref namespace }
+        | VaultAction::ListHistory { ref namespace, .. }
+            if namespace == b"factorseal/network-manager/v1" =>
+        {
+            DocumentKind::NetworkManagerWifi
+        }
         _ => DocumentKind::LocalKeyring,
     };
     ScopedAction { action, scope }
