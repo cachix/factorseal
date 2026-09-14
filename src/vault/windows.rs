@@ -190,8 +190,14 @@ fn accept_until_sealed(
                         .spawn_scoped(scope, move || {
                             let _active = ActiveConnection(active);
                             // A malformed or disconnected client must not
-                            // terminate the per-user vault.
-                            let _ = handle_connection(service, caller_cache, &mut stream);
+                            // terminate the per-user vault. Still counted, so
+                            // a client's undifferentiated transport timeout
+                            // has a corresponding operator-visible signal.
+                            if handle_connection(service, caller_cache, &mut stream).is_err() {
+                                crate::security::events::record(
+                                    crate::security::events::Kind::ConnectionFailed,
+                                );
+                            }
                         })
                     {
                         active.fetch_sub(1, Ordering::AcqRel);
@@ -616,6 +622,7 @@ pub(crate) fn caller_identity(
         .map_err(|error| io_error("read named-pipe client PID", &error))?;
     let client_sid = client_sid(stream)?;
     if client_sid != current_process_sid()? {
+        crate::security::events::record(crate::security::events::Kind::UntrustedCallerRejected);
         return Err(VaultError::AuthorizationRequired);
     }
     let (executable, start_time) = process_executable(process_id)?;
