@@ -23,6 +23,15 @@ class DependencyPolicyTests(unittest.TestCase):
         self.report["vulnerabilities"]["found"] = True
         self.assertTrue(policy.check(self.report, [self.exception], self.today))
 
+    def test_vulnerability_details_are_reported(self):
+        self.report["vulnerabilities"] = dict(found=True, list=[dict(
+            package=dict(name="example", version="1.0"),
+            advisory=dict(id="RUSTSEC-1", title="Example vulnerability"),
+            versions=dict(patched=[">=1.1"]),
+        )])
+        errors = policy.check(self.report, [self.exception], self.today)
+        self.assertIn("RUSTSEC-1: example 1.0: Example vulnerability (patched: >=1.1)", errors)
+
     def test_expired_missing_and_changed_versions_fail(self):
         self.assertTrue(policy.check(self.report, [], self.today))
         self.assertTrue(policy.check(self.report, [self.exception], self.exception["expires"]))

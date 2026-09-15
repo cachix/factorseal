@@ -547,6 +547,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link 0.2.1",
 ]
@@ -669,6 +670,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "credential-exchange-format"
+version = "0.4.0"
+source = "git+https://github.com/domenkozar/credential-exchange?rev=886ff4641b86da458d467185532b8b8e222f6060#886ff4641b86da458d467185532b8b8e222f6060"
+dependencies = [
+ "chrono",
+ "data-encoding",
+ "serde",
+ "serde_json",
+ "zeroize",
+ "zeroize_derive",
 ]
 
 [[package]]
@@ -843,6 +857,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "data-encoding"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
+
+[[package]]
 name = "der"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1005,6 +1025,7 @@ dependencies = [
  "argon2",
  "automerge",
  "base64",
+ "credential-exchange-format",
  "csv",
  "fs2",
  "getrandom 0.3.4",

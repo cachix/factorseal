@@ -1,4 +1,7 @@
+#[cfg(target_os = "linux")]
 use super::*;
+#[cfg(not(target_os = "linux"))]
+use super::{Context, DesktopView, Div, div};
 
 #[cfg(target_os = "linux")]
 #[derive(Default)]
@@ -9,6 +12,7 @@ pub(super) struct State {
 }
 
 impl DesktopView {
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_self))]
     pub(super) fn render_wifi_migration(
         &self,
         kind: factorseal::DocumentKind,

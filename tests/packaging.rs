@@ -54,24 +54,6 @@ fn png_dimensions(relative: &str) -> (u32, u32) {
     )
 }
 
-/// Read the `<string>` element that follows the `--askpass` element.
-fn plist_askpass_argument(plist: &str) -> String {
-    const MARKER: &str = "<string>--askpass</string>";
-    let rest = plist
-        .split_once(MARKER)
-        .unwrap_or_else(|| panic!("no `{MARKER}` in the LaunchAgent"))
-        .1;
-    let value = rest
-        .split_once("<string>")
-        .expect("--askpass has no following argument element")
-        .1;
-    value
-        .split_once("</string>")
-        .expect("unterminated argument element")
-        .0
-        .to_owned()
-}
-
 /// Read the quoted argument that follows `--askpass` in the task template.
 fn task_askpass_argument(task: &str) -> String {
     let rest = task
@@ -214,37 +196,15 @@ fn the_linux_starter_hands_its_logind_session_to_the_unit() {
 }
 
 #[test]
-fn the_macos_launcher_and_packager_agree_on_the_askpass_helper() {
+fn the_macos_launcher_starts_the_packaged_desktop_in_background() {
     let plist = packaging("macos/dev.factorseal.plist");
     let builder = packaging("build-unix.sh");
-
-    // Keep the script in Resources so the outer app signature seals it as a
-    // resource instead of treating it as unsigned nested code in MacOS.
-    let helper = plist_askpass_argument(&plist);
-    let factorseal = "/Applications/Factorseal.app/Contents/MacOS/factorseal";
-    assert!(
-        plist.contains(factorseal),
-        "the LaunchAgent no longer starts the expected binary"
-    );
-    assert!(
-        helper.starts_with("/Applications/Factorseal.app/Contents/Resources/"),
-        "the askpass helper is not installed as a signed app resource: {helper}"
-    );
-
-    // ...and the packager must actually put it there.
-    let name = Path::new(&helper).file_name().unwrap().to_str().unwrap();
-    assert!(
-        builder.contains(&format!("cp packaging/macos/{name} \"$app/Resources/\"")),
-        "build-unix.sh does not install {name} into the app bundle"
-    );
-    assert!(
-        builder.contains(&format!("\"$app/Resources/{name}\"")),
-        "build-unix.sh does not make {name} executable"
-    );
-    assert!(
-        packaging_path(&format!("macos/{name}")).is_file(),
-        "the macOS askpass helper source is missing"
-    );
+    assert!(plist.contains(
+        "<string>/Applications/Factorseal.app/Contents/MacOS/factorseal-desktop</string>"
+    ));
+    assert!(plist.contains("<string>--background</string>"));
+    assert!(builder.contains("cp \"$target_dir/$profile_dir/factorseal-desktop\" \"$app/MacOS/\""));
+    assert!(!plist.contains("<string>--askpass</string>"));
 }
 
 #[test]
@@ -347,7 +307,8 @@ fn the_store_msix_has_partner_center_identity_and_a_cli_alias() {
         assert!(builder.contains(placeholder));
     }
     assert!(manifest.contains("EntryPoint=\"Windows.FullTrustApplication\""));
-    assert!(manifest.contains("AppListEntry=\"none\""));
+    assert!(!manifest.contains("AppListEntry=\"none\""));
+    assert!(manifest.contains("Executable=\"factorseal-desktop.exe\""));
     assert!(manifest.contains("Category=\"windows.appExecutionAlias\""));
     assert!(manifest.contains("Alias=\"factorseal.exe\""));
     assert!(manifest.contains("<rescap:Capability Name=\"runFullTrust\""));
@@ -419,13 +380,13 @@ fn both_desktop_launchers_start_the_agent_at_login() {
 }
 
 #[test]
-fn every_background_launcher_uses_the_agent_command() {
+fn background_launchers_use_the_platform_entry_point() {
     let linux = packaging("linux/factorseal.service.in");
     let macos = packaging("macos/dev.factorseal.plist");
     let windows = packaging("windows/factorseal-task.xml.in");
 
     assert!(linux.contains("systemd-ask-password agent"));
-    assert!(macos.contains("<string>agent</string>"));
+    assert!(macos.contains("<string>--background</string>"));
     assert!(windows.contains("factorseal-askpass.cmd\" agent"));
 }
 

@@ -49,7 +49,7 @@ export FACTORSEAL_TEST_APPLE_NATIVE_OUTPUT="$results_dir/native-from-apple.json"
 } 2>&1 | tee "$results_dir/environment.log"
 
 cargo test --locked --no-default-features --features transfer --lib \
-    transfer::cxf::tests::native_fields_round_trip_through_independent_cxf_reader -- --exact \
+    transfer::cxf::tests::native_fields_round_trip_through_typed_cxf_model -- --exact \
     2>&1 | tee "$results_dir/rust-native-fixture.log"
 [[ -s $FACTORSEAL_TEST_APPLE_NATIVE_CXF ]]
 xcrun swift test --package-path platform/apple -Xswiftc -warnings-as-errors 2>&1 | tee "$results_dir/swift-tests.log"

@@ -27,6 +27,12 @@ def check(report, exceptions, today):
     vulnerabilities = report["vulnerabilities"]
     if vulnerabilities["found"] or vulnerabilities["list"]:
         errors.append("RustSec reports vulnerabilities; maintenance exceptions cannot allow them")
+    for finding in vulnerabilities["list"]:
+        package = finding["package"]
+        advisory = finding["advisory"]
+        patched = ", ".join(finding["versions"]["patched"]) or "no patched release"
+        errors.append(f'{advisory["id"]}: {package["name"]} {package["version"]}: '
+                      f'{advisory["title"]} (patched: {patched})')
     seen = set()
     for kind, warnings in report["warnings"].items():
         for warning in warnings:
