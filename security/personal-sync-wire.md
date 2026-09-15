@@ -180,7 +180,7 @@ pinned (or joining is pending), the legacy raw `configure_personal_sync` API is
 disabled. A membership change invalidates prepared old-epoch ciphertext and
 queues all existing personal histories for publication to the new recipients.
 
-`personal-sync-network` adds an iroh 1.1 courier library using ALPN
+`personal-sync-network` adds an iroh 1.2 courier library using ALPN
 `factorseal/personal-sync/1`. The embedding host supplies the endpoint and owns
 its secret, lifetime, connection limits and address discovery. The standalone library starts no listener by itself; Desktop owns one after
 sync setup. The courier owns only public authorization and the ciphertext spool;
