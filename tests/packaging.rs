@@ -6,7 +6,7 @@
 //! installs somewhere else. That breaks vault start at login and is invisible
 //! until a real machine runs it.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn packaging(relative: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
