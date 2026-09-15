@@ -45,13 +45,12 @@ fn application_context() -> VaultApplicationContext {
     VaultApplicationContext::new(
         Some("demo".to_owned()),
         Some("default".to_owned()),
-        Some(
-            std::env::current_dir()
+        Some(without_verbatim_prefix(
+            &std::env::current_dir()
                 .and_then(std::fs::canonicalize)
                 .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-        ),
+                .to_string_lossy(),
+        )),
         Some("test".to_owned()),
     )
     .unwrap()
