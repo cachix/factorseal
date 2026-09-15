@@ -259,10 +259,11 @@ opt-level = 3
 [patch.crates-io]
 # Windows route discovery without WMI: https://github.com/n0-computer/net-tools/pull/226
 netwatch = { git = "https://github.com/domenkozar/net-tools.git", rev = "0b252c90a768cae2aacba8d304e1de5a4ed062db" }
+# Compatible backport of rendering fixes: https://github.com/gpui-ce/gpui-ce/pull/256
 # Components and tray must share the application's CE types and Git revision.
-gpui-ce = { git = "https://github.com/domenkozar/gpui-ce.git", rev = "3178eb5e624485190c345d014ed6b808acbd3ba3" }
-gpui_ce_macros = { git = "https://github.com/domenkozar/gpui-ce.git", rev = "3178eb5e624485190c345d014ed6b808acbd3ba3" }
-gpui_ce_platform = { git = "https://github.com/domenkozar/gpui-ce.git", rev = "3178eb5e624485190c345d014ed6b808acbd3ba3" }
+gpui-ce = { git = "https://github.com/domenkozar/gpui-ce.git", rev = "85f7f16b3ac1542b70cb4c24a59fd70f71730ab1" }
+gpui_ce_macros = { git = "https://github.com/domenkozar/gpui-ce.git", rev = "85f7f16b3ac1542b70cb4c24a59fd70f71730ab1" }
+gpui_ce_platform = { git = "https://github.com/domenkozar/gpui-ce.git", rev = "85f7f16b3ac1542b70cb4c24a59fd70f71730ab1" }
 # Upstream replaces unmaintained proc-macro-error2 with proc-macro-error3.
 # Keep the workspace crates on the same source: Nix's Cargo vendor directory
 # cannot contain registry and Git copies with identical names and versions.
