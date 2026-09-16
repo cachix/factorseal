@@ -3859,8 +3859,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-tray"
-version = "0.1.1"
-source = "git+https://github.com/domenkozar/gpui-tray.git?rev=db57d965a7187563644c5028bb1a17d36486b919#db57d965a7187563644c5028bb1a17d36486b919"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d60e72a544b95f47a934881d3ade70f33771963890f7d53aa97393bb7cd51f0f"
 dependencies = [
  "async-channel",
  "gpui-ce",

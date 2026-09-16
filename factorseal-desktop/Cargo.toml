@@ -27,7 +27,7 @@ gpui = { package = "gpui-ce", git = "https://github.com/domenkozar/gpui-ce.git",
 gpui-component = { package = "gpui_ce_components", git = "https://github.com/domenkozar/gpui-kit.git", rev = "c7440f24e3c392beefe759aeb7989bd4ea4ffd4e" }
 gpui-component-assets = { package = "gpui_ce_components_assets", git = "https://github.com/domenkozar/gpui-kit.git", rev = "c7440f24e3c392beefe759aeb7989bd4ea4ffd4e" }
 gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/domenkozar/gpui-ce.git", rev = "85f7f16b3ac1542b70cb4c24a59fd70f71730ab1", features = ["font-kit", "x11", "wayland"] }
-gpui-tray = { version = "=0.1.1", git = "https://github.com/domenkozar/gpui-tray.git", rev = "db57d965a7187563644c5028bb1a17d36486b919", default-features = false, features = ["gpui-ce", "menu-state"] }
+gpui-tray = { version = "=0.1.2", default-features = false, features = ["gpui-ce", "menu-state"] }
 rfd = { version = "0.15.4", default-features = false, features = ["async-std", "xdg-portal"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 sentry = { version = "0.49.2", default-features = false, features = ["backtrace"] }

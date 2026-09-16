@@ -10,7 +10,6 @@
   "i18n-embed-impl-0.8.4" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";
   "automerge-0.11.0" = "sha256-RRo6hDFB4JKGHOkG0aknmOnAc6pHHlw7Qjpe+EZ8juk=";
   "gpui-ce-0.2.2" = "sha256-IxOBj8XQHla0qEoBepH/CjP4uHPzR9xWGdA4VebKfh4=";
-  "gpui-tray-0.1.1" = "sha256-IgDGjG47NHDtPhmiFvwkRYDYdECpUR+0CAKVqjZ1j4o=";
   "gpui_ce_apple-0.1.0" = "sha256-IxOBj8XQHla0qEoBepH/CjP4uHPzR9xWGdA4VebKfh4=";
   "gpui_ce_collections-0.2.2" = "sha256-IxOBj8XQHla0qEoBepH/CjP4uHPzR9xWGdA4VebKfh4=";
   "gpui_ce_components-0.2.0" = "sha256-/YqKvdDW9ulGUzPpyRvQuzs5fjUJnRI7zsrmNLlCNkc=";
