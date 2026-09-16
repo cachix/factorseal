@@ -4,6 +4,11 @@
 
 ## Build and test
 
+The desktop tray shows the package version beside FactorSeal in its title,
+tooltip, and menu heading. Development builds (with debug assertions enabled)
+also show the short Git revision, for example `FactorSeal 0.1.0 (dev · abc12345)`.
+Development source archives without Git metadata show `(dev)` instead.
+
 The repository uses [devenv](https://devenv.sh/) on Linux:
 
 ```console
@@ -69,4 +74,3 @@ $ nix run .#acceptance-linux -- \
 Developer packaging inputs are described in [Packaging](../packaging/README.md).
 No platform is considered release-ready merely because the shared Rust core
 builds or its unit tests pass.
-

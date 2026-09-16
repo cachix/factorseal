@@ -3227,7 +3227,8 @@ impl DesktopView {
                         } else {
                             "Choose an item on the left to see its details."
                         }),
-                ),
+                )
+                .child(self.render_browser(cx)),
             Some(VaultSelection::PersonalSecrets) => {
                 self.render_personal_secrets_detail(contents, cx)
             }
@@ -3700,7 +3701,10 @@ impl DesktopView {
 
     fn render_body(&self, compact: bool, cx: &mut Context<Self>) -> Div {
         if self.settings_open {
-            return div().w_full().child(self.settings.clone());
+            return div()
+                .w_full()
+                .child(self.settings.clone())
+                .child(self.render_browser(cx));
         }
         let theme = cx.theme().clone();
         match &self.snapshot {
@@ -3880,7 +3884,6 @@ impl Render for DesktopView {
                             }),
                     ),
             )
-            .child(self.render_browser(cx))
             .child(self.render_content(compact, cx))
             .child(self.render_footer(cx))
             .children(dialog_layer)
@@ -4112,6 +4115,20 @@ fn quit(_: &Quit, cx: &mut App) {
     cx.quit();
 }
 
+fn tray_label() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let revision = env!("FACTORSEAL_GIT_REVISION");
+    if cfg!(debug_assertions) {
+        if revision.is_empty() {
+            format!("FactorSeal {version} (dev)")
+        } else {
+            format!("FactorSeal {version} (dev · {revision})")
+        }
+    } else {
+        format!("FactorSeal {version}")
+    }
+}
+
 fn tray_menu(cx: &mut App) -> Vec<MenuItem> {
     let status = cx.global::<DesktopStatus>();
     let window_visible = cx.global::<DesktopWindow>().visible;
@@ -4122,11 +4139,15 @@ fn tray_menu(cx: &mut App) -> Vec<MenuItem> {
     } else {
         "Unseal"
     };
-    let mut items = if window_visible {
-        vec![MenuItem::action(desktop_label, CloseDesktop)]
+    let mut items = vec![
+        MenuItem::action(tray_label(), OpenDesktop).disabled(true),
+        MenuItem::separator(),
+    ];
+    items.push(if window_visible {
+        MenuItem::action(desktop_label, CloseDesktop)
     } else {
-        vec![MenuItem::action(desktop_label, OpenDesktop)]
-    };
+        MenuItem::action(desktop_label, OpenDesktop)
+    });
     if status.unsealed {
         items.push(MenuItem::action("Seal", SealVault));
     }
@@ -4161,8 +4182,8 @@ fn install_tray(cx: &mut App) {
     let tray = factorseal_icon(dark_background, cx).and_then(|icon| {
         Tray::builder()
             .icon(icon)
-            .title("FactorSeal")
-            .tooltip("FactorSeal vault")
+            .title(tray_label())
+            .tooltip(tray_label())
             .on_activate(ToggleDesktop)
             .menu(tray_menu)
             .build(cx)

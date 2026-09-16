@@ -1,6 +1,8 @@
-//! Best-effort browser discovery from executables, never profile contents.
+//! Best-effort browser discovery and extension installation metadata.
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+mod extension;
+pub use extension::extension_installed;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

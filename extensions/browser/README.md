@@ -46,8 +46,12 @@ setting. Extension installation and pairing still require the user’s actions.
 Individual profiles can be disconnected, requests denied, and sites paused.
 
 When you enter an unlocked vault, Desktop detects supported browser executables
-and offers installation instructions for browsers without an identified paired
-profile. Settings retains all detected browsers and paired profiles. Pairing is
+and shows their extension status below the welcome message. Desktop checks standard
+browser profile metadata for the bundled extension IDs, including unpacked Chromium
+builds, independently of pairing. “Extension not detected” is best effort: temporary
+Firefox add-ons and custom profile locations may not be recorded there. Paired browsers
+remain visible even when executable discovery misses them. Settings retains installation
+instructions and paired-profile controls. Pairing is
 per profile; a paired browser does not imply every profile is paired or online.
 Browser names are signed, self-reported display metadata, not authorization.
 Reload extensions paired with an older build to identify their browser names.

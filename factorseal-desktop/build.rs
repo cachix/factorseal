@@ -1,6 +1,7 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
+    git_revision();
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
@@ -72,4 +73,30 @@ fn main() {
     {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{bin}");
     }
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn git_revision() {
+    // Watch Git's actual paths, including linked worktrees and packed refs, so
+    // committing or switching branches refreshes the embedded revision.
+    let mut refs = vec!["HEAD".to_owned(), "packed-refs".to_owned()];
+    if let Some(branch) = git_output(&["symbolic-ref", "-q", "HEAD"]) {
+        refs.push(branch);
+    }
+    for reference in refs {
+        if let Some(path) = git_output(&["rev-parse", "--git-path", &reference]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    let revision = git_output(&["rev-parse", "--short=8", "HEAD"])
+        .filter(|revision| revision.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .unwrap_or_default();
+    println!("cargo:rustc-env=FACTORSEAL_GIT_REVISION={revision}");
 }

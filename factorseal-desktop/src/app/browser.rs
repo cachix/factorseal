@@ -12,7 +12,7 @@ struct BrowserGlobal {
     cache: std::path::PathBuf,
     registration_error: Arc<Mutex<bool>>,
     saved: Arc<std::sync::atomic::AtomicBool>,
-    installed: Arc<Mutex<Vec<Browser>>>,
+    installed: Arc<Mutex<Vec<(Browser, bool)>>>,
 }
 impl Global for BrowserGlobal {}
 
@@ -54,8 +54,9 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
     });
     let registration_root = root.to_path_buf();
     std::thread::spawn(move || {
-        if let Ok(mut found) = installed.lock() {
-            *found = factorseal::browser::discovery::installed();
+        let found = discover_browsers();
+        if let Ok(mut installed) = installed.lock() {
+            *installed = found;
         }
         let Ok(identity) = std::env::current_exe() else {
             return;
@@ -162,6 +163,7 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
     });
     cx.spawn(async move |cx| {
         let mut was_unsealed = false;
+        let mut last_browser_scan = std::time::Instant::now();
         loop {
             smol::Timer::after(std::time::Duration::from_millis(200)).await;
             cx.update(|cx| {
@@ -176,10 +178,11 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
                     &cx.global::<DesktopWindow>().snapshot,
                     Snapshot::Unsealed { owned: true, .. }
                 );
-                if unsealed && !was_unsealed {
+                if unsealed && (!was_unsealed || last_browser_scan.elapsed().as_secs() >= 10) {
+                    last_browser_scan = std::time::Instant::now();
                     let installed = Arc::clone(&cx.global::<BrowserGlobal>().installed);
                     std::thread::spawn(move || {
-                        let found = factorseal::browser::discovery::installed();
+                        let found = discover_browsers();
                         if let Ok(mut installed) = installed.lock() {
                             *installed = found;
                         }
@@ -216,6 +219,18 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
     })
     .detach();
 }
+fn discover_browsers() -> Vec<(Browser, bool)> {
+    factorseal::browser::discovery::installed()
+        .into_iter()
+        .map(|browser| {
+            (
+                browser,
+                factorseal::browser::discovery::extension_installed(browser),
+            )
+        })
+        .collect()
+}
+
 impl DesktopView {
     #[allow(clippy::too_many_lines)] // Declarative pairing, unlock, and account-selection controls.
     pub(super) fn render_browser(&self, cx: &mut Context<Self>) -> Div {
@@ -243,57 +258,66 @@ impl DesktopView {
                 .count()
         };
         let unknown = paired.iter().any(|key| !labels.contains_key(key));
-        if !self.settings_open && installed.iter().all(|browser| count(*browser) > 0) {
-            return div();
+        let mut panel = v_flex().py_3().gap_2().flex_none();
+        if self.settings_open {
+            panel = panel.child(div().font_semibold().child("Browser extensions"));
+        } else {
+            panel = panel.w_full().max_w(rems(420. / 16.));
         }
-        let mut panel = v_flex()
-            .py_3()
-            .gap_2()
-            .flex_none()
-            .child(div().font_semibold().child("Connect your browsers"));
         for (index, browser) in Browser::ALL.into_iter().enumerate() {
             let paired_count = count(browser);
-            if !(installed.contains(&browser) || self.settings_open && paired_count > 0) {
+            let detected = installed.iter().find(|(found, _)| *found == browser);
+            if detected.is_none() && paired_count == 0 {
                 continue;
             }
+            let extension_installed = detected.is_some_and(|(_, extension)| *extension);
             let state = if paired_count > 0 {
                 format!(
-                    "{paired_count} paired {}",
+                    "Extension paired · {paired_count} {}",
                     if paired_count == 1 {
                         "profile"
                     } else {
                         "profiles"
                     }
                 )
-            } else if unknown {
-                "Pairing not identified".into()
+            } else if extension_installed {
+                "Extension installed · Not paired".into()
             } else {
-                "Not paired".into()
+                "Extension not detected".into()
             };
             panel = panel.child(
                 h_flex()
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .child(div().child(format!("{} · {state}", browser.name())))
-                    .when(paired_count == 0, |row| {
-                        row.child(
-                            Button::new(("install-browser-extension", index))
-                                .small()
-                                .label("Install extension")
-                                .on_click(move |_, _, cx| cx.open_url(browser.install_url())),
-                        )
-                    }),
+                    .child(div().font_semibold().child(browser.name()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(state),
+                    )
+                    .when(
+                        self.settings_open && paired_count == 0 && !extension_installed,
+                        |row| {
+                            row.child(
+                                Button::new(("install-browser-extension", index))
+                                    .small()
+                                    .label("Install extension")
+                                    .on_click(move |_, _, cx| cx.open_url(browser.install_url())),
+                            )
+                        },
+                    ),
             );
         }
-        if unknown {
+        if self.settings_open && unknown {
             panel = panel.child(
                 div()
                     .text_sm()
                     .child("Reload existing extensions to identify their paired browsers."),
             );
         }
-        if installed.iter().any(|browser| count(*browser) == 0) {
+        if self.settings_open && installed.iter().any(|(browser, _)| count(*browser) == 0) {
             panel = panel.child(div().text_sm().child(
                 "Developer preview · Install the extension, then choose Pair with Desktop.",
             ));
