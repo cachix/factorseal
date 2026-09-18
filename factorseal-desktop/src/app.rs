@@ -747,13 +747,16 @@ impl DesktopView {
         if self.issue_report_busy {
             return;
         }
-        let description = self.issue_description.get_or_insert_with(|| {
-            cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .rows(5)
-                    .placeholder("What were you doing? What happened, and what did you expect? Include steps to reproduce if you can.")
+        let description = self
+            .issue_description
+            .get_or_insert_with(|| {
+                cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .rows(7)
+                        .placeholder("What happened, and what did you expect?")
+                })
             })
-        }).clone();
+            .clone();
         self.issue_report_error.set(None);
         let error = Rc::clone(&self.issue_report_error);
         let view = cx.weak_entity();
@@ -762,12 +765,20 @@ impl DesktopView {
             let cancel_view = view.clone();
             dialog
                 .title("Report an issue")
-                .width(px(520.))
+                .width(px(560.))
                 .overlay_closable(false)
-                .child("Describe what went wrong")
-                .child(Textarea::new(&description).h(rems(140. / 16.)))
-                .child(div().text_xs().text_color(cx.theme().muted_foreground)
-                    .child("Your description and recent diagnostic logs will be sent to Sentry. Don’t include passwords or secret values. Up to 4,000 characters."))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(div().text_sm().child("Describe the issue and how to reproduce it."))
+                        .child(
+                            Textarea::new(&description)
+                                .aria_label("Issue description")
+                                .h(rems(176. / 16.)),
+                        )
+                        .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                            .child("Up to 4,000 characters. Leave out passwords and other secrets.")),
+                )
                 .when_some(error.get(), |dialog, error| dialog.child(error_banner(error.to_owned(), cx.theme().danger)))
                 .footer(
                     DialogFooter::new()

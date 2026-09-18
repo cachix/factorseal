@@ -96,12 +96,19 @@ with the generated tray icons.
 From the repository root:
 
 ```console
-devenv shell cargo build -p factorseal --features cli,vault,hardware
-devenv shell cargo run -p factorseal-desktop
+devenv shell cargo build -p factorseal --bins
+devenv shell -- env -u FACTORSEAL_CLI_EXECUTABLE -u FACTORSEAL_DESKTOP_EXECUTABLE cargo run -p factorseal-desktop
 ```
 
 Install both binaries together, or set `FACTORSEAL_CLI_EXECUTABLE` to the absolute
 CLI path. The Nix Desktop package supplies this dependency automatically.
+
+The development command clears executable overrides inherited from an installed
+NixOS package so Desktop uses the CLI and browser bridge built beside it.
+An older installed CLI can reject `desktop-worker`, and a missing browser bridge
+causes the browser registration warning. Rebuild the CLI binaries after pulling
+changes; `cargo run -p factorseal-desktop` only rebuilds the CLI library dependency,
+not its executables.
 
 Set `FACTORSEAL_TIMINGS=1` when launching Desktop to log unlock timings to
 stderr, including worker setup, executable authentication, permission writes,
