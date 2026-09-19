@@ -39,6 +39,7 @@ pub(super) struct Prompt {
     pub(super) shared: Arc<Shared>,
     pub(super) path: String,
     pub(super) objects: Vec<OwnedObjectPath>,
+    pub(super) context: super::SecretServiceAccessContext,
 }
 
 pub(super) struct Session {
@@ -333,6 +334,8 @@ impl Service {
     async fn unlock(
         &self,
         objects: Vec<OwnedObjectPath>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
         if objects.is_empty() || !self.shared.locked() {
@@ -356,6 +359,7 @@ impl Service {
                     shared: Arc::clone(&self.shared),
                     path: path.clone(),
                     objects,
+                    context: access_context(&HashMap::new(), &header, connection).await,
                 },
             )
             .await
@@ -735,7 +739,10 @@ impl Prompt {
                 .await
                 .map_err(failed)?;
         } else {
-            self.shared.prompter.request_unlock();
+            self.shared.prompter.request_unlock_for(
+                self.context.clone(),
+                self.objects.iter().map(ToString::to_string).collect(),
+            );
         }
         Ok(())
     }

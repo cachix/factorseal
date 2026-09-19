@@ -17,7 +17,10 @@ pub(crate) enum AccessEvent {
     #[cfg(target_os = "linux")]
     Input(factorseal::SecretServiceInputRequest),
     #[cfg(target_os = "linux")]
-    Unlock,
+    Unlock {
+        context: factorseal::SecretServiceAccessContext,
+        objects: Vec<String>,
+    },
     #[cfg(target_os = "linux")]
     Request(factorseal::SecretServiceAccessRequest),
     #[cfg(target_os = "linux")]

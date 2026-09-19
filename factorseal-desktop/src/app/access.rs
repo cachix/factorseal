@@ -24,6 +24,7 @@ struct AccessView {
     inputs: Vec<factorseal::SecretServiceInputRequest>,
     editor: InputEditor,
     explicit_unlock: bool,
+    unlocks: Vec<(SecretServiceAccessContext, Vec<String>)>,
     grants: Vec<factorseal::Permission>,
     reviewed_grants: Vec<factorseal::Permission>,
     approving: bool,
@@ -314,6 +315,7 @@ fn open(event: AccessEvent, cx: &mut App) {
                 group,
                 requests: Vec::new(),
                 explicit_unlock: false,
+                unlocks: Vec::new(),
                 grants: Vec::new(),
                 reviewed_grants: Vec::new(),
                 approving: false,
@@ -402,7 +404,10 @@ impl AccessView {
             AccessEvent::Finished(_) => unreachable!("completion does not open a popup"),
             AccessEvent::Request(request) => self.requests.push(request),
             AccessEvent::Input(request) => self.inputs.push(request),
-            AccessEvent::Unlock => self.explicit_unlock = true,
+            AccessEvent::Unlock { context, objects } => {
+                self.explicit_unlock = true;
+                self.unlocks.push((context, objects));
+            }
             AccessEvent::Permissions(grants) => {
                 for grant in grants {
                     if !self.grants.iter().any(|existing| existing.id == grant.id) {
@@ -596,6 +601,28 @@ fn project_coordinates(context: &SecretServiceAccessContext) -> Option<(&str, &s
         .then_some((project, profile, secret))
 }
 
+fn access_title(has_input: bool, has_grants: bool, explicit_unlock: bool) -> &'static str {
+    if has_input {
+        "Save a secret"
+    } else if has_grants {
+        "Allow secret access"
+    } else if explicit_unlock {
+        "Unlock system keyring"
+    } else {
+        "Review secret access"
+    }
+}
+
+fn unlock_target_label(path: &str) -> String {
+    match path {
+        "/org/freedesktop/secrets/collection/factorseal"
+        | "/org/freedesktop/secrets/aliases/default" => {
+            "Default keyring (application did not specify an individual secret)".to_owned()
+        }
+        _ => format!("Locked item: {path}"),
+    }
+}
+
 fn application_name(path: &std::path::Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -667,12 +694,19 @@ impl Render for AccessView {
                 .is_some_and(|group| group.requires(factorseal::UnlockFactorKind::Password));
         let mut requests = v_flex().gap_4();
         let mut technical = v_flex().gap_4();
-        for context in self
+        for (context, objects) in self
             .requests
             .iter()
             .filter(|_| self.inputs.is_empty())
             .map(|request| &request.context)
             .chain(self.inputs.iter().take(1).map(|request| &request.context))
+            .map(|context| (context, None))
+            .chain(
+                self.unlocks
+                    .iter()
+                    .filter(|_| self.inputs.is_empty())
+                    .map(|(context, objects)| (context, Some(objects))),
+            )
         {
             let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted);
             if let Some((project, profile, secret)) = project_coordinates(context) {
@@ -687,6 +721,28 @@ impl Render for AccessView {
             } else {
                 card = card.child(div().font_semibold().child("System keyring"));
             }
+            if let Some(objects) = objects {
+                card = card.child(detail("Requested action", "Unlock system keyring", cx));
+                if objects.is_empty() {
+                    card = card.child(detail(
+                        "Requested items",
+                        "Not supplied by the application",
+                        cx,
+                    ));
+                }
+                for object in objects {
+                    card = card.child(detail("Requested item", unlock_target_label(object), cx));
+                }
+                card = card.child(div().text_sm().child(
+                    "Item names and contents stay encrypted until unlock. Unlocking does not grant permission to read secrets.",
+                ));
+            } else if project_coordinates(context).is_none()
+                && !context.attributes.contains_key("project")
+            {
+                for (key, value) in &context.attributes {
+                    card = card.child(detail(key.clone(), value.clone(), cx));
+                }
+            }
             if let Some(folder) = context.attributes.get("base_dir") {
                 card = card.child(detail("Project folder", folder.clone(), cx));
             }
@@ -695,10 +751,19 @@ impl Render for AccessView {
                 technical =
                     technical.child(detail("Executable", executable.display().to_string(), cx));
             }
-            // Once permissions arrive, their authenticated scope becomes the review summary.
-            if self.grants.is_empty() || !self.inputs.is_empty() {
-                requests = requests.child(card);
+            if context.executable.is_none() {
+                card = card.child(detail(
+                    "Requested by",
+                    if context.sender.is_empty() {
+                        "Unknown application".to_owned()
+                    } else {
+                        format!("Application identity unavailable ({})", context.sender)
+                    },
+                    cx,
+                ));
             }
+            // Keep the requested items visible alongside the authenticated grant scope.
+            requests = requests.child(card);
             let mut info = v_flex().gap_3();
             if let Some(directory) = &context.working_directory {
                 info = info.child(detail(
@@ -813,7 +878,7 @@ impl Render for AccessView {
             }))
             .bg(theme.background).text_color(theme.foreground).font_family(theme.font_family.clone()).text_size(theme.font_size)
             .child(v_flex().p_6().gap_2().child(h_flex().gap_2().items_center().child(brand_mark(22., theme.foreground)).child(div().text_sm().text_color(theme.muted_foreground).child("FactorSeal")))
-                .child(div().text_xl().font_semibold().child(if self.inputs.is_empty() { "Allow project access" } else { "Save a secret" })))
+                .child(div().text_xl().font_semibold().child(access_title(!self.inputs.is_empty(), !self.grants.is_empty(), self.explicit_unlock))))
             .child(div().id("access-request-details").flex_1().min_h_0().px_6().overflow_y_scrollbar().pb_4().child(requests))
             .child(v_flex().p_6().gap_3().border_t_1().border_color(theme.border)
                 .child(div().text_xs().text_color(theme.muted_foreground).child(if !self.inputs.is_empty() { "Saves this value once. No access grant is created." } else if self.grants.is_empty() { "Unlock your vault to continue here." } else { "Applies to this app, project, folder, and operation. Manage it in Access Grants." }))
@@ -840,6 +905,21 @@ impl Render for AccessView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unlock_dialog_describes_collection_and_item_requests() {
+        assert_eq!(access_title(false, false, true), "Unlock system keyring");
+        assert_eq!(access_title(false, true, true), "Allow secret access");
+        assert_eq!(access_title(true, true, true), "Save a secret");
+        for path in [
+            "/org/freedesktop/secrets/collection/factorseal",
+            "/org/freedesktop/secrets/aliases/default",
+        ] {
+            assert!(unlock_target_label(path).contains("did not specify an individual secret"));
+        }
+        let item = "/org/freedesktop/secrets/collection/factorseal/item/example";
+        assert_eq!(unlock_target_label(item), format!("Locked item: {item}"));
+    }
+
     #[test]
     fn approval_excludes_requests_arriving_after_review() {
         assert_eq!(

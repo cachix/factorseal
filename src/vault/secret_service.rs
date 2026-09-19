@@ -73,6 +73,12 @@ pub const SECRET_SERVICE_PERMISSIONS: [super::GrantPermission; 4] = [
 pub trait SecretServicePrompter: Send + Sync + 'static {
     fn request_unlock(&self);
 
+    /// Review an explicit keyring unlock with its original caller and object paths.
+    /// Item metadata remains encrypted while the vault is sealed.
+    fn request_unlock_for(&self, _context: SecretServiceAccessContext, _objects: Vec<String>) {
+        self.request_unlock();
+    }
+
     fn finish_access(&self, _context: SecretServiceAccessContext) {}
 
     fn supports_input(&self) -> bool {
@@ -1777,6 +1783,7 @@ mod tests {
         let prompt = Prompt {
             shared,
             path: "unused".to_owned(),
+            context: SecretServiceAccessContext::default(),
             objects: vec![item_path.clone(), alias.clone(), missing],
         };
         assert_eq!(
@@ -2141,6 +2148,86 @@ mod tests {
                     .unwrap();
                 assert!(stale.call::<_, _, ()>("Close", &()).await.is_err());
             }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_unlock_preserves_original_caller_and_requested_objects() {
+        struct ContextPrompter(mpsc::UnboundedSender<(SecretServiceAccessContext, Vec<String>)>);
+        impl SecretServicePrompter for ContextPrompter {
+            fn request_unlock(&self) {
+                panic!("explicit unlock must preserve context");
+            }
+            fn request_unlock_for(
+                &self,
+                context: SecretServiceAccessContext,
+                objects: Vec<String>,
+            ) {
+                self.0.send((context, objects)).unwrap();
+            }
+        }
+        runtime().block_on(async {
+            let Some((probe, _bus_guard)) = free_session_bus().await else {
+                return;
+            };
+            assert!(probe.release_name(BUS_NAME).await.unwrap());
+            let bus = fdo::DBusProxy::new(&probe).await.unwrap();
+            let mut owners = bus
+                .receive_name_owner_changed_with_args(&[(0, BUS_NAME)])
+                .await
+                .unwrap();
+            let (sender, mut requested) = mpsc::unbounded_channel();
+            let _host = SecretServiceHost::start_with(
+                Arc::new(ContextPrompter(sender)),
+                Duration::from_millis(1),
+            )
+            .unwrap();
+            let owned = tokio::time::timeout(Duration::from_secs(5), next(&mut owners))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(owned.args().unwrap().new_owner().is_some());
+            let client = Connection::session().await.unwrap();
+            let service = Proxy::new(
+                &client,
+                BUS_NAME,
+                SERVICE_PATH,
+                "org.freedesktop.Secret.Service",
+            )
+            .await
+            .unwrap();
+            let objects = vec![
+                object_path(DEFAULT_ALIAS_PATH).unwrap(),
+                item_path("example").unwrap(),
+            ];
+            let (unlocked, path): (Vec<OwnedObjectPath>, OwnedObjectPath) =
+                service.call("Unlock", &(objects.clone(),)).await.unwrap();
+            assert!(unlocked.is_empty());
+            // A different connection invoking Prompt must not replace the original requester.
+            let invoker = Connection::session().await.unwrap();
+            let prompt = Proxy::new(&invoker, BUS_NAME, path, "org.freedesktop.Secret.Prompt")
+                .await
+                .unwrap();
+            prompt
+                .call::<_, _, ()>("Prompt", &(String::new(),))
+                .await
+                .unwrap();
+            let (context, targets) = tokio::time::timeout(Duration::from_secs(5), requested.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(context.sender, client.unique_name().unwrap().as_str());
+            assert_eq!(context.process_id, Some(std::process::id()));
+            assert_eq!(
+                context.executable,
+                std::fs::read_link("/proc/self/exe").ok()
+            );
+            assert_eq!(
+                targets,
+                objects.iter().map(ToString::to_string).collect::<Vec<_>>()
+            );
+            prompt.call::<_, _, ()>("Dismiss", &()).await.unwrap();
         });
     }
 

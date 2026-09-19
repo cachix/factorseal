@@ -18,7 +18,11 @@ activation record for `org.freedesktop.secrets`. A keyring request while sealed
 starts Desktop in the background and opens a separate access dialog. The dialog
 shows the caller's executable, working directory, process ID, and lookup
 attributes; conventional SecretSpec addresses also show project, profile, and
-secret name. The user can deny the request or allow it and authenticate using
+secret name. Explicit D-Bus unlock prompts show the original requesting application
+and requested collection or item paths under “Unlock system keyring”. Collection
+requests explicitly say when no individual secret was specified; item names remain
+encrypted until unlock. Generic keyring lookups show their supplied attributes in
+the main review card. The user can deny the request or allow it and authenticate using
 FactorSeal's secure input. Unlocking and approval stay in the same popup and
 reuse the secure password entry. The vault browser stays closed. New access
 requires a signed grant for the authenticated executable, project, folder, and operation, valid for one hour or until revoked in Access Grants. The worker

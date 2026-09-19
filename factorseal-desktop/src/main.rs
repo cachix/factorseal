@@ -286,7 +286,20 @@ impl factorseal::SecretServicePrompter for DesktopPrompter {
         let _ = self.activate.try_send(app::AccessEvent::Finished(context));
     }
     fn request_unlock(&self) {
-        let _ = self.activate.try_send(app::AccessEvent::Unlock);
+        self.request_unlock_for(
+            factorseal::SecretServiceAccessContext::default(),
+            Vec::new(),
+        );
+    }
+
+    fn request_unlock_for(
+        &self,
+        context: factorseal::SecretServiceAccessContext,
+        objects: Vec<String>,
+    ) {
+        let _ = self
+            .activate
+            .try_send(app::AccessEvent::Unlock { context, objects });
     }
 
     fn request_access(&self, request: factorseal::SecretServiceAccessRequest) {
