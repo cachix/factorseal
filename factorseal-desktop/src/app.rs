@@ -4,12 +4,15 @@ mod access;
 mod approval_window;
 mod browser;
 mod devices;
+#[cfg(target_os = "linux")]
+mod niri;
 mod personal_actions;
 mod personal_detail;
 mod personal_templates;
 #[cfg(feature = "apple-credential-exchange")]
 mod system_transfer;
 mod wifi;
+mod window_activation;
 
 pub(crate) enum AccessEvent {
     #[cfg(target_os = "linux")]
@@ -4010,24 +4013,24 @@ fn refresh_desktop_snapshot(runtime: Arc<DesktopRuntime>, cx: &mut App) {
     .detach();
 }
 
+// Actions may arrive through a borrowed window. Defer all window operations
+// until dispatch finishes, including explicit menu actions and tray toggles.
 fn open_desktop(_: &OpenDesktop, cx: &mut App) {
+    cx.defer(show_desktop);
+}
+
+fn close_desktop(_: &CloseDesktop, cx: &mut App) {
+    cx.defer(hide_desktop);
+}
+
+fn toggle_desktop(_: &ToggleDesktop, cx: &mut App) {
+    cx.defer(toggle_desktop_window);
+}
+
+fn show_desktop(cx: &mut App) {
     let existing = cx.global::<DesktopWindow>().handle;
     if let Some(handle) = existing {
-        if handle
-            .update(cx, |_, window, _| {
-                // Wayland can reject activation without a recent input serial
-                // from this application (for example, a keyring lookup from a
-                // terminal). Remap the existing window so the compositor shows
-                // it again, preserving the unlock form and any entered input.
-                #[cfg(target_os = "linux")]
-                if std::env::var_os("WAYLAND_DISPLAY").is_some() && !window.is_window_active() {
-                    window.set_visible(false);
-                }
-                window.set_visible(true);
-                window.activate_window();
-            })
-            .is_ok()
-        {
+        if window_activation::desktop(handle, cx).is_ok() {
             cx.global_mut::<DesktopWindow>().visible = true;
             refresh_tray(cx);
             let runtime = Arc::clone(&cx.global::<RuntimeGlobal>().0);
@@ -4059,7 +4062,7 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
     refresh_desktop_snapshot(runtime, cx);
 }
 
-fn close_desktop(_: &CloseDesktop, cx: &mut App) {
+fn hide_desktop(cx: &mut App) {
     #[cfg(feature = "apple-credential-exchange")]
     system_transfer::cancel(cx);
     flush_desktop_personal_changes(cx);
@@ -4070,21 +4073,27 @@ fn close_desktop(_: &CloseDesktop, cx: &mut App) {
     cx.global_mut::<DesktopWindow>().visible = false;
     dismiss_secret_service_prompts(cx);
     refresh_tray(cx);
-    cx.defer(move |cx| {
-        if let Err(error) = handle.update(cx, |_, window, _| window.set_visible(false)) {
-            forget_desktop_window(handle, cx);
-            refresh_tray(cx);
-            factorseal::diagnostics::event("desktop", "hide_window", "error");
-            eprintln!("failed to hide FactorSeal Desktop window: {error}");
-        }
-    });
+    if let Err(error) = handle.update(cx, |_, window, _| window.set_visible(false)) {
+        forget_desktop_window(handle, cx);
+        refresh_tray(cx);
+        factorseal::diagnostics::event("desktop", "hide_window", "error");
+        eprintln!("failed to hide FactorSeal Desktop window: {error}");
+    }
 }
 
-fn toggle_desktop(_: &ToggleDesktop, cx: &mut App) {
-    if cx.global::<DesktopWindow>().visible {
-        close_desktop(&CloseDesktop, cx);
+fn toggle_desktop_window(cx: &mut App) {
+    let desktop = cx.global::<DesktopWindow>();
+    let visible = desktop.visible;
+    let handle = desktop.handle;
+    let focused = handle.is_some_and(|handle| {
+        handle
+            .update(cx, |_, window, _| window.is_window_active())
+            .unwrap_or(false)
+    });
+    if visible && focused {
+        hide_desktop(cx);
     } else {
-        open_desktop(&OpenDesktop, cx);
+        show_desktop(cx);
     }
 }
 

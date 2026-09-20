@@ -241,11 +241,7 @@ fn open(event: AccessEvent, cx: &mut App) {
             if layered {
                 return;
             }
-            if !window.is_window_active() {
-                window.set_visible(false);
-            }
-            window.set_visible(true);
-            window.activate_window();
+            window_activation::show(window, true);
         });
         return;
     }

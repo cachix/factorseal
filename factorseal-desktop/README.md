@@ -13,6 +13,10 @@ one at a time. If an agent already owns the endpoint, Desktop reports its live
 lease without attempting to take it over. A second Desktop invocation signals
 the first instance to activate instead of starting another host.
 
+Clicking the tray icon opens a hidden Desktop, focuses an unfocused Desktop,
+or hides a focused Desktop. On Niri, an already visible window is focused through
+the compositor's IPC without hiding it or changing its position in the layout.
+
 On Linux, the installed Desktop package also provides the session-bus
 activation record for `org.freedesktop.secrets`. A keyring request while sealed
 starts Desktop in the background and opens a separate access dialog. The dialog
