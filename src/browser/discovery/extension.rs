@@ -21,16 +21,15 @@ pub fn extension_installed(browser: Browser) -> bool {
         Browser::Edge => vec![base.config_dir().join("microsoft-edge")],
     };
     #[cfg(target_os = "macos")]
-    let roots = [
-        base.home_dir()
-            .join("Library/Application Support")
-            .join(match browser {
-                Browser::Firefox => "Firefox/Profiles",
-                Browser::Chrome => "Google/Chrome",
-                Browser::Chromium => "Chromium",
-                Browser::Edge => "Microsoft Edge",
-            }),
-    ];
+    let roots = [base
+        .home_dir()
+        .join("Library/Application Support")
+        .join(match browser {
+            Browser::Firefox => "Firefox/Profiles",
+            Browser::Chrome => "Google/Chrome",
+            Browser::Chromium => "Chromium",
+            Browser::Edge => "Microsoft Edge",
+        })];
     #[cfg(target_os = "windows")]
     let roots = [match browser {
         Browser::Firefox => base.config_dir().join("Mozilla/Firefox/Profiles"),
