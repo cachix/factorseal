@@ -4,6 +4,12 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Update the SecretSpec provider integration to IPC 0.20, accept the registered
+  `factorseal://` provider URI, and display conventional secret names with
+  project and profile coordinates. Group related access requests in the
+  Desktop review dialog by project and profile, put secret names first under a
+  project title, and offer access duration before unlock with a one-hour default.
+
 - Connect Desktop's Devices panel to iroh pairing and encrypted sync. Show QR
   tickets, comparison codes, explicit approval/cancellation, enrolled devices,
   reachability and publication/conflict counts. Keep forwarding while sealed

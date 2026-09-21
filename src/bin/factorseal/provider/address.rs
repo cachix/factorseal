@@ -1,5 +1,4 @@
 use factorseal::{SecretSpecAddress, SecretSpecCoordinates};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use secretspec_ipc::error::{ErrorKind, RpcError};
 use secretspec_ipc::protocol::provider::{Address, Coordinates};
 use secretspec_ipc::server::RpcResult;
@@ -10,21 +9,13 @@ pub(super) fn coordinates(address: Address) -> Coordinates {
             project,
             profile,
             key,
-        } => {
-            let encode = |value: &str| utf8_percent_encode(value, NON_ALPHANUMERIC).to_string();
-            Coordinates {
-                item: format!(
-                    "v1/{}/{}/{}",
-                    encode(&project),
-                    encode(&profile),
-                    encode(&key)
-                ),
-                field: None,
-                vault: None,
-                section: None,
-                version: None,
-            }
-        }
+        } => Coordinates {
+            item: key,
+            field: None,
+            vault: Some(project),
+            section: Some(profile),
+            version: None,
+        },
         Address::Native { coordinates } => coordinates,
     }
 }

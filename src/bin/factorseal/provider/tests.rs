@@ -13,7 +13,7 @@ use secretspec_ipc::protocol::provider::{
 use secretspec_ipc::protocol::{
     InitializeParams, Limits, PROTOCOL_VERSION, PROVIDER_PROTOCOL, Product,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -228,7 +228,6 @@ async fn provider_uses_cache_actions_for_crud_and_expiry() {
                 reason: Some("test".to_owned()),
                 requested_authorization_duration_ms: None,
             },
-            credentials: BTreeMap::new(),
         },
     };
     let (client, initialized) = Client::connect::<_, _, _, InitializedApplication>(
@@ -247,6 +246,7 @@ async fn provider_uses_cache_actions_for_crud_and_expiry() {
         GetResult::Found {
             value: "secret".to_owned(),
             expires_at_unix_ms: None,
+            revision: None,
         }
     );
 
@@ -261,7 +261,14 @@ async fn provider_uses_cache_actions_for_crud_and_expiry() {
 }
 
 #[test]
-fn convention_addresses_are_versioned_and_unambiguous() {
+fn accepts_registered_bare_provider_uri() {
+    assert!(super::accepts_provider_uri("factorseal://"));
+    assert!(super::accepts_provider_uri(super::PROVIDER_URI));
+    assert!(!super::accepts_provider_uri("other://"));
+}
+
+#[test]
+fn convention_addresses_expose_displayable_coordinates() {
     let first = address::coordinates(Address::Convention {
         project: "a/b".to_owned(),
         profile: "c".to_owned(),
@@ -273,9 +280,16 @@ fn convention_addresses_are_versioned_and_unambiguous() {
         key: "d".to_owned(),
     });
 
-    assert_eq!(first.item, "v1/a%2Fb/c/d");
-    assert_eq!(second.item, "v1/a/b%2Fc/d");
-    assert_ne!(first.item, second.item);
+    assert_eq!(first.item, "d");
+    assert_eq!(first.vault.as_deref(), Some("a/b"));
+    assert_eq!(first.section.as_deref(), Some("c"));
+    assert_eq!(second.item, "d");
+    assert_eq!(second.vault.as_deref(), Some("a"));
+    assert_eq!(second.section.as_deref(), Some("b/c"));
+    assert_ne!(
+        (first.item, first.vault, first.section),
+        (second.item, second.vault, second.section)
+    );
 }
 
 struct ApprovalVault;
@@ -478,7 +492,6 @@ fn approval_initialize() -> InitializeParams<InitializeApplication> {
                 reason: Some("deploy".to_owned()),
                 requested_authorization_duration_ms: Some(8 * 60 * 60 * 1_000),
             },
-            credentials: BTreeMap::new(),
         },
     }
 }

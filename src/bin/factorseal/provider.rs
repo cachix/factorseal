@@ -24,6 +24,10 @@ mod address;
 
 const PROVIDER_URI: &str = "factorseal://default";
 
+fn accepts_provider_uri(uri: &str) -> bool {
+    uri == "factorseal://" || uri == PROVIDER_URI
+}
+
 #[cfg(target_os = "linux")]
 struct InputChannelGuard(std::os::unix::net::UnixStream);
 #[cfg(target_os = "linux")]
@@ -83,13 +87,18 @@ impl FactorsealProvider {
             .map_err(|_| RpcError::new(ErrorKind::Internal))?
     }
 
-    async fn request<F>(&self, context: &RequestContext, action: F) -> RpcResult<VaultResponseBody>
+    async fn request<F>(
+        &self,
+        context: &RequestContext,
+        address: Option<&factorseal::SecretSpecAddress>,
+        action: F,
+    ) -> RpcResult<VaultResponseBody>
     where
         F: FnMut() -> factorseal::VaultResult<VaultAction>,
     {
         let mut opened_desktop = false;
         let result = self
-            .request_inner(context, action, &mut opened_desktop)
+            .request_inner(context, action, &mut opened_desktop, address)
             .await;
         #[cfg(target_os = "linux")]
         if opened_desktop {
@@ -103,7 +112,10 @@ impl FactorsealProvider {
                 )
                 .await?;
                 service
-                    .call::<_, _, ()>("FinishIpcAccess", &(self.request_attributes(context),))
+                    .call::<_, _, ()>(
+                        "FinishIpcAccess",
+                        &(self.request_attributes(context, address),),
+                    )
                     .await
             })
             .await;
@@ -116,6 +128,7 @@ impl FactorsealProvider {
         context: &RequestContext,
         mut action: F,
         _opened_desktop: &mut bool,
+        address: Option<&factorseal::SecretSpecAddress>,
     ) -> RpcResult<VaultResponseBody>
     where
         F: FnMut() -> factorseal::VaultResult<VaultAction>,
@@ -127,7 +140,7 @@ impl FactorsealProvider {
         let first = if matches!(&first, Err(error) if error.data.kind == ErrorKind::InteractionRequired && error.data.interaction.is_none())
         {
             *_opened_desktop = true;
-            self.unlock_desktop(context).await?;
+            self.unlock_desktop(context, address).await?;
             self.request_once(action().map_err(|error| map_vault_error(&error))?)
                 .await
         } else {
@@ -154,8 +167,12 @@ impl FactorsealProvider {
     }
 
     #[cfg(target_os = "linux")]
-    async fn unlock_desktop(&self, context: &RequestContext) -> RpcResult<()> {
-        let attributes = self.request_attributes(context);
+    async fn unlock_desktop(
+        &self,
+        context: &RequestContext,
+        address: Option<&factorseal::SecretSpecAddress>,
+    ) -> RpcResult<()> {
+        let attributes = self.request_attributes(context, address);
         let unlock = async {
             let connection = zbus::Connection::session().await?;
             let service = zbus::Proxy::new(
@@ -190,8 +207,21 @@ impl FactorsealProvider {
     fn request_attributes(
         &self,
         context: &RequestContext,
+        address: Option<&factorseal::SecretSpecAddress>,
     ) -> std::collections::HashMap<String, String> {
         let mut attributes = self.desktop_attributes();
+        if let Some(factorseal::SecretSpecAddress::Convention {
+            project,
+            profile,
+            key,
+        }) = address
+        {
+            attributes.insert("secret".to_owned(), key.clone());
+            attributes.insert(
+                "service".to_owned(),
+                format!("secretspec/{project}/{profile}/{key}"),
+            );
+        }
         attributes.insert(
             "factorseal_request_id".to_owned(),
             format!("{:?}", context.request_id),
@@ -345,7 +375,7 @@ impl FactorsealProvider {
         // Headless hosts and other platforms require a signed project grant.
         // A failed or cancelled desktop dialog never reaches this path.
         let response = self
-            .request(context, || {
+            .request(context, Some(&address), || {
                 Ok(VaultAction::PutCache {
                     project: project.clone(),
                     address: address.clone(),
@@ -435,10 +465,7 @@ impl ProviderHandler for FactorsealProvider {
         _context: &RequestContext,
         application: InitializeApplication,
     ) -> RpcResult<Metadata> {
-        if application.scheme != "factorseal"
-            || application.uri != PROVIDER_URI
-            || !application.credentials.is_empty()
-        {
+        if application.scheme != "factorseal" || !accepts_provider_uri(&application.uri) {
             return Err(RpcError::new(ErrorKind::InvalidParams));
         }
         let requested_duration_seconds = application
@@ -509,7 +536,7 @@ impl ProviderHandler for FactorsealProvider {
         let address = self.wire_address(address)?;
         let project = self.project()?.to_owned();
         match self
-            .request(&context, || {
+            .request(&context, Some(&address), || {
                 Ok(VaultAction::GetCache {
                     project: project.clone(),
                     address: address.clone(),
@@ -567,7 +594,7 @@ impl ProviderHandler for FactorsealProvider {
         let address = self.wire_address(address)?;
         let project = self.project()?.to_owned();
         match self
-            .request(&context, || {
+            .request(&context, Some(&address), || {
                 Ok(VaultAction::DeleteCache {
                     project: project.clone(),
                     address: address.clone(),
