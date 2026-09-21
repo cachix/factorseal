@@ -310,7 +310,7 @@ impl DesktopView {
                 if let Some(entry) = updated_contents.entries.iter().find(|entry| {
                     matches!(&self.selected_vault_item, Some(VaultSelection::Entry(selected)) if entry.address == selected.address && entry.partition == selected.partition)
                 }) {
-                    self.selected_vault_item = Some(VaultSelection::Entry(entry.clone()));
+                    self.selected_vault_item = Some(VaultSelection::Entry(Box::new(entry.clone())));
                 }
                 if let Snapshot::Unsealed {
                     contents,

@@ -344,8 +344,7 @@ fn desired_vault_browser_height(contents: &VaultContents) -> gpui::Pixels {
         .entries
         .iter()
         .filter(|entry| visible_vault_entry(entry))
-        .count()
-        + contents.permissions.len();
+        .count();
     px(440.) + px(54.) * document_count
 }
 
@@ -484,20 +483,6 @@ fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static s
         Some(_) => "Vault access",
         None => "Legacy access · type unknown",
     }
-}
-
-fn permission_matches_search(permission: &factorseal::Permission, query: &str) -> bool {
-    [
-        Some(permission.principal.application_id.as_str()),
-        permission.application.project.as_deref(),
-        permission.application.profile.as_deref(),
-        permission.application.base_dir.as_deref(),
-        Some(permission_access_type(permission.scope)),
-        Some(permission_operation_label(permission.operation)),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|value| search_matches(value, query))
 }
 
 fn vault_entry_details(entry: &factorseal::VaultEntryMetadata) -> Vec<(&'static str, String)> {
@@ -663,8 +648,7 @@ enum VaultSelection {
     TransferCredentials,
     BackupVault,
     Category(factorseal::DocumentKind),
-    Entry(factorseal::VaultEntryMetadata),
-    Permission(factorseal::Permission),
+    Entry(Box<factorseal::VaultEntryMetadata>),
 }
 
 impl VaultSelection {
@@ -685,9 +669,6 @@ fn selection_for_search(selection: Option<&VaultSelection>) -> Option<VaultSelec
             Some(VaultSelection::PersonalSecrets)
         }
         Some(VaultSelection::Entry(entry)) => Some(VaultSelection::Category(entry.document_kind)),
-        Some(VaultSelection::Permission(_)) => Some(VaultSelection::Category(
-            factorseal::DocumentKind::Authorization,
-        )),
         Some(VaultSelection::PersonalSecrets) => Some(VaultSelection::PersonalSecrets),
         Some(VaultSelection::Category(kind)) => Some(VaultSelection::Category(*kind)),
         _ => None,
@@ -1188,9 +1169,9 @@ impl DesktopView {
             match refreshed_item {
                 Some(entry)
                     if self.selected_vault_item.as_ref()
-                        != Some(&VaultSelection::Entry(entry.clone())) =>
+                        != Some(&VaultSelection::Entry(Box::new(entry.clone()))) =>
                 {
-                    self.select_vault_item(VaultSelection::Entry(entry), cx);
+                    self.select_vault_item(VaultSelection::Entry(Box::new(entry)), cx);
                 }
                 None => self.show_personal_panel(PersonalPanel::Overview, cx),
                 _ => {}
@@ -1231,7 +1212,7 @@ impl DesktopView {
         if let VaultSelection::Entry(entry) = selection
             && is_personal_secret(&entry)
         {
-            self.load_personal_item(entry, cx);
+            self.load_personal_item(*entry, cx);
         }
         cx.notify();
     }
@@ -2039,69 +2020,6 @@ impl DesktopView {
             .into_any_element()
     }
 
-    fn render_access_sidebar(
-        &self,
-        contents: &VaultContents,
-        query: &str,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let theme = cx.theme().clone();
-        let category_matches = search_matches("Access", query) || search_matches("Security", query);
-        let permissions: Vec<_> = contents
-            .permissions
-            .iter()
-            .filter(|permission| category_matches || permission_matches_search(permission, query))
-            .collect();
-        if !category_matches && permissions.is_empty() {
-            return div();
-        }
-        let access_selection = VaultSelection::Category(factorseal::DocumentKind::Authorization);
-        let access_selected = self.selected_vault_item.as_ref() == Some(&access_selection);
-        v_flex().gap_1().child(
-            h_flex()
-                .id("vault-access-category")
-                .w_full()
-                .items_center()
-                .justify_between()
-                .px_3()
-                .py_2()
-                .rounded_lg()
-                .cursor_pointer()
-                .when(access_selected, |element| {
-                    element
-                        .bg(theme.primary)
-                        .text_color(theme.primary_foreground)
-                        .font_semibold()
-                })
-                .when(!access_selected, |element| {
-                    element.hover(|style| style.bg(theme.sidebar_accent))
-                })
-                .child("Access")
-                .child(
-                    div()
-                        .min_w(rems(24. / 16.))
-                        .px_2()
-                        .py(rems(2. / 16.))
-                        .rounded_full()
-                        .bg(if access_selected {
-                            theme.primary_foreground.opacity(0.16)
-                        } else {
-                            theme.background.opacity(0.65)
-                        })
-                        .text_sm()
-                        .text_color(if access_selected {
-                            theme.primary_foreground
-                        } else {
-                            theme.muted_foreground
-                        })
-                        .child(permissions.len().to_string()),
-                )
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    view.select_vault_item(access_selection.clone(), cx);
-                })),
-        )
-    }
-
     fn render_system_integrations(
         &self,
         contents: &VaultContents,
@@ -2236,12 +2154,6 @@ impl DesktopView {
             "Provider cache",
             secret_spec_query,
         );
-        let access_visible = search_matches("Security", &query)
-            || search_matches("Access", &query)
-            || contents
-                .permissions
-                .iter()
-                .any(|permission| permission_matches_search(permission, &query));
         let group_label = |label: &'static str| {
             div()
                 .px_3()
@@ -2288,14 +2200,6 @@ impl DesktopView {
                                             secret_spec_query,
                                             cx,
                                         )),
-                                )
-                            })
-                            .when(access_visible, |sidebar| {
-                                sidebar.child(
-                                    v_flex()
-                                        .gap_2()
-                                        .child(group_label("Security"))
-                                        .child(self.render_access_sidebar(contents, &query, cx)),
                                 )
                             })
                             .child(self.render_system_integrations(contents, &query, cx)),
@@ -2362,7 +2266,7 @@ impl DesktopView {
             .overflow_hidden();
         for (index, entry) in entries.iter().enumerate() {
             let (label, detail) = vault_entry_label(entry);
-            let selection = VaultSelection::Entry((*entry).clone());
+            let selection = VaultSelection::Entry(Box::new((*entry).clone()));
             rows = rows.child(
                 h_flex()
                     .id(("secret-row", index))
@@ -2413,104 +2317,6 @@ impl DesktopView {
         rows
     }
 
-    fn render_permission_rows(
-        contents: &VaultContents,
-        query: &str,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let theme = cx.theme().clone();
-        if contents.permissions_loading {
-            return div()
-                .p_4()
-                .text_color(theme.muted_foreground)
-                .child("Loading permissions…");
-        }
-        if let Some(error) = &contents.permissions_error {
-            return div()
-                .p_4()
-                .text_color(theme.danger)
-                .child(format!("Could not load permissions: {error}"));
-        }
-        let permissions: Vec<_> = contents
-            .permissions
-            .iter()
-            .filter(|permission| permission_matches_search(permission, query))
-            .collect();
-        let mut rows = v_flex()
-            .w_full()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .overflow_hidden();
-        for (index, permission) in permissions.iter().enumerate() {
-            let application = permission
-                .application
-                .project
-                .as_deref()
-                .unwrap_or(&permission.principal.application_id)
-                .to_owned();
-            let selection = VaultSelection::Permission((*permission).clone());
-            rows =
-                rows.child(
-                    h_flex()
-                        .id(("permission-row", index))
-                        .w_full()
-                        .items_center()
-                        .justify_between()
-                        .gap_4()
-                        .px_4()
-                        .py_3()
-                        .when(index > 0, |row| row.border_t_1().border_color(theme.border))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.muted))
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .gap_1()
-                                .child(div().font_semibold().child(application))
-                                .child(div().text_sm().text_color(theme.muted_foreground).child(
-                                    format!(
-                                        "{} · {}",
-                                        permission_access_type(permission.scope),
-                                        permission_operation_label(permission.operation)
-                                    ),
-                                ))
-                                .child(
-                                    div().text_sm().text_color(theme.muted_foreground).child(
-                                        permission.application.base_dir.clone().unwrap_or_else(
-                                            || "No project folder recorded".to_owned(),
-                                        ),
-                                    ),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(permission.principal.application_id.clone()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_color(theme.muted_foreground)
-                                .child("›"),
-                        )
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.select_vault_item(selection.clone(), cx);
-                        })),
-                );
-        }
-        if permissions.is_empty() {
-            rows = rows.child(Self::empty_item_rows(
-                !contents.permissions.is_empty(),
-                query,
-                cx,
-            ));
-        }
-        rows
-    }
-
     fn render_category_instructions(guidance: &CategoryGuidance, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let mut instructions = v_flex().gap_2();
@@ -2554,32 +2360,23 @@ impl DesktopView {
         let theme = cx.theme().clone();
         let guidance = category_guidance(kind);
         let query = self.vault_search.read(cx).value().trim().to_lowercase();
-        let (item_count, item_rows) = if kind == factorseal::DocumentKind::Authorization {
-            (
-                contents.permissions.len(),
-                Self::render_permission_rows(contents, &query, cx),
-            )
-        } else {
-            let all_entries: Vec<_> = contents
-                .entries
-                .iter()
-                .filter(|entry| {
-                    entry.document_kind == kind
-                        && visible_vault_entry(entry)
-                        && !(kind == factorseal::DocumentKind::LocalKeyring
-                            && is_personal_secret(entry))
-                })
-                .collect();
-            let entries: Vec<_> = all_entries
-                .iter()
-                .copied()
-                .filter(|entry| entry_matches_search(entry, &query))
-                .collect();
-            (
-                all_entries.len(),
-                Self::render_entry_rows(&entries, !all_entries.is_empty(), &query, cx),
-            )
-        };
+        let all_entries: Vec<_> = contents
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.document_kind == kind
+                    && visible_vault_entry(entry)
+                    && !(kind == factorseal::DocumentKind::LocalKeyring
+                        && is_personal_secret(entry))
+            })
+            .collect();
+        let entries: Vec<_> = all_entries
+            .iter()
+            .copied()
+            .filter(|entry| entry_matches_search(entry, &query))
+            .collect();
+        let item_count = all_entries.len();
+        let item_rows = Self::render_entry_rows(&entries, !all_entries.is_empty(), &query, cx);
         let instructions = Self::render_category_instructions(&guidance, cx);
         let integration_error = if kind == factorseal::DocumentKind::LinuxSecretService {
             contents.secret_service_error.clone()
@@ -3280,84 +3077,6 @@ impl DesktopView {
                     .child(Self::render_detail_rows(vault_entry_details(entry), cx))
                     .child(Self::render_entry_access(entry, contents, cx))
             }
-            Some(VaultSelection::Permission(permission)) => {
-                let application = permission
-                    .application
-                    .project
-                    .as_deref()
-                    .unwrap_or(&permission.principal.application_id)
-                    .to_owned();
-                let state = match permission.state {
-                    factorseal::PermissionState::Pending { .. } => "Pending",
-                    factorseal::PermissionState::Granted { .. } => "Granted",
-                };
-                let mut details = vec![
-                    (
-                        "Access via",
-                        permission_access_type(permission.scope).to_owned(),
-                    ),
-                    (
-                        "Operation",
-                        permission_operation_label(permission.operation).to_owned(),
-                    ),
-                    ("State", state.to_owned()),
-                    ("Scope", entry_access::scope_label(permission).to_owned()),
-                    ("Lifetime", entry_access::lifetime_label(permission)),
-                    (
-                        "Application ID",
-                        permission.principal.application_id.clone(),
-                    ),
-                ];
-                if let Some(label) = entry_access::entry_label(permission) {
-                    details.push(("Entry", label));
-                }
-                if let Some(project) = &permission.application.project {
-                    details.push(("Project", project.clone()));
-                }
-                for (label, value) in [
-                    ("Profile", &permission.application.profile),
-                    ("Request", &permission.application.reason),
-                ] {
-                    if let Some(value) = value {
-                        details.push((label, value.clone()));
-                    }
-                }
-                details.push((
-                    "Executable digest",
-                    hex_digest(&permission.principal.executable_digest),
-                ));
-                details.push((
-                    "Project folder",
-                    permission
-                        .application
-                        .base_dir
-                        .clone()
-                        .unwrap_or_else(|| "No project folder recorded".to_owned()),
-                ));
-                details.push(("Grant ID", permission.id.clone()));
-                v_flex()
-                    .size_full()
-                    .gap_4()
-                    .p_6()
-                    .child(div().text_xl().font_semibold().child(application))
-                    .child(Self::render_detail_rows(details, cx))
-                    .when(
-                        matches!(
-                            permission.state,
-                            factorseal::PermissionState::Granted { .. }
-                        ),
-                        |element| {
-                            let permission = permission.clone();
-                            element.child(
-                                Button::new("revoke-access-grant")
-                                    .label("Revoke access")
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.revoke_access(permission.id.clone(), cx);
-                                    })),
-                            )
-                        },
-                    )
-            }
         }
     }
 
@@ -3368,17 +3087,17 @@ impl DesktopView {
         let runtime = Arc::clone(&self.runtime);
         cx.spawn(async move |this, cx| {
             let revoked_id = id.clone();
-            let result = smol::unblock(move || runtime.revoke_permission(&metadata, revoked_id)).await;
+            let result =
+                smol::unblock(move || runtime.revoke_permission(&metadata, revoked_id)).await;
             let _ = this.update(cx, |view, cx| {
                 match result {
                     Ok(()) => {
                         if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot {
-                            contents.permissions.retain(|permission| permission.id != id);
+                            contents
+                                .permissions
+                                .retain(|permission| permission.id != id);
                         }
-                        if matches!(&view.selected_vault_item, Some(VaultSelection::Permission(permission)) if permission.id == id) {
-                            view.selected_vault_item = None;
-                        }
-                    },
+                    }
                     Err(message) => {
                         if let Snapshot::Unsealed { error, .. } = &mut view.snapshot {
                             *error = Some(message);

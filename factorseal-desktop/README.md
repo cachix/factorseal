@@ -70,11 +70,10 @@ Each SecretSpec and keyring entry has an **Access** section showing recorded
 app grants, operations, lifetime, and revocation controls. Existing project, namespace,
 and secret-type grants remain valid and are labeled as inherited; revoking one removes access
 across its entire scope. Project grants also show their folder restriction.
-The global Access list remains available for auditing broader grants and pending
-requests. Grant details include the executable digest and grant ID. Older grants
-are attached to entries only when their stored target digest confirms the target;
-unknown targets remain visible in the global list. System-keyring relationships
-come from stored attributes rather than display labels.
+Older grants are attached to entries only when their stored target digest confirms
+the target. Grants with unknown targets can be inspected and revoked through the
+CLI. System-keyring relationships come from stored attributes rather than display
+labels.
 
 Writes use a masked secret-entry dialog with a Save button, without creating a
 persistent write grant. The incoming value can be reviewed or replaced. Native
