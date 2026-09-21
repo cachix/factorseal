@@ -24,8 +24,8 @@ The mobile backends are opt-in and disabled by default:
 
 ```toml
 [dependencies]
-hardwareseal = { path = "crates/hardwareseal", features = ["apple"] }   # macOS/iOS
-# hardwareseal = { path = "crates/hardwareseal", features = ["android"] } # Android
+hardwareseal = { version = "0.1", features = ["apple"] }   # macOS/iOS
+# hardwareseal = { version = "0.1", features = ["android"] } # Android
 ```
 
 With its platform feature disabled, `Protector::open` returns
@@ -43,7 +43,7 @@ macOS 26+ signing. `apple_pq::wrapping::MlKem768WrappingKey` is an opt-in
 ML-KEM-768/HKDF-SHA-256/AES-256-GCM wrapping prototype; it does not change the
 default protector. These APIs require Xcode 26+ to build and reject unsupported
 OS/hardware without a software fallback. See the
-[design and acceptance requirements](../../security/macos-crypto-and-isolation.md).
+[design and acceptance requirements](https://github.com/cachix/factorseal/blob/main/security/macos-crypto-and-isolation.md).
 Each `seal` writes its own keychain item and returns an envelope naming that
 item, so re-sealing under a label never destroys or silently repoints the
 previous secret, and `delete` removes every generation stored under the label.

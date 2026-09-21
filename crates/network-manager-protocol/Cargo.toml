@@ -5,7 +5,8 @@ edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
 description = "Pure-Rust NetworkManager secret-agent protocol types and Wi-Fi secrets"
-repository = "https://github.com/domenkozar/factorseal"
+repository = "https://github.com/cachix/factorseal"
+readme = "README.md"
 
 [dependencies]
 bitflags = "2.13.1"
