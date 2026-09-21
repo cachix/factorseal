@@ -1,4 +1,4 @@
-//! Bounded, in-memory project approval lifecycle.
+//! Bounded, in-memory entry approval lifecycle.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -29,6 +29,7 @@ pub(super) struct ApprovalCandidate {
     application: VaultApplicationContext,
     scope: DocumentKind,
     namespace: Vec<u8>,
+    address: Option<crate::SecretAddress>,
     permission: GrantPermission,
     operation: PermissionOperation,
 }
@@ -38,6 +39,7 @@ struct ApprovalRecord {
     caller: CallerIdentity,
     scope: DocumentKind,
     namespace: Vec<u8>,
+    address: Option<crate::SecretAddress>,
     permission: GrantPermission,
 }
 
@@ -62,26 +64,11 @@ impl ApprovalCandidate {
     pub(super) fn for_keyring(
         caller: &CallerIdentity,
         service: &str,
+        address: Option<crate::SecretAddress>,
         base_dir: String,
         operation: PermissionOperation,
     ) -> Self {
-        let parts: Vec<_> = service
-            .strip_prefix("service/")
-            .unwrap_or(service)
-            .splitn(4, '/')
-            .collect();
-        let (project, profile) = if parts.len() == 4
-            && parts[0] == "secretspec"
-            && !parts[1].is_empty()
-            && !parts[2].is_empty()
-        {
-            (
-                format!("secretspec/{}", parts[1]),
-                Some(parts[2].to_owned()),
-            )
-        } else {
-            (service.to_owned(), None)
-        };
+        let (project, profile) = crate::vault::secret_service_data::access_project(service);
         let permission = match operation {
             PermissionOperation::Get => GrantPermission::Get,
             PermissionOperation::Put => GrantPermission::Put,
@@ -99,6 +86,7 @@ impl ApprovalCandidate {
             },
             scope: DocumentKind::LinuxSecretService,
             namespace: project.into_bytes(),
+            address,
             permission,
             operation,
         }
@@ -111,7 +99,7 @@ impl ApprovalCandidate {
             super::super::grant::GrantRequirement {
                 scope: self.scope,
                 namespace: Some(&self.namespace),
-                address: None,
+                address: self.address.as_ref(),
                 project: self.application.project.as_deref(),
                 base_dir: self.application.base_dir.as_deref(),
                 permission: self.permission,
@@ -178,11 +166,20 @@ impl ApprovalCandidate {
             // address prefix, so it and all non-CRUD actions are ineligible.
             _ => return None,
         };
+        let address = match action {
+            VaultAction::GetCache { address, .. }
+            | VaultAction::PutCache { address, .. }
+            | VaultAction::DeleteCache { address, .. } => {
+                crate::SecretAddress::secret_spec(address.clone()).ok()?
+            }
+            _ => return None,
+        };
         Some(Self {
             caller: caller.clone(),
             application,
             scope,
             namespace: namespace.to_vec(),
+            address: Some(address),
             permission,
             operation,
         })
@@ -263,10 +260,20 @@ impl PendingApprovals {
         let expires_at = now
             .checked_add(APPROVAL_TTL_SECONDS)
             .ok_or(VaultError::Expired)?;
+        // A legacy bridge may still use an existing broad grant, but cannot
+        // create another broad approval without identifying the requested item.
+        let address = candidate
+            .address
+            .as_ref()
+            .ok_or(VaultError::AuthorizationRequired)?;
+        if candidate.operation == PermissionOperation::Clear {
+            return Err(VaultError::AuthorizationRequired);
+        }
         let fingerprint = candidate.caller.fingerprint();
         if let Some(existing) = self.records.iter().find(|record| {
             record.caller.fingerprint() == fingerprint
                 && record.summary.application == candidate.application
+                && record.address == candidate.address
                 && record.namespace == candidate.namespace
                 && record.scope == candidate.scope
                 && record.permission == candidate.permission
@@ -305,6 +312,20 @@ impl PendingApprovals {
         getrandom::fill(&mut challenge)?;
         let id = format!("prm_{}", URL_SAFE_NO_PAD.encode(id_bytes));
         let summary = Permission {
+            target: Some(Box::new(
+                GrantTarget::ProjectEntry {
+                    address,
+                    scope: candidate.scope,
+                    namespace: &candidate.namespace,
+                    project: candidate
+                        .application
+                        .project
+                        .as_deref()
+                        .expect("approval project"),
+                    base_dir: candidate.application.base_dir.as_deref(),
+                }
+                .summary(),
+            )),
             id: id.clone(),
             scope: Some(candidate.scope),
             operation: candidate.operation,
@@ -321,6 +342,7 @@ impl PendingApprovals {
             caller: candidate.caller,
             scope: candidate.scope,
             namespace: candidate.namespace,
+            address: candidate.address,
             permission: candidate.permission,
         });
         self.recent_creations
@@ -426,7 +448,11 @@ impl PendingApprovals {
         promote_permission(
             store,
             &record.caller,
-            GrantTarget::Project {
+            GrantTarget::ProjectEntry {
+                address: record
+                    .address
+                    .as_ref()
+                    .ok_or(VaultError::AuthorizationRequired)?,
                 scope: record.scope,
                 namespace: &record.namespace,
                 project,
@@ -471,9 +497,26 @@ mod tests {
                 .unwrap(),
             scope: DocumentKind::SecretSpecProviderCache,
             namespace: project.into_bytes(),
+            address: Some(crate::SecretAddress::new("test-entry", None).unwrap()),
             permission: GrantPermission::Get,
             operation: PermissionOperation::Get,
         }
+    }
+
+    #[test]
+    fn pending_approvals_do_not_coalesce_different_entries() {
+        let mut approvals = PendingApprovals::default();
+        let first = approvals.create(candidate(0, 0), 100).unwrap();
+        let mut other = candidate(0, 0);
+        other.address = Some(crate::SecretAddress::new("other-entry", None).unwrap());
+        let second = approvals.create(other, 100).unwrap();
+        assert_ne!(first.id, second.id);
+        let mut missing = candidate(0, 0);
+        missing.address = None;
+        assert!(matches!(
+            approvals.create(missing, 100),
+            Err(VaultError::AuthorizationRequired)
+        ));
     }
 
     #[test]

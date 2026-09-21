@@ -809,6 +809,9 @@ impl Render for AccessView {
                     permission_operation_label(grant.operation),
                     cx,
                 ));
+            if let Some(label) = entry_access::entry_label(grant) {
+                card = card.child(detail("Only this entry", label, cx));
+            }
             for (label, value) in [
                 ("Profile", &grant.application.profile),
                 ("Project folder", &grant.application.base_dir),
@@ -877,7 +880,7 @@ impl Render for AccessView {
                 .child(div().text_xl().font_semibold().child(access_title(!self.inputs.is_empty(), !self.grants.is_empty(), self.explicit_unlock))))
             .child(div().id("access-request-details").flex_1().min_h_0().px_6().overflow_y_scrollbar().pb_4().child(requests))
             .child(v_flex().p_6().gap_3().border_t_1().border_color(theme.border)
-                .child(div().text_xs().text_color(theme.muted_foreground).child(if !self.inputs.is_empty() { "Saves this value once. No access grant is created." } else if self.grants.is_empty() { "Unlock your vault to continue here." } else { "Applies to this app, project, folder, and operation. Manage it in Access Grants." }))
+                .child(div().text_xs().text_color(theme.muted_foreground).child(if !self.inputs.is_empty() { "Saves this value once. No access grant is created." } else if self.grants.is_empty() { "Unlock your vault to continue here." } else { "Applies only to the listed entries, app, folder, and operation. Manage access on each secret or in Access Grants." }))
                 .when(metadata.is_some_and(|metadata| metadata.unlock_policy().groups().len() > 1), |element| element.child(groups))
                 .when(!self.grants.is_empty() && self.inputs.is_empty(), |element| element.child(field_label("Allow access for", h_flex().gap_2()
                     .child(Button::new("grant-hour").label("1 hour").selected(self.duration == Some(3600)).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = Some(3600); cx.notify(); })))

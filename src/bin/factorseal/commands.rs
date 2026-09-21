@@ -1170,6 +1170,7 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
     let attack =
         "\u{1b}[2J\u{1b}]8;;https://invalid\u{7}\r\n\t\u{8}\u{85}\u{202e}\u{2066}\u{2028}\\\"é";
     let mut permission = Permission {
+        target: None,
         id: attack.to_owned(),
         scope: None,
         operation: PermissionOperation::Get,
@@ -1191,6 +1192,13 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
     permission.principal.user_id = attack.to_owned();
     permission.principal.signer_id = Some(attack.to_owned());
     permission.application.base_dir = Some(attack.to_owned());
+    permission.target = Some(Box::new(factorseal::PermissionTarget::Entry {
+        namespace: attack.as_bytes().to_vec(),
+        address: factorseal::SecretAddress::Local {
+            item: attack.to_owned(),
+            field: None,
+        },
+    }));
     let mut output = Vec::new();
     write_permission(&mut output, &permission).unwrap();
     assert!(
@@ -1199,7 +1207,7 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
             .all(|byte| byte.is_ascii() && (!byte.is_ascii_control() || *byte == b'\n'))
     );
     let rendered = String::from_utf8(output).unwrap();
-    assert_eq!(rendered.lines().count(), 5);
+    assert_eq!(rendered.lines().count(), 6);
     assert!(rendered.contains("\\u{1b}[2J"));
     assert!(rendered.contains("\\u{202e}"));
     assert!(rendered.contains("trusted:") && rendered.contains("declared:"));
@@ -1209,6 +1217,12 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
 }
 
 fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<(), CliError> {
+    let target = approval
+        .target
+        .as_deref()
+        .map(serde_json::to_string)
+        .transpose()?
+        .unwrap_or_else(|| "unknown".to_owned());
     let project = approval.application.project.as_deref().unwrap_or("unknown");
     let profile = approval.application.profile.as_deref().unwrap_or("default");
     let reason = approval
@@ -1253,6 +1267,7 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
         PromptText(&approval.id),
         approval.operation
     )
+    .and_then(|()| writeln!(output, "  target: {}", PromptText(&target)))
     .and_then(|()| {
         writeln!(
             output,

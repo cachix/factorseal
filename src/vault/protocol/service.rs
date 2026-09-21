@@ -418,6 +418,7 @@ impl VaultService {
                 });
             }
             VaultAction::KeyringAccess {
+                entry,
                 sender,
                 service,
                 operation,
@@ -448,7 +449,7 @@ impl VaultService {
                     return Ok(VaultResponseBody::PermissionWait { status });
                 }
                 let candidate =
-                    ApprovalCandidate::for_keyring(&peer, &service, base_dir, operation);
+                    ApprovalCandidate::for_keyring(&peer, &service, entry, base_dir, operation);
                 match candidate.require_keyring(state.store(), now) {
                     Ok(deadline) => {
                         tighten(valid_until, deadline);

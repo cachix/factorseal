@@ -485,14 +485,7 @@ impl DesktopRuntime {
             factorseal::desktop_worker::Operation::SignPermissions { group, requests },
             password,
         )?;
-        let signatures = factorseal::desktop_worker::receive::<Result<Vec<Vec<u8>>, String>>(
-            worker
-                .child
-                .stdout
-                .as_mut()
-                .ok_or("signing worker output unavailable")?,
-        )
-        .map_err(|error| error.to_string())??;
+        let signatures = worker.read_response::<Vec<Vec<u8>>>()?;
         worker.wait()?;
         if signatures.len() != permissions.len() {
             return Err("invalid signing response".to_owned());
@@ -612,7 +605,7 @@ impl DesktopRuntime {
         use std::process::{Command, Stdio};
         let desktop = std::env::current_exe().map_err(|e| e.to_string())?;
         let cli = cli_executable(&desktop)?.ok_or_else(|| "Factorseal CLI must be installed beside Desktop; set FACTORSEAL_CLI_EXECUTABLE to its absolute path".to_owned())?;
-        let mut command = Command::new(cli);
+        let mut command = Command::new(&cli);
         command.arg("--root").arg(&self.config.root);
         if let Some(socket) = &self.config.socket {
             command.arg("--socket").arg(socket);
@@ -628,6 +621,7 @@ impl DesktopRuntime {
         factorseal::diagnostics::event("desktop", "spawn_worker", "ok");
         let mut worker = Worker {
             child,
+            executable: cli,
             exit_reported: false,
         };
         let bootstrap = factorseal::desktop_worker::Bootstrap {
@@ -637,16 +631,16 @@ impl DesktopRuntime {
             hosts_secret_service: self.config.secret_service,
             sync_control: true,
         };
-        factorseal::desktop_worker::send(
+        let sent = factorseal::desktop_worker::send(
             worker
                 .child
                 .stdin
                 .as_mut()
                 .ok_or("worker input unavailable")?,
             &bootstrap,
-        )
-        .map_err(|e| e.to_string())?;
+        );
         drop(bootstrap);
+        sent.map_err(|error| worker.startup_error(&error))?;
         Ok(worker)
     }
 
@@ -754,6 +748,7 @@ impl DesktopRuntime {
 /// On every error, terminate and reap the child rather than leaving an orphan.
 struct Worker {
     child: std::process::Child,
+    executable: PathBuf,
     exit_reported: bool,
 }
 impl Worker {
@@ -765,13 +760,46 @@ impl Worker {
     }
 
     fn read_ready(&mut self) -> Result<(), String> {
-        factorseal::desktop_worker::receive::<Result<(), String>>(
+        self.read_response()
+    }
+
+    fn read_response<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, String> {
+        let response = factorseal::desktop_worker::receive::<Result<T, String>>(
             self.child
                 .stdout
                 .as_mut()
                 .ok_or("worker output unavailable")?,
+        );
+        response.map_err(|error| self.startup_error(&error))?
+    }
+
+    fn startup_error(&mut self, error: &std::io::Error) -> String {
+        use std::io::ErrorKind;
+        let reason = match error.kind() {
+            ErrorKind::UnexpectedEof | ErrorKind::BrokenPipe | ErrorKind::ConnectionReset => {
+                "closed its connection before replying".to_owned()
+            }
+            ErrorKind::InvalidData => "sent an invalid startup response".to_owned(),
+            _ => format!("could not communicate with Desktop: {error}"),
+        };
+        // Do not wait for a child that closed stdout but is still running.
+        // Drop will terminate and reap it when this error is returned.
+        let exit = self
+            .child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| {
+                self.record_exit(status);
+                format!(" ({status})")
+            })
+            .unwrap_or_default();
+        format!(
+            "The vault worker {reason}{exit}. This may indicate an incompatible CLI or a worker crash. \
+             Use the FactorSeal CLI from the same build as Desktop. \
+             Selected CLI: {}. If {CLI_EXECUTABLE_ENV} is set, update it to the matching CLI or unset it to use the CLI beside Desktop.",
+            self.executable.display(),
         )
-        .map_err(|e| format!("vault worker startup failed: {e}"))?
     }
     fn wait(&mut self) -> Result<(), String> {
         let status = self.child.wait().map_err(|e| e.to_string())?;
@@ -1140,6 +1168,76 @@ mod tests {
     use super::factorseal_secret_service;
     use super::load_vault_contents;
 
+    #[cfg(unix)]
+    fn test_worker(script: &str) -> super::Worker {
+        use std::process::{Command, Stdio};
+        super::Worker {
+            child: Command::new("sh")
+                .args(["-c", script])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+            executable: "/old-install/bin/factorseal".into(),
+            exit_reported: false,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_exit_before_reply_explains_cli_mismatch() {
+        let mut worker = test_worker("exit 2");
+        worker.child.wait().unwrap();
+        let error = worker.read_ready().unwrap_err();
+        assert!(error.contains("closed its connection before replying"));
+        assert!(error.contains("exit status: 2"));
+        assert!(error.contains("/old-install/bin/factorseal"));
+        assert!(error.contains("FACTORSEAL_CLI_EXECUTABLE"));
+        assert!(error.contains("same build as Desktop"));
+        assert!(!error.contains("failed to fill whole buffer"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_bootstrap_broken_pipe_explains_cli_mismatch() {
+        let mut worker = test_worker("exit 2");
+        let mut input = worker.child.stdin.take().unwrap();
+        worker.child.wait().unwrap();
+        let error = factorseal::desktop_worker::send(&mut input, &()).unwrap_err();
+        let error = worker.startup_error(&error);
+        assert!(error.contains("closed its connection before replying"));
+        assert!(error.contains("/old-install/bin/factorseal"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_authentication_errors_are_not_reported_as_cli_mismatches() {
+        let mut worker = test_worker("cat");
+        factorseal::desktop_worker::send(
+            worker.child.stdin.as_mut().unwrap(),
+            &Err::<(), _>("Password authentication failed"),
+        )
+        .unwrap();
+        assert_eq!(
+            worker.read_ready().unwrap_err(),
+            "Password authentication failed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signing_worker_invalid_reply_is_actionable() {
+        let mut worker = test_worker("cat");
+        factorseal::desktop_worker::send(
+            worker.child.stdin.as_mut().unwrap(),
+            &"not a signing response",
+        )
+        .unwrap();
+        let error = worker.read_response::<Vec<Vec<u8>>>().unwrap_err();
+        assert!(error.contains("invalid startup response"));
+        assert!(error.contains("/old-install/bin/factorseal"));
+    }
+
     #[test]
     fn lease_changes_preserve_the_captured_unlock_policy() {
         let directory = tempfile::tempdir().unwrap();
@@ -1231,6 +1329,7 @@ mod tests {
         let first = SecretSpecAddress::convention("alpha", "default", "TOKEN").unwrap();
         let second = SecretSpecAddress::convention("beta", "production", "DATABASE_URL").unwrap();
         let first = VaultEntryMetadata {
+            access_project: None,
             display_name: None,
             display_type: None,
             updated_at: None,
@@ -1239,6 +1338,7 @@ mod tests {
             address: SecretAddress::secret_spec(first).unwrap(),
         };
         let second = VaultEntryMetadata {
+            access_project: None,
             display_name: None,
             display_type: None,
             updated_at: None,
@@ -1278,6 +1378,7 @@ mod tests {
     #[test]
     fn initial_inventory_does_not_wait_for_permissions() {
         let entry = VaultEntryMetadata {
+            access_project: None,
             display_name: None,
             display_type: None,
             updated_at: None,

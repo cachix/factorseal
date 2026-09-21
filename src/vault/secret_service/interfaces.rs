@@ -67,22 +67,7 @@ async fn registered_items(
     Ok(items)
 }
 
-fn service_target(attributes: &HashMap<String, String>) -> String {
-    use sha2::{Digest as _, Sha256};
-    if let Some(service) = attributes
-        .get("service")
-        .filter(|service| !service.is_empty())
-    {
-        return format!("service/{service}");
-    }
-    let ordered: std::collections::BTreeMap<_, _> = attributes.iter().collect();
-    format!(
-        "attributes/{}",
-        hex::encode(Sha256::digest(
-            serde_json::to_vec(&ordered).expect("string map serializes")
-        ))
-    )
-}
+use crate::vault::secret_service_data::service_target;
 
 async fn matching_items(
     shared: &Arc<Shared>,
@@ -90,30 +75,20 @@ async fn matching_items(
     attributes: &HashMap<String, String>,
     owner: &str,
 ) -> Result<Vec<OwnedObjectPath>, SecretServiceError> {
-    if attributes.contains_key("service") {
-        shared
-            .authorized_agent(
-                owner,
-                &service_target(attributes),
-                super::super::PermissionOperation::Get,
-            )
-            .await?;
-    }
     let mut paths = Vec::new();
     for item in registered_items(shared, server).await? {
         if attributes
             .iter()
             .all(|(key, value)| item.attributes.get(key) == Some(value))
         {
-            if !attributes.contains_key("service") {
-                shared
-                    .authorized_agent(
-                        owner,
-                        &service_target(&item.attributes),
-                        super::super::PermissionOperation::Get,
-                    )
-                    .await?;
-            }
+            shared
+                .authorized_agent(
+                    owner,
+                    &service_target(&item.attributes),
+                    Some(item.address().map_err(failed)?),
+                    super::super::PermissionOperation::Get,
+                )
+                .await?;
             paths.push(item_path(&item.id)?);
         }
     }
@@ -397,6 +372,7 @@ impl Service {
                 .authorized_agent(
                     &owner,
                     &service_target(&item.attributes),
+                    Some(item.address().map_err(failed)?),
                     super::super::PermissionOperation::Get,
                 )
                 .await?;
@@ -484,6 +460,7 @@ impl Collection {
                 .authorized_agent(
                     &sender(&header)?,
                     &service_target(&attributes),
+                    None,
                     super::super::PermissionOperation::Put,
                 )
                 .await?;
@@ -694,6 +671,7 @@ impl Item {
             .authorized_agent(
                 &sender(header)?,
                 &service_target(&item.attributes),
+                Some(item.address().map_err(failed)?),
                 operation,
             )
             .await

@@ -472,6 +472,7 @@ impl Shared {
         &self,
         sender: &str,
         service: &str,
+        entry: Option<crate::SecretAddress>,
         operation: super::PermissionOperation,
     ) -> Result<Arc<Agent>, SecretServiceError> {
         let agent = self.agent()?;
@@ -483,7 +484,8 @@ impl Shared {
                 let sender = sender.to_owned();
                 let service = service.to_owned();
                 let pending = pending.clone();
-                move || store.check_access(sender, service, operation, pending)
+                let entry = entry.clone();
+                move || store.check_access(sender, service, entry, operation, pending)
             })
             .await
             .map_err(failed)?
@@ -500,6 +502,7 @@ impl Shared {
                         store: agent.store.delegated(
                             sender.to_owned(),
                             service.to_owned(),
+                            entry.clone(),
                             operation,
                         ),
                     }));
@@ -1191,7 +1194,8 @@ mod tests {
     }
 
     #[test]
-    fn keyring_project_grants_bind_peer_operation_and_revocation() {
+    #[allow(clippy::too_many_lines)]
+    fn keyring_entry_grants_bind_item_peer_operation_and_revocation() {
         use crate::vault::{
             PermissionOperation, PermissionState, PermissionWaitStatus, VaultAction, VaultRequest,
             VaultResponseBody,
@@ -1203,6 +1207,10 @@ mod tests {
             service.authorize_permission_manager(&manager, 100).unwrap();
             let call = |action| service.handle(&manager, VaultRequest::new(action).unwrap(), 101);
             let access = |project: &str, operation| VaultAction::KeyringAccess {
+                entry: Some(
+                    crate::SecretAddress::new("item/0123456789abcdef0123456789abcdef", None)
+                        .unwrap(),
+                ),
                 sender: sender.clone(),
                 service: format!("service/secretspec/{project}/dev/TOKEN"),
                 operation,
@@ -1246,6 +1254,17 @@ mod tests {
                     status: PermissionWaitStatus::Granted
                 })
             ));
+            let mut other = access("first", PermissionOperation::Get);
+            if let VaultAction::KeyringAccess { entry, .. } = &mut other {
+                *entry = Some(
+                    crate::SecretAddress::new("item/ffffffffffffffffffffffffffffffff", None)
+                        .unwrap(),
+                );
+            }
+            assert!(
+                call(other).result.unwrap_err().interaction.is_some(),
+                "same service does not authorize another item"
+            );
             assert!(
                 call(access("first", PermissionOperation::Put))
                     .result
@@ -2477,6 +2496,47 @@ mod tests {
             let response = self.backend_request(decoded)?;
             crate::VaultResponse::decode(&response.encode()?)
         }
+    }
+
+    #[test]
+    fn keyring_inventory_exposes_access_project_from_attributes() {
+        let (_directory, agent) = archive_agent();
+        agent
+            .service
+            .authorize_permission_manager(&agent.caller, 100)
+            .unwrap();
+        let (item, _) = agent
+            .create_or_replace(
+                "Unrelated display name".into(),
+                HashMap::from([("service".into(), "secretspec/demo/dev/TOKEN".into())]),
+                b"secret",
+                "text/plain".into(),
+                false,
+            )
+            .unwrap();
+        let response = agent.service.handle(
+            &agent.caller,
+            crate::VaultRequest::new(crate::VaultAction::ListVaultEntries {
+                cursor: None,
+                limit: 8,
+            })
+            .unwrap(),
+            unix_time(),
+        );
+        let crate::VaultResponseBody::VaultEntries { entries, .. } = response.result.unwrap()
+        else {
+            panic!("inventory")
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].address, item.address().unwrap());
+        assert_eq!(
+            entries[0].display_name.as_deref(),
+            Some("Unrelated display name")
+        );
+        assert_eq!(
+            entries[0].access_project.as_deref(),
+            Some("secretspec/demo")
+        );
     }
 
     fn import_item(

@@ -71,7 +71,7 @@ pub use vault::{
 #[cfg(feature = "vault-client")]
 pub use vault::{
     MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
-    PermissionChange, PermissionOperation, PermissionPrincipal, PermissionState,
+    PermissionChange, PermissionOperation, PermissionPrincipal, PermissionState, PermissionTarget,
     PermissionWaitStatus, VaultAction, VaultApplicationContext, VaultClient,
     VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference, VaultMutation,
     VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode,

@@ -801,6 +801,7 @@ fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
     let mut item = PersonalSecret::generic("Original title".into(), "secret".into());
     item.kind = crate::personal::PersonalSecretKind::Login;
     let source = VaultEntryMetadata {
+        access_project: None,
         display_name: Some("untrusted title".into()),
         display_type: Some("untrusted type".into()),
         updated_at: Some(u64::MAX),
@@ -881,6 +882,7 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
         .unwrap();
     service.authorize_permission_manager(&manager, 100).unwrap();
     let source = VaultEntryMetadata {
+        access_project: None,
         display_name: None,
         display_type: None,
         updated_at: None,
@@ -1136,6 +1138,7 @@ fn revoking_an_expired_permission_cleans_the_registry() {
     let principal = caller();
     let provenance = Provenance::service(ServiceReason::GrantStorage);
     let permission = |id: &str, expires_at: Option<u64>| Permission {
+        target: None,
         id: id.to_owned(),
         scope: None,
         operation: PermissionOperation::Get,
@@ -1414,7 +1417,7 @@ fn application_context_is_bounded_and_requires_an_absolute_base_directory() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn approval_is_project_scoped_and_requires_a_vault_signature() {
+fn approval_is_entry_scoped_and_requires_a_vault_signature() {
     let (directory, service) = service(100, UnsealLeasePolicy::default());
     let provider = caller();
     let application = |project: &str| {
@@ -1588,6 +1591,9 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     };
     assert_eq!(permissions.len(), 1);
     assert_eq!(permissions[0].id, interaction.id);
+    assert!(
+        matches!(permissions[0].target.as_deref(), Some(crate::PermissionTarget::ProjectEntry { namespace, project, .. }) if namespace == b"demo" && project == "demo")
+    );
     let PermissionState::Granted {
         granted_at,
         expires_at: Some(deadline),
@@ -1597,6 +1603,27 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
     };
     assert!((204..=204 + approved_elapsed).contains(&granted_at));
     assert_eq!(deadline, granted_at + 60 * 60);
+    for (profile, key) in [("default", "OTHER"), ("other-profile", "API_KEY")] {
+        let denied = service.handle(
+            &provider,
+            VaultRequest::new_with_application(
+                VaultAction::GetCache {
+                    project: "demo".into(),
+                    address: SecretSpecAddress::convention("demo", profile, key).unwrap(),
+                },
+                application("demo"),
+            )
+            .unwrap(),
+            206,
+        );
+        let request = denied
+            .result
+            .unwrap_err()
+            .interaction
+            .expect("another entry needs its own approval");
+        assert_ne!(request.id, interaction.id);
+    }
+
     assert!(
         service
             .handle(&provider, get("other-project"), 207)
@@ -1670,7 +1697,7 @@ fn approval_is_project_scoped_and_requires_a_vault_signature() {
         .result
         .unwrap_err()
         .interaction
-        .expect("revocation must remove the underlying project authority");
+        .expect("revocation must remove the underlying entry authority");
     let denied = service.handle(
         &manager,
         VaultRequest::new(VaultAction::DenyPermission {
@@ -2302,6 +2329,7 @@ fn export_obeys_record_delivery_expiry() {
     };
     let before = revision();
     let entry = VaultEntryMetadata {
+        access_project: None,
         display_name: None,
         display_type: None,
         updated_at: None,
@@ -2938,5 +2966,53 @@ mod browser_integration {
             )
             .is_err()
         );
+    }
+}
+
+#[test]
+fn legacy_project_grants_still_cover_multiple_entries() {
+    use super::super::grant::{GrantRequirement, require_grant_until};
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let peer = caller();
+    let state = service.state.lock_live(Instant::now()).unwrap();
+    for scope in [
+        DocumentKind::SecretSpecProviderCache,
+        DocumentKind::LinuxSecretService,
+    ] {
+        store_grant(
+            state.store(),
+            &peer,
+            GrantTarget::Project {
+                scope,
+                namespace: b"demo",
+                project: "demo",
+                base_dir: None,
+            },
+            [GrantPermission::Get],
+            None,
+            100,
+        )
+        .unwrap();
+        for key in ["first", "second"] {
+            let address = if scope == DocumentKind::LinuxSecretService {
+                SecretAddress::new(key, None).unwrap()
+            } else {
+                SecretAddress::secret_spec(project_key("demo", key)).unwrap()
+            };
+            require_grant_until(
+                state.store(),
+                &peer,
+                GrantRequirement {
+                    scope,
+                    namespace: Some(b"demo"),
+                    address: Some(&address),
+                    project: Some("demo"),
+                    base_dir: None,
+                    permission: GrantPermission::Get,
+                },
+                101,
+            )
+            .unwrap();
+        }
     }
 }

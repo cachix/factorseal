@@ -526,6 +526,9 @@ pub enum VaultAction {
         sender: String,
     },
     KeyringAccess {
+        /// Actual stored item; absent only for legacy bridges or creation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<SecretAddress>,
         sender: String,
         service: String,
         operation: PermissionOperation,
@@ -736,6 +739,7 @@ impl VaultAction {
                 }
             }
             Self::KeyringAccess {
+                entry,
                 sender,
                 service,
                 action,
@@ -750,6 +754,17 @@ impl VaultAction {
                     return Err(VaultError::Protocol(
                         "invalid keyring access target".to_owned(),
                     ));
+                }
+                if let Some(entry) = entry {
+                    entry.validate()?;
+                    if !entry.as_local().is_some_and(|(item, field)| {
+                        field.is_none()
+                            && item.strip_prefix("item/").is_some_and(|id| {
+                                id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                    }) {
+                        return Err(VaultError::Protocol("invalid keyring entry".to_owned()));
+                    }
                 }
                 if let Some(id) = pending {
                     validate_permission_id(id)?;
@@ -1105,7 +1120,10 @@ pub enum VaultResponseBody {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultEntryMetadata {
-    /// Display-only personal title, decrypted during inventory. Never used for addressing.
+    /// Authorization project derived from stored system-keyring attributes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_project: Option<String>,
+    /// Display-only title, decrypted during inventory. Never used for addressing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// Display-only personal item type, derived from encrypted content during inventory.
@@ -1165,6 +1183,9 @@ fn validate_transfer_entry(entry: &VaultEntryMetadata) -> VaultResult<()> {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Permission {
+    /// Actual grant target. Absent for older summaries whose target is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Box<PermissionTarget>>,
     pub id: String,
     /// Actual backend scope, independent of caller-supplied project labels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1176,6 +1197,84 @@ pub struct Permission {
     /// authenticate the executable principal.
     pub application: VaultApplicationContext,
     pub state: PermissionState,
+}
+
+/// Value-free target coordinates, independent of application display labels.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum PermissionTarget {
+    DocumentKind,
+    Namespace {
+        #[serde(with = "base64_bytes")]
+        namespace: Vec<u8>,
+    },
+    Entry {
+        #[serde(with = "base64_bytes")]
+        namespace: Vec<u8>,
+        address: SecretAddress,
+    },
+    /// One entry, restricted to the requesting project and folder.
+    ProjectEntry {
+        #[serde(with = "base64_bytes")]
+        namespace: Vec<u8>,
+        address: SecretAddress,
+        project: String,
+        base_dir: Option<String>,
+    },
+    Project {
+        #[serde(with = "base64_bytes")]
+        namespace: Vec<u8>,
+        project: String,
+        base_dir: Option<String>,
+    },
+}
+
+impl Permission {
+    /// Whether this grant covers the entry, subject to its caller, operation,
+    /// lifetime, and (for project grants) working-directory restrictions.
+    #[must_use]
+    pub fn applies_to_entry(&self, entry: &VaultEntryMetadata) -> bool {
+        if self.scope != Some(entry.document_kind) {
+            return false;
+        }
+        match self.target.as_deref() {
+            Some(PermissionTarget::DocumentKind) => true,
+            Some(PermissionTarget::Namespace { namespace }) => *namespace == entry.partition,
+            Some(PermissionTarget::Entry { namespace, address }) => {
+                *namespace == entry.partition && *address == entry.address
+            }
+            Some(PermissionTarget::ProjectEntry {
+                namespace,
+                address,
+                project,
+                ..
+            }) => {
+                *address == entry.address
+                    && if entry.document_kind == DocumentKind::LinuxSecretService {
+                        entry.access_project.as_deref() == Some(project.as_str())
+                            && namespace == project.as_bytes()
+                    } else {
+                        *namespace == entry.partition
+                    }
+            }
+            Some(PermissionTarget::Project {
+                namespace, project, ..
+            }) => {
+                if entry.document_kind == DocumentKind::LinuxSecretService {
+                    entry.access_project.as_deref() == Some(project.as_str())
+                        && namespace == project.as_bytes()
+                } else {
+                    *namespace == entry.partition
+                        && entry.address.as_secret_spec().is_some_and(|address| {
+                            address
+                                .project()
+                                .is_none_or(|entry_project| entry_project == project)
+                        })
+                }
+            }
+            None => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1447,5 +1546,155 @@ mod locked_secret_tests {
         }
         let escaped: WireSecret = serde_json::from_str(r#""\u0059Q==""#).unwrap();
         assert_eq!(escaped.expose(), b"a");
+    }
+}
+
+#[cfg(test)]
+mod entry_access_tests {
+    use super::*;
+
+    fn entry() -> VaultEntryMetadata {
+        VaultEntryMetadata {
+            access_project: None,
+            display_name: None,
+            display_type: None,
+            updated_at: None,
+            document_kind: DocumentKind::SecretSpecProviderCache,
+            partition: b"demo".to_vec(),
+            address: SecretAddress::secret_spec(
+                SecretSpecAddress::convention("demo", "dev", "TOKEN").unwrap(),
+            )
+            .unwrap(),
+        }
+    }
+
+    fn permission(target: Option<PermissionTarget>) -> Permission {
+        Permission {
+            target: target.map(Box::new),
+            id: "prm_test".into(),
+            scope: Some(DocumentKind::SecretSpecProviderCache),
+            operation: PermissionOperation::Get,
+            principal: PermissionPrincipal {
+                platform: CallerPlatform::Linux,
+                user_id: "uid:1000".into(),
+                application_id: "test".into(),
+                executable_digest: [0; 32],
+                signer_id: None,
+            },
+            application: VaultApplicationContext::new(
+                Some("untrusted-label".into()),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+            state: PermissionState::Granted {
+                granted_at: 1,
+                expires_at: None,
+            },
+        }
+    }
+
+    #[test]
+    fn project_entry_access_is_direct_and_matches_only_one_entry() {
+        let mut entry = entry();
+        let grant = permission(Some(PermissionTarget::ProjectEntry {
+            namespace: b"demo".to_vec(),
+            address: entry.address.clone(),
+            project: "demo".into(),
+            base_dir: Some("/demo".into()),
+        }));
+        assert!(grant.applies_to_entry(&entry));
+        entry.address = SecretAddress::secret_spec(
+            SecretSpecAddress::convention("demo", "dev", "OTHER").unwrap(),
+        )
+        .unwrap();
+        assert!(!grant.applies_to_entry(&entry));
+        let mut json = serde_json::to_value(&grant).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Permission>(json.take()).unwrap(),
+            grant
+        );
+    }
+
+    #[test]
+    fn entry_access_matches_actual_scope_namespace_and_address() {
+        let mut entry = entry();
+        let grant = permission(Some(PermissionTarget::Entry {
+            namespace: entry.partition.clone(),
+            address: entry.address.clone(),
+        }));
+        assert!(grant.applies_to_entry(&entry));
+        entry.partition = b"another".to_vec();
+        assert!(!grant.applies_to_entry(&entry));
+        entry.partition = b"demo".to_vec();
+        entry.address = SecretAddress::secret_spec(
+            SecretSpecAddress::convention("demo", "prod", "TOKEN").unwrap(),
+        )
+        .unwrap();
+        assert!(!grant.applies_to_entry(&entry));
+        let broad = permission(Some(PermissionTarget::Namespace {
+            namespace: b"demo".to_vec(),
+        }));
+        assert!(broad.applies_to_entry(&entry));
+        entry.document_kind = DocumentKind::SecretSpecProject;
+        assert!(!broad.applies_to_entry(&entry));
+    }
+
+    #[test]
+    fn project_access_is_inherited_across_profiles_but_not_other_projects_or_local_addresses() {
+        let grant = permission(Some(PermissionTarget::Project {
+            namespace: b"demo".to_vec(),
+            project: "demo".into(),
+            base_dir: Some("/project".into()),
+        }));
+        let mut entry = entry();
+        assert!(grant.applies_to_entry(&entry));
+        for (project, expected) in [("demo", true), ("other", false)] {
+            entry.address = SecretAddress::secret_spec(
+                SecretSpecAddress::convention(project, "prod", "OTHER_KEY").unwrap(),
+            )
+            .unwrap();
+            assert_eq!(grant.applies_to_entry(&entry), expected);
+        }
+        entry.address = SecretAddress::new("TOKEN", None).unwrap();
+        assert!(!grant.applies_to_entry(&entry));
+    }
+
+    #[test]
+    fn keyring_access_uses_inventory_project_not_labels() {
+        let mut grant = permission(Some(PermissionTarget::Project {
+            namespace: b"secretspec/demo".to_vec(),
+            project: "secretspec/demo".into(),
+            base_dir: None,
+        }));
+        grant.scope = Some(DocumentKind::LinuxSecretService);
+        let mut entry = entry();
+        entry.document_kind = DocumentKind::LinuxSecretService;
+        entry.partition = b"factorseal/secret-service/v1".to_vec();
+        entry.address = SecretAddress::new("item/123", None).unwrap();
+        entry.display_name = Some("secretspec/demo".into());
+        assert!(!grant.applies_to_entry(&entry));
+        entry.access_project = Some("secretspec/demo".into());
+        assert!(grant.applies_to_entry(&entry));
+        entry.access_project = Some("secretspec/other".into());
+        assert!(!grant.applies_to_entry(&entry));
+    }
+
+    #[test]
+    fn old_permissions_remain_readable_without_guessing_entry_access() {
+        let grant = permission(None);
+        let json = serde_json::to_value(&grant).unwrap();
+        assert!(json.get("target").is_none());
+        let decoded: Permission = serde_json::from_value(json).unwrap();
+        assert!(!decoded.applies_to_entry(&entry()));
+        let grant = permission(Some(PermissionTarget::Entry {
+            namespace: b"demo".to_vec(),
+            address: entry().address,
+        }));
+        let decoded: Permission =
+            serde_json::from_slice(&serde_json::to_vec(&grant).unwrap()).unwrap();
+        assert_eq!(decoded, grant);
+        assert!(decoded.applies_to_entry(&entry()));
     }
 }

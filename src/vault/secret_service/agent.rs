@@ -48,7 +48,12 @@ impl Backend for Remote {
 #[derive(Clone)]
 pub(super) struct Store {
     backend: Arc<dyn Backend>,
-    delegation: Option<(String, String, crate::vault::PermissionOperation)>,
+    delegation: Option<(
+        String,
+        String,
+        Option<crate::SecretAddress>,
+        crate::vault::PermissionOperation,
+    )>,
 }
 
 impl Store {
@@ -83,11 +88,12 @@ impl Store {
         &self,
         sender: String,
         service: String,
+        entry: Option<crate::SecretAddress>,
         operation: crate::vault::PermissionOperation,
     ) -> Self {
         Self {
             backend: Arc::clone(&self.backend),
-            delegation: Some((sender, service, operation)),
+            delegation: Some((sender, service, entry, operation)),
         }
     }
 
@@ -95,11 +101,13 @@ impl Store {
         &self,
         sender: String,
         service: String,
+        entry: Option<crate::SecretAddress>,
         operation: crate::vault::PermissionOperation,
         pending: Option<String>,
     ) -> VaultResult<VaultResponse> {
         self.backend
             .request(VaultRequest::new(VaultAction::KeyringAccess {
+                entry,
                 sender,
                 service,
                 operation,
@@ -109,8 +117,9 @@ impl Store {
     }
 
     fn call(&self, action: VaultAction) -> VaultResult<VaultResponseBody> {
-        let action = if let Some((sender, service, operation)) = &self.delegation {
+        let action = if let Some((sender, service, entry, operation)) = &self.delegation {
             VaultAction::KeyringAccess {
+                entry: entry.clone(),
                 sender: sender.clone(),
                 service: service.clone(),
                 operation: *operation,

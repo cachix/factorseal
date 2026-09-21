@@ -106,3 +106,43 @@ impl PortableItem {
         Ok(item)
     }
 }
+
+#[cfg(any(
+    feature = "vault-store",
+    all(feature = "secret-service-host", target_os = "linux")
+))]
+pub(crate) fn service_target(attributes: &HashMap<String, String>) -> String {
+    use sha2::{Digest as _, Sha256};
+    if let Some(service) = attributes
+        .get("service")
+        .filter(|service| !service.is_empty())
+    {
+        return format!("service/{service}");
+    }
+    let ordered: std::collections::BTreeMap<_, _> = attributes.iter().collect();
+    format!(
+        "attributes/{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&ordered).expect("string map serializes")
+        ))
+    )
+}
+
+/// Shared with approval creation so inventory never guesses from display labels.
+#[cfg(feature = "vault-store")]
+pub(crate) fn access_project(service: &str) -> (String, Option<String>) {
+    let parts: Vec<_> = service
+        .strip_prefix("service/")
+        .unwrap_or(service)
+        .splitn(4, '/')
+        .collect();
+    if parts.len() == 4 && parts[0] == "secretspec" && !parts[1].is_empty() && !parts[2].is_empty()
+    {
+        (
+            format!("secretspec/{}", parts[1]),
+            Some(parts[2].to_owned()),
+        )
+    } else {
+        (service.to_owned(), None)
+    }
+}

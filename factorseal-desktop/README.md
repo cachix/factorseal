@@ -29,7 +29,7 @@ encrypted until unlock. Generic keyring lookups show their supplied attributes i
 the main review card. The user can deny the request or allow it and authenticate using
 FactorSeal's secure input. Unlocking and approval stay in the same popup and
 reuse the secure password entry. The vault browser stays closed. New access
-requires a signed grant for the authenticated executable, project, folder, and operation, valid for one hour or until revoked in Access Grants. The worker
+requires a signed grant for the specific entry, authenticated executable, project, folder, and operation, valid for one hour or until revoked. Keyring approvals bind the stored item ID, so another item with the same service name requires separate approval. The worker
 checks grants for every operation. SecretSpec IPC also opens this approval flow,
 using its own provider-cache scope. Project labels are caller-supplied context;
 the worker authenticates the executable independently. Denial, dismissal, and
@@ -66,10 +66,15 @@ Registration retries after NetworkManager or the system bus restarts. Network
 profiles change only through the explicit migration action. Certificate configuration and verification
 remain NetworkManager's responsibility.
 
-The Access list distinguishes System keyring from the native SecretSpec provider
-and shows the project folder and requesting executable. Grant details include
-the executable digest and grant ID. Older grants recover their access type by
-matching the stored target digest; unmatched types remain explicitly unknown.
+Each SecretSpec and keyring entry has an **Access** section showing recorded
+app grants, operations, lifetime, and revocation controls. Existing project, namespace,
+and secret-type grants remain valid and are labeled as inherited; revoking one removes access
+across its entire scope. Project grants also show their folder restriction.
+The global Access list remains available for auditing broader grants and pending
+requests. Grant details include the executable digest and grant ID. Older grants
+are attached to entries only when their stored target digest confirms the target;
+unknown targets remain visible in the global list. System-keyring relationships
+come from stored attributes rather than display labels.
 
 Writes use a masked secret-entry dialog with a Save button, without creating a
 persistent write grant. The incoming value can be reviewed or replaced. Native

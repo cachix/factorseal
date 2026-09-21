@@ -1027,6 +1027,23 @@ impl StoreWorker {
                     .await?;
             }
             let partition = document.partition().to_vec();
+            let mut keyring_items = std::collections::HashMap::new();
+            if document_kind == DocumentKind::LinuxSecretService
+                && partition == crate::vault::secret_service_data::NAMESPACE
+            {
+                use crate::vault::secret_service_data::{
+                    INDEX_ITEM, Index, access_project, service_target,
+                };
+                let index_address = SecretAddress::new(INDEX_ITEM, None)?;
+                let bytes = match document.get(&index_address, now)? {
+                    crate::vault::document::SecretRead::Value(value) => Some(value),
+                    _ => None,
+                };
+                for item in Index::decode(bytes.as_ref().map(|value| value.as_slice()))?.items {
+                    let project = access_project(&service_target(&item.attributes)).0;
+                    keyring_items.insert(format!("item/{}", item.id), (item.label, project));
+                }
+            }
             for (storage_key, address) in document.addresses()? {
                 if document_kind == DocumentKind::NetworkManagerWifi
                     && address
@@ -1055,9 +1072,19 @@ impl StoreWorker {
                         display_name = std::str::from_utf8(&value).ok().map(str::to_owned);
                     }
                 }
+                let access_project = address.as_local().and_then(|(item, field)| {
+                    if field.is_some() {
+                        return None;
+                    }
+                    keyring_items.get(item).map(|(label, project)| {
+                        display_name = Some(label.clone());
+                        project.clone()
+                    })
+                });
                 entries.push((
                     self.vault_entry_cursor(document_kind, document_id, &storage_key),
                     VaultEntryMetadata {
+                        access_project,
                         display_name,
                         display_type,
                         updated_at,

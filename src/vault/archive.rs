@@ -432,6 +432,7 @@ mod tests {
             42,
             vec![VaultArchiveEntry {
                 metadata: VaultEntryMetadata {
+                    access_project: None,
                     display_name: None,
                     display_type: None,
                     updated_at: None,
@@ -501,6 +502,7 @@ mod tests {
         let mut index = Index::default();
         index.items.push(item.clone());
         let metadata = |address| VaultEntryMetadata {
+            access_project: None,
             display_name: None,
             display_type: None,
             updated_at: None,

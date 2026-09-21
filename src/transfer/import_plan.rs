@@ -41,6 +41,7 @@ impl PreparedImport {
         for secret in secrets {
             entries.push(VaultArchiveEntry {
                 metadata: VaultEntryMetadata {
+                    access_project: None,
                     display_name: None,
                     display_type: None,
                     updated_at: None,
@@ -228,6 +229,7 @@ mod tests {
     fn archive_preview_rejects_invalid_personal_payloads() {
         let entry = VaultArchiveEntry {
             metadata: VaultEntryMetadata {
+                access_project: None,
                 display_name: None,
                 display_type: None,
                 updated_at: None,
@@ -248,6 +250,7 @@ mod tests {
     fn expiry_is_rechecked_after_preview_before_any_writes() {
         let entry = VaultArchiveEntry {
             metadata: VaultEntryMetadata {
+                access_project: None,
                 display_name: None,
                 display_type: None,
                 updated_at: None,

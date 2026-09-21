@@ -85,12 +85,59 @@ pub(super) enum GrantTarget<'a> {
         namespace: &'a [u8],
         address: &'a SecretAddress,
     },
+    ProjectEntry {
+        scope: DocumentKind,
+        namespace: &'a [u8],
+        address: &'a SecretAddress,
+        project: &'a str,
+        base_dir: Option<&'a str>,
+    },
     Project {
         scope: DocumentKind,
         namespace: &'a [u8],
         project: &'a str,
         base_dir: Option<&'a str>,
     },
+}
+
+impl GrantTarget<'_> {
+    pub(super) fn summary(self) -> super::PermissionTarget {
+        use super::PermissionTarget;
+        match self {
+            Self::Kind { .. } => PermissionTarget::DocumentKind,
+            Self::Namespace { namespace, .. } => PermissionTarget::Namespace {
+                namespace: namespace.to_vec(),
+            },
+            Self::Entry {
+                namespace, address, ..
+            } => PermissionTarget::Entry {
+                namespace: namespace.to_vec(),
+                address: address.clone(),
+            },
+            Self::ProjectEntry {
+                namespace,
+                address,
+                project,
+                base_dir,
+                ..
+            } => PermissionTarget::ProjectEntry {
+                namespace: namespace.to_vec(),
+                address: address.clone(),
+                project: project.to_owned(),
+                base_dir: base_dir.map(str::to_owned),
+            },
+            Self::Project {
+                namespace,
+                project,
+                base_dir,
+                ..
+            } => PermissionTarget::Project {
+                namespace: namespace.to_vec(),
+                project: project.to_owned(),
+                base_dir: base_dir.map(str::to_owned),
+            },
+        }
+    }
 }
 
 #[cfg(feature = "vault-store")]
@@ -352,7 +399,7 @@ pub(super) fn promote_permission(
     caller: &CallerIdentity,
     target: GrantTarget<'_>,
     grant_permission: GrantPermission,
-    permission: Permission,
+    mut permission: Permission,
     now: u64,
     provenance: &Provenance,
 ) -> VaultResult<()> {
@@ -379,6 +426,14 @@ pub(super) fn promote_permission(
         serde_json::to_vec(&grant).map_err(|error| VaultError::Protocol(error.to_string()))?,
     );
 
+    permission.scope = Some(match target {
+        GrantTarget::Kind { kind } => kind,
+        GrantTarget::Namespace { scope, .. }
+        | GrantTarget::Entry { scope, .. }
+        | GrantTarget::Project { scope, .. }
+        | GrantTarget::ProjectEntry { scope, .. } => scope,
+    });
+    permission.target = Some(Box::new(target.summary()));
     let mut registry = load_permission_registry(store, now)?;
     registry.permissions.retain(|stored| {
         stored.permission.id != permission.id && !is_expired(&stored.permission, now)
@@ -420,6 +475,7 @@ pub(super) fn list_granted_permissions(
                         stored.target_digest,
                     );
                 }
+                recover_permission_target(&mut stored.permission, stored.target_digest);
                 Some(stored.permission)
             }
             _ => None,
@@ -538,7 +594,7 @@ pub(super) fn require_grant_until(
         permission,
     } = requirement;
     let caller_fingerprint = caller.fingerprint();
-    let mut targets = Vec::with_capacity(4);
+    let mut targets = Vec::with_capacity(5);
     if let Some(namespace) = namespace {
         if let Some(address) = address {
             targets.push(grant_target_digest(&GrantTarget::Entry {
@@ -549,13 +605,23 @@ pub(super) fn require_grant_until(
         }
         if let Some(project) = project
             && address.is_none_or(|address| {
-                address.as_secret_spec().is_some_and(|address| {
-                    address
-                        .project()
-                        .is_none_or(|address_project| address_project == project)
-                })
+                scope == DocumentKind::LinuxSecretService
+                    || address.as_secret_spec().is_some_and(|address| {
+                        address
+                            .project()
+                            .is_none_or(|address_project| address_project == project)
+                    })
             })
         {
+            if let Some(address) = address {
+                targets.push(grant_target_digest(&GrantTarget::ProjectEntry {
+                    scope,
+                    namespace,
+                    address,
+                    project,
+                    base_dir,
+                }));
+            }
             targets.push(grant_target_digest(&GrantTarget::Project {
                 scope,
                 namespace,
@@ -630,6 +696,24 @@ pub(super) fn grant_target_digest(target: &GrantTarget<'_>) -> [u8; 32] {
             append_digest_bytes(&mut digest, namespace);
             append_digest_bytes(&mut digest, address.storage_key().as_bytes());
         }
+        GrantTarget::ProjectEntry {
+            scope,
+            namespace,
+            address,
+            project,
+            base_dir,
+        } => {
+            digest.update([
+                if base_dir.is_some() { 6 } else { 5 },
+                document_kind_tag(*scope),
+            ]);
+            append_digest_bytes(&mut digest, namespace);
+            append_digest_bytes(&mut digest, address.storage_key().as_bytes());
+            append_digest_bytes(&mut digest, project.as_bytes());
+            if let Some(base_dir) = base_dir {
+                append_digest_bytes(&mut digest, base_dir.as_bytes());
+            }
+        }
         GrantTarget::Project {
             scope,
             namespace,
@@ -690,6 +774,24 @@ fn permission_name(permission: GrantPermission) -> &'static str {
     }
 }
 
+/// Old summaries lack coordinates. Recover only a target authenticated by its digest.
+fn recover_permission_target(permission: &mut Permission, digest: [u8; 32]) {
+    if permission.target.is_none()
+        && let Some(scope) = permission.scope
+        && let Some(project) = permission.application.project.as_deref()
+    {
+        let target = GrantTarget::Project {
+            scope,
+            namespace: project.as_bytes(),
+            project,
+            base_dir: permission.application.base_dir.as_deref(),
+        };
+        if grant_target_digest(&target) == digest {
+            permission.target = Some(Box::new(target.summary()));
+        }
+    }
+}
+
 /// Recover old summaries only when the actual stored target digest matches.
 fn legacy_permission_scope(
     application: &super::VaultApplicationContext,
@@ -714,6 +816,46 @@ fn legacy_permission_scope(
 #[cfg(test)]
 mod scope_tests {
     use super::*;
+
+    #[test]
+    fn legacy_target_recovery_requires_matching_digest() {
+        let caller = CallerIdentity::new(
+            super::super::CallerPlatform::Linux,
+            "uid:1000",
+            "test",
+            [0; 32],
+            None,
+        )
+        .unwrap();
+        let mut permission = Permission {
+            target: None,
+            id: "legacy".into(),
+            scope: Some(DocumentKind::SecretSpecProviderCache),
+            operation: super::super::PermissionOperation::Get,
+            principal: super::super::PermissionPrincipal::from(&caller),
+            application: super::super::VaultApplicationContext::new(
+                Some("demo".into()),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+            state: PermissionState::Granted {
+                granted_at: 1,
+                expires_at: None,
+            },
+        };
+        let target = GrantTarget::Project {
+            scope: DocumentKind::SecretSpecProviderCache,
+            namespace: b"demo",
+            project: "demo",
+            base_dir: None,
+        };
+        recover_permission_target(&mut permission, [0; 32]);
+        assert!(permission.target.is_none());
+        recover_permission_target(&mut permission, grant_target_digest(&target));
+        assert_eq!(permission.target.as_deref(), Some(&target.summary()));
+    }
 
     #[test]
     fn legacy_scope_uses_target_digest_not_project_name() {

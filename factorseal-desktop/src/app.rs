@@ -4,6 +4,7 @@ mod access;
 mod approval_window;
 mod browser;
 mod devices;
+mod entry_access;
 #[cfg(target_os = "linux")]
 mod niri;
 mod personal_actions;
@@ -390,7 +391,10 @@ fn vault_entry_label(entry: &factorseal::VaultEntryMetadata) -> (String, String)
     }
     if entry.document_kind == factorseal::DocumentKind::LinuxSecretService {
         (
-            "System keyring item".to_owned(),
+            entry
+                .display_name
+                .clone()
+                .unwrap_or_else(|| "System keyring item".to_owned()),
             item.strip_prefix("secret-").unwrap_or(item).to_owned(),
         )
     } else {
@@ -475,6 +479,7 @@ fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static s
         Some(factorseal::DocumentKind::LinuxSecretService) => "System keyring",
         Some(factorseal::DocumentKind::NetworkManagerWifi) => "Wi-Fi passwords",
         Some(factorseal::DocumentKind::SecretSpecProviderCache) => "SecretSpec provider",
+        Some(factorseal::DocumentKind::SecretSpecProject) => "SecretSpec project",
         Some(factorseal::DocumentKind::LocalKeyring) => "Application keyring",
         Some(_) => "Vault access",
         None => "Legacy access · type unknown",
@@ -3273,6 +3278,7 @@ impl DesktopView {
                             .child("Secret value hidden"),
                     )
                     .child(Self::render_detail_rows(vault_entry_details(entry), cx))
+                    .child(Self::render_entry_access(entry, contents, cx))
             }
             Some(VaultSelection::Permission(permission)) => {
                 let application = permission
@@ -3295,11 +3301,16 @@ impl DesktopView {
                         permission_operation_label(permission.operation).to_owned(),
                     ),
                     ("State", state.to_owned()),
+                    ("Scope", entry_access::scope_label(permission).to_owned()),
+                    ("Lifetime", entry_access::lifetime_label(permission)),
                     (
                         "Application ID",
                         permission.principal.application_id.clone(),
                     ),
                 ];
+                if let Some(label) = entry_access::entry_label(permission) {
+                    details.push(("Entry", label));
+                }
                 if let Some(project) = &permission.application.project {
                     details.push(("Project", project.clone()));
                 }
@@ -3356,10 +3367,18 @@ impl DesktopView {
         };
         let runtime = Arc::clone(&self.runtime);
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || runtime.revoke_permission(&metadata, id)).await;
+            let revoked_id = id.clone();
+            let result = smol::unblock(move || runtime.revoke_permission(&metadata, revoked_id)).await;
             let _ = this.update(cx, |view, cx| {
                 match result {
-                    Ok(()) => view.selected_vault_item = None,
+                    Ok(()) => {
+                        if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot {
+                            contents.permissions.retain(|permission| permission.id != id);
+                        }
+                        if matches!(&view.selected_vault_item, Some(VaultSelection::Permission(permission)) if permission.id == id) {
+                            view.selected_vault_item = None;
+                        }
+                    },
                     Err(message) => {
                         if let Snapshot::Unsealed { error, .. } = &mut view.snapshot {
                             *error = Some(message);
@@ -4439,6 +4458,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, updated_at)| factorseal::VaultEntryMetadata {
+                access_project: None,
                 display_name: Some(format!("Item {index}")),
                 display_type: Some("Login".into()),
                 updated_at,
@@ -4461,6 +4481,7 @@ mod tests {
     fn personal_inventory_shows_and_searches_item_types() {
         for kind in super::PersonalSecretKind::ALL {
             let entry = factorseal::VaultEntryMetadata {
+                access_project: None,
                 display_name: Some("Example".into()),
                 display_type: Some(kind.label().into()),
                 updated_at: None,
