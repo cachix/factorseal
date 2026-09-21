@@ -1026,7 +1026,7 @@ impl DesktopView {
             transfer_notice: None,
             #[cfg(feature = "apple-credential-exchange")]
             system_transfer: system_transfer::State::default(),
-            system_integrations_expanded: false,
+            system_integrations_expanded: true,
             #[cfg(target_os = "linux")]
             wifi_migration: wifi::State::default(),
             _subscriptions: vec![password_submit, vault_search_change],
