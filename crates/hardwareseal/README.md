@@ -1,23 +1,18 @@
 # hardwareseal
 
-A small, fail-closed Rust API for sealing short secrets to platform hardware.
-
-The crate intentionally exposes opaque `seal` and `unseal` operations instead
-of public-key encryption. Linux and non-biometric Windows secrets use a TPM 2.0
-sealed-data object beneath an AES-256-CFB storage primary. Windows biometric
-secrets use an AES-256-GCM envelope keyed by a Windows Hello PRF output.
+Seal short secrets to platform security hardware with a small Rust API.
+Secrets stay bound to the device; unavailable hardware and unsupported policies
+return errors without falling back to software.
 
 ## Quick start
-
-Add the dependency:
 
 ```toml
 [dependencies]
 hardwareseal = "0.1"
 ```
 
-The public API is exposed through `Protector` and its `open`, `seal`, and
-`unseal` methods:
+Use [`Protector`](https://docs.rs/hardwareseal/latest/hardwareseal/struct.Protector.html)
+to seal and unseal a secret:
 
 ```rust
 use hardwareseal::{AccessPolicy, Protector};
@@ -38,151 +33,138 @@ fn main() -> Result<(), hardwareseal::Error> {
 ```
 
 Secrets can be at most **64 bytes**, suitable for sealing an encryption key
-used to protect larger data. `AccessPolicy::None` requires hardware possession
-without a biometric prompt. Unsupported policies and unavailable hardware
-return errors without falling back to software.
+used to protect larger data. Store the returned envelope as opaque bytes.
+Labels must contain 1–128 ASCII letters, digits, dots, underscores, or hyphens.
 
-On Linux, this example requires access to `/dev/tpmrm0`; on Windows, it requires
-a TPM 2.0 device. Apple and Android require their respective feature flags and
-host application setup described below.
+`AccessPolicy::None` requires hardware possession without a biometric prompt.
+`AccessPolicy::Biometric` requests native user verification on every `unseal`.
+The crate does not cache approvals or unsealed secrets; the caller controls how
+long it retains the returned secret.
 
-## Platform model
+## Platform setup
 
-`hardwareseal` uses the strongest native symmetric sealing mechanism available and
-never silently falls back to a software-only key:
-
-| Platform | Native backend | Biometric policy |
+| Platform | Backend | `Biometric` policy |
 | --- | --- | --- |
-| Linux | TPM 2.0 sealed-data object | Not yet available |
-| Windows | TPM 2.0 through TPM Base Services, nested inside Windows Hello PRF encryption for biometric secrets | Fingerprint, face, or PIN verification, implemented |
-| macOS (`apple` feature) | Data Protection Keychain | Touch ID, implemented |
-| iPhone/iPad (`apple` feature) | Data Protection Keychain | Face ID/Touch ID, implemented |
-| Android (`android` feature) | Hardware-backed Android Keystore AES-256-GCM | Host bridge planned |
+| Linux | TPM 2.0 | Unsupported |
+| Windows | TPM 2.0; Windows Hello PRF for biometric secrets | Fingerprint, face, or PIN |
+| macOS | Data Protection Keychain | Touch ID |
+| iPhone/iPad | Data Protection Keychain | Face ID / Touch ID |
+| Android | Hardware-backed Keystore AES-256-GCM | Unsupported; host bridge pending |
 
-The mobile backends are opt-in and disabled by default:
+### Linux and Windows
+
+Both backends are enabled by default. Linux requires access to `/dev/tpmrm0`;
+Windows requires a TPM 2.0 device accessible through TPM Base Services.
+
+On Windows, `Biometric` additionally requires Windows Hello with PRF support
+and WebAuthn API version 6 or newer. Enrollment creates a platform credential;
+unsealing requires both the original TPM and Windows Hello verification.
+Windows may offer the enrolled Hello PIN when biometrics are unavailable.
+External security keys are excluded, and each ceremony has a two-minute timeout.
+
+### macOS and iOS
+
+Enable the `apple` feature:
 
 ```toml
-[dependencies]
-hardwareseal = { version = "0.1", features = ["apple"] }   # macOS/iOS
-# hardwareseal = { version = "0.1", features = ["android"] } # Android
+hardwareseal = { version = "0.1", features = ["apple"] }
 ```
 
-With its platform feature disabled, `Protector::open` returns
-`Error::NotAvailable` on that platform.
+The backend requires Secure Enclave hardware and rejects simulators. It stores
+each secret as a device-only Data Protection Keychain item under the requested
+access policy. With `Biometric`, changes to biometric enrollment invalidate
+access to the item.
 
-Apple does not expose general symmetric encryption in the Secure Enclave. The
-default protector uses the Data Protection Keychain: a
-device-only item is released only after the configured Secure Enclave-backed
-authentication ceremony. Opening the protector first requires successful
-transient Secure Enclave P-256 key creation, rejecting software-only Macs and
-simulators. That capability probe is not used to wrap the secret; the payload
-is stored by the Data Protection Keychain under the configured access policy.
-With the `apple` feature, `apple_pq::MlDsa65Key` also exposes non-exportable
-macOS 26+ signing. `apple_pq::wrapping::MlKem768WrappingKey` is an opt-in
-ML-KEM-768/HKDF-SHA-256/AES-256-GCM wrapping prototype; it does not change the
-default protector. These APIs require Xcode 26+ to build and reject unsupported
-OS/hardware without a software fallback. See the
-[design and acceptance requirements](https://github.com/cachix/factorseal/blob/main/security/macos-crypto-and-isolation.md).
-Each `seal` writes its own keychain item and returns an envelope naming that
-item, so re-sealing under a label never destroys or silently repoints the
-previous secret, and `delete` removes every generation stored under the label.
-On macOS, the host executable must live in an app-like bundle signed with a
-provisioning profile that authorizes its `com.apple.application-identifier`
-entitlement. An unsigned command-line tool has no Data Protection Keychain
-access group and fails with `errSecMissingEntitlement` (`-34018`).
-Android requires a StrongBox or TEE security level and rejects software-only
-Keystore keys.
+On macOS, building with `apple` requires Xcode 26+. The host executable must be
+in an app-like bundle signed with a provisioning profile authorizing its
+`com.apple.application-identifier` entitlement. An unsigned command-line tool
+fails with `errSecMissingEntitlement` (`-34018`). On iOS, applications using
+Face ID must provide `NSFaceIDUsageDescription`. Run Keychain operations away
+from the UI thread because authentication may block.
 
-Android's non-interactive policy is implemented directly through JNI. The
-embedding runtime must initialize `ndk-context` (as `android-activity` does).
-Biometric Android unsealing remains fail-closed until the crate includes the
-small host-side `BiometricPrompt` bridge needed to bind a prompt to each cipher
-operation.
+The feature also exposes macOS 26+ non-exportable ML-DSA signing and an opt-in
+ML-KEM wrapping prototype through `apple_pq`. See the
+[design and acceptance requirements](https://github.com/cachix/factorseal/blob/main/security/macos-crypto-and-isolation.md)
+for these separate APIs.
 
-On iOS, applications using the biometric policy must provide
-`NSFaceIDUsageDescription`. Keychain work may block while the system presents
-authentication UI, so callers should invoke it away from their UI thread.
+### Android
 
-Unsupported policies and unavailable hardware fail closed. On mobile,
-biometric operations must run away from the UI thread and applications must
-provide the platform usage descriptions and entitlements required by the OS.
+Enable the `android` feature:
 
-On Windows, biometric-policy enrollment creates a platform WebAuthn credential
-with PRF enabled. Every secret is first sealed to the physical TPM and then
-encrypted with AES-256-GCM under the 32-byte PRF output. Unsealing therefore
-requires both Windows Hello user verification and the original TPM. The outer
-envelope contains only the credential ID, a fresh random PRF input, nonce, and
-authenticated TPM envelope. PRF inputs use the standard WebAuthn domain
-separation rather than raw `hmac-secret` semantics. Assertions must match the
-RP-ID hash and confirm both user presence and user verification. Windows may
-offer the enrolled Hello PIN when fingerprint or face verification is
-unavailable. Windows WebAuthn API version 6 or newer is required, external
-security keys are excluded by requiring the platform authenticator, and each
-ceremony uses a process-owned window with a two-minute timeout.
+```toml
+hardwareseal = { version = "0.1", features = ["android"] }
+```
 
-The envelope is opaque and versioned; callers should persist it without
-inspecting it.
+The embedding runtime must initialize `ndk-context`, as `android-activity` does.
+The backend requires StrongBox or TEE-backed Keystore keys and supports
+`AccessPolicy::None`. Biometric operations remain unsupported until the
+host-side `BiometricPrompt` bridge is implemented.
 
-## Authorization errors
+On Apple and Android, omitting the platform feature causes `Protector::open`
+to return `Error::NotAvailable`.
 
-Native authorization outcomes are returned as
-`Error::Authorization(AuthorizationError)` instead of platform error strings.
-Callers can distinguish cancellation, denial, unavailable authorization UI, a
-locked or missing interactive session, and an invalidated platform credential.
-`Error::NotAvailable` remains the distinct signal for unavailable hardware,
-while unclassified device and operating-system failures remain
-`Error::Hardware`.
+## Storage and deletion
 
-The biometric policy performs a native authorization ceremony on every
-`unseal` call. HardwareSeal does not cache an approval or an unsealed secret;
-an embedding application that keeps a secret available after unsealing owns
-that session policy and must bound it separately.
+Each `seal` returns a new envelope. Re-sealing under the same label leaves
+previous envelopes usable.
+
+`Protector::delete` removes all persistent platform state for its label on
+Keychain, Android Keystore, and Windows Hello. On Linux and non-biometric
+Windows, TPM envelopes are self-contained and `delete` is a no-op: callers
+must remove the stored envelopes and any backups themselves.
+
+See the [security model](https://github.com/cachix/factorseal/blob/main/crates/hardwareseal/SECURITY.md)
+for backend cryptography and protection boundaries. The crate is not FIPS
+validated.
+
+## Errors
+
+- `Error::NotAvailable`: no supported hardware backend is reachable.
+- `Error::PolicyNotSupported`: the backend cannot enforce the requested policy.
+- `Error::Authorization`: native authorization was cancelled or denied, the UI
+  or session is unavailable, or the platform credential was invalidated.
+- `Error::Hardware`: an unclassified device or operating-system failure.
+
+Input validation errors cover invalid labels, oversized secrets, and malformed
+or mismatched envelopes. See the
+[API reference](https://docs.rs/hardwareseal/latest/hardwareseal/enum.Error.html)
+for all variants.
 
 ## Development
 
-Enter the development environment and run the checks:
+From the repository root on Linux:
 
-```console
-devenv shell
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+```sh
+devenv shell -- cargo fmt --all -- --check
+devenv shell -- cargo clippy -p hardwareseal --all-targets --all-features -- -D warnings
+devenv shell -- cargo test -p hardwareseal --all-features
 ```
 
-A real TPM round trip is opt-in:
+On macOS and Windows, run the Cargo commands directly. Physical-hardware tests
+are opt-in and can create credentials, show authentication UI, and write or
+remove test state. In a shell with Cargo available, run the command for your
+platform (the Windows example uses PowerShell):
 
-```console
-HARDWARESEAL_REAL_TPM_TEST=1 cargo test real_tpm_roundtrip_when_requested
+```sh
+HARDWARESEAL_REAL_TPM_TEST=1 cargo test -p hardwareseal real_tpm_
+HARDWARESEAL_REAL_APPLE_TEST=1 cargo test -p hardwareseal --features apple real_apple
 ```
 
-Windows Hello acceptance is also opt-in and presents native enrollment and
-verification UI:
-
-```console
-HARDWARESEAL_REAL_WINDOWS_HELLO_TEST=1 cargo test --features apple real_windows_hello
+```powershell
+$env:HARDWARESEAL_REAL_WINDOWS_HELLO_TEST = "1"
+cargo test -p hardwareseal real_windows_hello
 ```
 
-Keychain acceptance is opt-in on macOS and iOS, and writes and removes real
-keychain items:
+Run the round-trip and generations tests on real hardware before changing a
+key-store backend. They check that re-sealing preserves earlier envelopes and
+that deletion is scoped to the intended label.
 
-```console
-HARDWARESEAL_REAL_APPLE_TEST=1 cargo test --features apple real_apple
-```
+[`self_test`](https://docs.rs/hardwareseal/latest/hardwareseal/fn.self_test.html)
+checks these invariants on a device using reserved scratch labels, including
+rejection of envelopes under another label. It attempts cleanup even after a
+failure. FactorSeal exposes it as `factorseal hardware-self-test` for machines
+without a Rust toolchain.
 
-Each backend has a round-trip test and a generations test. The generations
-tests are the ones that cover per-seal isolation and deletion: that re-sealing
-under a label leaves earlier envelopes openable, and that `delete` removes
-every generation without reaching another label. Run them on real hardware
-before trusting a change to a key-store backend, since neither property can be
-observed from a build on another platform.
+## License
 
-Those invariants are also exposed as [`self_test`], so a machine with no Rust
-toolchain can check them. It additionally proves that another label cannot open
-the envelope and survives deletion of the test label. The `factorseal` release
-archive reaches it through `factorseal hardware-self-test`, which is how the
-physical acceptance runners in `acceptance/` verify them on a volunteer's
-hardware. `self_test` works on reserved scratch state and attempts to remove
-everything it writes, including after a failure.
-
-The selected algorithms are compatible with common compliance profiles, but
-using them does not by itself make this crate or a product FIPS validated.
+Apache-2.0. See [LICENSE](LICENSE).
