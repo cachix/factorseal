@@ -7,6 +7,45 @@ of public-key encryption. Linux and non-biometric Windows secrets use a TPM 2.0
 sealed-data object beneath an AES-256-CFB storage primary. Windows biometric
 secrets use an AES-256-GCM envelope keyed by a Windows Hello PRF output.
 
+## Quick start
+
+Add the dependency:
+
+```toml
+[dependencies]
+hardwareseal = "0.1"
+```
+
+The public API is exposed through `Protector` and its `open`, `seal`, and
+`unseal` methods:
+
+```rust
+use hardwareseal::{AccessPolicy, Protector};
+
+fn main() -> Result<(), hardwareseal::Error> {
+    let protector = Protector::open("my-app-key", AccessPolicy::None)?;
+
+    let envelope = protector.seal(b"example secret")?;
+    // Persist these opaque envelope bytes in your application's storage.
+
+    // Later, reopen with the same label and policy on the same device.
+    let protector = Protector::open("my-app-key", AccessPolicy::None)?;
+    let secret = protector.unseal(&envelope)?;
+    assert_eq!(secret.as_slice(), b"example secret");
+    // The returned secret buffer is zeroized when dropped.
+    Ok(())
+}
+```
+
+Secrets can be at most **64 bytes**, suitable for sealing an encryption key
+used to protect larger data. `AccessPolicy::None` requires hardware possession
+without a biometric prompt. Unsupported policies and unavailable hardware
+return errors without falling back to software.
+
+On Linux, this example requires access to `/dev/tpmrm0`; on Windows, it requires
+a TPM 2.0 device. Apple and Android require their respective feature flags and
+host application setup described below.
+
 ## Platform model
 
 `hardwareseal` uses the strongest native symmetric sealing mechanism available and
