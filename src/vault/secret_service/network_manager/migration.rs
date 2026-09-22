@@ -167,6 +167,8 @@ pub(super) async fn migrate_connection(
     shared: &Arc<Shared>,
     legacy: Option<&Legacy>,
 ) -> Result<Option<WifiMigrationEntry>, &'static str> {
+    #[cfg(test)]
+    eprintln!("migration stage: VersionId");
     let version: u64 = connection
         .get_property("VersionId")
         .await
@@ -174,6 +176,8 @@ pub(super) async fn migrate_connection(
     if version == 0 {
         return Err("Cannot safely update an unversioned profile");
     }
+    #[cfg(test)]
+    eprintln!("migration stage: GetSettings");
     let settings: Settings = connection
         .call("GetSettings", &())
         .await
@@ -309,6 +313,8 @@ async fn read_credentials(
     mut settings: Settings,
 ) -> Result<(Profile, Settings), &'static str> {
     let profile = Profile::parse(&settings, &[]).map_err(|_| "Unsupported Wi-Fi profile")?;
+    #[cfg(test)]
+    eprintln!("migration stage: Unsaved");
     if connection
         .get_property::<bool>("Unsaved")
         .await
@@ -318,6 +324,8 @@ async fn read_credentials(
     }
     // GetSecrets never prompts for a new password. NM enforces the caller's
     // authorization and may return system storage or the current agent's values.
+    #[cfg(test)]
+    eprintln!("migration stage: GetSecrets");
     let secrets: Settings = match connection.call("GetSecrets", &(profile.setting,)).await {
         Ok(secrets) => secrets,
         Err(zbus::Error::MethodError(name, _, _)) if name.as_str().ends_with(".NoSecrets") => {
@@ -357,10 +365,16 @@ async fn migrate_profile(
     settings: Settings,
 ) -> Result<String, &'static str> {
     let agent = shared.agent().map_err(|_| "Unlock the vault first")?;
+    #[cfg(test)]
+    eprintln!("migration stage: write lock");
     let _write = shared.wifi_writes.lock().await;
     let uuid = Profile::uuid(&settings).map_err(|_| "Unsupported Wi-Fi profile")?;
     let _guard = Guard::acquire(shared, &uuid)?;
+    #[cfg(test)]
+    eprintln!("migration stage: credentials");
     let (profile, mut settings) = read_credentials(connection, settings).await?;
+    #[cfg(test)]
+    eprintln!("migration stage: collect");
     let copies = collect(&agent.store, &profile, legacy).await?;
     if copies.is_empty() {
         return Ok(
@@ -378,9 +392,13 @@ async fn migrate_profile(
         });
     }
     writes.push(name_mutation(&profile).map_err(|_| "Invalid connection name")?);
+    #[cfg(test)]
+    eprintln!("migration stage: mutate");
     mutate(agent.store.clone(), writes)
         .await
         .map_err(|_| "Cannot save credentials in the vault")?;
+    #[cfg(test)]
+    eprintln!("migration stage: verify");
     verify(&agent.store, &profile, &copies).await?;
     ensure_unlocked(shared, &agent)?;
     let values = settings
@@ -404,12 +422,16 @@ async fn migrate_profile(
     // NM's settings plugin omits agent-owned values from persistent profiles.
     // Include them in the update so the daemon does not lose other secret state.
     let args = BTreeMap::from([("version-id", OwnedValue::from(version))]);
+    #[cfg(test)]
+    eprintln!("migration stage: Update2");
     let _: BTreeMap<String, OwnedValue> = connection
         .call("Update2", &(settings, 0x41_u32, args))
         .await
         .map_err(
             |_| "Profile update failed or was rejected; check authorization and concurrent edits",
         )?;
+    #[cfg(test)]
+    eprintln!("migration stage: updated GetSettings");
     let updated: Settings = connection
         .call("GetSettings", &())
         .await
@@ -426,6 +448,8 @@ async fn migrate_profile(
             return Err("Updated profile did not retain agent-owned storage");
         }
     }
+    #[cfg(test)]
+    eprintln!("migration stage: verify");
     verify(&agent.store, &profile, &copies).await?;
     ensure_unlocked(shared, &agent)?;
     if let Some(legacy) = legacy {

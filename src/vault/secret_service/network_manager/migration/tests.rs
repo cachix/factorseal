@@ -69,6 +69,7 @@ struct MockConnection {
 impl MockConnection {
     #[zbus(property)]
     fn version_id(&self) -> u64 {
+        eprintln!("migration mock: VersionId");
         self.state.lock().unwrap().version
     }
     #[zbus(property)]
@@ -79,6 +80,7 @@ impl MockConnection {
         duplicate(&self.state.lock().unwrap().settings)
     }
     fn get_secrets(&self, setting: &str) -> Result<Settings, Error> {
+        eprintln!("migration mock: GetSecrets");
         assert!(matches!(
             setting,
             protocol::WIFI_SECURITY_SETTING | protocol::EAP_SETTING
@@ -107,6 +109,7 @@ impl MockConnection {
         flags: u32,
         args: BTreeMap<String, OwnedValue>,
     ) -> fdo::Result<BTreeMap<String, OwnedValue>> {
+        eprintln!("migration mock: Update2");
         assert_eq!(flags, 0x41);
         let profile = Profile::parse(&settings, &[]).unwrap();
         // This assertion is inside the remote Update2 handler: source removal
@@ -130,6 +133,7 @@ impl MockConnection {
         }
         let mut state = self.state.lock().unwrap();
         if state.reject {
+            eprintln!("migration mock: reject Update2");
             return Err(fdo::Error::AccessDenied("denied".into()));
         }
         if u64::try_from(&args["version-id"]).unwrap() != state.version {
@@ -153,6 +157,7 @@ impl MockConnection {
         updated.version = state.version + 1;
         updated.updates = state.updates + 1;
         *state = updated;
+        eprintln!("migration mock: updated");
         Ok(BTreeMap::new())
     }
 }
