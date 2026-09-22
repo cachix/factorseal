@@ -44,6 +44,24 @@ CI runs native Linux, macOS, and Windows jobs. Unit tests use deterministic mock
 protectors and never weaken production backend selection. The Nix flake also
 provides `nixosModules.factorseal` and a NixOS VM test with a virtual TPM.
 
+SecretSpec provider tests exercise every advertised provider method over the
+wire, including convention and native addresses, missing values, and rejected
+cross-project access. Linux CI also runs upstream transport conformance against
+the built Factorseal executable using the SecretSpec revision in `Cargo.toml`:
+
+```console
+$ devenv shell -- cargo build -p factorseal --all-features --bins
+$ devenv shell -- python3 scripts/test-provider-conformance.py --endpoint target/debug/factorseal
+```
+
+The transport profile checks framing, strict wire validation, initialization,
+notifications, and connection lifecycle. Upstream's memory-provider operation,
+error-fixture, and lifecycle cases are explicitly reported as not applicable;
+they require fixture behavior Factorseal does not implement. The NixOS VM test
+separately checks installed SecretSpec discovery, approvals, CRUD, project
+isolation, and cache expiry. This is not full protocol conformance on every
+desktop platform.
+
 ## Release status
 
 The shared core, native transports, lifecycle monitors, CLI, Secret Service,

@@ -7,8 +7,9 @@ use factorseal::{
 };
 use secretspec_ipc::client::Client;
 use secretspec_ipc::protocol::provider::{
-    AddressParams, ApplicationContext, Coordinates, DeletedResult, GetResult,
-    InitializeApplication, InitializedApplication, SetExpiringParams, SetParams, StoredResult,
+    AddressParams, ApplicationContext, Coordinates, DeletedResult, DescribeWriteTargetResult,
+    EmptyResult, ExistsResult, GetResult, InitializeApplication, InitializedApplication,
+    SetExpiringParams, SetParams, StoredResult,
 };
 use secretspec_ipc::protocol::{
     InitializeParams, Limits, PROTOCOL_VERSION, PROVIDER_PROTOCOL, Product,
@@ -188,6 +189,70 @@ async fn store_expiring(client: &Client, address: Address) {
     assert!(stored.stored);
 }
 
+async fn exists(client: &Client, address: Address) -> bool {
+    client
+        .call::<_, ExistsResult>(wire::method::EXISTS, &AddressParams { address }, deadline())
+        .await
+        .unwrap()
+        .exists
+}
+
+async fn check_address_methods(client: &Client) {
+    for address in [address(), native_address()] {
+        let params = AddressParams {
+            address: address.clone(),
+        };
+        let resolved: ResolveAddressResult = client
+            .call(wire::method::RESOLVE_ADDRESS, &params, deadline())
+            .await
+            .unwrap();
+        let expected = match address {
+            Address::Convention { .. } => Coordinates {
+                item: "TOKEN".to_owned(),
+                field: None,
+                vault: Some("demo".to_owned()),
+                section: Some("production".to_owned()),
+                version: None,
+            },
+            Address::Native { coordinates } => coordinates,
+        };
+        assert_eq!(resolved.coordinates, expected);
+        for method in [wire::method::CHECK_WRITABLE, wire::method::CHECK_DELETABLE] {
+            client
+                .call::<_, EmptyResult>(method, &params, deadline())
+                .await
+                .unwrap();
+        }
+        let target: DescribeWriteTargetResult = client
+            .call(wire::method::DESCRIBE_WRITE_TARGET, &params, deadline())
+            .await
+            .unwrap();
+        assert_eq!(target.description, "Factorseal device cache");
+    }
+}
+
+async fn reject_cross_project_addresses(client: &Client) {
+    let params = AddressParams {
+        address: Address::Convention {
+            project: "another-project".to_owned(),
+            profile: "production".to_owned(),
+            key: "TOKEN".to_owned(),
+        },
+    };
+    for method in [
+        wire::method::EXISTS,
+        wire::method::CHECK_WRITABLE,
+        wire::method::CHECK_DELETABLE,
+        wire::method::DESCRIBE_WRITE_TARGET,
+    ] {
+        let error = client
+            .call::<_, serde_json::Value>(method, &params, deadline())
+            .await
+            .unwrap_err();
+        assert_eq!(error.rpc_kind(), Some(ErrorKind::InvalidParams), "{method}");
+    }
+}
+
 #[tokio::test]
 async fn provider_uses_cache_actions_for_crud_and_expiry() {
     let vault = Arc::new(MemoryVault::default());
@@ -240,7 +305,12 @@ async fn provider_uses_cache_actions_for_crud_and_expiry() {
     .unwrap();
     assert_eq!(initialized.application.provider.name, "factorseal");
 
+    check_address_methods(&client).await;
+    reject_cross_project_addresses(&client).await;
+    assert!(vault.values.lock().unwrap().is_empty());
+    assert!(!exists(&client, address()).await);
     store(&client, address(), "secret").await;
+    assert!(exists(&client, address()).await);
     assert_eq!(
         get(&client, address()).await,
         GetResult::Found {
@@ -252,7 +322,10 @@ async fn provider_uses_cache_actions_for_crud_and_expiry() {
 
     let native = native_address();
     store(&client, native.clone(), "native").await;
-    delete(&client, native).await;
+    assert!(exists(&client, native.clone()).await);
+    delete(&client, native.clone()).await;
+    assert!(!exists(&client, native.clone()).await);
+    assert_eq!(get(&client, native).await, GetResult::Missing);
 
     store_expiring(&client, address()).await;
     assert!(vault.last_evict_at.lock().unwrap().is_some());

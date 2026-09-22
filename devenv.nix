@@ -13,9 +13,11 @@
     gtk4
     libxkbcommon
     pkg-config
+    python3
     qt6.qtbase
     shellcheck
     vulkan-loader
+    yyjson # Upstream SecretSpec IPC conformance runner's C transport fixtures.
   ];
 
   languages.rust = {
