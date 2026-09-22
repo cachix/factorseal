@@ -253,11 +253,24 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemd-inhibit --list | grep -F Factorseal")
         machine.succeed(f"test $(stat -c %a {socket}) = 600")
         machine.succeed(f"test $(stat -c %a {root}) = 700")
-        as_alice(
+        # The native listener is bound before the Secret Service thread
+        # connects to the session bus and claims its name. Wait for the
+        # interface itself instead of treating socket creation as D-Bus readiness.
+        introspect = (
             "busctl --user introspect org.freedesktop.secrets "
             "/org/freedesktop/secrets org.freedesktop.Secret.Service "
             "| grep -w OpenSession"
         )
+        try:
+            machine.wait_until_succeeds(
+                f"{alice_prefix} sh -c {shlex.quote(introspect)}",
+                timeout=30,
+            )
+        except Exception:
+            print(machine.succeed(
+                "journalctl _SYSTEMD_USER_UNIT=factorseal.service --no-pager"
+            ))
+            raise
 
     with subtest("idle expiry seals the vault and removes the socket"):
         # The 5 s idle lease above is what ends this; wait for the outcome
