@@ -464,6 +464,7 @@ fn category_is_visible(
         })
 }
 
+#[cfg(target_os = "linux")]
 fn hex_digest(digest: &[u8; 32]) -> String {
     use std::fmt::Write as _;
     let mut output = String::with_capacity(64);
@@ -473,6 +474,7 @@ fn hex_digest(digest: &[u8; 32]) -> String {
     output
 }
 
+#[cfg(target_os = "linux")]
 fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static str {
     match scope {
         Some(factorseal::DocumentKind::LinuxSecretService) => "System keyring",
