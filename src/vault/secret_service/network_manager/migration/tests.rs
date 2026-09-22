@@ -187,20 +187,25 @@ impl Fixture {
                 crate::vault::secret_service::agent::Agent::load(store.clone()).unwrap(),
             )))
             .unwrap();
-        let server = Connection::session().await.unwrap();
-        let client = Connection::session().await.unwrap();
         let state = Arc::new(Mutex::new(State::new(settings)));
-        server
-            .object_server()
-            .at(
+        // Register before connecting: build waits for the method dispatcher.
+        // object_server().at() on an existing connection starts that dispatcher
+        // asynchronously, so the first VersionId request can arrive before it
+        // subscribes and be lost without ever reaching the mock handler.
+        let server = zbus::connection::Builder::session()
+            .unwrap()
+            .serve_at(
                 PATH,
                 MockConnection {
                     state: Arc::clone(&state),
                     store: store.clone(),
                 },
             )
+            .unwrap()
+            .build()
             .await
             .unwrap();
+        let client = Connection::session().await.unwrap();
         Self {
             _directory: directory,
             shared,
