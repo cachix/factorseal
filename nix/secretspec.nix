@@ -4,19 +4,23 @@
   fetchurl,
 }:
 
+let
+  manifest = builtins.fromTOML (builtins.readFile ../Cargo.toml);
+  rev = manifest.dependencies.secretspec-ipc.rev;
+in
 rustPlatform.buildRustPackage {
   pname = "secretspec";
-  version = "0.20.0-dev-8adfdb4";
+  version = "0.20.0-dev-${builtins.substring 0 7 rev}";
 
   # Keep the installed client on the exact revision used by Factorseal's
   # Secret Provider Protocol dependency. nixpkgs 0.18 predates external
   # provider discovery and cannot exercise this integration.
   src = fetchurl {
-    url = "https://github.com/cachix/secretspec/archive/8adfdb4815889d4739af4f92cebf1537e5d30ef8.tar.gz";
-    hash = "sha256-qYNhXkCfl40sh6riZ9eQgeFTp+6XAQYpIGcNAKpJC1A=";
+    url = "https://github.com/cachix/secretspec/archive/${rev}.tar.gz";
+    hash = "sha256-ikktTnmYEjoHsKnPR7eqv1oGL1o+JpAWaaxEMGlc9FM=";
   };
 
-  cargoHash = "sha256-H9atiLKLAQ0co8mpkNFzh8j8fIZFu1bwSnE1wfgG8Cg=";
+  cargoHash = "sha256-pQb5Wtfe9k6r5Ii3F+8SGzOuPIRBevNypoJPKL4mnTg=";
 
   cargoBuildFlags = [
     "-p"

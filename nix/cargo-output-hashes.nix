@@ -33,7 +33,7 @@
   "gpui_ce_windows-0.1.0" = "sha256-IxOBj8XQHla0qEoBepH/CjP4uHPzR9xWGdA4VebKfh4=";
   "hexane-1.0.0-alpha.5" = "sha256-RRo6hDFB4JKGHOkG0aknmOnAc6pHHlw7Qjpe+EZ8juk=";
   "netwatch-0.19.3" = "sha256-ENNj4P7OSxA6no19kRoJK/eBUneLLhkAQgAa0ZhyrEU=";
-  "secretspec-ipc-0.20.0" = "sha256-HnYZbCzedqI64B2CBCpR97Co8MDuAbxKyjCC2s3bejA=";
+  "secretspec-ipc-0.20.0" = "sha256-YacTNBVyhbSjGQD7Iuf6kxewGpfTH5cl8gUob7QzdtQ=";
   "wgsl-rs-0.1.0" = "sha256-M+YP+viw8PADmxr92qg/6C3WweXBRvOTDuS1RKvzoBA=";
   "wgsl-rs-ir-0.1.0" = "sha256-M+YP+viw8PADmxr92qg/6C3WweXBRvOTDuS1RKvzoBA=";
   "wgsl-rs-macros-0.1.0" = "sha256-M+YP+viw8PADmxr92qg/6C3WweXBRvOTDuS1RKvzoBA=";
