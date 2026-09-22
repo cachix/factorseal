@@ -206,18 +206,22 @@ impl Fixture {
         }
     }
     async fn migrate(&self, legacy: Option<&Legacy>) -> WifiMigrationEntry {
-        let proxy = proxy(
-            &self.client,
-            self.server.unique_name().unwrap().as_str(),
-            PATH,
-            CONNECTION,
-        )
-        .await
-        .unwrap();
-        migrate_connection(&proxy, &self.shared, legacy)
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let proxy = proxy(
+                &self.client,
+                self.server.unique_name().unwrap().as_str(),
+                PATH,
+                CONNECTION,
+            )
             .await
-            .unwrap()
-            .unwrap()
+            .unwrap();
+            migrate_connection(&proxy, &self.shared, legacy)
+                .await
+                .unwrap()
+                .unwrap()
+        })
+        .await
+        .expect("NetworkManager migration did not finish within 30 seconds")
     }
     async fn password(&self) -> Option<WireSecret> {
         read(self.store.clone(), Property::Psk.address(UUID))

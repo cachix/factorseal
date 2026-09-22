@@ -133,6 +133,8 @@ impl FactorsealProvider {
     where
         F: FnMut() -> factorseal::VaultResult<VaultAction>,
     {
+        #[cfg(not(target_os = "linux"))]
+        let _ = address;
         let first = self
             .request_once(action().map_err(|e| map_vault_error(&e))?)
             .await;

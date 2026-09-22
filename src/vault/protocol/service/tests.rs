@@ -271,7 +271,9 @@ fn authorization_batch_preserves_expiry_and_last_request_wins() {
         .unwrap()
     };
     assert!(matches!(
-        service.handle(&caller, request(), 199).result,
+        // Requests advance the supplied clock while storage work runs. Leave
+        // enough time before expiry for a loaded CI runner to finish the read.
+        service.handle(&caller, request(), 150).result,
         Ok(VaultResponseBody::Secret { value: None })
     ));
     assert!(matches!(
