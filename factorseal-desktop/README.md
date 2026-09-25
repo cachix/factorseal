@@ -36,6 +36,16 @@ the worker authenticates the executable independently. Denial, dismissal, and
 timeout return distinct D-Bus errors. The dialog only offers unlock-method
 buttons when the vault has multiple methods configured.
 
+On every platform, Desktop opens the same popup for pending SecretSpec
+permissions while the vault is unsealed. That includes requests from the native
+provider and requests relayed from WSL2. On macOS and Windows this is the only
+Desktop approval flow; keyring prompts remain Linux-only. The popup can open
+while you are typing in another app, and on Windows it can take keyboard focus
+even while it stays behind that app. So its fields accept no typing until you
+click inside it, and Grant access, Enter, Unlock, and Save secret do nothing
+until one second after the popup appears or its list of requests changes.
+Escape still denies.
+
 Wi-Fi passwords appear under **System integrations → Wi-Fi passwords**. On
 Linux, the desktop registers a NetworkManager secret agent on the system bus
 and stores its credentials in a separate encrypted vault namespace. Personal
@@ -83,7 +93,8 @@ that point also requires a change in SecretSpec.
 
 On Wayland compositors supporting layer-shell, including Niri, the access
 prompt opens as a centered overlay outside the tiling layout. It takes keyboard
-focus until dismissed; Escape and Deny close it. Compositors without layer-shell
+focus until dismissed, but its fields accept typing only after a click; Escape
+and Deny close it. Compositors without layer-shell
 receive a normal access dialog instead. No compositor window rule is required.
 
 On Linux, theme probes run as short-lived child processes so GTK and Qt never
