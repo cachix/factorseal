@@ -13,7 +13,7 @@
 //!
 //! Usage:
 //!   factorseal-wsl-broker.exe <pipe-name> <distro> status
-//!   factorseal-wsl-broker.exe <pipe-name> <distro> get <namespace> <item> [field]
+//!   factorseal-wsl-broker.exe <pipe-name> <distro> get <project> <profile> <key>
 
 #[cfg(windows)]
 fn main() {
