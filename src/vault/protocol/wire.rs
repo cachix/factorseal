@@ -325,9 +325,9 @@ pub struct VaultApplicationContext {
     /// interop broker. Never authenticates anything and never affects the
     /// caller's fingerprint: transport authentication still resolves the
     /// broker's own SID and executable digest exactly as any other Windows
-    /// client. This is display context for the approval prompt only, and it
-    /// forces every such request through interactive approval with no
-    /// persisted grant, since it carries no equivalent of the
+    /// client. It is display context for the approval prompt, and it caps
+    /// the lifetime of any grant approved for such a request at
+    /// `MAX_WSL_GRANT_SECONDS`, since it carries no equivalent of the
     /// executable-identity hint a native caller gets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_wsl_origin: Option<String>,
