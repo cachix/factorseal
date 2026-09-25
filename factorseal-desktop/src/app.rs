@@ -1,6 +1,5 @@
 use self::shortcuts::OpenSettings;
 use crate::secret_input::SecretInputState;
-#[cfg(target_os = "linux")]
 mod access;
 mod approval_window;
 mod breadcrumb;
@@ -30,19 +29,17 @@ mod window_activation;
 #[cfg(target_os = "windows")]
 mod windows_screen;
 
+/// Work for the access popup. Only the Linux Secret Service adapter sends the
+/// keyring variants; pending permissions come from polling on every platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum AccessEvent {
-    #[cfg(target_os = "linux")]
     Finished(factorseal::SecretServiceAccessContext),
-    #[cfg(target_os = "linux")]
     Input(factorseal::SecretServiceInputRequest),
-    #[cfg(target_os = "linux")]
     Unlock {
         context: factorseal::SecretServiceAccessContext,
         objects: Vec<String>,
     },
-    #[cfg(target_os = "linux")]
     Request(factorseal::SecretServiceAccessRequest),
-    #[cfg(target_os = "linux")]
     Permissions(Vec<factorseal::Permission>),
 }
 use std::{cell::Cell, rc::Rc, sync::Arc};
@@ -907,7 +904,6 @@ fn highlighted_text(text: String, query: &str, color: Hsla) -> StyledText {
     StyledText::new(text).with_highlights(highlights)
 }
 
-#[cfg(target_os = "linux")]
 fn hex_digest(digest: &[u8; 32]) -> String {
     use std::fmt::Write as _;
     let mut output = String::with_capacity(64);
@@ -958,7 +954,6 @@ fn link_showing(
         .child(shown.into())
 }
 
-#[cfg(target_os = "linux")]
 fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static str {
     match scope {
         Some(factorseal::DocumentKind::LinuxSecretService) => "System keyring",
@@ -4251,7 +4246,6 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
     cx.global_mut::<DesktopStatus>().unsealed = matches!(snapshot, Snapshot::Unsealed { .. });
     refresh_tray(cx);
     sync_secret_service(snapshot, cx);
-    #[cfg(target_os = "linux")]
     access::update(snapshot, cx);
     if matches!(snapshot, Snapshot::Unsealed { .. }) {
         crate::timing::finish_unlock("ui_updated", "ok");
@@ -4780,10 +4774,7 @@ pub(crate) fn setup(
         }
     })
     .detach();
-    #[cfg(target_os = "linux")]
     access::setup(access_requests, cx);
-    #[cfg(not(target_os = "linux"))]
-    drop(access_requests);
     if !background {
         cx.activate(true);
     }
@@ -4829,7 +4820,6 @@ fn sync_secret_service(snapshot: &Snapshot, cx: &mut App) {
 /// A hidden window cannot answer an unlock prompt. Complete pending prompts
 /// as dismissed so waiting clients get an answer instead of a hang.
 fn dismiss_secret_service_prompts(cx: &mut App) {
-    #[cfg(target_os = "linux")]
     if access::is_open(cx) {
         return;
     }

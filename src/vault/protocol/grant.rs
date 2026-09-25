@@ -10,7 +10,7 @@ use crate::vault::{
     VaultResult, VaultStore,
 };
 
-use super::wire::append_digest_bytes;
+use super::wire::{MAX_WSL_GRANT_SECONDS, append_digest_bytes};
 use super::{CallerIdentity, Permission, PermissionState};
 
 // Version 3 stores each operation independently so one permission's lifetime
@@ -21,10 +21,6 @@ const GRANT_TARGET_DOMAIN: &[u8] = b"factorseal/grant-target/v3\0";
 const PERMISSION_REGISTRY_VERSION: u8 = 1;
 #[cfg(target_os = "linux")]
 const EXCLUSIVE_HOLDER_VERSION: u8 = 1;
-/// Maximum lifetime for a grant created from a WSL-relayed request,
-/// regardless of the duration requested or approved. See
-/// `VaultApplicationContext::declared_wsl_origin`.
-pub(super) const MAX_WSL_GRANT_SECONDS: u64 = 300;
 
 /// Permission persisted in one caller grant.
 #[cfg(feature = "vault-store")]
