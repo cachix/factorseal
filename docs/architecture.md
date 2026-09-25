@@ -255,7 +255,11 @@ $ factorseal permissions revoke prm_7K3M
 Watch mode uses a bounded native revision wait: it wakes immediately when the
 permission set changes without polling once per second. The agent permits a small
 bounded set of concurrent local connections, allowing provider requests to
-create pending permissions while CLI and future GUI notification listeners wait.
+create pending permissions while CLI and Desktop listeners wait. Desktop polls
+pending permissions while unsealed and opens its approval popup on every
+platform; the popup accepts input only after the user clicks it and ignores
+approval for one second after its requests change, so typing meant for another
+app cannot approve a request.
 The SecretSpec endpoint waits internally for its own pending permission while
 the original provider request remains within its deadline. Approval completes
 that request without exposing permission-management APIs to SecretSpec. If the
