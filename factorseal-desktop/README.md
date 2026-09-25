@@ -29,7 +29,7 @@ encrypted until unlock. Generic keyring lookups show their supplied attributes i
 the main review card. The user can deny the request or allow it and authenticate using
 FactorSeal's secure input. Unlocking and approval stay in the same popup and
 reuse the secure password entry. The vault browser stays closed. New access
-requires a signed grant for the specific entry, authenticated executable, project, folder, and operation, valid for one hour or until revoked. Keyring approvals bind the stored item ID, so another item with the same service name requires separate approval. The worker
+requires a signed grant for the specific entry, authenticated executable, project, folder, and operation, valid for one hour or until revoked. Requests relayed from WSL2 show the distro name, and their grants expire after five minutes whatever duration is chosen, because every WSL2 caller shares the broker's identity (see [architecture](../docs/architecture.md#wsl2-broker)). Keyring approvals bind the stored item ID, so another item with the same service name requires separate approval. The worker
 checks grants for every operation. SecretSpec IPC also opens this approval flow,
 using its own provider-cache scope. Project labels are caller-supplied context;
 the worker authenticates the executable independently. Denial, dismissal, and
