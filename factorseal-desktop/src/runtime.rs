@@ -468,7 +468,6 @@ impl DesktopRuntime {
         })
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn approve_permissions(
         &self,
         metadata: &VaultMetadata,
@@ -511,7 +510,6 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn deny_permission(
         &self,
         metadata: &VaultMetadata,

@@ -130,9 +130,9 @@ fn queued_request_is_rejected_after_absolute_expiry() {
 }
 
 use super::super::grant::{
-    GrantTarget, MAX_WSL_GRANT_SECONDS, list_granted_permissions, promote_permission,
-    revoke_permission, store_grant,
+    GrantTarget, list_granted_permissions, promote_permission, revoke_permission, store_grant,
 };
+use super::super::wire::MAX_WSL_GRANT_SECONDS;
 use super::*;
 use crate::vault::{
     DeviceKeyId, HistoryEntry, HistoryOperation, MAX_HISTORY_PAGE_SIZE, Permission,

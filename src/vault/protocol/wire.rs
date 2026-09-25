@@ -22,6 +22,10 @@ pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
 pub const MAX_PERMISSION_WAIT_MS: u64 = 5_000;
+/// Maximum lifetime for a grant created from a WSL-relayed request,
+/// regardless of the duration requested or approved. See
+/// [`VaultApplicationContext::declared_wsl_origin`].
+pub const MAX_WSL_GRANT_SECONDS: u64 = 300;
 /// Maximum number of metadata-only entries returned by one list request.
 ///
 /// Eight complete native SecretSpec addresses still fit below the one-MiB

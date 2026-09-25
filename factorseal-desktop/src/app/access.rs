@@ -955,8 +955,19 @@ impl Render for AccessView {
                 // prominently because it changes what this approval actually
                 // grants: a short-lived lease regardless of the duration
                 // chosen below, since this caller has none of the
-                // executable-identity assurance a native one has.
-                card = card.child(detail("Relayed from WSL distro", distro.clone(), cx));
+                // executable-identity assurance a native one has. The
+                // expiry row says so, so the duration buttons don't
+                // overstate the grant.
+                card = card
+                    .child(detail("Relayed from WSL distro", distro.clone(), cx))
+                    .child(detail(
+                        "Access expires",
+                        format!(
+                            "After {} minutes, whichever duration you choose",
+                            factorseal::MAX_WSL_GRANT_SECONDS / 60
+                        ),
+                        cx,
+                    ));
             }
             card = card.child(detail(
                 "Requested by",
