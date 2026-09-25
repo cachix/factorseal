@@ -959,7 +959,7 @@ impl Render for AccessView {
                 // expiry row says so, so the duration buttons don't
                 // overstate the grant.
                 card = card
-                    .child(detail("Relayed from WSL distro", distro.clone(), cx))
+                    .child(detail("WSL distro", distro.clone(), cx))
                     .child(detail(
                         "Access expires",
                         format!(

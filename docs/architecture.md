@@ -327,7 +327,7 @@ digest, not the Linux process that invoked it. Every WSL2 caller therefore
 shares a single identity, the broker's.
 
 The broker tags each request with the invoking distro's name. This name is
-caller-declared: approval prompts show it as “Relayed from WSL distro”, but it
+caller-declared: approval prompts show it as “WSL distro”, but it
 never authenticates anything and does not change the caller's identity.
 
 Because the vault cannot tell WSL2 callers apart, a grant approved for a
