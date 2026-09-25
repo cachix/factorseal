@@ -3,6 +3,10 @@ use super::*;
 use factorseal::{SecretServiceAccessContext, SecretServiceAccessRequest};
 use std::collections::BTreeMap;
 
+/// How long the popup ignores approval after it appears or its requests
+/// change, so a click or Enter meant for another window cannot approve.
+const ARM_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[derive(Default)]
 struct AccessWindow(Option<(AnyWindowHandle, gpui::Entity<AccessView>)>, bool);
 impl Global for AccessWindow {}
@@ -11,6 +15,32 @@ struct InputEditor {
     value: gpui::Entity<SecretInputState>,
     initialized: bool,
     focused: bool,
+}
+
+/// The popup can take keyboard focus while the user is typing in another app,
+/// even while it stays hidden behind that app. Its fields take no focus and
+/// nothing is approved until the user clicks inside it, and approval waits
+/// [`ARM_DELAY`] after the popup appears or its requests change.
+struct InputGuard {
+    armed: bool,
+    changed_at: std::time::Instant,
+}
+
+impl InputGuard {
+    fn new() -> Self {
+        Self {
+            armed: false,
+            changed_at: std::time::Instant::now(),
+        }
+    }
+
+    fn changed(&mut self) {
+        self.changed_at = std::time::Instant::now();
+    }
+
+    fn allows_approval(&self) -> bool {
+        self.armed && self.changed_at.elapsed() >= ARM_DELAY
+    }
 }
 
 #[derive(Default)]
@@ -35,6 +65,7 @@ struct AccessView {
     password: gpui::Entity<SecretInputState>,
     group: Option<factorseal::UnlockGroup>,
     error: Option<String>,
+    guard: InputGuard,
     _submit: Subscription,
     _secret_submit: Subscription,
 }
@@ -95,7 +126,7 @@ pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App
                         .collect();
                     if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
                         view.update(cx, |view, cx| {
-                            view.grants = pending;
+                            view.set_pending(pending);
                             cx.notify();
                         });
                     } else if !pending.is_empty() {
@@ -233,6 +264,7 @@ fn open(event: AccessEvent, cx: &mut App) {
     if let Some((handle, view)) = cx.global::<AccessWindow>().0.clone() {
         view.update(cx, |view, cx| {
             view.add(event);
+            view.guard.changed();
             cx.notify();
         });
         let layered = cx.global::<AccessWindow>().1;
@@ -264,7 +296,6 @@ fn open(event: AccessEvent, cx: &mut App) {
         let view = cx.new(|cx| {
             let password =
                 cx.new(|cx| SecretInputState::new(window, cx).placeholder("FactorSeal password"));
-            password.update(cx, |input, cx| input.focus(window, cx));
             let submit = cx.subscribe_in(
                 &password,
                 window,
@@ -320,6 +351,7 @@ fn open(event: AccessEvent, cx: &mut App) {
                 duration: Some(3600),
                 details: RequestDetails::default(),
                 error: None,
+                guard: InputGuard::new(),
                 _submit: submit,
                 _secret_submit: secret_submit,
             };
@@ -469,7 +501,38 @@ impl AccessView {
         cx.notify();
     }
 
+    /// Replace the polled pending permissions, restarting the approval delay
+    /// when the set changes under the user.
+    fn set_pending(&mut self, pending: Vec<factorseal::Permission>) {
+        if self
+            .grants
+            .iter()
+            .map(|grant| &grant.id)
+            .ne(pending.iter().map(|grant| &grant.id))
+        {
+            self.guard.changed();
+        }
+        self.grants = pending;
+    }
+
+    /// Accept keyboard input once the user clicks inside the popup.
+    fn arm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.guard.armed {
+            return;
+        }
+        self.guard.armed = true;
+        // The secret editor takes focus in render once armed.
+        if self.inputs.is_empty() {
+            self.password
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
     fn allow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.guard.allows_approval() {
+            return;
+        }
         if self.approving || matches!(self.snapshot, Snapshot::Unlocking { .. }) {
             return;
         }
@@ -671,7 +734,8 @@ impl Render for AccessView {
             }
             self.editor.initialized = true;
         }
-        if !self.editor.focused
+        if self.guard.armed
+            && !self.editor.focused
             && !self.inputs.is_empty()
             && matches!(self.snapshot, Snapshot::Unsealed { .. })
         {
@@ -1018,6 +1082,7 @@ impl Render for AccessView {
             }
         }
         v_flex().size_full().border_1().border_color(theme.border)
+            .capture_any_mouse_down(cx.listener(|view, _, window, cx| view.arm(window, cx)))
             .capture_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
@@ -1053,6 +1118,24 @@ impl Render for AccessView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn input_guard_needs_a_click_and_a_settled_popup() {
+        let settled = std::time::Instant::now()
+            .checked_sub(ARM_DELAY * 2)
+            .expect("monotonic clock is past the delay");
+        let mut guard = InputGuard::new();
+        assert!(!guard.allows_approval(), "opening does not arm");
+        guard.changed_at = settled;
+        assert!(
+            !guard.allows_approval(),
+            "a settled popup still needs a click"
+        );
+        guard.armed = true;
+        assert!(guard.allows_approval());
+        guard.changed();
+        assert!(!guard.allows_approval(), "new requests restart the delay");
+    }
+
     #[test]
     fn unlock_dialog_describes_collection_and_item_requests() {
         assert_eq!(access_title(false, false, true), "Unlock system keyring");
