@@ -275,6 +275,9 @@ fn open(event: AccessEvent, cx: &mut App) {
                 return;
             }
             window_activation::show(window, true);
+            // Activation can be refused (Windows keeps focus with the app the
+            // user is typing in), so also flag the window in the taskbar.
+            window_activation::request_attention(window);
         });
         return;
     }
@@ -371,6 +374,13 @@ fn open(event: AccessEvent, cx: &mut App) {
     }
     match opened {
         Ok(handle) => {
+            if !layered {
+                // A new window opened behind the focused app gets no focus of
+                // its own on Windows; flag it so the request is not missed.
+                let _ = handle.update(cx, |_, window, _| {
+                    window_activation::request_attention(window);
+                });
+            }
             let state = cx.global_mut::<AccessWindow>();
             state.0 = Some((handle.into(), entity.unwrap()));
             state.1 = layered;

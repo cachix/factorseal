@@ -33,6 +33,55 @@ pub(super) fn show(window: &mut Window, remap_unfocused: bool) {
     window.activate_window();
 }
 
+/// Flag a window in the taskbar when it could not take the foreground.
+pub(super) fn request_attention(window: &Window) {
+    #[cfg(target_os = "windows")]
+    win32::flash_until_foreground(window);
+    #[cfg(not(target_os = "windows"))]
+    window.request_attention();
+}
+
+/// GPUI's `request_attention` skips windows that `GetActiveWindow` reports as
+/// active. A newly shown window is always its own thread's active window, even
+/// when another app keeps the foreground, so on Windows it never flashes.
+#[cfg(target_os = "windows")]
+mod win32 {
+    #![allow(unsafe_code)]
+    use gpui::Window;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FLASHW_ALL, FLASHW_TIMERNOFG, FLASHWINFO, FlashWindowEx, GetForegroundWindow,
+    };
+
+    /// Flash the taskbar button until the window comes to the foreground.
+    pub(super) fn flash_until_foreground(window: &Window) {
+        // GPUI's inherent `Window::window_handle` returns its own handle type.
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return;
+        };
+        let hwnd = HWND(handle.hwnd.get() as *mut _);
+        // SAFETY: GetForegroundWindow takes no arguments and only reads state.
+        if unsafe { GetForegroundWindow() } == hwnd {
+            return;
+        }
+        let info = FLASHWINFO {
+            cbSize: u32::try_from(std::mem::size_of::<FLASHWINFO>())
+                .expect("FLASHWINFO is a few dozen bytes"),
+            hwnd,
+            dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+            uCount: 0,
+            dwTimeout: 0,
+        };
+        // SAFETY: `info` is a fully initialized FLASHWINFO for a live window
+        // owned by this thread, and it outlives the call.
+        let _ = unsafe { FlashWindowEx(&raw const info) };
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn focus_niri(handle: AnyWindowHandle, cx: &mut App) {
     cx.spawn(async move |cx| {
