@@ -44,7 +44,8 @@ while you are typing in another app, and on Windows it can take keyboard focus
 even while it stays behind that app. So its fields accept no typing until you
 click inside it, and Grant access, Enter, Unlock, and Save secret do nothing
 until one second after the popup appears or its list of requests changes.
-Escape still denies.
+Escape still denies. If Windows keeps another app in front, the popup's taskbar
+button flashes until you open it.
 
 Wi-Fi passwords appear under **System integrations → Wi-Fi passwords**. On
 Linux, the desktop registers a NetworkManager secret agent on the system bus
