@@ -856,12 +856,34 @@ fn launch_chain_label(chain: &[String]) -> Option<String> {
     })
 }
 
+// Text with an element ID. The ID is what exposes text to accessibility
+// clients (screen readers, UI Automation) as a label; a plain string is
+// drawn but not exposed. An ID must be unique among the children of its
+// nearest ancestor with an ID, which is why each request card and each
+// group of technical details below has one.
+fn text(id: impl Into<gpui::ElementId>, value: impl Into<gpui::SharedString>) -> gpui::Text {
+    gpui::Text::new(id.into(), value.into())
+}
+
+// A labelled row, identified by its label.
 fn detail(
     label: impl Into<gpui::SharedString>,
     value: impl Into<gpui::SharedString>,
     cx: &App,
-) -> Div {
+) -> gpui::Stateful<Div> {
+    let label = label.into();
+    detail_row(label.clone(), label, value, cx)
+}
+
+// A labelled row for a label that repeats among its siblings.
+fn detail_row(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    value: impl Into<gpui::SharedString>,
+    cx: &App,
+) -> gpui::Stateful<Div> {
     h_flex()
+        .id(id)
         .items_start()
         .gap_3()
         .child(
@@ -870,9 +892,15 @@ fn detail(
                 .flex_none()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(label.into()),
+                .child(text("label", label)),
         )
-        .child(div().flex_1().min_w_0().text_sm().child(value.into()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .child(text("value", value)),
+        )
 }
 
 impl Render for AccessView {
@@ -972,6 +1000,7 @@ impl Render for AccessView {
                 .is_some_and(|group| group.requires(factorseal::UnlockFactorKind::Password));
         let mut requests = v_flex().gap_4();
         let mut technical = v_flex().gap_4();
+        let mut card_index = 0_usize;
         if self.inputs.is_empty() {
             let mut grouped: BTreeMap<(&str, &str), (Vec<&str>, &SecretServiceAccessContext)> =
                 BTreeMap::new();
@@ -987,14 +1016,26 @@ impl Render for AccessView {
             }
             for ((project, profile), (mut secrets, context)) in grouped {
                 secrets.sort_unstable();
-                let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted).child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("Secrets"),
-                );
-                for secret in secrets {
-                    card = card.child(div().text_lg().font_semibold().child(secret.to_owned()));
+                card_index += 1;
+                let mut card = v_flex()
+                    .id(("access-request", card_index))
+                    .p_4()
+                    .gap_3()
+                    .rounded_lg()
+                    .bg(theme.muted)
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(text("heading", "Secrets")),
+                    );
+                for (index, secret) in secrets.into_iter().enumerate() {
+                    card = card.child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(text(("secret", index), secret.to_owned())),
+                    );
                 }
                 if project_title.is_none() {
                     card = card.child(detail("Project", project, cx));
@@ -1021,18 +1062,35 @@ impl Render for AccessView {
                     .map(|(context, objects)| (context, Some(objects))),
             )
         {
-            let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted);
+            card_index += 1;
+            let mut card = v_flex()
+                .id(("access-request", card_index))
+                .p_4()
+                .gap_3()
+                .rounded_lg()
+                .bg(theme.muted);
+            let mut info = v_flex().id(("technical", card_index)).gap_3();
             if let Some((project, profile, secret)) = project_coordinates(context) {
                 card = card
-                    .child(div().text_lg().font_semibold().child(project.to_owned()))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(text("title", project.to_owned())),
+                    )
                     .child(detail("Secret", format!("{secret} · {profile}"), cx));
             } else if let Some(project) = context.attributes.get("project") {
-                card = card.child(div().text_lg().font_semibold().child(project.clone()));
+                card = card.child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .child(text("title", project.clone())),
+                );
                 if let Some(secret) = context.attributes.get("secret") {
                     card = card.child(detail("Secret", secret.clone(), cx));
                 }
             } else {
-                card = card.child(div().font_semibold().child("System keyring"));
+                card = card.child(div().font_semibold().child(text("title", "System keyring")));
             }
             if let Some(objects) = objects {
                 card = card.child(detail("Requested action", "Unlock system keyring", cx));
@@ -1043,12 +1101,18 @@ impl Render for AccessView {
                         cx,
                     ));
                 }
-                for object in objects {
-                    card = card.child(detail("Requested item", unlock_target_label(object), cx));
+                for (index, object) in objects.iter().enumerate() {
+                    card = card.child(detail_row(
+                        ("requested-item", index),
+                        "Requested item",
+                        unlock_target_label(object),
+                        cx,
+                    ));
                 }
-                card = card.child(div().text_sm().child(
+                card = card.child(div().text_sm().child(text(
+                    "unlock-note",
                     "Item names and contents stay encrypted until unlock. Unlocking does not grant permission to read secrets.",
-                ));
+                )));
             } else if project_coordinates(context).is_none()
                 && !context.attributes.contains_key("project")
             {
@@ -1061,8 +1125,7 @@ impl Render for AccessView {
             }
             if let Some(executable) = &context.executable {
                 card = card.child(detail("Requested by", application_name(executable), cx));
-                technical =
-                    technical.child(detail("Executable", executable.display().to_string(), cx));
+                info = info.child(detail("Executable", executable.display().to_string(), cx));
             }
             if context.executable.is_none() {
                 card = card.child(detail(
@@ -1077,7 +1140,6 @@ impl Render for AccessView {
             }
             // Keep the requested items visible alongside the authenticated grant scope.
             requests = requests.child(card);
-            let mut info = v_flex().gap_3();
             if let Some(directory) = &context.working_directory {
                 info = info.child(detail(
                     "Working directory",
@@ -1139,24 +1201,42 @@ impl Render for AccessView {
                 .collect();
             labels.sort();
             labels.dedup();
-            let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted).child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Secrets"),
-            );
+            card_index += 1;
+            let mut card = v_flex()
+                .id(("access-request", card_index))
+                .p_4()
+                .gap_3()
+                .rounded_lg()
+                .bg(theme.muted)
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(text("heading", "Secrets")),
+                );
+            let mut grant_technical = v_flex().id(("technical", card_index)).gap_4();
             if labels.is_empty() {
-                card = card.child(div().text_lg().font_semibold().child("Secret access"));
+                card = card.child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .child(text("secret", "Secret access")),
+                );
             }
-            for label in labels {
-                card = card.child(div().text_lg().font_semibold().child(label));
+            for (index, label) in labels.into_iter().enumerate() {
+                card = card.child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .child(text(("secret", index), label)),
+                );
             }
             if let Some(project) = &grant.application.project
                 && project_title.is_none()
             {
                 card = card.child(detail("Project", project.clone(), cx));
             }
-            technical = technical
+            grant_technical = grant_technical
                 .child(detail(
                     "Access via",
                     permission_access_type(grant.scope),
@@ -1168,9 +1248,12 @@ impl Render for AccessView {
                     cx,
                 ));
             let requester = grant_requester(grant);
-            card = card.child(div().text_sm().child(format!(
-                "{requester} is requesting permission to {} these secrets.",
-                permission_operation_label(grant.operation).to_lowercase(),
+            card = card.child(div().text_sm().child(text(
+                "request",
+                format!(
+                    "{requester} is requesting permission to {} these secrets.",
+                    permission_operation_label(grant.operation).to_lowercase(),
+                ),
             )));
             card = card.child(detail("Requested by", requester, cx));
             if let Some(chain) = launch_chain_label(&grant.application.declared_launch_chain) {
@@ -1204,23 +1287,31 @@ impl Render for AccessView {
                         cx,
                     ));
             }
-            technical = technical.child(detail(
+            grant_technical = grant_technical.child(detail(
                 "Executable",
-                grant.principal.application_id.clone(),
+                display_executable(&grant.principal.application_id),
                 cx,
             ));
-            for executable in grant.application.declared_launch_chain.iter().rev() {
-                technical = technical.child(detail("Launcher", executable.clone(), cx));
+            if !grant.application.declared_launch_chain.is_empty() {
+                let launchers: Vec<_> = grant
+                    .application
+                    .declared_launch_chain
+                    .iter()
+                    .rev()
+                    .map(String::as_str)
+                    .collect();
+                grant_technical =
+                    grant_technical.child(detail("Launchers", launchers.join(" → "), cx));
             }
             if let Some(reason) = &grant.application.reason {
-                technical = technical.child(detail("Request", reason.clone(), cx));
+                grant_technical = grant_technical.child(detail("Request", reason.clone(), cx));
             }
             requests = requests.child(card);
-            technical = technical.child(detail(
+            technical = technical.child(grant_technical.child(detail(
                 "Executable digest",
                 hex_digest(&grant.principal.executable_digest),
                 cx,
-            ));
+            )));
         }
         requests = requests.child(
             Button::new("access-technical-details").ghost().small()
@@ -1231,9 +1322,14 @@ impl Render for AccessView {
                 })),
         ).when(self.details.expanded, |element| {
             element.child(technical).child(div().text_xs().text_color(theme.muted_foreground)
-                .child("Project labels and launchers come from the requesting app. The executable's identity is verified by the operating system, and access is granted to it."))
+                .child(text("technical-note", "Project labels and launchers come from the requesting app. The executable's identity is verified by the operating system, and access is granted to it.")))
         });
-        let mut groups = h_flex().gap_2().flex_wrap();
+        let mut groups = h_flex()
+            .id("unlock-group")
+            .role(gpui::Role::RadioGroup)
+            .aria_label("Unlock with")
+            .gap_2()
+            .flex_wrap();
         if let Some(metadata) = metadata {
             for (index, group) in metadata.unlock_policy().groups().iter().enumerate() {
                 let selected = self.group.as_ref() == Some(group);
@@ -1241,6 +1337,8 @@ impl Render for AccessView {
                 groups = groups.child(
                     Button::new(("access-factor", index))
                         .label(group.to_string())
+                        .role(Some(gpui::Role::RadioButton))
+                        .toggled(selected)
                         .selected(selected)
                         .disabled(busy)
                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -1278,10 +1376,15 @@ impl Render for AccessView {
                                 div()
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
-                                    .child("FactorSeal"),
+                                    .child(text("brand", "FactorSeal")),
                             ),
                     )
-                    .child(div().text_xl().font_semibold().child(title)),
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_semibold()
+                            .child(text("access-title", title)),
+                    ),
             )
             .child(
                 div()
@@ -1299,15 +1402,21 @@ impl Render for AccessView {
                     .gap_3()
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if !self.inputs.is_empty() {
-                            "Saves this value once. No access grant is created."
-                        } else if self.grants.is_empty() {
-                            "Unlock your vault to continue here."
-                        } else {
-                            grant_scope_note(&self.grants)
-                        },
-                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(text(
+                                "scope-note",
+                                if !self.inputs.is_empty() {
+                                    "Saves this value once. No access grant is created."
+                                } else if self.grants.is_empty() {
+                                    "Unlock your vault to continue here."
+                                } else {
+                                    grant_scope_note(&self.grants)
+                                },
+                            )),
+                    )
                     .when(
                         metadata
                             .is_some_and(|metadata| metadata.unlock_policy().groups().len() > 1),
@@ -1320,11 +1429,16 @@ impl Render for AccessView {
                             element.child(field_label(
                                 "Allow access for",
                                 h_flex()
+                                    .id("grant-lifetime")
+                                    .role(gpui::Role::RadioGroup)
+                                    .aria_label("Allow access for")
                                     .gap_2()
                                     .when(single_write_allowed(&self.grants), |row| {
                                         row.child(
                                             Button::new("grant-once")
                                                 .label("This write only")
+                                                .role(Some(gpui::Role::RadioButton))
+                                                .toggled(choice == GrantChoice::ThisWriteOnly)
                                                 .selected(choice == GrantChoice::ThisWriteOnly)
                                                 .disabled(busy)
                                                 .on_click(cx.listener(|view, _, _, cx| {
@@ -1336,6 +1450,8 @@ impl Render for AccessView {
                                     .child(
                                         Button::new("grant-hour")
                                             .label("1 hour")
+                                            .role(Some(gpui::Role::RadioButton))
+                                            .toggled(choice == GrantChoice::Hour)
                                             .selected(choice == GrantChoice::Hour)
                                             .disabled(busy)
                                             .on_click(cx.listener(|view, _, _, cx| {
@@ -1346,6 +1462,8 @@ impl Render for AccessView {
                                     .child(
                                         Button::new("grant-persistent")
                                             .label("Until revoked")
+                                            .role(Some(gpui::Role::RadioButton))
+                                            .toggled(choice == GrantChoice::UntilRevoked)
                                             .selected(choice == GrantChoice::UntilRevoked)
                                             .disabled(busy)
                                             .on_click(cx.listener(|view, _, _, cx| {
@@ -1368,9 +1486,10 @@ impl Render for AccessView {
                     .when(
                         matches!(self.snapshot, Snapshot::Uninitialized { .. }),
                         |element| {
-                            element.child(div().text_sm().child(
+                            element.child(div().text_sm().child(text(
+                                "setup-note",
                                 "Set up your vault in FactorSeal Desktop before allowing access.",
-                            ))
+                            )))
                         },
                     )
                     .child(

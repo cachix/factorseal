@@ -40,8 +40,10 @@ promptly; it seals itself after a few idle minutes.
 
 ## Inspect
 
-- UI Automation: `uia-dump.ps1 -Out <file> [-DesktopPid <pid>]`. From WSL it
-  sees only window frames if Desktop was started elevated.
+- UI Automation: `uia-dump.ps1 -Out <file> [-DesktopPid <pid>]` lists the
+  popup's text and which lifetime is selected, so read what the popup says
+  there; `screenshot.ps1` shows how it looks. From WSL it sees only window
+  frames if Desktop was started elevated.
 - Hangs or crashes: start `proc-watch.ps1 -Out <file> -Seconds 600` from WSL
   in the background before the user launches Desktop, and ask them to set
   `$env:FACTORSEAL_TIMINGS = '1'` and redirect stderr to a file.
