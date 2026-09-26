@@ -581,6 +581,7 @@ impl DesktopRuntime {
         group: factorseal::UnlockGroup,
         password: Zeroizing<Vec<u8>>,
         duration: Option<u64>,
+        single_use: bool,
     ) -> Result<(), String> {
         let requests = permissions
             .iter()
@@ -589,7 +590,7 @@ impl DesktopRuntime {
                 else {
                     return Err("permission is no longer pending".to_owned());
                 };
-                Ok((permission.id.clone(), challenge, duration))
+                Ok((permission.id.clone(), challenge, duration, single_use))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let password = LockedBytes::from_zeroizing(password).map_err(|error| error.to_string())?;
@@ -609,6 +610,7 @@ impl DesktopRuntime {
                     id: permission.id.clone(),
                     signature,
                     duration_seconds: duration,
+                    single_use,
                 })
                 .map_err(|error| error.to_string())?,
             )?;

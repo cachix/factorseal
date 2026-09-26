@@ -653,6 +653,7 @@ async fn secretspec_request_waits_for_approval_and_completes() {
             id: permissions[0].id.clone(),
             signature,
             duration_seconds: Some(8 * 60 * 60),
+            single_use: false,
         })
         .unwrap(),
         fixture.now + 3,

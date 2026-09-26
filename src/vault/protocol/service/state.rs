@@ -235,21 +235,14 @@ impl LiveStateGuard<'_> {
         &mut self,
         id: &str,
         signature: &[u8],
-        grant_duration_seconds: Option<u64>,
+        lifetime: super::approvals::ApprovedLifetime,
         now: u64,
         provenance: &Provenance,
     ) -> VaultResult<()> {
         let LiveState {
             store, approvals, ..
         } = &mut *self.live;
-        approvals.approve(
-            store,
-            id,
-            signature,
-            grant_duration_seconds,
-            now,
-            provenance,
-        )?;
+        approvals.approve(store, id, signature, lifetime, now, provenance)?;
         self.save_approvals(now);
         self.approval_changed.notify_all();
         Ok(())

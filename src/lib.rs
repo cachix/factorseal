@@ -72,10 +72,10 @@ pub use vault::{
 pub use vault::{
     MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
     PermissionChange, PermissionOperation, PermissionPrincipal, PermissionState, PermissionTarget,
-    PermissionWaitStatus, VaultAction, VaultApplicationContext, VaultClient,
-    VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference, VaultMutation,
-    VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
-    WireSecret, WireSecretAddress, read_permission_pages,
+    PermissionWaitStatus, SINGLE_USE_GRANT_SECONDS, VaultAction, VaultApplicationContext,
+    VaultClient, VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference,
+    VaultMutation, VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError,
+    VaultResponseErrorCode, WireSecret, WireSecretAddress, read_permission_pages,
 };
 
 #[cfg(all(feature = "key-protection", feature = "vault-client"))]
