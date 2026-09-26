@@ -2,78 +2,179 @@
 # Checks FactorSeal Desktop's approval popup on Windows from WSL2.
 #
 #   check.sh popup [--delay SECONDS] [--key KEY] [--observe SECONDS]
+#                  [--test-vault [--then grant|deny]]
 #       Send a WSL-relayed request and report whether the popup opened, whether
 #       it reached the foreground or flashed its taskbar button, a screenshot,
 #       and whether the vault holds the pending request with its WSL origin.
 #       --delay waits before sending, so a focus scenario can be set up.
-#   check.sh grant [--key KEY]
+#       --then drives the popup afterwards (test vault only); grant also runs
+#       the grant check.
+#   check.sh grant --key KEY [--test-vault]
 #       After approving in the popup, resend the request and check that it
 #       succeeds without a new popup and that the grant is capped at 300 s.
+#   check.sh test-desktop
+#       Create the throwaway test vault if needed, start a Desktop on it, and
+#       unlock it, so --test-vault runs need no person.
 #
-# Needs Desktop running and unsealed, the native Windows build of the CLI,
-# and the cross-compiled broker. Paths can be overridden with
-# FACTORSEAL_WINDOWS_TREE (Windows copy of this repository, as a WSL path) and
-# FACTORSEAL_WSL_BROKER.
+# --test-vault targets the throwaway vault in %LOCALAPPDATA%\FactorSeal-check
+# and the Desktop running on it instead of the default vault. Needs the native
+# Windows build of the CLI and the cross-compiled broker. Paths can be
+# overridden with FACTORSEAL_WINDOWS_TREE (Windows copy of this repository, as
+# a WSL path) and FACTORSEAL_WSL_BROKER.
 set -euo pipefail
 
 case ${1:-} in
-    popup | grant) ;;
-    *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    popup | grant | test-desktop) ;;
+    *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 here=$(cd "$(dirname "$0")" && pwd)
 
-windows_profile=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')")
+windows_env() { cmd.exe /c "echo %$1%" 2>/dev/null | tr -d '\r'; }
+windows_profile=$(wslpath "$(windows_env USERPROFILE)")
 windows_tree=${FACTORSEAL_WINDOWS_TREE:-$windows_profile/Projects/factorseal}
 cli="$windows_tree/target/release/factorseal.exe"
+desktop="$windows_tree/target/release/factorseal-desktop.exe"
 broker=${FACTORSEAL_WSL_BROKER:-$repo/target/x86_64-pc-windows-msvc/release/factorseal-wsl-broker.exe}
 distro=${WSL_DISTRO_NAME:?not running inside WSL}
+test_dir="$(windows_env LOCALAPPDATA)\\FactorSeal-check"
+test_root="$test_dir\\vault"
+test_password="$test_dir\\password"
 project=wsl-ui-check
 profile=default
 max_wsl_grant_seconds=300
 
 die() { echo "FAIL: $*" >&2; exit 1; }
 
-[ -x "$cli" ] || die "no native CLI at $cli; build it on Windows (see docs/development.md)"
-[ -x "$broker" ] || die "no broker at $broker; build it with:
-  devenv shell -- cargo xwin build --release --target x86_64-pc-windows-msvc --bin factorseal-wsl-broker --features vault-client"
-
-# The vault seals itself after a few idle minutes, so check before sending.
-require_unsealed() {
-    status=$("$cli" status </dev/null 2>&1) || die "factorseal status failed: $status"
-    installation=$(sed -n 's/.*"installation_id": "\([^"]*\)".*/\1/p' <<<"$status")
-    state=$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' <<<"$status")
-    [ -n "$installation" ] || die "no installation_id in factorseal status"
-    [ "$state" = unsealed ] || die "vault is $state; unlock it in Desktop first"
-}
-require_unsealed
-pipe="\\\\.\\pipe\\factorseal-$installation"
-
-send() { timeout 60 "$broker" "$pipe" "$distro" get "$project" "$profile" "$1" 2>&1 || true; }
-
-# Prints the permission block for one request ID, or nothing.
-permission() {
-    "$cli" permissions list </dev/null 2>&1 | awk -v id="\"$1\"" '
-        $1 == id { found = 1; print; next }
-        found && /^"prm_/ { exit }
-        found { print }'
+powershell() {
+    local script=$1
+    shift
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$here/$script")" "$@" </dev/null |
+        tr -d '\r'
 }
 
-command=${1:-}
-shift || true
+[ -x "$cli" ] || die "no native CLI at $cli; build it with $here/build-windows.sh"
+
+command=$1
+shift
 key="CHECK_$(date +%H%M%S)"
 key_given=no
 delay=0
 observe=12
+test_vault=no
+then=
 while [ $# -gt 0 ]; do
     case $1 in
         --key) key=$2; key_given=yes; shift 2 ;;
         --delay) delay=$2; shift 2 ;;
         --observe) observe=$2; shift 2 ;;
+        --test-vault) test_vault=yes; shift ;;
+        --then) then=$2; shift 2 ;;
         *) die "unknown option $1" ;;
     esac
 done
+case $then in
+    '' | grant | deny) ;;
+    *) die "--then takes grant or deny" ;;
+esac
+[ -z "$then" ] || [ "$test_vault" = yes ] || die "--then drives only the test vault; add --test-vault"
+[ "$command" = test-desktop ] && test_vault=yes
+
+root_args=()
+[ "$test_vault" = yes ] && root_args=(--root "$test_root")
+factorseal() { "$cli" "${root_args[@]}" "$@" </dev/null 2>&1; }
+
+# The Desktop serving the chosen vault; the test one runs with --root.
+desktop_pid() {
+    local test='$false'
+    [ "$test_vault" = yes ] && test='$true'
+    powershell.exe -NoProfile -Command "
+        Get-CimInstance Win32_Process -Filter \"Name='factorseal-desktop.exe'\" |
+            Where-Object { (\$_.CommandLine -like '*FactorSeal-check*') -eq $test } |
+            Select-Object -First 1 -ExpandProperty ProcessId" </dev/null | tr -d '\r'
+}
+
+state() { factorseal status | sed -n 's/.*"state": "\([^"]*\)".*/\1/p'; }
+
+# The vault seals itself after a few idle minutes, so check before sending.
+require_unsealed() {
+    status=$(factorseal status) || die "factorseal status failed: $status"
+    installation=$(sed -n 's/.*"installation_id": "\([^"]*\)".*/\1/p' <<<"$status")
+    [ -n "$installation" ] || die "no installation_id in factorseal status"
+    if [ "$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' <<<"$status")" != unsealed ]; then
+        [ "$test_vault" = yes ] && die "the test vault is sealed; run: $0 test-desktop"
+        die "vault is sealed; unlock it in Desktop first"
+    fi
+}
+
+if [ "$command" = test-desktop ]; then
+    powershell test-vault.ps1 -Cli "$(wslpath -w "$cli")" | sed 's/^/test vault:    /'
+    pid=$(desktop_pid)
+    if [ -z "$pid" ]; then
+        # Detached, with no handle to this shell, so the launch returns.
+        setsid "$desktop" --root "$test_root" </dev/null >/dev/null 2>&1 &
+        for _ in $(seq 50); do
+            pid=$(desktop_pid)
+            [ -n "$pid" ] && break
+            sleep 0.2
+        done
+        [ -n "$pid" ] || die "the test Desktop did not start"
+        echo "desktop:       started, pid $pid"
+    else
+        echo "desktop:       running, pid $pid"
+    fi
+    if [ "$(state)" = unsealed ]; then
+        echo "vault:         unsealed"
+        echo "PASS"
+        exit 0
+    fi
+    result=$(powershell drive.ps1 -Action unlock -DesktopPid "$pid" -PasswordFile "$test_password" -Seconds 30 || true)
+    sed 's/^/driver:        /' <<<"$result"
+    grep -q '^unlocked=True' <<<"$result" || die "the driver could not unlock the test vault"
+    # Status can trail the window by a moment.
+    for _ in $(seq 25); do
+        [ "$(state)" = unsealed ] && break
+        sleep 0.2
+    done
+    [ "$(state)" = unsealed ] || die "the test vault is still sealed"
+    echo "vault:         unsealed"
+    echo "PASS"
+    exit 0
+fi
+
+[ -x "$broker" ] || die "no broker at $broker; build it with: $here/build-windows.sh --broker"
+require_unsealed
+pipe="\\\\.\\pipe\\factorseal-$installation"
+pid=$(desktop_pid)
+[ -n "$pid" ] || die "no Desktop is running on this vault"
+
+send() { timeout 60 "$broker" "$pipe" "$distro" get "$project" "$profile" "$1" 2>&1 || true; }
+
+# Prints the permission block for one request ID, or nothing.
+permission() {
+    factorseal permissions list | awk -v id="\"$1\"" '
+        $1 == id { found = 1; print; next }
+        found && /^"prm_/ { exit }
+        found { print }'
+}
+
+check_grant() {
+    reply=$(send "$key")
+    grep -q 'approval required' <<<"$reply" && die "the request needed approval again: $reply"
+    echo "broker:        ${reply//$'\n'/ | }"
+    # The target line, right after each ID line, holds the key JSON-escaped.
+    id=$(factorseal permissions list | grep -F -B1 "\\\"key\\\":\\\"$key\\\"" |
+        sed -n 's/^"\(prm_[^"]*\)".*/\1/p' | head -1)
+    [ -n "$id" ] || die "no grant found for $key"
+    record=$(permission "$id")
+    granted=$(sed -n 's/.*granted: \([0-9]*\).*/\1/p' <<<"$record" | head -1)
+    expires=$(sed -n 's/.*expires: \([0-9]*\).*/\1/p' <<<"$record" | head -1)
+    [ -n "$granted" ] && [ -n "$expires" ] || die "grant for $key has no expiry: $record"
+    lifetime=$((expires - granted))
+    echo "grant:         $lifetime s (cap $max_wsl_grant_seconds s)"
+    [ "$lifetime" -le "$max_wsl_grant_seconds" ] || die "WSL grant outlives the cap"
+}
 
 case $command in
 popup)
@@ -88,7 +189,7 @@ popup)
         require_unsealed
     fi
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$win_out\\observe.ps1" \
-        -OutDir "$win_out" -Seconds "$observe" >"$out/powershell.txt" 2>&1 &
+        -OutDir "$win_out" -Seconds "$observe" -DesktopPid "$pid" >"$out/powershell.txt" 2>&1 &
     observer=$!
     # Windows PowerShell writes UTF-8 with a byte-order mark and CRLF endings.
     report() { sed '1s/^\xEF\xBB\xBF//' "$out/observer.txt" 2>/dev/null | tr -d '\r'; }
@@ -102,7 +203,7 @@ popup)
     [ -e "$out/ready" ] || die "observer did not start; see $out/powershell.txt"
 
     echo "Sending request for $project/$profile/$key at $(date -u +%T) UTC"
-    echo "Leave the popup alone until the result prints."
+    [ -n "$then" ] || echo "Leave the popup alone until the result prints."
     reply=$(send "$key")
     wait "$observer" || true
     id=$(sed -n 's/.*approval required (id \(prm_[^)]*\)).*/\1/p' <<<"$reply")
@@ -141,25 +242,29 @@ popup)
     elif [ "$foreground" != True ] && [ "$flashed" != True ]; then
         echo "FAIL: the popup is behind another app and did not flash"; failures=$((failures + 1))
     fi
-    [ "$failures" -eq 0 ] && echo "PASS" || exit 1
-    echo "Approve or deny it in the popup. After approving, run: $0 grant --key $key"
+    [ "$failures" -eq 0 ] || exit 1
+
+    if [ -z "$then" ]; then
+        echo "PASS"
+        echo "Approve or deny it in the popup. After approving, run: $0 grant --key $key"
+        exit 0
+    fi
+    result=$(powershell drive.ps1 -Action "$then" -DesktopPid "$pid" -PasswordFile "$test_password" || true)
+    sed 's/^/driver:        /' <<<"$result"
+    grep -q '^popup_closed=True' <<<"$result" || die "the driver could not $then the request"
+    record=$(permission "$id")
+    if [ "$then" = deny ]; then
+        grep -q 'pending' <<<"$record" && die "$id is still pending after Deny"
+        grep -q 'granted: ' <<<"$record" && die "$id was granted after Deny: $record"
+        echo "vault:         $id no longer pending, not granted"
+    else
+        check_grant
+    fi
+    echo "PASS"
     ;;
 grant)
     [ "$key_given" = yes ] || die "grant needs --key KEY from the popup run"
-    reply=$(send "$key")
-    grep -q 'approval required' <<<"$reply" && die "the request needed approval again: $reply"
-    echo "broker:        ${reply//$'\n'/ | }"
-    # The target line, right after each ID line, holds the key JSON-escaped.
-    id=$("$cli" permissions list </dev/null 2>&1 | grep -F -B1 "\\\"key\\\":\\\"$key\\\"" |
-        sed -n 's/^"\(prm_[^"]*\)".*/\1/p' | head -1)
-    [ -n "$id" ] || die "no grant found for $key"
-    record=$(permission "$id")
-    granted=$(sed -n 's/.*granted: \([0-9]*\).*/\1/p' <<<"$record" | head -1)
-    expires=$(sed -n 's/.*expires: \([0-9]*\).*/\1/p' <<<"$record" | head -1)
-    [ -n "$granted" ] && [ -n "$expires" ] || die "grant for $key has no expiry: $record"
-    lifetime=$((expires - granted))
-    echo "grant:         $lifetime s (cap $max_wsl_grant_seconds s)"
-    [ "$lifetime" -le "$max_wsl_grant_seconds" ] || die "WSL grant outlives the cap"
+    check_grant
     echo "PASS"
     ;;
 esac

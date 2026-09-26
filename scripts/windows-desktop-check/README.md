@@ -18,8 +18,12 @@ by default `%USERPROFILE%\Projects\factorseal`; set `FACTORSEAL_WINDOWS_TREE`
 | `build-windows.sh check` | WSL | Mirrors, then runs clippy and Desktop's tests natively. Safe while Desktop runs. |
 | `check.sh popup [--delay S] [--key K]` | WSL | Sends a request through the WSL broker and reports whether the popup opened, reached the foreground or flashed its taskbar button, with screenshots of the popup and the taskbar and a check that the vault holds the pending request. |
 | `check.sh grant --key K` | WSL | After the popup was approved, resends the request and checks that it succeeds without a new popup and that the grant stays within the 300-second WSL cap. |
+| `check.sh test-desktop` | WSL | Creates the throwaway test vault if needed, starts a Desktop on it, and unlocks it through `drive.ps1`. |
+| `check.sh popup --test-vault [--then grant\|deny]` | WSL | `popup` against the test vault and its Desktop; `--then` drives the popup afterwards, and `grant` also runs the grant check. `grant --test-vault` works the same way. |
 | `observe.ps1` | Windows | Used by `check.sh`; hooks taskbar-flash notifications and captures the screenshots. |
-| `uia-dump.ps1 [-Out FILE]` | Windows | Lists what UI Automation sees in Desktop's windows: control types, names, AutomationIds, and whether a value is exposed (never the value itself). |
+| `uia-dump.ps1 [-Out FILE] [-DesktopPid P]` | Windows | Lists what UI Automation sees in Desktop's windows: control types, names, AutomationIds, and whether a value is exposed (never the value itself). |
+| `test-vault.ps1 -Cli EXE` | Windows | Used by `check.sh`; creates a password-only vault in `%LOCALAPPDATA%\FactorSeal-check` with a random password in an owner-only file. Leaves an existing one alone. |
+| `drive.ps1 -Action unlock\|grant\|deny -DesktopPid P [-PasswordFile F]` | Windows | Used by `check.sh`; unlocks Desktop's main window or grants or denies the popup. Finds controls through UI Automation, then clicks and types with real input, because the popup accepts approval only after a click inside it. |
 | `proc-watch.ps1 -Out FILE [-Seconds N]` | Windows | Logs FactorSeal processes, their helpers and WerFault starting and exiting, and whether Desktop's window responds. For diagnosing hangs and crashes. |
 
 PowerShell scripts are run from WSL as
@@ -42,6 +46,23 @@ using their path in the Windows copy.
 Before changing Desktop's UI, run `build-windows.sh check`; afterwards,
 `build-windows.sh` and the flow above.
 
+## Automated flow on a test vault
+
+Nobody has to type a password or click the popup when the checks run against
+a throwaway vault. It runs in its own Desktop next to the user's, which keeps
+its own vault and tray icon.
+
+1. `./scripts/windows-desktop-check/check.sh test-desktop`
+2. `./scripts/windows-desktop-check/check.sh popup --test-vault --then grant`
+   (or `--then deny`)
+
+The driver moves the pointer and types, so it takes over the Windows
+desktop for a few seconds. It never clicks or types unless Desktop's window
+is in front and under the pointer. While it acts, it keeps that window
+topmost, because an always-on-top app (such as a pinned terminal) otherwise
+covers it, and it releases it afterwards. `--then deny` is known to leave the
+request pending in the vault; see the pitfalls.
+
 ## Reading the results
 
 - `check.sh popup` passes when the popup is **in the foreground or flashed its
@@ -62,10 +83,15 @@ Before changing Desktop's UI, run `build-windows.sh check`; afterwards,
   `--delay`); unlock and rerun when it says the vault is sealed.
 - **Desktop locks its executables.** Quit it from the tray before
   `build-windows.sh release`.
-- **Desktop is run from an elevated PowerShell on this setup**, and Windows
-  blocks UI Automation from a normal process into an elevated one. From WSL,
-  `uia-dump.ps1` then sees only window frames; run it from an elevated
-  PowerShell to see the controls.
+- **Windows blocks UI Automation from a normal process into an elevated
+  one.** Desktop no longer needs elevation, but if it is started elevated,
+  `uia-dump.ps1` and `drive.ps1` from WSL see only window frames.
+- **Denying in the popup does not yet reach the vault** (found 2026-09-26):
+  the popup closes, but the request stays pending, because Desktop ignores a
+  failed denial. The popup has also been seen closing by itself with a request
+  pending, after which new requests got no popup. Neither is explained yet.
+- **An always-on-top window covers the taskbar too**, so `taskbar.png` then
+  shows that window; rely on the flash count instead.
 - **The CLI needs `secretspec-provider`** for native SecretSpec on Windows.
   Packaging leaves it out until the SecretSpec IPC crate is published;
   `build-windows.sh` adds it (see `docs/development.md`).
