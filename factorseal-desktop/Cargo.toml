@@ -73,6 +73,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSVi
 raw-window-handle = "0.6.2"
 
 [dev-dependencies]
+gpui = { package = "gpui-ce", git = "https://github.com/domenkozar/gpui-ce.git", rev = "afc7a95c8971c3d829a2fe8a2646ed3c436ca2b4", features = ["test-support"] }
 qrcode = { version = "0.14.1", default-features = false }
 
 [lints.rust]
