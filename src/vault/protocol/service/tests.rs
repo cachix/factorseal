@@ -132,7 +132,7 @@ fn queued_request_is_rejected_after_absolute_expiry() {
 use super::super::grant::{
     GrantTarget, list_granted_permissions, promote_permission, revoke_permission, store_grant,
 };
-use super::super::wire::MAX_WSL_GRANT_SECONDS;
+use super::super::wire::{MAX_WSL_GRANT_SECONDS, SINGLE_USE_GRANT_SECONDS};
 use super::*;
 use crate::vault::{
     DeviceKeyId, HistoryEntry, HistoryOperation, MAX_HISTORY_PAGE_SIZE, Permission,
@@ -1151,6 +1151,7 @@ fn revoking_an_expired_permission_cleans_the_registry() {
         state: PermissionState::Granted {
             granted_at: 100,
             expires_at,
+            single_use: false,
         },
     };
     let state = service.state.lock_live(Instant::now()).unwrap();
@@ -1551,6 +1552,7 @@ fn approval_is_entry_scoped_and_requires_a_vault_signature() {
             id: permissions[0].id.clone(),
             signature: signature.clone(),
             duration_seconds: None,
+            single_use: false,
         })
         .unwrap(),
         203,
@@ -1563,6 +1565,7 @@ fn approval_is_entry_scoped_and_requires_a_vault_signature() {
             id: permissions[0].id.clone(),
             signature,
             duration_seconds: Some(60 * 60),
+            single_use: false,
         })
         .unwrap(),
         204,
@@ -1609,6 +1612,7 @@ fn approval_is_entry_scoped_and_requires_a_vault_signature() {
     let PermissionState::Granted {
         granted_at,
         expires_at: Some(deadline),
+        single_use: false,
     } = permissions[0].state
     else {
         panic!("expected a time-bounded grant");
@@ -1816,6 +1820,7 @@ fn wsl_declared_origin_caps_the_granted_lease() {
             id: permissions[0].id.clone(),
             signature,
             duration_seconds: Some(requested_duration),
+            single_use: false,
         })
         .unwrap(),
         103,
@@ -1922,6 +1927,7 @@ fn declared_launch_chain_is_shown_but_does_not_scope_the_grant() {
             id: permissions[0].id.clone(),
             signature,
             duration_seconds: Some(3_600),
+            single_use: false,
         })
         .unwrap(),
         103,
@@ -2059,6 +2065,7 @@ fn pending_approval_survives_sealing_and_is_approved_after_unseal() {
             id: interaction.id.clone(),
             signature,
             duration_seconds: Some(60 * 60),
+            single_use: false,
         })
         .unwrap(),
         now + 54,
@@ -3413,4 +3420,201 @@ fn legacy_project_grants_still_cover_multiple_entries() {
             .unwrap();
         }
     }
+}
+
+fn cache_write(project: &str, value: &[u8]) -> VaultRequest {
+    VaultRequest::new_with_application(
+        VaultAction::PutCache {
+            project: project.to_owned(),
+            address: project_address(project),
+            value: WireSecret::new(value.to_vec()).unwrap(),
+            evict_at: None,
+        },
+        VaultApplicationContext::new(Some(project.to_owned()), None, None, None).unwrap(),
+    )
+    .unwrap()
+}
+
+fn listed_permissions(
+    service: &VaultService,
+    manager: &CallerIdentity,
+    now: u64,
+) -> Vec<Permission> {
+    let listed = service.handle(
+        manager,
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+        now,
+    );
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
+        panic!("expected permissions");
+    };
+    permissions
+}
+
+/// Approve the only pending permission, signed for `single_use`.
+fn approve_only_pending(
+    directory: &tempfile::TempDir,
+    service: &VaultService,
+    manager: &CallerIdentity,
+    single_use: bool,
+    now: u64,
+) -> Result<VaultResponseBody, VaultResponseError> {
+    let permissions = listed_permissions(service, manager, now);
+    let [permission] = permissions.as_slice() else {
+        panic!("expected one permission, got {permissions:?}");
+    };
+    let PermissionState::Pending { challenge, .. } = &permission.state else {
+        panic!("expected a pending permission");
+    };
+    let signature = Vault::unseal_for_test(&directory.path().join("factorseal"))
+        .unwrap()
+        .sign_permission_approval(&permission.id, challenge, None, single_use)
+        .unwrap();
+    service
+        .handle(
+            manager,
+            VaultRequest::new(VaultAction::ApprovePermission {
+                id: permission.id.clone(),
+                signature,
+                duration_seconds: None,
+                single_use,
+            })
+            .unwrap(),
+            now,
+        )
+        .result
+}
+
+#[test]
+fn single_use_write_permission_allows_exactly_one_write() {
+    let now = wall_clock();
+    let (directory, service) = service(now, UnsealLeasePolicy::default());
+    let provider = caller();
+    let manager = permission_manager();
+    service.authorize_permission_manager(&manager, now).unwrap();
+    let asked = service.handle(&provider, cache_write("demo", b"first"), now + 1);
+    assert!(asked.result.unwrap_err().interaction.is_some());
+
+    assert!(matches!(
+        approve_only_pending(&directory, &service, &manager, true, now + 2),
+        Ok(VaultResponseBody::PermissionChanged {
+            status: PermissionChange::Granted
+        })
+    ));
+    let permissions = listed_permissions(&service, &manager, now + 3);
+    assert!(matches!(
+        permissions[0].state,
+        PermissionState::Granted {
+            single_use: true,
+            expires_at: Some(deadline),
+            ..
+        } if deadline == now + 2 + SINGLE_USE_GRANT_SECONDS
+    ));
+
+    let written = service.handle(&provider, cache_write("demo", b"first"), now + 4);
+    assert!(matches!(written.result, Ok(VaultResponseBody::Stored)));
+    assert!(
+        listed_permissions(&service, &manager, now + 5).is_empty(),
+        "the write spent the permission"
+    );
+    let second = service.handle(&provider, cache_write("demo", b"second"), now + 6);
+    assert!(second.result.unwrap_err().interaction.is_some());
+
+    // Spending it was persisted: sealing and reopening does not bring it back.
+    let service = reopen_after_seal(&directory, service, now + 7);
+    service
+        .authorize_permission_manager(&manager, now + 8)
+        .unwrap();
+    assert_eq!(pending_ids(&service, &manager, now + 8).len(), 1);
+    assert!(
+        listed_permissions(&service, &manager, now + 8)
+            .iter()
+            .all(|permission| matches!(permission.state, PermissionState::Pending { .. }))
+    );
+    let after_reopen = service.handle(&provider, cache_write("demo", b"second"), now + 9);
+    assert!(after_reopen.result.unwrap_err().interaction.is_some());
+    // Reads never had a permission, and a single-use write grant is not one.
+    let read = service.handle(&provider, cache_request("demo"), now + 10);
+    assert!(read.result.unwrap_err().interaction.is_some());
+}
+
+#[test]
+fn unused_single_use_write_permission_expires() {
+    let now = wall_clock();
+    let (directory, service) = service(now, UnsealLeasePolicy::default());
+    let provider = caller();
+    let manager = permission_manager();
+    service.authorize_permission_manager(&manager, now).unwrap();
+    let asked = service.handle(&provider, cache_write("demo", b"late"), now + 1);
+    assert!(asked.result.unwrap_err().interaction.is_some());
+    approve_only_pending(&directory, &service, &manager, true, now + 2).unwrap();
+
+    let late = service.handle(
+        &provider,
+        cache_write("demo", b"late"),
+        now + 2 + SINGLE_USE_GRANT_SECONDS,
+    );
+    assert!(late.result.unwrap_err().interaction.is_some());
+}
+
+#[test]
+fn single_use_approval_is_signed_and_only_for_secretspec_writes() {
+    let now = wall_clock();
+    let (directory, service) = service(now, UnsealLeasePolicy::default());
+    let provider = caller();
+    let manager = permission_manager();
+    service.authorize_permission_manager(&manager, now).unwrap();
+
+    // A signature for a lasting approval cannot be replayed as single-use,
+    // nor the other way round.
+    let asked = service.handle(&provider, cache_write("demo", b"value"), now + 1);
+    assert!(asked.result.unwrap_err().interaction.is_some());
+    let permissions = listed_permissions(&service, &manager, now + 2);
+    let PermissionState::Pending { challenge, .. } = &permissions[0].state else {
+        panic!("expected a pending permission");
+    };
+    let unsealed = Vault::unseal_for_test(&directory.path().join("factorseal")).unwrap();
+    for (signed_single_use, sent_single_use) in [(false, true), (true, false)] {
+        let signature = unsealed
+            .sign_permission_approval(&permissions[0].id, challenge, None, signed_single_use)
+            .unwrap();
+        let approved = service.handle(
+            &manager,
+            VaultRequest::new(VaultAction::ApprovePermission {
+                id: permissions[0].id.clone(),
+                signature,
+                duration_seconds: None,
+                single_use: sent_single_use,
+            })
+            .unwrap(),
+            now + 3,
+        );
+        assert!(approved.result.is_err());
+    }
+    assert!(
+        unsealed
+            .sign_permission_approval(&permissions[0].id, challenge, Some(60), true)
+            .is_err()
+    );
+    let with_duration = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ApprovePermission {
+            id: permissions[0].id.clone(),
+            signature: vec![1],
+            duration_seconds: Some(60),
+            single_use: true,
+        })
+        .unwrap(),
+        now + 3,
+    );
+    assert!(with_duration.result.is_err());
+    assert_eq!(pending_ids(&service, &manager, now + 4).len(), 1);
+
+    // A read cannot be approved for one use: only a write spends the grant.
+    let (read_directory, reads) = self::service(now, UnsealLeasePolicy::default());
+    reads.authorize_permission_manager(&manager, now).unwrap();
+    let read = reads.handle(&provider, cache_request("demo"), now + 1);
+    assert!(read.result.unwrap_err().interaction.is_some());
+    assert!(approve_only_pending(&read_directory, &reads, &manager, true, now + 2).is_err());
+    assert_eq!(pending_ids(&reads, &manager, now + 3).len(), 1);
 }

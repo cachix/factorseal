@@ -17,7 +17,7 @@ use crate::vault::{
 // Version 12 adds revision-bound permission pages and logical keyring transfers.
 // Version 16 adds reviewed browser credential saves to the manager-only boundary.
 // Version 17 adds the caller-declared WSL origin hint and launch chain on
-// VaultApplicationContext.
+// VaultApplicationContext, and single-use write approvals.
 pub(super) const PROTOCOL_VERSION: u8 = 17;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -27,6 +27,9 @@ pub const MAX_PERMISSION_WAIT_MS: u64 = 5_000;
 /// regardless of the duration requested or approved. See
 /// [`VaultApplicationContext::declared_wsl_origin`].
 pub const MAX_WSL_GRANT_SECONDS: u64 = 300;
+/// How long a single-use write permission waits for its write. See
+/// [`VaultAction::ApprovePermission`].
+pub const SINGLE_USE_GRANT_SECONDS: u64 = 300;
 /// Maximum number of executables in
 /// [`VaultApplicationContext::declared_launch_chain`].
 pub const MAX_DECLARED_LAUNCH_CHAIN: usize = 4;
@@ -762,9 +765,16 @@ pub enum VaultAction {
     ApprovePermission {
         id: String,
         signature: Vec<u8>,
-        /// User-selected permission lifetime. `None` means no expiry.
+        /// User-selected permission lifetime. `None` means no expiry,
+        /// unless `single_use` is set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_seconds: Option<u64>,
+        /// Allow one write only: the vault removes the permission when it
+        /// authorizes the first write, and after `SINGLE_USE_GRANT_SECONDS`
+        /// if none comes. Only for a SecretSpec write request, and never
+        /// with a duration. The signature covers this choice.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        single_use: bool,
     },
     DenyPermission {
         id: String,
@@ -876,8 +886,14 @@ impl VaultAction {
                 id,
                 signature,
                 duration_seconds,
+                single_use,
             } => {
                 validate_permission_id(id)?;
+                if *single_use && duration_seconds.is_some() {
+                    return Err(VaultError::Protocol(
+                        "a single-use approval takes no duration".to_owned(),
+                    ));
+                }
                 if signature.is_empty() || signature.len() > 16 * 1024 {
                     return Err(VaultError::Protocol(
                         "permission signature is empty or too long".to_owned(),
@@ -1351,6 +1367,9 @@ pub enum PermissionState {
         granted_at: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<u64>,
+        /// Covers one write, and is removed when that write is authorized.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        single_use: bool,
     },
 }
 
@@ -1653,6 +1672,7 @@ mod entry_access_tests {
             state: PermissionState::Granted {
                 granted_at: 1,
                 expires_at: None,
+                single_use: false,
             },
         }
     }

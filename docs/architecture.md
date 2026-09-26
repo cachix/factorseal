@@ -273,9 +273,13 @@ With Desktop on Linux, each write uses the secure input dialog described below.
 The provider checks the host's input capability before choosing the flow;
 cancelling or failing a desktop dialog ends the write. Desktop on macOS and
 Windows has no secure input dialog, so writes there use the signed project
-permissions too: the first write asks for a write permission in Desktop's
-approval popup, and it covers later writes of that entry for the chosen
-duration.
+permissions too: each write without a permission asks in Desktop's approval
+popup. The popup offers "This write only", its default for a write, which the
+vault removes when it authorizes that write (or after five minutes if the write
+never comes), so the next write asks again. "1 hour" and "Until revoked" instead
+cover later writes of that entry for the chosen duration. A single-use
+permission is removed before the value is written, so a write that then fails
+needs a new approval.
 
 Granting requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal

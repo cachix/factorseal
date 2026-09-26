@@ -20,10 +20,18 @@ use crate::vault::{
 use super::super::grant::{GrantTarget, promote_permission};
 use super::super::{
     CallerIdentity, GrantPermission, Permission, PermissionOperation, PermissionPrincipal,
-    PermissionState, PermissionWaitStatus, VaultAction, VaultApplicationContext,
-    VaultInteractionReference,
+    PermissionState, PermissionWaitStatus, SINGLE_USE_GRANT_SECONDS, VaultAction,
+    VaultApplicationContext, VaultInteractionReference,
 };
 use crate::vault::signature::{permission_payload, verify};
+
+/// The lifetime a person signed when approving: a duration (`None` for
+/// until revoked), or a single use.
+#[derive(Clone, Copy)]
+pub(super) struct ApprovedLifetime {
+    pub duration_seconds: Option<u64>,
+    pub single_use: bool,
+}
 
 const APPROVAL_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_PENDING_APPROVALS: usize = 128;
@@ -534,10 +542,14 @@ impl PendingApprovals {
         store: &VaultStore,
         id: &str,
         signature: &[u8],
-        grant_duration_seconds: Option<u64>,
+        lifetime: ApprovedLifetime,
         now: u64,
         provenance: &Provenance,
     ) -> VaultResult<()> {
+        let ApprovedLifetime {
+            duration_seconds: grant_duration_seconds,
+            single_use,
+        } = lifetime;
         self.purge_expired(now);
         let index = self
             .records
@@ -550,9 +562,30 @@ impl PendingApprovals {
         };
         verify(
             store.device().public_signing_key(),
-            &permission_payload(&record.summary.id, &challenge, grant_duration_seconds),
+            &permission_payload(
+                &record.summary.id,
+                &challenge,
+                grant_duration_seconds,
+                single_use,
+            ),
             signature,
         )?;
+        // Only a SecretSpec write consumes a single-use grant (see
+        // `grant::require_grant_consuming`); any other request would keep it
+        // until it expires, so refuse to create one.
+        if single_use
+            && (record.scope != DocumentKind::SecretSpecProviderCache
+                || record.permission != GrantPermission::Put)
+        {
+            return Err(VaultError::Protocol(
+                "only a SecretSpec write can be approved for one write".to_owned(),
+            ));
+        }
+        let grant_duration_seconds = if single_use {
+            Some(SINGLE_USE_GRANT_SECONDS)
+        } else {
+            grant_duration_seconds
+        };
         let grant_expires_at = grant_duration_seconds
             .map(|duration| now.checked_add(duration).ok_or(VaultError::Expired))
             .transpose()?;
@@ -566,6 +599,7 @@ impl PendingApprovals {
         permission.state = PermissionState::Granted {
             granted_at: now,
             expires_at: grant_expires_at,
+            single_use,
         };
         promote_permission(
             store,

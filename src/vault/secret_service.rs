@@ -1170,6 +1170,7 @@ mod tests {
                 id: id.clone(),
                 signature,
                 duration_seconds: Some(3600),
+                single_use: false,
             })
             .result
             .unwrap();

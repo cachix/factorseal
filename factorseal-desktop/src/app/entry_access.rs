@@ -44,6 +44,17 @@ pub(super) fn lifetime_label(permission: &Permission) -> String {
         .as_secs();
     if deadline <= now {
         "Expired".to_owned()
+    } else if matches!(
+        permission.state,
+        PermissionState::Granted {
+            single_use: true,
+            ..
+        }
+    ) {
+        format!(
+            "Next write only, within {} minutes",
+            (deadline - now).div_ceil(60)
+        )
     } else {
         format!("Expires in {} minutes", (deadline - now).div_ceil(60))
     }

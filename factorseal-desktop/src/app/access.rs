@@ -67,7 +67,8 @@ struct AccessView {
     reviewed_grants: Vec<factorseal::Permission>,
     approving: bool,
     reviewing: bool,
-    duration: Option<u64>,
+    // The person's pick; `None` until they click one. See `grant_choice`.
+    choice: Option<GrantChoice>,
     details: RequestDetails,
     password: gpui::Entity<SecretInputState>,
     group: Option<factorseal::UnlockGroup>,
@@ -480,7 +481,7 @@ impl AccessView {
             reviewed_grants: Vec::new(),
             approving: false,
             reviewing: false,
-            duration: Some(3600),
+            choice: None,
             details: RequestDetails::default(),
             error: None,
             guard: InputGuard::new(),
@@ -545,12 +546,13 @@ impl AccessView {
         self.password.update(cx, SecretInputState::clear);
         let runtime = Arc::clone(&self.runtime);
         let ids: Vec<_> = grants.iter().map(|grant| grant.id.clone()).collect();
-        let duration = self.duration;
+        let (duration, single_use) = grant_choice(&grants, self.choice).lifetime();
         self.approving = true;
         self.error = None;
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
-                runtime.approve_permissions(&metadata, &grants, group, password, duration)
+                runtime
+                    .approve_permissions(&metadata, &grants, group, password, duration, single_use)
             })
             .await;
             let _ = this.update(cx, |view, cx| {
@@ -785,6 +787,46 @@ fn is_secretspec_request(grant: &factorseal::Permission) -> bool {
     grant.scope == Some(factorseal::DocumentKind::SecretSpecProviderCache)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GrantChoice {
+    ThisWriteOnly,
+    Hour,
+    UntilRevoked,
+}
+
+impl GrantChoice {
+    // The approval's duration, and whether it is single-use.
+    fn lifetime(self) -> (Option<u64>, bool) {
+        match self {
+            Self::ThisWriteOnly => (None, true),
+            Self::Hour => (Some(3600), false),
+            Self::UntilRevoked => (None, false),
+        }
+    }
+}
+
+// The vault takes a single-use approval only for a SecretSpec write.
+fn single_write_allowed(grants: &[factorseal::Permission]) -> bool {
+    !grants.is_empty()
+        && grants.iter().all(|grant| {
+            is_secretspec_request(grant) && grant.operation == factorseal::PermissionOperation::Put
+        })
+}
+
+// A write asks for no more than that write unless the person picks a
+// longer lifetime. A pick of "This write only" that no longer applies,
+// because a request that is not a SecretSpec write joined the popup,
+// falls back to one hour.
+fn grant_choice(grants: &[factorseal::Permission], choice: Option<GrantChoice>) -> GrantChoice {
+    let single_write = single_write_allowed(grants);
+    match choice {
+        Some(GrantChoice::ThisWriteOnly) if !single_write => GrantChoice::Hour,
+        Some(choice) => choice,
+        None if single_write => GrantChoice::ThisWriteOnly,
+        None => GrantChoice::Hour,
+    }
+}
+
 // A SecretSpec grant binds the provider, not the program that ran
 // `secretspec`, so say who it covers in those terms.
 fn grant_scope_note(grants: &[factorseal::Permission]) -> &'static str {
@@ -866,6 +908,7 @@ impl Render for AccessView {
         }
         let theme = cx.theme().clone();
         let busy = self.approving || matches!(self.snapshot, Snapshot::Unlocking { .. });
+        let choice = grant_choice(&self.grants, self.choice);
         let unsealed = matches!(self.snapshot, Snapshot::Unsealed { .. });
         let metadata = self.snapshot.metadata();
         let context_project = |context: &SecretServiceAccessContext| {
@@ -1274,23 +1317,35 @@ impl Render for AccessView {
                                 "Allow access for",
                                 h_flex()
                                     .gap_2()
+                                    .when(single_write_allowed(&self.grants), |row| {
+                                        row.child(
+                                            Button::new("grant-once")
+                                                .label("This write only")
+                                                .selected(choice == GrantChoice::ThisWriteOnly)
+                                                .disabled(busy)
+                                                .on_click(cx.listener(|view, _, _, cx| {
+                                                    view.choice = Some(GrantChoice::ThisWriteOnly);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    })
                                     .child(
                                         Button::new("grant-hour")
                                             .label("1 hour")
-                                            .selected(self.duration == Some(3600))
+                                            .selected(choice == GrantChoice::Hour)
                                             .disabled(busy)
                                             .on_click(cx.listener(|view, _, _, cx| {
-                                                view.duration = Some(3600);
+                                                view.choice = Some(GrantChoice::Hour);
                                                 cx.notify();
                                             })),
                                     )
                                     .child(
                                         Button::new("grant-persistent")
                                             .label("Until revoked")
-                                            .selected(self.duration.is_none())
+                                            .selected(choice == GrantChoice::UntilRevoked)
                                             .disabled(busy)
                                             .on_click(cx.listener(|view, _, _, cx| {
-                                                view.duration = None;
+                                                view.choice = Some(GrantChoice::UntilRevoked);
                                                 cx.notify();
                                             })),
                                     ),
@@ -1516,6 +1571,36 @@ mod tests {
         grant.scope = Some(factorseal::DocumentKind::LinuxSecretService);
         assert_eq!(grant_requester(&grant), "factorseal.exe");
         assert!(grant_scope_note(std::slice::from_ref(&grant)).contains("entries, app, folder"));
+
+        // A SecretSpec write defaults to this write only, and the pick
+        // falls back to an hour once a request that is not one joins.
+        grant.scope = Some(factorseal::DocumentKind::SecretSpecProviderCache);
+        let write = grant.clone();
+        assert_eq!(
+            grant_choice(std::slice::from_ref(&write), None),
+            GrantChoice::ThisWriteOnly
+        );
+        assert_eq!(GrantChoice::ThisWriteOnly.lifetime(), (None, true));
+        let mut read = write.clone();
+        read.operation = factorseal::PermissionOperation::Get;
+        assert!(!single_write_allowed(std::slice::from_ref(&read)));
+        assert_eq!(
+            grant_choice(std::slice::from_ref(&read), None),
+            GrantChoice::Hour
+        );
+        let mixed = [write.clone(), read];
+        assert_eq!(
+            grant_choice(&mixed, Some(GrantChoice::ThisWriteOnly)),
+            GrantChoice::Hour
+        );
+        assert_eq!(
+            grant_choice(
+                std::slice::from_ref(&write),
+                Some(GrantChoice::UntilRevoked)
+            ),
+            GrantChoice::UntilRevoked
+        );
+        grant.scope = Some(factorseal::DocumentKind::LinuxSecretService);
 
         assert_eq!(launch_chain_label(&[]), None);
         assert_eq!(

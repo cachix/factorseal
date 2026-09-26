@@ -1275,9 +1275,11 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
         PermissionState::Granted {
             granted_at,
             expires_at,
+            single_use,
         } => format!(
-            "granted  granted: {granted_at}  expires: {}",
-            expires_at.map_or_else(|| "never".to_owned(), |value| value.to_string())
+            "granted  granted: {granted_at}  expires: {}{}",
+            expires_at.map_or_else(|| "never".to_owned(), |value| value.to_string()),
+            if single_use { "  next write only" } else { "" }
         ),
     };
     writeln!(
@@ -1674,6 +1676,7 @@ fn approve(
             id: id.to_owned(),
             signature,
             duration_seconds: grant_duration_seconds,
+            single_use: false,
         },
         PermissionChange::Granted,
     )
