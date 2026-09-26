@@ -65,6 +65,7 @@ raw-window-handle = "0.6.2"
 
 [dev-dependencies]
 gpui_ce_parley = { version = "0.3.0", default-features = false }
+gpui = { package = "gpui-ce", version = "0.3.0", features = ["test-support"] }
 qrcode = { version = "0.14.1", default-features = false }
 
 [lints.rust]
