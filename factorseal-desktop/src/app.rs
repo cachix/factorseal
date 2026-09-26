@@ -2295,7 +2295,11 @@ impl DesktopView {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.muted))
                     .child(
+                        // Take the row's width: with only min_w_0 the
+                        // layout shrank the column below its text, which
+                        // then wrapped one character per line.
                         v_flex()
+                            .flex_1()
                             .min_w_0()
                             .gap_1()
                             .when(is_personal_secret(entry), |content| {
