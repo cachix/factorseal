@@ -54,8 +54,12 @@ fi
 mkdir -p "$windows_tree"
 echo "Mirroring $repo to $windows_tree"
 set +e
+# devenv's generated .claude/ and .mcp.json link into /nix/store, which Windows
+# cannot open. Robocopy retries an unreadable file a million times by default,
+# so /R and /W make any such file fail within seconds instead of hanging.
 /mnt/c/Windows/System32/robocopy.exe "$(wslpath -w "$repo")" "$(wslpath -w "$windows_tree")" \
-    /MIR /XD .git target .claude .devenv /NJH /NJS /NDL /NP /NFL >/dev/null
+    /MIR /XD .git target .claude .devenv /XF .mcp.json /R:1 /W:1 \
+    /NJH /NJS /NDL /NP /NFL >/dev/null
 copied=$?
 set -e
 # Robocopy exit codes below 8 mean success; 1 means files were copied.
