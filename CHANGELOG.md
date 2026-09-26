@@ -4,6 +4,12 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Let SecretSpec 0.21 and later pass `FACTORSEAL_ROOT` and
+  `FACTORSEAL_SOCKET` to the provider. Those releases start a provider with
+  only a fixed base environment plus the variables its discovery claim lists,
+  so the provider silently used the default vault. The claim now lists both;
+  earlier SecretSpec releases ignore the field.
+
 - Tell SecretSpec that approval is needed when a person has not finished
   approving a request within SecretSpec's 30-second operation limit. The
   provider now answers `interaction_required` with the pending permission's

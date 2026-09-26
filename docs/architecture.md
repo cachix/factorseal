@@ -216,12 +216,16 @@ the `factorseal` scheme in SecretSpec's user provider directory:
 
 ```json
 {
-  "executable": "/absolute/path/to/factorseal"
+  "executable": "/absolute/path/to/factorseal",
+  "environment": ["FACTORSEAL_ROOT", "FACTORSEAL_SOCKET"]
 }
 ```
 
 The public claim is named `factorseal.secretspec.json`; users do not create or
-manage it. The agent refreshes its canonical executable path at startup so
+manage it. SecretSpec 0.21 and later start a provider with only a fixed base
+environment plus the variables its claim lists, so the claim lists the two that
+choose a different vault or service endpoint; earlier releases ignore the
+field. The agent refreshes its canonical executable path at startup so
 packaged upgrades remain discoverable. SecretSpec always launches the claimed
 executable with the fixed `provider` argument. The provider URI is
 `factorseal://default`. Factorseal requires SecretSpec to supply a project

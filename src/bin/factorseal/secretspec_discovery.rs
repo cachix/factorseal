@@ -17,9 +17,17 @@ use super::CliError;
 
 const CLAIM_FILE: &str = "factorseal.secretspec.json";
 
+/// Variables SecretSpec passes from its own environment to the provider.
+/// Since 0.21 it starts providers with only a fixed base set plus the names a
+/// claim lists, so without these a vault chosen by `FACTORSEAL_ROOT` or
+/// `FACTORSEAL_SOCKET` would be ignored in favour of the default one. Older
+/// releases ignore the field.
+const PROVIDER_ENVIRONMENT: &[&str] = &["FACTORSEAL_ROOT", "FACTORSEAL_SOCKET"];
+
 #[derive(Serialize)]
 struct ProviderClaim<'a> {
     executable: &'a Path,
+    environment: &'a [&'a str],
 }
 
 pub(super) fn publish_for_default_root(root: &Path) -> Result<(), CliError> {
@@ -79,7 +87,10 @@ fn write_claim(directory: &Path, executable: &Path) -> Result<(), CliError> {
     })
     .map_err(|error| CliError::SecretSpecDiscovery(error.to_string()))?;
     let destination = directory.join(CLAIM_FILE);
-    let bytes = serde_json::to_vec(&ProviderClaim { executable })?;
+    let bytes = serde_json::to_vec(&ProviderClaim {
+        executable,
+        environment: PROVIDER_ENVIRONMENT,
+    })?;
     #[cfg(unix)]
     let bytes = {
         let mut bytes = bytes;
@@ -171,7 +182,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn secretspec_claim_contains_only_the_canonical_executable() {
+    fn secretspec_claim_names_the_canonical_executable_and_forwarded_environment() {
         let directory = tempfile::tempdir().unwrap();
         let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
 
@@ -180,7 +191,13 @@ mod tests {
         let claim =
             fs::read_to_string(directory.path().join("factorseal.secretspec.json")).unwrap();
         let claim: serde_json::Value = serde_json::from_str(&claim).unwrap();
-        assert_eq!(claim, serde_json::json!({ "executable": executable }));
+        assert_eq!(
+            claim,
+            serde_json::json!({
+                "executable": executable,
+                "environment": ["FACTORSEAL_ROOT", "FACTORSEAL_SOCKET"],
+            })
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -236,12 +253,26 @@ mod tests {
         let claim = directory.path().join("factorseal.secretspec.json");
         write_claim(directory.path(), &first).unwrap();
         write_claim(directory.path(), &second).unwrap();
-        let expected = serde_json::json!({ "executable": second });
+        let expected = serde_json::json!({
+            "executable": second,
+            "environment": ["FACTORSEAL_ROOT", "FACTORSEAL_SOCKET"],
+        });
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&fs::read(&claim).unwrap()).unwrap(),
             expected
         );
         fs::write(&claim, b"invalid claim").unwrap();
+        write_claim(directory.path(), &second).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&claim).unwrap()).unwrap(),
+            expected
+        );
+        // A claim from a release before the environment list gains it.
+        fs::write(
+            &claim,
+            serde_json::to_vec(&serde_json::json!({ "executable": second })).unwrap(),
+        )
+        .unwrap();
         write_claim(directory.path(), &second).unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&fs::read(&claim).unwrap()).unwrap(),
