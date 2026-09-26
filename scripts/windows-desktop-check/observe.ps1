@@ -6,7 +6,9 @@
 # piped output.
 param(
     [Parameter(Mandatory = $true)][string]$OutDir,
-    [int]$Seconds = 12
+    [int]$Seconds = 12,
+    # Picks one Desktop when several run (for example one on a test vault).
+    [int]$DesktopPid
 )
 $ErrorActionPreference = 'Stop'
 $report = Join-Path $OutDir 'observer.txt'
@@ -95,7 +97,11 @@ function Capture($rect, [string]$name) {
 # Physical pixels, so window rectangles match the screen capture.
 [void][Win]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
-$desktop = Get-Process factorseal-desktop -ErrorAction SilentlyContinue | Select-Object -First 1
+$desktop = if ($DesktopPid) {
+    Get-Process -Id $DesktopPid -ErrorAction SilentlyContinue
+} else {
+    Get-Process factorseal-desktop -ErrorAction SilentlyContinue | Select-Object -First 1
+}
 if (-not $desktop) { Emit 'error=FactorSeal Desktop is not running'; exit 2 }
 Emit "desktop_pid=$($desktop.Id)"
 

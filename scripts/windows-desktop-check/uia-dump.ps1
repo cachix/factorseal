@@ -2,11 +2,16 @@
 # type, name, AutomationId, and whether a node exposes a value. Used to check
 # what an automation driver (or a screen reader) can find in the approval
 # popup. Windows blocks UI Automation from a normal process into an elevated
-# one, so run this at the same integrity level as Desktop.
-param([string]$Out)
+# one, so run this at the same integrity level as Desktop. -DesktopPid picks
+# one Desktop when several run (for example one on a test vault).
+param([string]$Out, [int]$DesktopPid)
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $lines = New-Object System.Collections.Generic.List[string]
-$desktop = Get-Process factorseal-desktop -ErrorAction SilentlyContinue | Select-Object -First 1
+$desktop = if ($DesktopPid) {
+    Get-Process -Id $DesktopPid -ErrorAction SilentlyContinue
+} else {
+    Get-Process factorseal-desktop -ErrorAction SilentlyContinue | Select-Object -First 1
+}
 if (-not $desktop) {
     $lines.Add('error=FactorSeal Desktop is not running')
 } else {
