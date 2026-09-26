@@ -856,15 +856,6 @@ fn launch_chain_label(chain: &[String]) -> Option<String> {
     })
 }
 
-// Text with an element ID. The ID is what exposes text to accessibility
-// clients (screen readers, UI Automation) as a label; a plain string is
-// drawn but not exposed. An ID must be unique among the children of its
-// nearest ancestor with an ID, which is why each request card and each
-// group of technical details below has one.
-fn text(id: impl Into<gpui::ElementId>, value: impl Into<gpui::SharedString>) -> gpui::Text {
-    gpui::Text::new(id.into(), value.into())
-}
-
 // A labelled row, identified by its label.
 fn detail(
     label: impl Into<gpui::SharedString>,

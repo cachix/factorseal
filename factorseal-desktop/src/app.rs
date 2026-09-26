@@ -42,7 +42,6 @@ use gpui_component::{
     dialog::{Cancel as CancelDialog, Confirm as ConfirmDialog, DialogFooter},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
-    link::Link,
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     spinner::Spinner,
@@ -276,20 +275,27 @@ fn hardware_backend_label(backend: &str) -> &str {
     }
 }
 
-fn setup_protection_description() -> Div {
+fn setup_protection_description(cx: &App) -> Div {
     if cfg!(target_os = "linux") {
         h_flex()
             .gap_1()
             .flex_wrap()
-            .child("Your password and this device's")
-            .child(
-                Link::new("tpm-explanation-link")
-                    .href("https://trustedcomputinggroup.org/about/what-is-a-trusted-platform-module-tpm/")
-                    .child("TPM"),
-            )
-            .child("protect your vault. Both are required to unlock it.")
+            .child(text("setup-before-link", "Your password and this device's"))
+            .child(link(
+                "tpm-explanation-link",
+                "TPM",
+                "https://trustedcomputinggroup.org/about/what-is-a-trusted-platform-module-tpm/",
+                cx,
+            ))
+            .child(text(
+                "setup-after-link",
+                "protect your vault. Both are required to unlock it.",
+            ))
     } else {
-        h_flex().child("Choose how this device should authorize access to your secrets.")
+        h_flex().child(text(
+            "setup-description",
+            "Choose how this device should authorize access to your secrets.",
+        ))
     }
 }
 
@@ -477,6 +483,82 @@ fn hex_digest(digest: &[u8; 32]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+/// Text with an element ID. The ID is what exposes text to accessibility
+/// clients (screen readers, UI Automation) as a label; a plain string is
+/// drawn but not exposed. An ID must be unique among the children of its
+/// nearest ancestor with an ID, so containers of repeated rows carry one.
+fn text(id: impl Into<gpui::ElementId>, value: impl Into<gpui::SharedString>) -> gpui::Text {
+    gpui::Text::new(id.into(), value.into())
+}
+
+/// A link to a web page. gpui-kit's `Link` draws the same but gives the
+/// element no role, so screen readers never found it; this one is exposed
+/// as a link named by its text.
+fn link(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    href: &'static str,
+    cx: &App,
+) -> gpui::Stateful<Div> {
+    let label = label.into();
+    link_showing(id, label.clone(), label, href, cx)
+}
+
+/// A link whose drawn text differs from its accessible name, such as a
+/// label followed by an arrow that a screen reader should not read out.
+/// The text stays one child, so it lays out on one line.
+fn link_showing(
+    id: impl Into<gpui::ElementId>,
+    name: impl Into<gpui::SharedString>,
+    shown: impl Into<gpui::SharedString>,
+    href: &'static str,
+    cx: &App,
+) -> gpui::Stateful<Div> {
+    let color = cx.theme().link;
+    div()
+        .id(id)
+        .role(gpui::Role::Link)
+        .aria_label(name)
+        .text_color(color)
+        .text_decoration_1()
+        .text_decoration_color(color.opacity(0.5))
+        .hover(move |this| {
+            this.text_color(color.opacity(0.8))
+                .text_decoration_1()
+                .text_decoration_color(color)
+        })
+        .active(move |this| {
+            this.text_color(color.opacity(0.6))
+                .text_decoration_1()
+                .text_decoration_color(color)
+        })
+        .cursor_pointer()
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| cx.open_url(href))
+        .child(shown.into())
+}
+
+/// A group named for a screen reader, for a control that has no name of its
+/// own, such as a personal field's value input, which is named by its label.
+fn named_group(
+    id: impl Into<gpui::ElementId>,
+    name: impl Into<gpui::SharedString>,
+) -> gpui::Stateful<Div> {
+    div().id(id).role(gpui::Role::Group).aria_label(name)
+}
+
+/// A sidebar category as a screen reader announces it: its name and how many
+/// items it holds, or that its integration needs attention.
+fn category_accessible_name(title: &str, count: usize, needs_attention: bool) -> String {
+    if needs_attention {
+        format!("{title}, needs attention")
+    } else if count == 1 {
+        format!("{title}, 1 item")
+    } else {
+        format!("{title}, {count} items")
+    }
 }
 
 /// An authenticated executable path as a person reads it. Windows reports
@@ -918,13 +1000,14 @@ impl DesktopView {
                                         view.report_issue(window, cx);
                                     })),
                             )
-                            .child(branding::TAGLINE),
+                            .child(text("tagline", branding::TAGLINE)),
                     )
-                    .child(
-                        Link::new("footer-security-link")
-                            .href("https://factorseal.dev/security")
-                            .child(security_label),
-                    ),
+                    .child(link(
+                        "footer-security-link",
+                        security_label,
+                        "https://factorseal.dev/security",
+                        cx,
+                    )),
             )
     }
 
@@ -1928,6 +2011,13 @@ impl DesktopView {
         v_flex().gap_1().child(
             h_flex()
                 .id(("vault-category", category_index))
+                .role(gpui::Role::Tab)
+                .aria_label(category_accessible_name(
+                    title,
+                    entries.len(),
+                    integration_error,
+                ))
+                .aria_selected(category_selected)
                 .w_full()
                 .items_center()
                 .justify_between()
@@ -2010,6 +2100,13 @@ impl DesktopView {
             .child(
                 h_flex()
                     .id("personal-secrets-category")
+                    .role(gpui::Role::Tab)
+                    .aria_label(category_accessible_name(
+                        "Personal secrets",
+                        entries.len(),
+                        false,
+                    ))
+                    .aria_selected(selected)
                     .w_full()
                     .items_center()
                     .justify_between()
@@ -2087,6 +2184,9 @@ impl DesktopView {
             .child(
                 h_flex()
                     .id("system-integrations-toggle")
+                    .role(gpui::Role::Button)
+                    .aria_label("System integrations")
+                    .aria_expanded(expanded)
                     .w_full()
                     .items_center()
                     .justify_between()
@@ -2143,6 +2243,8 @@ impl DesktopView {
                     input.suffix(
                         div()
                             .id("clear-vault-search")
+                            .role(gpui::Role::Button)
+                            .aria_label("Clear search")
                             .p_1()
                             .rounded_sm()
                             .cursor_pointer()
@@ -2195,7 +2297,7 @@ impl DesktopView {
                 .text_xs()
                 .font_semibold()
                 .text_color(theme.muted_foreground)
-                .child(label)
+                .child(text(label, label))
         };
         v_flex()
             .id("vault-sidebar")
@@ -2205,6 +2307,8 @@ impl DesktopView {
             .child(
                 div()
                     .id("vault-sidebar-results")
+                    .role(gpui::Role::TabList)
+                    .aria_label("Vault sections")
                     .flex_1()
                     .min_h_0()
                     .child(
@@ -2241,12 +2345,17 @@ impl DesktopView {
             )
     }
 
-    fn render_detail_rows(details: Vec<(&'static str, String)>, cx: &mut Context<Self>) -> Div {
+    fn render_detail_rows(
+        id: impl Into<gpui::ElementId>,
+        details: Vec<(&'static str, String)>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
         let theme = cx.theme();
-        let mut rows = v_flex();
+        let mut rows = v_flex().id(id);
         for (label, value) in details {
             rows = rows.child(
                 h_flex()
+                    .id(label)
                     .w_full()
                     .items_start()
                     .justify_between()
@@ -2254,8 +2363,18 @@ impl DesktopView {
                     .py_3()
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(div().text_color(theme.muted_foreground).child(label))
-                    .child(div().min_w_0().text_right().font_medium().child(value)),
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(text("label", label)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_right()
+                            .font_medium()
+                            .child(text("value", value)),
+                    ),
             );
         }
         rows
@@ -2268,17 +2387,20 @@ impl DesktopView {
             .gap_2()
             .px_5()
             .py_6()
-            .child(div().font_semibold().child(if has_any {
-                "No matching items"
-            } else {
-                "No items yet"
-            }))
+            .child(div().font_semibold().child(text(
+                "empty-items",
+                if has_any {
+                    "No matching items"
+                } else {
+                    "No items yet"
+                },
+            )))
             .when(has_any && !query.is_empty(), |empty| {
                 empty.child(
                     div()
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child("Try a different search."),
+                        .child(text("empty-search", "Try a different search.")),
                 )
             })
     }
@@ -2303,6 +2425,8 @@ impl DesktopView {
             rows = rows.child(
                 h_flex()
                     .id(("secret-row", index))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("{label}, {detail}"))
                     .w_full()
                     .items_center()
                     .justify_between()
@@ -2354,12 +2478,22 @@ impl DesktopView {
         rows
     }
 
-    fn render_category_instructions(guidance: &CategoryGuidance, cx: &mut Context<Self>) -> Div {
+    fn render_category_instructions(
+        guidance: &CategoryGuidance,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
         let theme = cx.theme();
-        let mut instructions = v_flex().gap_2();
+        let mut instructions = v_flex()
+            .id("instructions")
+            .role(gpui::Role::List)
+            .aria_label("How to use it")
+            .gap_2();
         for (index, instruction) in guidance.instructions.iter().enumerate() {
             instructions = instructions.child(
                 h_flex()
+                    .id(("instruction", index))
+                    .role(gpui::Role::ListItem)
+                    .aria_label(*instruction)
                     .w_full()
                     .items_start()
                     .gap_3()
@@ -2433,7 +2567,12 @@ impl DesktopView {
                         .items_center()
                         .justify_between()
                         .gap_3()
-                        .child(div().text_xl().font_semibold().child(guidance.title))
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_semibold()
+                                .child(text("category-title", guidance.title)),
+                        )
                         .child(
                             div()
                                 .flex_none()
@@ -2443,30 +2582,38 @@ impl DesktopView {
                                 .bg(theme.muted)
                                 .text_sm()
                                 .text_color(theme.muted_foreground)
-                                .child(format!(
-                                    "{item_count} {}",
-                                    if item_count == 1 { "item" } else { "items" }
+                                .child(text(
+                                    "category-count",
+                                    format!(
+                                        "{item_count} {}",
+                                        if item_count == 1 { "item" } else { "items" }
+                                    ),
                                 )),
                         ),
                 )
                 .child(
                     div()
                         .text_color(theme.muted_foreground)
-                        .child(guidance.description),
+                        .child(text("category-description", guidance.description)),
                 )
                 .when_some(integration_error, |element, error| {
                     element.child(error_banner(error, theme.danger))
                 })
                 .child(self.render_wifi_migration(kind, cx))
-                .child(div().font_semibold().child("Items"))
+                .child(div().font_semibold().child(text("items-heading", "Items")))
                 .child(item_rows)
-                .child(div().font_semibold().child("How to use it"))
+                .child(
+                    div()
+                        .font_semibold()
+                        .child(text("instructions-heading", "How to use it")),
+                )
                 .child(instructions)
                 .when_some(category_documentation(kind), |element, (id, label, url)| {
                     element.child(
                         h_flex()
                             .pt_1()
-                            .child(Link::new(id).href(url).child(format!("{label} ↗"))),
+                            // The arrow is drawn but not part of the link's name.
+                            .child(link_showing(id, label, format!("{label} ↗"), url, cx)),
                     )
                 }),
         )
@@ -2525,13 +2672,21 @@ impl DesktopView {
             .bg(theme.popover)
 
             .child(
-                h_flex().flex_wrap().gap_2().children(
+                h_flex()
+                    .id("personal-category")
+                    .role(gpui::Role::RadioGroup)
+                    .aria_label("Item type")
+                    .flex_wrap()
+                    .gap_2()
+                    .children(
                     PersonalSecretKind::ALL
                         .into_iter()
                         .enumerate()
                         .map(|(index, kind)| {
                             Button::new(("personal-category", index))
                                 .label(kind.label())
+                                .role(Some(gpui::Role::RadioButton))
+                                .toggled(self.personal_kind == kind)
                                 .selected(self.personal_kind == kind)
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     // Switching templates is disabled while any values have been entered.
@@ -2586,11 +2741,16 @@ impl DesktopView {
                                         .gap_2()
                                         .child(
                                             Input::new(&field.label)
+                                                .aria_label("Field name")
                                                 .bg(theming::input_background(cx)),
                                         )
                                         .child(
                                             Button::new(("personal-field-type", index))
                                                 .label(format!("{} ▾", field.field_type.label()))
+                                                .accessibility_label(format!(
+                                                    "Field type: {}",
+                                                    field.field_type.label()
+                                                ))
                                                 .dropdown_menu({
                                                     let view = cx.entity().downgrade();
                                                     let selected = field.field_type.clone();
@@ -2628,7 +2788,15 @@ impl DesktopView {
                                 )
                             })
                             .child(h_flex().items_start().gap_2()
-                                .child(div().flex_1().min_w_0().child(field.value.clone()))
+                                .child(
+                                    named_group(
+                                        ("personal-draft-value", index),
+                                        field.label.read(cx).value().to_string(),
+                                    )
+                                    .flex_1()
+                                        .min_w_0()
+                                        .child(field.value.clone()),
+                                )
                                 .child(Button::new(("copy-personal-draft", index)).small()
                                     .label(if self.copied_personal_field == Some(personal_actions::CopiedField::Draft(index)) { "Copied" } else { "Copy" })
                                     .disabled(field.value.read(cx).value().is_empty())
@@ -2693,31 +2861,38 @@ impl DesktopView {
 
     fn render_cxf_key_options(&self, is_import: bool, cx: &mut Context<Self>) -> Div {
         let mut panel = v_flex().gap_3().child(
-            h_flex().gap_2().children(
-                [(false, "Passphrase"), (true, "Post-quantum key")]
-                    .into_iter()
-                    .map(|(hybrid, label)| {
-                        Button::new(("transfer-key-mode", usize::from(hybrid)))
-                            .label(label)
-                            .selected(self.transfer_use_recipient == hybrid)
-                            .disabled(self.transfer_busy)
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.clear_secret_inputs(cx);
-                                view.transfer_use_recipient = hybrid;
-                                view.transfer_key_file = None;
-                                view.transfer_notice = None;
-                                cx.notify();
-                            }))
-                    }),
-            ),
+            h_flex()
+                .id("transfer-key-mode")
+                .role(gpui::Role::RadioGroup)
+                .aria_label("Encrypt with")
+                .gap_2()
+                .children(
+                    [(false, "Passphrase"), (true, "Post-quantum key")]
+                        .into_iter()
+                        .map(|(hybrid, label)| {
+                            Button::new(("transfer-key-mode", usize::from(hybrid)))
+                                .label(label)
+                                .role(Some(gpui::Role::RadioButton))
+                                .toggled(self.transfer_use_recipient == hybrid)
+                                .selected(self.transfer_use_recipient == hybrid)
+                                .disabled(self.transfer_busy)
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.clear_secret_inputs(cx);
+                                    view.transfer_use_recipient = hybrid;
+                                    view.transfer_key_file = None;
+                                    view.transfer_notice = None;
+                                    cx.notify();
+                                }))
+                        }),
+                ),
         );
         if self.transfer_use_recipient {
             panel = panel
-                .child(div().whitespace_normal().child(if is_import {
+                .child(div().whitespace_normal().child(text("key-description", if is_import {
                     "Choose the private age identity matching the recipient used for this export. The key file must be unencrypted and private to your account."
                 } else {
                     "Choose the recipient's public age post-quantum key. Only the matching private key can decrypt this export. Compatible with age 1.3 and later."
-                }))
+                })))
                 .child(
                     Button::new("choose-transfer-key")
                         .label(if is_import { "Choose private key file" } else { "Choose public key file" })
@@ -2725,7 +2900,7 @@ impl DesktopView {
                         .on_click(cx.listener(move |view, _, _, cx| view.choose_transfer_key_file(is_import, cx))),
                 )
                 .when_some(self.transfer_key_file.as_ref(), |panel, path| {
-                    panel.child(div().whitespace_normal().child(path.file_name().unwrap_or_default().to_string_lossy().into_owned()))
+                    panel.child(div().whitespace_normal().child(text("key-file", path.file_name().unwrap_or_default().to_string_lossy().into_owned())))
                 });
         }
         panel
@@ -2775,30 +2950,30 @@ impl DesktopView {
                     });
                 })
         };
-        let mut form =
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .gap_5()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .children([false, true].into_iter().map(|import| {
-                            Button::new(("transfer-direction", usize::from(import)))
-                                .selected(is_import == import)
-                                .disabled(self.transfer_busy)
-                                .label(match (is_backup, import) {
-                                    (true, false) => "Create backup",
-                                    (true, true) => "Restore backup",
-                                    (false, false) => "Export credentials",
-                                    (false, true) => "Import credentials",
-                                })
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.select_transfer_direction(import, cx);
-                                }))
-                        })),
-                );
+        let mut form = v_flex().w_full().min_w_0().gap_5().child(
+            h_flex()
+                .id("transfer-direction")
+                .role(gpui::Role::RadioGroup)
+                .aria_label(if is_backup { "Backup" } else { "Transfer" })
+                .gap_2()
+                .flex_wrap()
+                .children([false, true].into_iter().map(|import| {
+                    Button::new(("transfer-direction", usize::from(import)))
+                        .role(Some(gpui::Role::RadioButton))
+                        .toggled(is_import == import)
+                        .selected(is_import == import)
+                        .disabled(self.transfer_busy)
+                        .label(match (is_backup, import) {
+                            (true, false) => "Create backup",
+                            (true, true) => "Restore backup",
+                            (false, false) => "Export credentials",
+                            (false, true) => "Import credentials",
+                        })
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.select_transfer_direction(import, cx);
+                        }))
+                })),
+        );
         if !is_backup {
             #[cfg(feature = "apple-credential-exchange")]
             if crate::apple_exchange::available() {
@@ -2807,31 +2982,44 @@ impl DesktopView {
             form = form.child(
                 v_flex()
                     .gap_2()
-                    .child(div().text_sm().font_semibold().child("File type"))
                     .child(
-                        h_flex().gap_2().flex_wrap().children(
-                            TransferFormat::ALL
-                                .into_iter()
-                                .filter(|candidate| {
-                                    !candidate.is_native()
-                                        && (is_import
-                                            || *candidate != TransferFormat::OnePasswordPux)
-                                })
-                                .enumerate()
-                                .map(|(index, candidate)| {
-                                    Button::new(("transfer-format", index))
-                                        .selected(format == candidate)
-                                        .disabled(self.transfer_busy)
-                                        .label(if candidate == TransferFormat::CxfAge {
-                                            "Encrypted transfer"
-                                        } else {
-                                            candidate.label()
-                                        })
-                                        .on_click(cx.listener(move |view, _, _, cx| {
-                                            view.select_transfer_format(candidate, cx);
-                                        }))
-                                }),
-                        ),
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .child(text("file-type-label", "File type")),
+                    )
+                    .child(
+                        h_flex()
+                            .id("transfer-format")
+                            .role(gpui::Role::RadioGroup)
+                            .aria_label("File type")
+                            .gap_2()
+                            .flex_wrap()
+                            .children(
+                                TransferFormat::ALL
+                                    .into_iter()
+                                    .filter(|candidate| {
+                                        !candidate.is_native()
+                                            && (is_import
+                                                || *candidate != TransferFormat::OnePasswordPux)
+                                    })
+                                    .enumerate()
+                                    .map(|(index, candidate)| {
+                                        Button::new(("transfer-format", index))
+                                            .role(Some(gpui::Role::RadioButton))
+                                            .toggled(format == candidate)
+                                            .selected(format == candidate)
+                                            .disabled(self.transfer_busy)
+                                            .label(if candidate == TransferFormat::CxfAge {
+                                                "Encrypted transfer"
+                                            } else {
+                                                candidate.label()
+                                            })
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.select_transfer_format(candidate, cx);
+                                            }))
+                                    }),
+                            ),
                     ),
             );
         }
@@ -2847,20 +3035,20 @@ impl DesktopView {
                     .child(
                         div()
                             .font_semibold()
-                            .child(if is_backup { "Encrypted backup" } else { "Encrypted credential file" }),
+                            .child(text("format-title", if is_backup { "Encrypted backup" } else { "Encrypted credential file" })),
                     )
                     .child(
                         div()
                             .w_full()
                             .whitespace_normal()
                             .text_color(theme.muted_foreground)
-                            .child(if format == TransferFormat::CxfAge {
+                            .child(text("format-description", if format == TransferFormat::CxfAge {
                                 "Uses the open CXF credential format with age encryption. The receiving manager needs CXF support and may require a separate decryption step."
                             } else if is_import {
                                 "Enter the passphrase used when this backup was created. Restored data is protected by this device's vault keys."
                             } else {
                                 "Includes durable vault items, but not provider caches, application authorizations, history, or device keys. Choose a separate passphrase for this portable backup."
-                            }),
+                            })),
                     )
                     .when(format == TransferFormat::CxfAge, |panel| panel.child(self.render_cxf_key_options(is_import, cx)))
                     .when(!use_recipient, |panel| panel.child(field_label(if is_backup { "Backup passphrase" } else { "Transfer passphrase" }, self.archive_passphrase.clone())))
@@ -2879,17 +3067,17 @@ impl DesktopView {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.popover)
-                    .child(div().font_semibold().child(format.label()))
+                    .child(div().font_semibold().child(text("format-title", format.label())))
                     .child(
                         div()
                             .w_full()
                             .whitespace_normal()
                             .text_color(theme.muted_foreground)
-                            .child(if is_import {
+                            .child(text("format-description", if is_import {
                                 "Personal items retain typed fields and sections. Unknown source data is kept with the encrypted item. 1PUX files are imported as separate document items."
                             } else {
                                 "Only Personal secrets are exported. Password-manager interchange files are plaintext and are not protected by FactorSeal after they are written."
-                            }),
+                            })),
                     )
                     .when(!is_import, |panel| panel.child(plaintext_control)),
             );
@@ -2906,7 +3094,7 @@ impl DesktopView {
                         .py_3()
                         .rounded_lg()
                         .bg(theme.secondary)
-                        .child(message),
+                        .child(text("transfer-success", message)),
                 ),
                 TransferNotice::Error(message) => form.child(error_banner(message, theme.danger)),
             })
@@ -2922,17 +3110,20 @@ impl DesktopView {
                                 .gap_2()
                                 .text_color(theme.muted_foreground)
                                 .child(Spinner::new().small())
-                                .child(if is_import {
-                                    if is_backup {
-                                        "Restore in progress…"
+                                .child(text(
+                                    "transfer-progress",
+                                    if is_import {
+                                        if is_backup {
+                                            "Restore in progress…"
+                                        } else {
+                                            "Import in progress…"
+                                        }
+                                    } else if is_backup {
+                                        "Preparing backup…"
                                     } else {
-                                        "Import in progress…"
-                                    }
-                                } else if is_backup {
-                                    "Preparing backup…"
-                                } else {
-                                    "Preparing export…"
-                                }),
+                                        "Preparing export…"
+                                    },
+                                )),
                         )
                     })
                     .child(
@@ -2965,7 +3156,11 @@ impl DesktopView {
                 .max_w(rems(820. / 16.))
                 .gap_4()
                 .p_6()
-                .child(div().text_color(theme.muted_foreground).child(description))
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(text("transfer-description", description)),
+                )
                 .child(form),
         )
     }
@@ -2994,6 +3189,8 @@ impl DesktopView {
                         .child(
                             div()
                                 .id("personal-secrets-breadcrumb")
+                                .role(gpui::Role::Link)
+                                .aria_label("Personal secrets")
                                 .cursor_pointer()
                                 .hover(move |style| style.text_color(muted))
                                 .child("Personal secrets")
@@ -3071,18 +3268,21 @@ impl DesktopView {
                     div()
                         .text_2xl()
                         .font_semibold()
-                        .child("Welcome to your vault"),
+                        .child(text("welcome-title", "Welcome to your vault")),
                 )
                 .child(
                     div()
                         .max_w(rems(420. / 16.))
                         .text_center()
                         .text_color(theme.muted_foreground)
-                        .child(if entry_count == 0 {
-                            "Choose a secret type on the left to get started."
-                        } else {
-                            "Choose an item on the left to see its details."
-                        }),
+                        .child(text(
+                            "welcome-hint",
+                            if entry_count == 0 {
+                                "Choose a secret type on the left to get started."
+                            } else {
+                                "Choose an item on the left to see its details."
+                            },
+                        )),
                 )
                 .child(self.render_browser(cx)),
             Some(VaultSelection::PersonalSecrets) => {
@@ -3105,13 +3305,22 @@ impl DesktopView {
                     .size_full()
                     .gap_4()
                     .p_6()
-                    .child(div().text_xl().font_semibold().child(title))
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_semibold()
+                            .child(text("entry-title", title)),
+                    )
                     .child(
                         div()
                             .text_color(theme.muted_foreground)
-                            .child("Secret value hidden"),
+                            .child(text("entry-value-hidden", "Secret value hidden")),
                     )
-                    .child(Self::render_detail_rows(vault_entry_details(entry), cx))
+                    .child(Self::render_detail_rows(
+                        "entry-details",
+                        vault_entry_details(entry),
+                        cx,
+                    ))
                     .child(Self::render_entry_access(entry, contents, cx))
             }
         }
@@ -3165,6 +3374,8 @@ impl DesktopView {
                 .child(
                     div()
                         .id("vault-breadcrumb")
+                        .role(gpui::Role::Link)
+                        .aria_label("Your vault")
                         .cursor_pointer()
                         .hover(|style| style.text_color(theme.muted_foreground))
                         .child("Your vault")
@@ -3173,9 +3384,12 @@ impl DesktopView {
                         })),
                 )
                 .child(div().text_color(theme.muted_foreground).child("→"))
-                .child(title)
+                .child(text("page-title", title))
         } else {
-            h_flex().text_2xl().font_semibold().child("Your vault")
+            h_flex()
+                .text_2xl()
+                .font_semibold()
+                .child(text("page-title", "Your vault"))
         }
     }
 
@@ -3285,15 +3499,21 @@ impl DesktopView {
             .min_h_0()
             .overflow_hidden()
             .gap_5()
-            .child(v_flex().flex_none().gap_1().child(header_title).child(
-                div().text_sm().text_color(theme.muted_foreground).child(
-                    if self.selected_vault_item == Some(VaultSelection::Devices) {
-                        "Pair devices to sync your personal secrets."
-                    } else {
-                        "On this device. Available to authorized applications."
-                    },
+            .child(
+                v_flex().flex_none().gap_1().child(header_title).child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(text(
+                            "page-subtitle",
+                            if self.selected_vault_item == Some(VaultSelection::Devices) {
+                                "Pair devices to sync your personal secrets."
+                            } else {
+                                "On this device. Available to authorized applications."
+                            },
+                        )),
                 ),
-            ))
+            )
             .child(self.render_vault_workspace(contents, compact, cx))
             .when_some(contents_error.map(str::to_owned), |element, error| {
                 element.child(
@@ -3347,7 +3567,7 @@ impl DesktopView {
                                         .rounded_full()
                                         .bg(theme.success),
                                 )
-                                .child("Vault is unsealed")
+                                .child(text("vault-state", "Vault is unsealed"))
                                 .tooltip(move |window, cx| {
                                     Tooltip::new(tooltip.clone()).build(window, cx)
                                 }),
@@ -3355,6 +3575,8 @@ impl DesktopView {
                         .child(
                             div()
                                 .id("seal-vault")
+                                .role(gpui::Role::Button)
+                                .aria_label("Seal now")
                                 .flex()
                                 .items_center()
                                 .px_3()
@@ -3436,7 +3658,7 @@ impl DesktopView {
                     .bg(theme.muted)
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child(setup_protection_description()),
+                    .child(setup_protection_description(cx)),
             )
             .when(has_multiple_methods, |element| element.child(methods))
             .when(cfg!(target_os = "linux"), |element| {
@@ -3450,9 +3672,12 @@ impl DesktopView {
                             ),
                     )
                     .child(
-                        Link::new("security-link")
-                            .href("https://factorseal.dev/security")
-                            .child("How device protection works"),
+                        link(
+                            "security-link",
+                            "How device protection works",
+                            "https://factorseal.dev/security",
+                            cx,
+                        ),
                     )
             })
             .when(self.setup_method.needs_password(), |element| {
@@ -3642,6 +3867,8 @@ impl Render for DesktopView {
                                     .gap_2()
                                     .when(self.settings_open, |element| {
                                         element
+                                            .role(gpui::Role::Link)
+                                            .aria_label("Back to your vault")
                                             .cursor_pointer()
                                             .hover(|style| style.text_color(theme.muted_foreground))
                                             .on_click(cx.listener(|view, _, _, cx| {
