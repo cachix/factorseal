@@ -4,7 +4,9 @@
 # cover it, then released. Prints saved=PATH or error=REASON.
 param(
     [Parameter(Mandatory = $true)][int]$DesktopPid,
-    [Parameter(Mandatory = $true)][string]$Out
+    [Parameter(Mandatory = $true)][string]$Out,
+    # The end of the popup's title: "Browser access" for browser requests.
+    [string]$Title = 'Secret access'
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -28,14 +30,14 @@ public static class Shot {
 
     // Found by title, not through UI Automation, which lists a popup owned
     // by the main window under it rather than at the top level.
-    public static IntPtr FindPopup(int pid) {
+    public static IntPtr FindPopup(int pid, string suffix) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((hwnd, _) => {
             int owner;
             GetWindowThreadProcessId(hwnd, out owner);
             var title = new StringBuilder(256);
             GetWindowText(hwnd, title, title.Capacity);
-            if (owner == pid && IsWindowVisible(hwnd) && title.ToString().EndsWith("Secret access")) {
+            if (owner == pid && IsWindowVisible(hwnd) && title.ToString().EndsWith(suffix)) {
                 found = hwnd;
                 return false;
             }
@@ -48,7 +50,7 @@ public static class Shot {
 
 # Physical pixels, so the window rectangle matches the screen capture.
 [void][Shot]::SetProcessDpiAwarenessContext([IntPtr](-4))
-$popup = [Shot]::FindPopup($DesktopPid)
+$popup = [Shot]::FindPopup($DesktopPid, $Title)
 if ($popup -eq [IntPtr]::Zero) { 'error=no approval popup is open'; exit 1 }
 
 # Windows lets a process take the foreground right after it sent input, so
