@@ -55,6 +55,8 @@ pub(super) struct ApprovalCandidate {
     address: Option<crate::SecretAddress>,
     permission: GrantPermission,
     operation: PermissionOperation,
+    /// A write that carries an expiry; shown so prompts pick their default.
+    expiring_write: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -126,6 +128,7 @@ impl ApprovalCandidate {
             address,
             permission,
             operation,
+            expiring_write: false,
         }
     }
 
@@ -219,6 +222,13 @@ impl ApprovalCandidate {
             address: Some(address),
             permission,
             operation,
+            expiring_write: matches!(
+                action,
+                VaultAction::PutCache {
+                    evict_at: Some(_),
+                    ..
+                }
+            ),
         })
     }
 }
@@ -406,6 +416,11 @@ impl PendingApprovals {
                 && record.namespace == candidate.namespace
                 && record.scope == candidate.scope
                 && record.permission == candidate.permission
+                && matches!(
+                    record.summary.state,
+                    PermissionState::Pending { expiring_write, .. }
+                        if expiring_write == candidate.expiring_write
+                )
         }) {
             let PermissionState::Pending { expires_at, .. } = existing.summary.state else {
                 unreachable!("queue stores only pending records");
@@ -468,6 +483,7 @@ impl PendingApprovals {
                 expires_at,
                 challenge,
                 awaited: false,
+                expiring_write: candidate.expiring_write,
             },
         };
         self.records.push_back(ApprovalRecord {
@@ -686,6 +702,7 @@ mod tests {
             address: Some(crate::SecretAddress::new("test-entry", None).unwrap()),
             permission: GrantPermission::Get,
             operation: PermissionOperation::Get,
+            expiring_write: false,
         }
     }
 
