@@ -1192,6 +1192,7 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
     permission.principal.user_id = attack.to_owned();
     permission.principal.signer_id = Some(attack.to_owned());
     permission.application.base_dir = Some(attack.to_owned());
+    permission.application.declared_launch_chain = vec![attack.to_owned(), attack.to_owned()];
     permission.target = Some(Box::new(factorseal::PermissionTarget::Entry {
         namespace: attack.as_bytes().to_vec(),
         address: factorseal::SecretAddress::Local {
@@ -1207,13 +1208,31 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
             .all(|byte| byte.is_ascii() && (!byte.is_ascii_control() || *byte == b'\n'))
     );
     let rendered = String::from_utf8(output).unwrap();
-    assert_eq!(rendered.lines().count(), 6);
+    assert_eq!(rendered.lines().count(), 7);
+    assert!(rendered.contains("launched from (not verified): "));
     assert!(rendered.contains("\\u{1b}[2J"));
     assert!(rendered.contains("\\u{202e}"));
     assert!(rendered.contains("trusted:") && rendered.contains("declared:"));
     let long = "é".repeat(600);
     assert!(PromptReason(&long).to_string().ends_with("[truncated]"));
     assert!(!PromptText(&long).to_string().contains("[truncated]"));
+}
+
+/// Caller-declared, not authenticated -- see
+/// `VaultApplicationContext::declared_launch_chain`. The grant binds the
+/// executable, not these. Outermost launcher first.
+fn write_launch_chain(output: &mut impl Write, chain: &[String]) -> std::io::Result<()> {
+    if chain.is_empty() {
+        return Ok(());
+    }
+    write!(output, "  launched from (not verified): ")?;
+    for (index, executable) in chain.iter().rev().enumerate() {
+        if index > 0 {
+            write!(output, " -> ")?;
+        }
+        write!(output, "{}", PromptText(executable))?;
+    }
+    writeln!(output)
 }
 
 fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<(), CliError> {
@@ -1304,6 +1323,7 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
             Ok(())
         }
     })
+    .and_then(|()| write_launch_chain(output, &approval.application.declared_launch_chain))
     .and_then(|()| {
         if let Some(duration) = approval.application.requested_permission_duration_seconds {
             writeln!(

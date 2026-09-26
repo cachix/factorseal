@@ -16,7 +16,8 @@ use crate::vault::{
 
 // Version 12 adds revision-bound permission pages and logical keyring transfers.
 // Version 16 adds reviewed browser credential saves to the manager-only boundary.
-// Version 17 adds the caller-declared WSL origin hint on VaultApplicationContext.
+// Version 17 adds the caller-declared WSL origin hint and launch chain on
+// VaultApplicationContext.
 pub(super) const PROTOCOL_VERSION: u8 = 17;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -26,6 +27,9 @@ pub const MAX_PERMISSION_WAIT_MS: u64 = 5_000;
 /// regardless of the duration requested or approved. See
 /// [`VaultApplicationContext::declared_wsl_origin`].
 pub const MAX_WSL_GRANT_SECONDS: u64 = 300;
+/// Maximum number of executables in
+/// [`VaultApplicationContext::declared_launch_chain`].
+pub const MAX_DECLARED_LAUNCH_CHAIN: usize = 4;
 /// Maximum number of metadata-only entries returned by one list request.
 ///
 /// Eight complete native SecretSpec addresses still fit below the one-MiB
@@ -335,6 +339,15 @@ pub struct VaultApplicationContext {
     /// executable-identity hint a native caller gets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_wsl_origin: Option<String>,
+    /// Caller-declared executables that launched the caller, nearest first:
+    /// for the SecretSpec provider, `secretspec` and then whatever ran it.
+    /// Display context only. The caller reads it from the process table, and
+    /// a parent process can be named arbitrarily at creation on Windows, so
+    /// it never affects grants, matching or the caller's fingerprint. A grant
+    /// approved for such a request still binds the transport-authenticated
+    /// caller (the provider), not these executables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_launch_chain: Vec<String>,
 }
 
 impl VaultApplicationContext {
@@ -351,6 +364,7 @@ impl VaultApplicationContext {
             reason,
             requested_permission_duration_seconds: None,
             declared_wsl_origin: None,
+            declared_launch_chain: Vec::new(),
         };
         context.validate()?;
         Ok(context)
@@ -367,6 +381,12 @@ impl VaultApplicationContext {
 
     pub fn with_declared_wsl_origin(mut self, distro: Option<String>) -> VaultResult<Self> {
         self.declared_wsl_origin = distro;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_declared_launch_chain(mut self, chain: Vec<String>) -> VaultResult<Self> {
+        self.declared_launch_chain = chain;
         self.validate()?;
         Ok(self)
     }
@@ -421,6 +441,16 @@ impl VaultApplicationContext {
         {
             return Err(VaultError::Protocol(
                 "declared WSL origin is empty or too long".to_owned(),
+            ));
+        }
+        if self.declared_launch_chain.len() > MAX_DECLARED_LAUNCH_CHAIN
+            || self
+                .declared_launch_chain
+                .iter()
+                .any(|value| value.is_empty() || value.len() > MAX_APPLICATION_COMPONENT_BYTES)
+        {
+            return Err(VaultError::Protocol(
+                "declared launch chain is too long or has an empty entry".to_owned(),
             ));
         }
         Ok(())

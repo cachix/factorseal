@@ -1416,6 +1416,15 @@ fn application_context_is_bounded_and_requires_an_absolute_base_directory() {
         )
         .is_err()
     );
+    let with_chain = |chain: Vec<String>| {
+        VaultApplicationContext::new(Some("demo".to_owned()), None, None, None)
+            .unwrap()
+            .with_declared_launch_chain(chain)
+    };
+    assert!(with_chain(vec!["secretspec".to_owned(); 4]).is_ok());
+    assert!(with_chain(vec!["secretspec".to_owned(); 5]).is_err());
+    assert!(with_chain(vec![String::new()]).is_err());
+    assert!(with_chain(vec!["x".repeat(4 * 1024 + 1)]).is_err());
 }
 
 #[test]
@@ -1841,6 +1850,92 @@ fn wsl_declared_origin_caps_the_granted_lease() {
     let retried = service.handle(&provider, get(), 104);
     assert!(matches!(
         retried.result,
+        Ok(VaultResponseBody::Secret { .. })
+    ));
+}
+
+/// The launch chain is display context read from a spoofable process table
+/// (see `VaultApplicationContext::declared_launch_chain`). A grant binds the
+/// authenticated caller and the target, so the same provider launched from
+/// another program is covered by it, and the chain must not be mistaken for
+/// a check that it is not.
+#[test]
+fn declared_launch_chain_is_shown_but_does_not_scope_the_grant() {
+    let (directory, service) = service(100, UnsealLeasePolicy::default());
+    let provider = caller();
+    let get = |launcher: &str| {
+        let application = VaultApplicationContext::new(
+            Some("demo".to_owned()),
+            Some("production".to_owned()),
+            Some(format!(
+                "{}/projects/first",
+                if cfg!(windows) { "C:" } else { "" }
+            )),
+            Some("deploy".to_owned()),
+        )
+        .unwrap()
+        .with_declared_launch_chain(vec!["secretspec".to_owned(), launcher.to_owned()])
+        .unwrap();
+        VaultRequest::new_with_application(
+            VaultAction::GetCache {
+                project: "demo".to_owned(),
+                address: project_address("demo"),
+            },
+            application,
+        )
+        .unwrap()
+    };
+
+    let denied = service.handle(&provider, get("terminal"), 101);
+    assert!(denied.result.unwrap_err().interaction.is_some());
+    let manager = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.cli",
+        [9; 32],
+        None,
+    )
+    .unwrap();
+    service.authorize_permission_manager(&manager, 101).unwrap();
+    let listed = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+        102,
+    );
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
+        panic!("expected one pending permission");
+    };
+    assert_eq!(
+        permissions[0].application.declared_launch_chain,
+        ["secretspec", "terminal"]
+    );
+    let PermissionState::Pending { challenge, .. } = &permissions[0].state else {
+        panic!("expected pending permission");
+    };
+    let unsealed = Vault::unseal_for_test(&directory.path().join("factorseal")).unwrap();
+    let signature = unsealed
+        .sign_permission_challenge(&permissions[0].id, challenge, Some(3_600))
+        .unwrap();
+    let approved = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ApprovePermission {
+            id: permissions[0].id.clone(),
+            signature,
+            duration_seconds: Some(3_600),
+        })
+        .unwrap(),
+        103,
+    );
+    assert!(matches!(
+        approved.result,
+        Ok(VaultResponseBody::PermissionChanged {
+            status: PermissionChange::Granted
+        })
+    ));
+
+    let other_launcher = service.handle(&provider, get("another-program"), 104);
+    assert!(matches!(
+        other_launcher.result,
         Ok(VaultResponseBody::Secret { .. })
     ));
 }
