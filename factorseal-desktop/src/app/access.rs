@@ -11,6 +11,13 @@ const ARM_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 struct AccessWindow(Option<(AnyWindowHandle, gpui::Entity<AccessView>)>, bool);
 impl Global for AccessWindow {}
 
+/// Pending permissions the user denied while the vault was sealed. The vault
+/// keeps pending permissions across a seal, so they are denied once it is
+/// unsealed again instead of coming back.
+#[derive(Default)]
+struct DeferredDenials(Vec<String>);
+impl Global for DeferredDenials {}
+
 struct InputEditor {
     value: gpui::Entity<SecretInputState>,
     initialized: bool,
@@ -73,67 +80,34 @@ struct AccessView {
 
 pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App) {
     cx.set_global(AccessWindow::default());
+    cx.set_global(DeferredDenials::default());
     cx.spawn(async move |cx| {
         loop {
             smol::Timer::after(std::time::Duration::from_millis(500)).await;
             let state = cx.update(|cx| {
-                let snapshot = &cx.global::<DesktopWindow>().snapshot;
-                match snapshot {
-                    Snapshot::Unsealed { metadata, .. } => Some((
-                        Arc::clone(&cx.global::<RuntimeGlobal>().0),
-                        metadata.clone(),
-                    )),
-                    _ => None,
-                }
+                let metadata = match &cx.global::<DesktopWindow>().snapshot {
+                    Snapshot::Unsealed { metadata, .. } => metadata.clone(),
+                    _ => return None,
+                };
+                Some((
+                    Arc::clone(&cx.global::<RuntimeGlobal>().0),
+                    metadata,
+                    std::mem::take(&mut cx.global_mut::<DeferredDenials>().0),
+                ))
             });
-            let Some((runtime, metadata)) = state else {
+            let Some((runtime, metadata, denials)) = state else {
                 continue;
             };
-            if let Ok(permissions) =
-                smol::unblock(move || runtime.load_permissions(&metadata)).await
+            // Deny before loading, so a denied permission is not reopened.
+            if let Ok(permissions) = smol::unblock(move || {
+                for id in denials {
+                    let _ = runtime.deny_permission(&metadata, id);
+                }
+                runtime.load_permissions(&metadata)
+            })
+            .await
             {
-                cx.update(|cx| {
-                    if !cx.global::<DesktopStatus>().unsealed {
-                        return;
-                    }
-                    if let Snapshot::Unsealed { contents, .. } =
-                        &mut cx.global_mut::<DesktopWindow>().snapshot
-                    {
-                        contents.permissions.clone_from(&permissions);
-                        contents.permissions_loading = false;
-                    }
-                    let holder = Arc::clone(&cx.global::<DesktopWindow>().view);
-                    if let Ok(holder) = holder.lock()
-                        && let Some(view) = holder.as_ref()
-                    {
-                        view.update(cx, |view, cx| {
-                            if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot
-                                && contents.permissions != permissions
-                            {
-                                contents.permissions.clone_from(&permissions);
-                                contents.permissions_loading = false;
-                                cx.notify();
-                            }
-                        });
-                    }
-                    let pending: Vec<_> = permissions
-                        .into_iter()
-                        .filter(|permission| {
-                            matches!(
-                                permission.state,
-                                factorseal::PermissionState::Pending { .. }
-                            )
-                        })
-                        .collect();
-                    if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
-                        view.update(cx, |view, cx| {
-                            view.set_pending(pending);
-                            cx.notify();
-                        });
-                    } else if !pending.is_empty() {
-                        open(AccessEvent::Permissions(pending), cx);
-                    }
-                });
+                cx.update(|cx| apply_permissions(permissions, cx));
             }
         }
     })
@@ -173,6 +147,49 @@ pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App
     .detach();
 }
 
+/// Show freshly polled permissions in the main window and the popup, opening
+/// the popup when a permission is pending.
+fn apply_permissions(permissions: Vec<factorseal::Permission>, cx: &mut App) {
+    if !cx.global::<DesktopStatus>().unsealed {
+        return;
+    }
+    if let Snapshot::Unsealed { contents, .. } = &mut cx.global_mut::<DesktopWindow>().snapshot {
+        contents.permissions.clone_from(&permissions);
+        contents.permissions_loading = false;
+    }
+    let holder = Arc::clone(&cx.global::<DesktopWindow>().view);
+    if let Ok(holder) = holder.lock()
+        && let Some(view) = holder.as_ref()
+    {
+        view.update(cx, |view, cx| {
+            if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot
+                && contents.permissions != permissions
+            {
+                contents.permissions.clone_from(&permissions);
+                contents.permissions_loading = false;
+                cx.notify();
+            }
+        });
+    }
+    let pending: Vec<_> = permissions
+        .into_iter()
+        .filter(|permission| {
+            matches!(
+                permission.state,
+                factorseal::PermissionState::Pending { .. }
+            )
+        })
+        .collect();
+    if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
+        view.update(cx, |view, cx| {
+            view.set_pending(pending);
+            cx.notify();
+        });
+    } else if !pending.is_empty() {
+        open(AccessEvent::Permissions(pending), cx);
+    }
+}
+
 pub(super) fn is_open(cx: &App) -> bool {
     cx.try_global::<AccessWindow>()
         .is_some_and(|state| state.0.is_some())
@@ -189,9 +206,15 @@ fn close(cx: &mut App) {
                 Arc::clone(&view.runtime),
                 view.snapshot.metadata().cloned(),
                 std::mem::take(&mut view.grants),
+                matches!(view.snapshot, Snapshot::Unsealed { .. }),
             )
         });
-        if let (runtime, Some(metadata), grants) = denial {
+        if let (_, _, grants, false) = &denial {
+            // A sealed vault cannot deny; it keeps the permissions pending.
+            cx.global_mut::<DeferredDenials>()
+                .0
+                .extend(grants.iter().map(|grant| grant.id.clone()));
+        } else if let (runtime, Some(metadata), grants, true) = denial {
             cx.spawn(async move |_| {
                 smol::unblock(move || {
                     for grant in grants {
@@ -221,7 +244,18 @@ pub(super) fn update(snapshot: &Snapshot, cx: &mut App) {
         if matches!(view.snapshot, Snapshot::Unsealed { .. })
             && matches!(snapshot, Snapshot::Sealed { .. })
         {
-            return true;
+            // The vault keeps its pending permissions across a seal, so a
+            // popup still reviewing them stays open to unlock and continue.
+            let reviewing = !view.grants.is_empty()
+                || !view.inputs.is_empty()
+                || view
+                    .requests
+                    .iter()
+                    .any(SecretServiceAccessRequest::is_pending);
+            if !reviewing {
+                return true;
+            }
+            view.guard.changed();
         }
         view.snapshot = snapshot.clone();
         view.error = match snapshot {
@@ -640,6 +674,9 @@ impl AccessView {
                 cx.notify();
                 return;
             }
+            // Unlocking does not approve pending permissions; granting them
+            // takes the password again.
+            self.password.update(cx, SecretInputState::clear);
             self.snapshot = Snapshot::Unlocking { metadata, group };
         } else if !matches!(self.snapshot, Snapshot::Unsealed { .. }) {
             return;
@@ -1152,7 +1189,7 @@ impl Render for AccessView {
                         });
                     })))
                     .child(Button::new("allow-access").primary().disabled((self.reviewing && self.grants.is_empty() && self.inputs.is_empty() && unsealed) || busy || !matches!(self.snapshot, Snapshot::Sealed { .. } | Snapshot::Unsealed { .. }))
-                        .label(if self.approving { "Authorizing…" } else if busy { "Unlocking…" } else if !self.inputs.is_empty() && unsealed { "Save secret" } else if !self.grants.is_empty() { "Grant access" } else if unsealed && self.reviewing { "Checking access…" } else if unsealed { "Continue" } else { "Unlock to continue" })
+                        .label(if self.approving { "Authorizing…" } else if busy { "Unlocking…" } else if !self.inputs.is_empty() && unsealed { "Save secret" } else if !self.grants.is_empty() && unsealed { "Grant access" } else if unsealed && self.reviewing { "Checking access…" } else if unsealed { "Continue" } else { "Unlock to continue" })
                         .on_click(cx.listener(|view, _, window, cx| view.allow(window, cx))))))
     }
 }
