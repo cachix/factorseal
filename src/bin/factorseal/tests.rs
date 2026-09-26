@@ -1,8 +1,8 @@
 use super::cli::{Cli, Command, CompletionShell, PermissionCommand, TransferFormat};
 use super::commands::{
-    ApprovalDecision, ParsedGrantDuration, parse_grant_duration, read_approval_decision,
-    read_bounded, read_grant_duration, read_init_unlock_groups, read_password_for_groups,
-    read_project_value, read_unlock_group_choice, require_prompt_terminal, resolve_unlock_group,
+    ApprovalDecision, GrantLifetime, parse_grant_lifetime, read_approval_decision, read_bounded,
+    read_grant_lifetime, read_init_unlock_groups, read_password_for_groups, read_project_value,
+    read_unlock_group_choice, require_prompt_terminal, resolve_unlock_group,
     wait_for_initialization, write_metadata,
 };
 use super::factor::{read_archive_passphrase, read_factor};
@@ -875,37 +875,158 @@ fn approval_prompt_requires_a_terminal_and_explicit_decision() {
     assert_eq!(selected, groups[1]);
 }
 
+/// A pending permission as the vault lists it, for the approval prompts.
+fn pending_permission(
+    scope: factorseal::DocumentKind,
+    operation: factorseal::PermissionOperation,
+    requested_duration: Option<u64>,
+) -> factorseal::Permission {
+    let caller = factorseal::CallerIdentity::new(
+        factorseal::CallerPlatform::Linux,
+        "uid:1000",
+        "/usr/bin/factorseal",
+        [7; 32],
+        None,
+    )
+    .unwrap();
+    factorseal::Permission {
+        target: None,
+        id: "prm_test".to_owned(),
+        scope: Some(scope),
+        operation,
+        principal: factorseal::PermissionPrincipal::from(&caller),
+        application: factorseal::VaultApplicationContext::new(
+            Some("demo".to_owned()),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_requested_permission_duration_seconds(requested_duration)
+        .unwrap(),
+        state: factorseal::PermissionState::Pending {
+            created_at: 1,
+            expires_at: 2,
+            challenge: [0; 32],
+        },
+    }
+}
+
 #[test]
 fn approval_grant_duration_uses_app_default_and_accepts_overrides() {
     assert_eq!(
-        parse_grant_duration("30m"),
-        Some(ParsedGrantDuration::Seconds(30 * 60))
+        parse_grant_lifetime("30m"),
+        Some(GrantLifetime::Seconds(30 * 60))
     );
     assert_eq!(
-        parse_grant_duration("1d"),
-        Some(ParsedGrantDuration::Seconds(24 * 60 * 60))
+        parse_grant_lifetime("1d"),
+        Some(GrantLifetime::Seconds(24 * 60 * 60))
     );
     assert_eq!(
-        parse_grant_duration("forever"),
-        Some(ParsedGrantDuration::Forever)
+        parse_grant_lifetime("forever"),
+        Some(GrantLifetime::Forever)
     );
-    assert_eq!(parse_grant_duration("0h"), None);
-    assert_eq!(parse_grant_duration("later"), None);
+    assert_eq!(parse_grant_lifetime("once"), Some(GrantLifetime::Once));
+    assert_eq!(parse_grant_lifetime("0h"), None);
+    assert_eq!(parse_grant_lifetime("later"), None);
 
+    let read = factorseal::PermissionOperation::Get;
+    let cache = factorseal::DocumentKind::SecretSpecProviderCache;
     let mut accept_default = std::io::Cursor::new(b"\n");
     assert_eq!(
-        read_grant_duration(&mut accept_default, &mut Vec::new(), Some(8 * 60 * 60)).unwrap(),
-        Some(8 * 60 * 60)
+        read_grant_lifetime(
+            &mut accept_default,
+            &mut Vec::new(),
+            &pending_permission(cache, read, Some(8 * 60 * 60))
+        )
+        .unwrap(),
+        GrantLifetime::Seconds(8 * 60 * 60)
     );
 
-    let mut retry_then_forever = std::io::Cursor::new(b"later\nforever\n");
+    // `once` is refused where the vault would refuse it.
+    let mut retry_then_forever = std::io::Cursor::new(b"later\nonce\nforever\n");
     let mut output = Vec::new();
     assert_eq!(
-        read_grant_duration(&mut retry_then_forever, &mut output, None).unwrap(),
-        None
+        read_grant_lifetime(
+            &mut retry_then_forever,
+            &mut output,
+            &pending_permission(cache, read, None)
+        )
+        .unwrap(),
+        GrantLifetime::Forever
     );
-    assert!(String::from_utf8(output).unwrap().contains("30m"));
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("30m") && !output.contains("once"));
 
     let mut closed = std::io::Cursor::new(Vec::<u8>::new());
-    assert!(read_grant_duration(&mut closed, &mut Vec::new(), None).is_err());
+    assert!(
+        read_grant_lifetime(
+            &mut closed,
+            &mut Vec::new(),
+            &pending_permission(cache, read, None)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_secretspec_write_is_approved_once_unless_a_duration_is_given() {
+    let write = pending_permission(
+        factorseal::DocumentKind::SecretSpecProviderCache,
+        factorseal::PermissionOperation::Put,
+        Some(8 * 60 * 60),
+    );
+    let mut accept_default = std::io::Cursor::new(b"\n");
+    let mut output = Vec::new();
+    assert_eq!(
+        read_grant_lifetime(&mut accept_default, &mut output, &write).unwrap(),
+        GrantLifetime::Once
+    );
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("[once (this write only)]")
+    );
+    let mut hour = std::io::Cursor::new(b"1h\n");
+    assert_eq!(
+        read_grant_lifetime(&mut hour, &mut Vec::new(), &write).unwrap(),
+        GrantLifetime::Seconds(60 * 60)
+    );
+
+    // A keyring write is not a SecretSpec write: the vault would refuse once.
+    let keyring_write = pending_permission(
+        factorseal::DocumentKind::LinuxSecretService,
+        factorseal::PermissionOperation::Put,
+        None,
+    );
+    let mut default = std::io::Cursor::new(b"\n");
+    assert_eq!(
+        read_grant_lifetime(&mut default, &mut Vec::new(), &keyring_write).unwrap(),
+        GrantLifetime::Seconds(60 * 60)
+    );
+}
+
+#[test]
+fn the_signing_helper_takes_single_use_or_a_duration_but_not_both() {
+    let parse = |extra: &[&str]| {
+        let mut arguments = vec![
+            "factorseal",
+            "sign-permission",
+            "--id",
+            "prm_test",
+            "--challenge",
+            "00",
+        ];
+        arguments.extend_from_slice(extra);
+        Cli::try_parse_from(arguments)
+    };
+    assert!(matches!(
+        parse(&["--single-use"]).unwrap().command,
+        Command::SignPermission {
+            single_use: true,
+            duration_seconds: None,
+            ..
+        }
+    ));
+    assert!(parse(&["--single-use", "--duration-seconds", "60"]).is_err());
 }

@@ -807,10 +807,7 @@ impl GrantChoice {
 
 // The vault takes a single-use approval only for a SecretSpec write.
 fn single_write_allowed(grants: &[factorseal::Permission]) -> bool {
-    !grants.is_empty()
-        && grants.iter().all(|grant| {
-            is_secretspec_request(grant) && grant.operation == factorseal::PermissionOperation::Put
-        })
+    !grants.is_empty() && grants.iter().all(factorseal::Permission::allows_single_use)
 }
 
 // A write asks for no more than that write unless the person picks a

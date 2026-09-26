@@ -1308,6 +1308,15 @@ pub enum PermissionTarget {
 }
 
 impl Permission {
+    /// Whether this request can be approved for one write only (see
+    /// [`VaultAction::ApprovePermission`]): the vault accepts that only for
+    /// a SecretSpec write.
+    #[must_use]
+    pub fn allows_single_use(&self) -> bool {
+        self.scope == Some(DocumentKind::SecretSpecProviderCache)
+            && self.operation == PermissionOperation::Put
+    }
+
     /// Whether this grant covers the entry, subject to its caller, operation,
     /// lifetime, and (for project grants) working-directory restrictions.
     #[must_use]

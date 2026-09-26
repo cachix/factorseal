@@ -285,7 +285,8 @@ Granting requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal
 prompts for the permission lifetime; Enter accepts the app-requested default (or one
 hour when the app supplied none), and values such as `30m`, `8h`, `7d`, and
-`forever` override it. The chosen lifetime is bound into the vault signature,
+`forever` override it. For a SecretSpec write the default is `once`, which
+allows that write only, as Desktop's "This write only" does. The chosen lifetime is bound into the vault signature,
 so it cannot be changed after factor confirmation. Factorseal verifies the
 typed address and project partition before accepting the project permission,
 so declaring an approved project cannot reach another project's secrets.
