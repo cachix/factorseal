@@ -1317,6 +1317,22 @@ impl Permission {
             && self.operation == PermissionOperation::Put
     }
 
+    /// Whether an approval prompt should offer one write only as its
+    /// default. Not for an expiring write: SecretSpec's cache refreshes an
+    /// entry on its own each time it expires, and a single-use approval
+    /// would ask again at every refresh.
+    #[must_use]
+    pub fn defaults_to_single_use(&self) -> bool {
+        self.allows_single_use()
+            && !matches!(
+                self.state,
+                PermissionState::Pending {
+                    expiring_write: true,
+                    ..
+                }
+            )
+    }
+
     /// Whether this grant covers the entry, subject to its caller, operation,
     /// lifetime, and (for project grants) working-directory restrictions.
     #[must_use]
@@ -1371,6 +1387,10 @@ pub enum PermissionState {
         created_at: u64,
         expires_at: u64,
         challenge: [u8; 32],
+        /// The request writes a value that expires, as SecretSpec's cache
+        /// does when it refreshes an entry on its own.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        expiring_write: bool,
     },
     Granted {
         granted_at: u64,

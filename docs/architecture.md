@@ -277,7 +277,9 @@ permissions too: each write without a permission asks in Desktop's approval
 popup. The popup offers "This write only", its default for a write, which the
 vault removes when it authorizes that write (or after five minutes if the write
 never comes), so the next write asks again. "1 hour" and "Until revoked" instead
-cover later writes of that entry for the chosen duration. A single-use
+cover later writes of that entry for the chosen duration, and "1 hour" is the
+default for a write that expires: SecretSpec's cache writes such an entry again
+each time it expires, so a single-use approval would ask at every refresh. A single-use
 permission is removed before the value is written, so a write that then fails
 needs a new approval.
 
@@ -285,8 +287,9 @@ Granting requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal
 prompts for the permission lifetime; Enter accepts the app-requested default (or one
 hour when the app supplied none), and values such as `30m`, `8h`, `7d`, and
-`forever` override it. For a SecretSpec write the default is `once`, which
-allows that write only, as Desktop's "This write only" does. The chosen lifetime is bound into the vault signature,
+`forever` override it. For a SecretSpec write that does not expire the default is
+`once`, which allows that write only, as Desktop's "This write only" does; a
+cache write can still be approved `once`. The chosen lifetime is bound into the vault signature,
 so it cannot be changed after factor confirmation. Factorseal verifies the
 typed address and project partition before accepting the project permission,
 so declaring an approved project cannot reach another project's secrets.

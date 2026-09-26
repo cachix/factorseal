@@ -810,16 +810,23 @@ fn single_write_allowed(grants: &[factorseal::Permission]) -> bool {
     !grants.is_empty() && grants.iter().all(factorseal::Permission::allows_single_use)
 }
 
-// A write asks for no more than that write unless the person picks a
-// longer lifetime. A pick of "This write only" that no longer applies,
-// because a request that is not a SecretSpec write joined the popup,
-// falls back to one hour.
+// A plain SecretSpec write asks for no more than that write unless the
+// person picks a longer lifetime; a cache write, which SecretSpec repeats
+// whenever the entry expires, defaults to an hour (see
+// `Permission::defaults_to_single_use`). A pick of "This write only" that no
+// longer applies, because a request that is not a SecretSpec write joined
+// the popup, falls back to one hour.
 fn grant_choice(grants: &[factorseal::Permission], choice: Option<GrantChoice>) -> GrantChoice {
-    let single_write = single_write_allowed(grants);
     match choice {
-        Some(GrantChoice::ThisWriteOnly) if !single_write => GrantChoice::Hour,
+        Some(GrantChoice::ThisWriteOnly) if !single_write_allowed(grants) => GrantChoice::Hour,
         Some(choice) => choice,
-        None if single_write => GrantChoice::ThisWriteOnly,
+        None if !grants.is_empty()
+            && grants
+                .iter()
+                .all(factorseal::Permission::defaults_to_single_use) =>
+        {
+            GrantChoice::ThisWriteOnly
+        }
         None => GrantChoice::Hour,
     }
 }
@@ -1558,6 +1565,7 @@ mod tests {
                 created_at: 1,
                 expires_at: 2,
                 challenge: [0; 32],
+                expiring_write: false,
             },
         };
         assert_eq!(grant_requester(&grant), "SecretSpec");
@@ -1578,6 +1586,27 @@ mod tests {
             GrantChoice::ThisWriteOnly
         );
         assert_eq!(GrantChoice::ThisWriteOnly.lifetime(), (None, true));
+        // A cache write repeats on every expiry, so it defaults to an hour,
+        // but can still be approved for one write.
+        let mut cache_write = write.clone();
+        cache_write.state = factorseal::PermissionState::Pending {
+            created_at: 1,
+            expires_at: 2,
+            challenge: [0; 32],
+            expiring_write: true,
+        };
+        assert_eq!(
+            grant_choice(std::slice::from_ref(&cache_write), None),
+            GrantChoice::Hour
+        );
+        assert!(single_write_allowed(std::slice::from_ref(&cache_write)));
+        assert_eq!(
+            grant_choice(
+                std::slice::from_ref(&cache_write),
+                Some(GrantChoice::ThisWriteOnly)
+            ),
+            GrantChoice::ThisWriteOnly
+        );
         let mut read = write.clone();
         read.operation = factorseal::PermissionOperation::Get;
         assert!(!single_write_allowed(std::slice::from_ref(&read)));

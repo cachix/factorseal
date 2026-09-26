@@ -1186,6 +1186,7 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
             created_at: 1,
             expires_at: 99,
             challenge: [0; 32],
+            expiring_write: false,
         },
     };
     permission.principal.application_id = attack.to_owned();
@@ -1409,16 +1410,16 @@ pub(super) fn parse_grant_lifetime(value: &str) -> Option<GrantLifetime> {
 }
 
 /// Ask how long an approval lasts. A request that allows it can be
-/// approved `once`, for that write only, and that is then the default, as
-/// in Desktop's popup; otherwise the caller's requested duration, or an
-/// hour, is.
+/// approved `once`, for that write only. That is the default for a plain
+/// SecretSpec write, as in Desktop's popup; otherwise the caller's requested
+/// duration, or an hour, is (see `Permission::defaults_to_single_use`).
 pub(super) fn read_grant_lifetime(
     input: &mut impl BufRead,
     output: &mut impl Write,
     approval: &Permission,
 ) -> Result<GrantLifetime, CliError> {
     let once_allowed = approval.allows_single_use();
-    let default = if once_allowed {
+    let default = if approval.defaults_to_single_use() {
         GrantLifetime::Once
     } else {
         GrantLifetime::Seconds(
