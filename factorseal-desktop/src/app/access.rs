@@ -297,8 +297,11 @@ fn open(event: AccessEvent, cx: &mut App) {
             false
         });
         let view = cx.new(|cx| {
-            let password =
-                cx.new(|cx| SecretInputState::new(window, cx).placeholder("FactorSeal password"));
+            let password = cx.new(|cx| {
+                SecretInputState::new(window, cx)
+                    .placeholder("FactorSeal password")
+                    .accessibility_id("factorseal.access.password")
+            });
             let submit = cx.subscribe_in(
                 &password,
                 window,
@@ -314,7 +317,11 @@ fn open(event: AccessEvent, cx: &mut App) {
                     }
                 },
             );
-            let secret = cx.new(|cx| SecretInputState::new(window, cx).placeholder("Secret value"));
+            let secret = cx.new(|cx| {
+                SecretInputState::new(window, cx)
+                    .placeholder("Secret value")
+                    .accessibility_id("factorseal.access.secret-value")
+            });
             let secret_submit = cx.subscribe_in(
                 &secret,
                 window,
