@@ -60,8 +60,7 @@ The driver moves the pointer and types, so it takes over the Windows
 desktop for a few seconds. It never clicks or types unless Desktop's window
 is in front and under the pointer. While it acts, it keeps that window
 topmost, because an always-on-top app (such as a pinned terminal) otherwise
-covers it, and it releases it afterwards. `--then deny` is known to leave the
-request pending in the vault; see the pitfalls.
+covers it, and it releases it afterwards.
 
 ## Reading the results
 
@@ -86,10 +85,10 @@ request pending in the vault; see the pitfalls.
 - **Windows blocks UI Automation from a normal process into an elevated
   one.** Desktop no longer needs elevation, but if it is started elevated,
   `uia-dump.ps1` and `drive.ps1` from WSL see only window frames.
-- **Denying in the popup does not yet reach the vault** (found 2026-09-26):
-  the popup closes, but the request stays pending, because Desktop ignores a
-  failed denial. The popup has also been seen closing by itself with a request
-  pending, after which new requests got no popup. Neither is explained yet.
+- **UI Automation may list the popup under the main window** rather than at
+  the top level, when Windows makes the main window its owner. Find the popup
+  by its window title (as `observe.ps1` and `drive.ps1` do), not among the
+  UI Automation root's children.
 - **An always-on-top window covers the taskbar too**, so `taskbar.png` then
   shows that window; rely on the flash count instead.
 - **The CLI needs `secretspec-provider`** for native SecretSpec on Windows.
