@@ -30,6 +30,30 @@ public static class Input {
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    public delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr lParam);
+    [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr hwnd, out int pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, System.Text.StringBuilder text, int max);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+
+    // A visible top-level window of the process whose title ends as given.
+    // UI Automation lists the popup under the main window when Windows makes
+    // the main window its owner, so search the window list instead.
+    public static IntPtr Find(int pid, string suffix) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((hwnd, _) => {
+            int owner;
+            GetWindowThreadProcessId(hwnd, out owner);
+            var title = new System.Text.StringBuilder(256);
+            GetWindowText(hwnd, title, title.Capacity);
+            if (owner == pid && IsWindowVisible(hwnd) && title.ToString().EndsWith(suffix)) {
+                found = hwnd;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
@@ -99,17 +123,14 @@ function Fail([string]$message) { Emit "error=$message"; exit 1 }
 $auto = [System.Windows.Automation.AutomationElement]
 $scope = [System.Windows.Automation.TreeScope]
 if (-not (Get-Process -Id $DesktopPid -ErrorAction SilentlyContinue)) { Fail "Desktop $DesktopPid is not running" }
-$byPid = New-Object System.Windows.Automation.PropertyCondition($auto::ProcessIdProperty, $DesktopPid)
 
 # The main window is titled "FactorSeal Desktop"; the popup's title ends in
 # "Secret access" (see observe.ps1).
 function FindWindow {
-    foreach ($window in $auto::RootElement.FindAll($scope::Children, $byPid)) {
-        $name = $window.Current.Name
-        if ($Action -eq 'unlock' -and $name -eq 'FactorSeal Desktop') { return $window }
-        if ($Action -ne 'unlock' -and $name.EndsWith('Secret access')) { return $window }
-    }
-    $null
+    $suffix = if ($Action -eq 'unlock') { 'FactorSeal Desktop' } else { 'Secret access' }
+    $hwnd = [Input]::Find($DesktopPid, $suffix)
+    if ($hwnd -eq [IntPtr]::Zero) { return $null }
+    $auto::FromHandle($hwnd)
 }
 
 function Find($window, [string]$name) {
