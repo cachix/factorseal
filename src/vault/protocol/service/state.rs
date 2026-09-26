@@ -54,12 +54,14 @@ impl ServiceState {
         let seal_handle = store.clone();
         let lease = UnsealLease::new(now, policy)?;
         store.set_deadline(lease.expires_at())?;
+        // Requests still waiting for review when the vault last sealed.
+        let approvals = PendingApprovals::load(&store, now);
         Ok(Self {
             live: Mutex::new(LiveState {
                 store,
                 lease,
                 replay: ReplayWindow::new(),
-                approvals: PendingApprovals::default(),
+                approvals,
                 granted_permissions: Vec::new(),
                 // Opening the store already swept this second.
                 last_purge_at: now,
@@ -180,13 +182,25 @@ impl LiveStateGuard<'_> {
         let revision = self.live.approvals.revision();
         let interaction = self.live.approvals.create(candidate, now);
         if self.live.approvals.revision() != revision {
+            self.save_approvals(now);
             self.approval_changed.notify_all();
         }
         interaction
     }
 
+    /// Write changed pending approvals through to the store. Best effort: a
+    /// failed write loses only the requests changed since the last one, and
+    /// only if the vault seals before the next write.
+    fn save_approvals(&mut self, now: u64) {
+        let LiveState {
+            store, approvals, ..
+        } = &mut *self.live;
+        let _ = approvals.save(store, now);
+    }
+
     pub(super) fn list_permissions(&mut self, now: u64) -> VaultResult<(u64, Vec<Permission>)> {
         let (_, mut permissions) = self.live.approvals.list(now);
+        self.save_approvals(now);
         let mut granted = list_granted_permissions(&self.live.store, now)?;
         granted.sort_by(|left, right| left.id.cmp(&right.id));
         if granted != self.live.granted_permissions {
@@ -200,6 +214,7 @@ impl LiveStateGuard<'_> {
 
     pub(super) fn deny_approval(&mut self, id: &str, now: u64) -> VaultResult<()> {
         self.live.approvals.deny(id, now)?;
+        self.save_approvals(now);
         self.approval_changed.notify_all();
         Ok(())
     }
@@ -235,6 +250,7 @@ impl LiveStateGuard<'_> {
             now,
             provenance,
         )?;
+        self.save_approvals(now);
         self.approval_changed.notify_all();
         Ok(())
     }

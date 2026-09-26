@@ -232,8 +232,11 @@ on its protocol streams, a sealed service is reported to SecretSpec as
 `interaction_required`.
 
 When a project lacks a cache permission, Factorseal creates a pending permission
-with a stable opaque ID and retains it in memory for seven days. Equivalent
-requests reuse the ID and refresh its expiry. Grant, deny, or later revoke it
+with a stable opaque ID and retains it for seven days. Pending permissions are
+also written to the encrypted vault, local to the device like grants, so a
+request still waiting for review survives the vault sealing and is offered
+again after the next unseal. Equivalent requests reuse the ID; a request's
+expiry is fixed when it is created. Grant, deny, or later revoke it
 through one command family:
 
 ```console
