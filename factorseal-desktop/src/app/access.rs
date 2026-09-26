@@ -11,6 +11,13 @@ const ARM_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 struct AccessWindow(Option<(AnyWindowHandle, gpui::Entity<AccessView>)>, bool);
 impl Global for AccessWindow {}
 
+/// Pending permissions the user denied while the vault was sealed. The vault
+/// keeps pending permissions across a seal, so they are denied once it is
+/// unsealed again instead of coming back.
+#[derive(Default)]
+struct DeferredDenials(Vec<String>);
+impl Global for DeferredDenials {}
+
 struct InputEditor {
     value: gpui::Entity<SecretInputState>,
     initialized: bool,
@@ -77,6 +84,7 @@ struct AccessView {
 
 pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App) {
     cx.set_global(AccessWindow::default());
+    cx.set_global(DeferredDenials::default());
     watch_permissions(cx);
     cx.spawn(async move |cx| {
         loop {
@@ -121,16 +129,20 @@ fn watch_permissions(cx: &mut App) {
         loop {
             let state = cx.update(|cx| {
                 let desktop = cx.global::<DesktopWindow>();
-                match &desktop.snapshot {
-                    Snapshot::Unsealed { metadata, .. } => Some((
-                        Arc::clone(&cx.global::<RuntimeGlobal>().0),
-                        metadata.clone(),
-                        desktop.refresh_generation,
-                    )),
-                    _ => None,
-                }
+                let Snapshot::Unsealed { metadata, .. } = &desktop.snapshot else {
+                    return None;
+                };
+                let state = (
+                    Arc::clone(&cx.global::<RuntimeGlobal>().0),
+                    metadata.clone(),
+                    desktop.refresh_generation,
+                );
+                Some((
+                    state,
+                    std::mem::take(&mut cx.global_mut::<DeferredDenials>().0),
+                ))
             });
-            let Some((runtime, metadata, current_generation)) = state else {
+            let Some(((runtime, metadata, current_generation), denials)) = state else {
                 generation = None;
                 after_revision = None;
                 smol::Timer::after(std::time::Duration::from_millis(500)).await;
@@ -140,8 +152,14 @@ fn watch_permissions(cx: &mut App) {
                 generation = Some(current_generation);
                 after_revision = None;
             }
-            let result =
-                smol::unblock(move || runtime.watch_permissions(&metadata, after_revision)).await;
+            // Deny before watching, so a denied permission is not reopened.
+            let result = smol::unblock(move || {
+                for id in denials {
+                    let _ = runtime.deny_permission(&metadata, id);
+                }
+                runtime.watch_permissions(&metadata, after_revision)
+            })
+            .await;
             if let Ok((revision, permissions)) = result {
                 let accepted = cx.update(|cx| {
                     // A seal, another unlock or a refresh supersedes this wait.
@@ -231,9 +249,15 @@ fn close(cx: &mut App) {
                 Arc::clone(&view.runtime),
                 view.snapshot.metadata().cloned(),
                 std::mem::take(&mut view.grants),
+                matches!(view.snapshot, Snapshot::Unsealed { .. }),
             )
         });
-        if let (runtime, Some(metadata), grants) = denial {
+        if let (_, _, grants, false) = &denial {
+            // A sealed vault cannot deny; it keeps the permissions pending.
+            cx.global_mut::<DeferredDenials>()
+                .0
+                .extend(grants.iter().map(|grant| grant.id.clone()));
+        } else if let (runtime, Some(metadata), grants, true) = denial {
             cx.spawn(async move |_| {
                 smol::unblock(move || {
                     for grant in grants {
@@ -263,7 +287,18 @@ pub(super) fn update(snapshot: &Snapshot, cx: &mut App) {
         if matches!(view.snapshot, Snapshot::Unsealed { .. })
             && matches!(snapshot, Snapshot::Sealed { .. })
         {
-            return true;
+            // The vault keeps its pending permissions across a seal, so a
+            // popup still reviewing them stays open to unlock and continue.
+            let reviewing = !view.grants.is_empty()
+                || !view.inputs.is_empty()
+                || view
+                    .requests
+                    .iter()
+                    .any(SecretServiceAccessRequest::is_pending);
+            if !reviewing {
+                return true;
+            }
+            view.guard.changed();
         }
         view.snapshot = snapshot.clone();
         view.error = match snapshot {
@@ -692,6 +727,9 @@ impl AccessView {
                 cx.notify();
                 return;
             }
+            // Unlocking does not approve pending permissions; granting them
+            // takes the password again.
+            self.password.update(cx, SecretInputState::clear);
             self.snapshot = Snapshot::Unlocking {
                 metadata,
                 group,
@@ -1580,7 +1618,7 @@ impl Render for AccessView {
                         });
                     })))
                     .child(button("allow-access").primary().disabled((self.reviewing && self.grants.is_empty() && self.inputs.is_empty() && unsealed) || busy || !matches!(self.snapshot, Snapshot::Sealed { .. } | Snapshot::Unsealed { .. }))
-                        .label(if self.approving { "Authorizing…" } else if busy { "Unlocking…" } else if !self.inputs.is_empty() && unsealed { "Save secret" } else if !self.grants.is_empty() { "Grant access" } else if unsealed && self.reviewing { "Checking access…" } else if unsealed { "Continue" } else { "Unlock to continue" })
+                        .label(if self.approving { "Authorizing…" } else if busy { "Unlocking…" } else if !self.inputs.is_empty() && unsealed { "Save secret" } else if !self.grants.is_empty() && unsealed { "Grant access" } else if unsealed && self.reviewing { "Checking access…" } else if unsealed { "Continue" } else { "Unlock to continue" })
                         .on_click(cx.listener(|view, _, window, cx| view.allow(window, cx)))))))
             .when(expired, |window| window.child(h_flex().p_6().justify_end().border_t_1().border_color(theme.border)
                 .child(button("close-expired-access").primary().label("Close").on_click(|_, _, cx| cx.defer(close))))))
