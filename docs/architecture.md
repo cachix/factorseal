@@ -254,8 +254,11 @@ bounded set of concurrent local connections, allowing provider requests to
 create pending permissions while CLI and future GUI notification listeners wait.
 The SecretSpec endpoint waits internally for its own pending permission while
 the original provider request remains within its deadline. Approval completes
-that request without exposing permission-management APIs to SecretSpec; a later
-approval remains useful when the caller retries after its deadline.
+that request without exposing permission-management APIs to SecretSpec. If the
+permission is still pending shortly before the deadline (SecretSpec allows 30
+seconds per operation), the endpoint answers `interaction_required` with the
+permission's reference instead of letting the request time out; a later
+approval remains useful when the caller retries.
 
 With the headless agent, SecretSpec writes use these signed project permissions.
 With Desktop, each write uses the secure input dialog described below. The

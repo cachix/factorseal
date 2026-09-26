@@ -4,6 +4,40 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Tell SecretSpec that approval is needed when a person has not finished
+  approving a request within SecretSpec's 30-second operation limit. The
+  provider now answers `interaction_required` with the pending permission's
+  reference just before the deadline, instead of timing out with
+  `deadline_exceeded`. The permission stays pending, so rerunning after
+  approving it succeeds.
+
+- Keep permission requests that are waiting for review when the vault seals.
+  Pending permissions are now stored in the encrypted vault, local to the
+  device, and offered again after the next unseal, even after Desktop
+  restarts. Desktop's approval popup stays open through a seal and offers to
+  unlock; granting still takes the password again. A request denied while the
+  vault is sealed is denied as soon as it is unsealed.
+
+- Flash Desktop's taskbar button on Windows when the approval popup loses
+  the foreground before it was clicked, as when Windows gives it the focus
+  for a moment and then hands it back to the app being used. A popup opened
+  while the main window is active has no taskbar button of its own, so the
+  main window's button flashes for it until the popup is in front.
+
+- Unlock on Windows without administrator rights. Windows gives the TPM
+  storage hierarchy authorization only to administrators, so `hardwareseal`
+  now tries the empty authorization Windows sets by default when it is
+  refused, and derives the same storage key, so existing vaults keep working.
+  If the TPM rejects that, the error says to run as administrator instead of
+  showing a raw TBS status.
+
+- Open Desktop's permission approval popup on macOS and Windows as well as
+  Linux, for native SecretSpec requests and requests relayed from WSL2.
+  Relayed requests show the WSL distro and that access expires after five
+  minutes. The popup no longer takes typing until clicked, and ignores
+  approval for one second after its requests change, so keystrokes or an
+  Enter meant for another app cannot approve a request.
+
 - Update the SecretSpec provider integration to IPC 0.20, accept the registered
   `factorseal://` provider URI, and display conventional secret names with
   project and profile coordinates. Group related access requests in the
