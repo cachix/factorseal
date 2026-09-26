@@ -3618,3 +3618,48 @@ fn single_use_approval_is_signed_and_only_for_secretspec_writes() {
     assert!(approve_only_pending(&read_directory, &reads, &manager, true, now + 2).is_err());
     assert_eq!(pending_ids(&reads, &manager, now + 3).len(), 1);
 }
+
+#[test]
+fn an_expiring_cache_write_is_marked_so_prompts_do_not_default_to_once() {
+    let now = wall_clock();
+    let (_directory, service) = service(now, UnsealLeasePolicy::default());
+    let provider = caller();
+    let manager = permission_manager();
+    service.authorize_permission_manager(&manager, now).unwrap();
+    let expiring = VaultRequest::new_with_application(
+        VaultAction::PutCache {
+            project: "demo".to_owned(),
+            address: project_address("demo"),
+            value: WireSecret::new(b"cached".to_vec()).unwrap(),
+            evict_at: Some(now + 30),
+        },
+        VaultApplicationContext::new(Some("demo".to_owned()), None, None, None).unwrap(),
+    )
+    .unwrap();
+    let asked = service.handle(&provider, expiring, now + 1);
+    assert!(asked.result.unwrap_err().interaction.is_some());
+    let plain = service.handle(&provider, cache_write("demo", b"typed"), now + 2);
+    assert!(plain.result.unwrap_err().interaction.is_some());
+
+    // Two separate requests: one expiring, one not.
+    let permissions = listed_permissions(&service, &manager, now + 3);
+    assert_eq!(permissions.len(), 2);
+    let expiring = permissions
+        .iter()
+        .find(|permission| {
+            matches!(
+                permission.state,
+                PermissionState::Pending {
+                    expiring_write: true,
+                    ..
+                }
+            )
+        })
+        .expect("the cache write is marked");
+    assert!(expiring.allows_single_use() && !expiring.defaults_to_single_use());
+    let plain = permissions
+        .iter()
+        .find(|permission| permission.id != expiring.id)
+        .unwrap();
+    assert!(plain.defaults_to_single_use());
+}

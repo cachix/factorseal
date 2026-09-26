@@ -908,6 +908,7 @@ fn pending_permission(
             created_at: 1,
             expires_at: 2,
             challenge: [0; 32],
+            expiring_write: false,
         },
     }
 }
@@ -991,6 +992,26 @@ fn a_secretspec_write_is_approved_once_unless_a_duration_is_given() {
     assert_eq!(
         read_grant_lifetime(&mut hour, &mut Vec::new(), &write).unwrap(),
         GrantLifetime::Seconds(60 * 60)
+    );
+
+    // SecretSpec's cache writes again at every expiry, so its write defaults
+    // to the requested duration, and can still be approved once.
+    let mut cache_write = write.clone();
+    cache_write.state = factorseal::PermissionState::Pending {
+        created_at: 1,
+        expires_at: 2,
+        challenge: [0; 32],
+        expiring_write: true,
+    };
+    let mut default = std::io::Cursor::new(b"\n");
+    assert_eq!(
+        read_grant_lifetime(&mut default, &mut Vec::new(), &cache_write).unwrap(),
+        GrantLifetime::Seconds(8 * 60 * 60)
+    );
+    let mut once = std::io::Cursor::new(b"once\n");
+    assert_eq!(
+        read_grant_lifetime(&mut once, &mut Vec::new(), &cache_write).unwrap(),
+        GrantLifetime::Once
     );
 
     // A keyring write is not a SecretSpec write: the vault would refuse once.
