@@ -101,6 +101,8 @@ pub(super) enum Command {
         challenge: String,
         #[arg(long)]
         duration_seconds: Option<u64>,
+        #[arg(long, conflicts_with = "duration_seconds")]
+        single_use: bool,
         #[arg(long)]
         unlock: Option<UnlockGroup>,
     },
