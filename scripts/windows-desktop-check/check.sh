@@ -2,7 +2,7 @@
 # Checks FactorSeal Desktop's approval popup on Windows from WSL2.
 #
 #   check.sh popup [--delay SECONDS] [--key KEY] [--observe SECONDS] [--steal]
-#                  [--test-vault [--then grant|deny]]
+#                  [--test-vault [--seal] [--then grant|deny]]
 #       Send a WSL-relayed request and report whether the popup opened, whether
 #       it reached the foreground or flashed its taskbar button, a screenshot,
 #       and whether the vault holds the pending request with its WSL origin.
@@ -11,6 +11,9 @@
 #       the popup takes it; the popup must then flash.
 #       --then drives the popup afterwards (test vault only); grant also runs
 #       the grant check.
+#       --seal seals the vault while the request waits; the popup must stay
+#       open. grant then unlocks from the popup; deny denies while sealed and
+#       unlocks from the main window, and the request must stay denied.
 #   check.sh grant --key KEY [--test-vault]
 #       After approving in the popup, resend the request and check that it
 #       succeeds without a new popup and that the grant is capped at 300 s.
@@ -27,7 +30,7 @@ set -euo pipefail
 
 case ${1:-} in
     popup | grant | test-desktop) ;;
-    *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -66,6 +69,7 @@ delay=0
 observe=12
 test_vault=no
 steal=no
+seal=no
 then=
 while [ $# -gt 0 ]; do
     case $1 in
@@ -74,6 +78,7 @@ while [ $# -gt 0 ]; do
         --observe) observe=$2; shift 2 ;;
         --test-vault) test_vault=yes; shift ;;
         --steal) steal=yes; shift ;;
+        --seal) seal=yes; shift ;;
         --then) then=$2; shift 2 ;;
         *) die "unknown option $1" ;;
     esac
@@ -83,6 +88,7 @@ case $then in
     *) die "--then takes grant or deny" ;;
 esac
 [ -z "$then" ] || [ "$test_vault" = yes ] || die "--then drives only the test vault; add --test-vault"
+[ "$seal" = no ] || [ -n "$then" ] || die "--seal needs --then grant or --then deny"
 [ "$command" = test-desktop ] && test_vault=yes
 
 root_args=()
@@ -264,9 +270,40 @@ popup)
         echo "Approve or deny it in the popup. After approving, run: $0 grant --key $key"
         exit 0
     fi
-    result=$(powershell drive.ps1 -Action "$then" -DesktopPid "$pid" -PasswordFile "$test_password" || true)
-    sed 's/^/driver:        /' <<<"$result"
+    drive() {
+        result=$(powershell drive.ps1 -Action "$1" -DesktopPid "$pid" -PasswordFile "$test_password" || true)
+        sed 's/^/driver:        /' <<<"$result"
+    }
+    wait_state() {
+        for _ in $(seq 50); do
+            [ "$(state)" = "$1" ] && return 0
+            sleep 0.2
+        done
+        return 1
+    }
+    if [ "$seal" = yes ]; then
+        factorseal seal >/dev/null
+        wait_state sealed || die "the vault did not seal"
+        drive find
+        grep -q '^popup_open=True' <<<"$result" || die "sealing closed the popup"
+        echo "sealed:        vault sealed, popup still open"
+        if [ "$then" = grant ]; then
+            drive unlock-popup
+            grep -q '^unlocked=True' <<<"$result" || die "the popup did not unlock the vault"
+            wait_state unsealed || die "the vault is still sealed after unlocking in the popup"
+        fi
+    fi
+    drive "$then"
     grep -q '^popup_closed=True' <<<"$result" || die "the driver could not $then the request"
+    if [ "$seal" = yes ] && [ "$then" = deny ]; then
+        # Denied while sealed: Desktop sends the denial after the next unlock.
+        drive unlock
+        grep -q '^unlocked=True' <<<"$result" || die "the driver could not unlock the main window"
+        wait_state unsealed || die "the vault is still sealed"
+        sleep 3
+        drive find
+        grep -q '^popup_open=False' <<<"$result" || die "the denied request came back after unlocking"
+    fi
     record=$(permission "$id")
     if [ "$then" = deny ]; then
         grep -q 'pending' <<<"$record" && die "$id is still pending after Deny"
