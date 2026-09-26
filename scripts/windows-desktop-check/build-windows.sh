@@ -29,7 +29,7 @@ windows_profile=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d
 windows_tree=${FACTORSEAL_WINDOWS_TREE:-$windows_profile/Projects/factorseal}
 # The features release packaging uses, plus the SecretSpec provider, which
 # packaging leaves out until its IPC crate is published (docs/development.md).
-cli_features=vault,cli,hardware,secretspec-provider,personal-sync-network
+cli_features=vault,cli,hardware,secretspec-provider,personal-sync-network,browser
 
 die() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -46,7 +46,7 @@ windows() {
 
 if [ "$mode" = release ]; then
     running=$(powershell.exe -NoProfile -Command \
-        "Get-Process factorseal, factorseal-desktop -ErrorAction SilentlyContinue | ForEach-Object { \"\$(\$_.Name) (pid \$(\$_.Id))\" }" |
+        "Get-Process factorseal, factorseal-desktop, factorseal-browser -ErrorAction SilentlyContinue | ForEach-Object { \"\$(\$_.Name) (pid \$(\$_.Id))\" }" |
         tr -d '\r' || true) # Get-Process exits 1 when nothing matches.
     [ -z "$running" ] || die "quit FactorSeal first (tray icon, Quit); running: ${running//$'\n'/, }"
 fi
@@ -70,7 +70,7 @@ release)
     echo "Building Desktop"
     windows "cargo build --locked --release -p factorseal-desktop"
     echo "Building the CLI and its helpers"
-    windows "cargo build --locked --release --no-default-features --features $cli_features --bin factorseal --bin factorseal-parser --bin factorseal-network"
+    windows "cargo build --locked --release --no-default-features --features $cli_features --bin factorseal --bin factorseal-parser --bin factorseal-network --bin factorseal-browser"
     ;;
 check)
     echo "Running clippy"
@@ -83,7 +83,7 @@ esac
 
 if [ "$mode" = release ]; then
     echo
-    for binary in factorseal-desktop factorseal factorseal-parser factorseal-network; do
+    for binary in factorseal-desktop factorseal factorseal-parser factorseal-network factorseal-browser; do
         stat -c "%y  %n" "$windows_tree/target/release/$binary.exe" | cut -c1-19,36-
     done
 fi
