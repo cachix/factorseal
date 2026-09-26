@@ -91,6 +91,24 @@ public static class Input {
         Send(new[] { down, up });
     }
 
+    // Empty the focused field: End, then Backspace until nothing is left.
+    // Ctrl+A would be simpler, but Desktop does not see an injected Ctrl
+    // key and inserts an "A" instead.
+    public static void Clear(int keys) {
+        var end = new INPUT { type = INPUT_KEYBOARD };
+        end.u.ki.wVk = 0x23;
+        var endUp = end;
+        endUp.u.ki.dwFlags = KEYEVENTF_KEYUP;
+        Send(new[] { end, endUp });
+        for (int i = 0; i < keys; i++) {
+            var back = new INPUT { type = INPUT_KEYBOARD };
+            back.u.ki.wVk = 0x08;
+            var backUp = back;
+            backUp.u.ki.dwFlags = KEYEVENTF_KEYUP;
+            Send(new[] { back, backUp });
+        }
+    }
+
     public static void Type(string text) {
         foreach (char c in text) {
             var down = new INPUT { type = INPUT_KEYBOARD };
@@ -173,6 +191,8 @@ function TypeInto($window, [string]$text) {
     if ([Input]::GetForegroundWindow() -ne [IntPtr]$window.Current.NativeWindowHandle) {
         Fail 'the window lost the foreground before typing'
     }
+    # A failed attempt leaves its text in the field; remove it first.
+    [Input]::Clear(256)
     [Input]::Type($text)
 }
 
@@ -211,10 +231,22 @@ switch ($Action) {
         $button = WaitFor $window 'Unlock vault' 2
         if (-not $button) { Fail 'no enabled Unlock vault button' }
         ClickOn $window $button 'Unlock vault'
-        # The password field goes away once the vault is unsealed.
+        # The password field goes away once the vault is unsealed. It also
+        # disappears briefly while an attempt runs, and comes back after a
+        # wrong password, so it must stay away.
         $deadline = [DateTime]::UtcNow.AddSeconds(20)
-        while ((Find $window 'FactorSeal password') -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
-        $done = -not (Find $window 'FactorSeal password')
+        $goneSince = $null
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if (Find $window 'FactorSeal password') {
+                $goneSince = $null
+            } elseif (-not $goneSince) {
+                $goneSince = [DateTime]::UtcNow
+            } elseif (([DateTime]::UtcNow - $goneSince).TotalMilliseconds -ge 1500) {
+                break
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        $done = $goneSince -and -not (Find $window 'FactorSeal password')
         Emit "unlocked=$done"
     }
     'grant' {
