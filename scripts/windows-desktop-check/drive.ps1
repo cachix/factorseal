@@ -1,14 +1,15 @@
-# Drives FactorSeal Desktop like a person: unlocks the main window, or grants
-# or denies the approval popup. UI Automation finds the controls; the clicks
-# and keystrokes are real input, since the popup accepts approval only after
-# a mouse click inside it and one second without changes. Every click first
-# checks that the target window is in the foreground and is the window under
-# the pointer, so a click never lands in another app.
+# Drives FactorSeal Desktop like a person: unlocks the main window or a popup
+# kept open by a seal, or grants or denies the approval popup. UI Automation
+# finds the controls; the clicks and keystrokes are real input, since the
+# popup accepts approval only after a mouse click inside it and one second
+# without changes. Every click first checks that the target window is in the
+# foreground and is the window under the pointer, so a click never lands in
+# another app.
 #
 # Use it only with a throwaway vault (test-vault.ps1): the password is typed
 # from -PasswordFile. Prints key=value lines; the password is never printed.
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('unlock', 'grant', 'deny')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('find', 'unlock', 'unlock-popup', 'grant', 'deny')][string]$Action,
     [Parameter(Mandatory = $true)][int]$DesktopPid,
     [string]$PasswordFile,
     [int]$Seconds = 15
@@ -161,6 +162,12 @@ function ClickOn($window, $element, [string]$what) {
     Emit "clicked=$what"
 }
 
+# Reports whether the popup is open, without touching anything.
+if ($Action -eq 'find') {
+    Emit "popup_open=$([bool](FindWindow))"
+    exit 0
+}
+
 # Keystrokes go to whatever has focus, so check just before typing.
 function TypeInto($window, [string]$text) {
     if ([Input]::GetForegroundWindow() -ne [IntPtr]$window.Current.NativeWindowHandle) {
@@ -222,6 +229,18 @@ switch ($Action) {
         if (-not $button) { Fail 'no enabled Grant access button' }
         ClickOn $window $button 'Grant access'
     }
+    'unlock-popup' {
+        # A popup kept open by a seal offers to unlock; it stays open to grant.
+        $field = WaitFor $window 'FactorSeal password' 5
+        if (-not $field) { Fail 'the popup shows no password field' }
+        ClickOn $window $field 'password field'
+        Start-Sleep -Milliseconds 1200
+        TypeInto $window $password
+        $button = WaitFor $window 'Unlock to continue' 5
+        if (-not $button) { Fail 'no enabled Unlock to continue button' }
+        ClickOn $window $button 'Unlock to continue'
+        Emit "unlocked=$([bool](WaitFor $window 'Grant access' 30))"
+    }
     'deny' {
         $button = WaitFor $window 'Deny' 5
         if (-not $button) { Fail 'no enabled Deny button' }
@@ -234,7 +253,7 @@ switch ($Action) {
 }
 $password = $null
 
-if ($Action -ne 'unlock') {
+if ($Action -in 'grant', 'deny') {
     # The popup closes once no request is left.
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while ((FindWindow) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }

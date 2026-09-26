@@ -20,11 +20,12 @@ by default `%USERPROFILE%\Projects\factorseal`; set `FACTORSEAL_WINDOWS_TREE`
 | `check.sh grant --key K` | WSL | After the popup was approved, resends the request and checks that it succeeds without a new popup and that the grant stays within the 300-second WSL cap. |
 | `check.sh test-desktop` | WSL | Creates the throwaway test vault if needed, starts a Desktop on it, and unlocks it through `drive.ps1`. |
 | `check.sh popup --steal` | WSL | As soon as the popup takes the foreground, the observer hands it to a window of its own that stands in for another app. The popup must then flash. Needs the popup to take the foreground first, which happens when Desktop was just used, for example right after `test-desktop`. |
+| `check.sh popup --test-vault --seal --then grant\|deny` | WSL | Seals the vault while the request waits and checks that the popup stays open. `grant` unlocks from the popup and grants; `deny` denies while sealed, unlocks from the main window, and checks that the request stays denied. |
 | `check.sh popup --test-vault [--then grant\|deny]` | WSL | `popup` against the test vault and its Desktop; `--then` drives the popup afterwards, and `grant` also runs the grant check. `grant --test-vault` works the same way. |
 | `observe.ps1` | Windows | Used by `check.sh`; hooks taskbar-flash notifications and captures the screenshots. |
 | `uia-dump.ps1 [-Out FILE] [-DesktopPid P]` | Windows | Lists what UI Automation sees in Desktop's windows: control types, names, AutomationIds, and whether a value is exposed (never the value itself). |
 | `test-vault.ps1 -Cli EXE` | Windows | Used by `check.sh`; creates a password-only vault in `%LOCALAPPDATA%\FactorSeal-check` with a random password in an owner-only file. Leaves an existing one alone. |
-| `drive.ps1 -Action unlock\|grant\|deny -DesktopPid P [-PasswordFile F]` | Windows | Used by `check.sh`; unlocks Desktop's main window or grants or denies the popup. Finds controls through UI Automation, then clicks and types with real input, because the popup accepts approval only after a click inside it. |
+| `drive.ps1 -Action find\|unlock\|unlock-popup\|grant\|deny -DesktopPid P [-PasswordFile F]` | Windows | Used by `check.sh`; reports whether the popup is open, unlocks Desktop's main window or a popup kept open by a seal, or grants or denies the popup. Finds controls through UI Automation, then clicks and types with real input, because the popup accepts approval only after a click inside it. |
 | `proc-watch.ps1 -Out FILE [-Seconds N]` | Windows | Logs FactorSeal processes, their helpers and WerFault starting and exiting, and whether Desktop's window responds. For diagnosing hangs and crashes. |
 
 PowerShell scripts are run from WSL as
@@ -78,9 +79,11 @@ covers it, and it releases it afterwards.
 
 ## Pitfalls
 
-- **The vault seals itself after a few idle minutes.** The pending request is
-  lost and the popup closes. `check.sh` checks before sending (and again after
-  `--delay`); unlock and rerun when it says the vault is sealed.
+- **The vault seals itself after a few idle minutes.** A pending request
+  survives it: the popup stays open with "Unlock to continue", and the request
+  is still pending after the unlock. A new request cannot reach a sealed vault,
+  so `check.sh` checks before sending (and again after `--delay`); unlock and
+  rerun when it says the vault is sealed.
 - **Desktop locks its executables.** Quit it from the tray before
   `build-windows.sh release`.
 - **Windows blocks UI Automation from a normal process into an elevated
