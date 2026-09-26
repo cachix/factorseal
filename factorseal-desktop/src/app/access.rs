@@ -297,74 +297,7 @@ fn open(event: AccessEvent, cx: &mut App) {
             false
         });
         let view = cx.new(|cx| {
-            let password = cx.new(|cx| {
-                SecretInputState::new(window, cx)
-                    .placeholder("FactorSeal password")
-                    .accessibility_id("factorseal.access.password")
-            });
-            let submit = cx.subscribe_in(
-                &password,
-                window,
-                |view: &mut AccessView, _, event: &InputEvent, window, cx| {
-                    if matches!(
-                        event,
-                        InputEvent::PressEnter {
-                            secondary: false,
-                            ..
-                        }
-                    ) {
-                        view.allow(window, cx);
-                    }
-                },
-            );
-            let secret = cx.new(|cx| {
-                SecretInputState::new(window, cx)
-                    .placeholder("Secret value")
-                    .accessibility_id("factorseal.access.secret-value")
-            });
-            let secret_submit = cx.subscribe_in(
-                &secret,
-                window,
-                |view: &mut AccessView, _, event: &InputEvent, window, cx| {
-                    if matches!(
-                        event,
-                        InputEvent::PressEnter {
-                            secondary: false,
-                            ..
-                        }
-                    ) {
-                        view.allow(window, cx);
-                    }
-                },
-            );
-            let group = snapshot
-                .metadata()
-                .map(|metadata| metadata.preferred_unlock_group().clone());
-            let mut view = AccessView {
-                runtime: Arc::clone(&runtime),
-                snapshot: snapshot.clone(),
-                password,
-                editor: InputEditor {
-                    value: secret,
-                    initialized: false,
-                    focused: false,
-                },
-                inputs: Vec::new(),
-                group,
-                requests: Vec::new(),
-                explicit_unlock: false,
-                unlocks: Vec::new(),
-                grants: Vec::new(),
-                reviewed_grants: Vec::new(),
-                approving: false,
-                reviewing: false,
-                duration: Some(3600),
-                details: RequestDetails::default(),
-                error: None,
-                guard: InputGuard::new(),
-                _submit: submit,
-                _secret_submit: secret_submit,
-            };
+            let mut view = AccessView::new(Arc::clone(&runtime), snapshot.clone(), window, cx);
             view.add(event.take().expect("window builder runs once"));
             view
         });
@@ -431,6 +364,82 @@ fn deny(cx: &mut App) {
 }
 
 impl AccessView {
+    fn new(
+        runtime: Arc<DesktopRuntime>,
+        snapshot: Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let password = cx.new(|cx| {
+            SecretInputState::new(window, cx)
+                .placeholder("FactorSeal password")
+                .accessibility_id("factorseal.access.password")
+        });
+        let submit = cx.subscribe_in(
+            &password,
+            window,
+            |view: &mut AccessView, _, event: &InputEvent, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    view.allow(window, cx);
+                }
+            },
+        );
+        let secret = cx.new(|cx| {
+            SecretInputState::new(window, cx)
+                .placeholder("Secret value")
+                .accessibility_id("factorseal.access.secret-value")
+        });
+        let secret_submit = cx.subscribe_in(
+            &secret,
+            window,
+            |view: &mut AccessView, _, event: &InputEvent, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    view.allow(window, cx);
+                }
+            },
+        );
+        let group = snapshot
+            .metadata()
+            .map(|metadata| metadata.preferred_unlock_group().clone());
+        AccessView {
+            runtime,
+            snapshot,
+            password,
+            editor: InputEditor {
+                value: secret,
+                initialized: false,
+                focused: false,
+            },
+            inputs: Vec::new(),
+            group,
+            requests: Vec::new(),
+            explicit_unlock: false,
+            unlocks: Vec::new(),
+            grants: Vec::new(),
+            reviewed_grants: Vec::new(),
+            approving: false,
+            reviewing: false,
+            duration: Some(3600),
+            details: RequestDetails::default(),
+            error: None,
+            guard: InputGuard::new(),
+            _submit: submit,
+            _secret_submit: secret_submit,
+        }
+    }
+
     fn prune_inputs(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = prune_queue(
             &mut self.inputs,
@@ -1151,6 +1160,71 @@ mod tests {
         assert!(guard.allows_approval());
         guard.changed();
         assert!(!guard.allows_approval(), "new requests restart the delay");
+    }
+
+    /// Opens the popup over a vault-less snapshot with a password unlock
+    /// group, which shows the password field without a real vault.
+    fn open_popup(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<AccessView>, &mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::appearance::initialize_for_test(cx);
+        });
+        let (runtime, _) = DesktopRuntime::new(crate::runtime::RuntimeConfig {
+            root: std::env::temp_dir().join("factorseal-access-popup-test"),
+            socket: None,
+            lease: crate::runtime::LeasePolicy {
+                idle_timeout: std::time::Duration::from_mins(1),
+                maximum_lifetime: std::time::Duration::from_mins(1),
+            },
+            secret_service: false,
+        });
+        let mut popup = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view =
+                    AccessView::new(runtime, Snapshot::Uninitialized { error: None }, window, cx);
+                view.group = Some(
+                    factorseal::UnlockGroup::new([factorseal::UnlockFactorKind::Password])
+                        .expect("a password-only group is valid"),
+                );
+                view
+            });
+            popup = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        (popup.expect("the window builder ran"), cx)
+    }
+
+    fn password(view: &gpui::Entity<AccessView>, cx: &mut gpui::VisualTestContext) -> String {
+        view.read_with(cx, |view, cx| view.password.read(cx).value().to_string())
+    }
+
+    #[gpui::test]
+    fn typing_meant_for_another_app_does_not_reach_the_password(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = open_popup(cx);
+        cx.run_until_parked();
+        cx.simulate_input("typed in a terminal");
+        assert_eq!(
+            password(&view, cx),
+            "",
+            "the field takes no focus on its own"
+        );
+        assert!(view.read_with(cx, |view, _| !view.guard.armed));
+    }
+
+    #[gpui::test]
+    fn a_click_arms_the_popup_and_focuses_the_password(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = open_popup(cx);
+        cx.run_until_parked();
+        cx.simulate_click(
+            gpui::point(gpui::px(20.), gpui::px(20.)),
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_input("vault password");
+        assert!(view.read_with(cx, |view, _| view.guard.armed));
+        assert_eq!(password(&view, cx), "vault password");
     }
 
     #[test]

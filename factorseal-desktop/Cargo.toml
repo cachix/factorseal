@@ -49,6 +49,9 @@ native-theme-qt = "=0.1.0"
 notify = "=8.2.0"
 xdg = "=3.0.0"
 
+[dev-dependencies]
+gpui = { package = "gpui-ce", git = "https://github.com/domenkozar/gpui-ce.git", rev = "85f7f16b3ac1542b70cb4c24a59fd70f71730ab1", features = ["test-support"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6.2"
 windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
