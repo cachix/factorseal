@@ -26,6 +26,8 @@ by default `%USERPROFILE%\Projects\factorseal`; set `FACTORSEAL_WINDOWS_TREE`
 | `uia-dump.ps1 [-Out FILE] [-DesktopPid P]` | Windows | Lists what UI Automation sees in Desktop's windows: control types, names, AutomationIds, and whether a value is exposed (never the value itself). |
 | `test-vault.ps1 -Cli EXE` | Windows | Used by `check.sh`; creates a password-only vault in `%LOCALAPPDATA%\FactorSeal-check` with a random password in an owner-only file. Leaves an existing one alone. |
 | `drive.ps1 -Action find\|unlock\|unlock-popup\|grant\|deny -DesktopPid P [-PasswordFile F]` | Windows | Used by `check.sh`; reports whether the popup is open, unlocks Desktop's main window or a popup kept open by a seal, or grants or denies the popup. Finds controls through UI Automation, then clicks and types with real input, because the popup accepts approval only after a click inside it. |
+| `screenshot.ps1 -DesktopPid P -Out FILE` | Windows | Saves a PNG of the approval popup, raised and kept topmost for the capture. The popup's text is not exposed to UI Automation, so this is how a check reads what it says. |
+| `provider-probe.ps1 -Cli EXE [-Root DIR] [-Method get\|set] [-Key K] [-Directory D]` | Windows | Talks to `factorseal provider` directly as SecretSpec would (initialize, then one get or set) and prints the replies and the provider's standard error. Makes requests the `secretspec` CLI cannot, such as a write to an undeclared key. A get reply contains the value, so use `-Root` with the test vault. |
 | `proc-watch.ps1 -Out FILE [-Seconds N]` | Windows | Logs FactorSeal processes, their helpers and WerFault starting and exiting, and whether Desktop's window responds. For diagnosing hangs and crashes. |
 
 PowerShell scripts are run from WSL as
