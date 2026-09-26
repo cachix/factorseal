@@ -288,9 +288,9 @@ approval remains useful when the caller retries.
 With the headless agent, SecretSpec writes use these signed project permissions.
 With Desktop on Linux, each write uses the secure input dialog described below.
 The provider checks the host's input capability before choosing the flow;
-cancelling or failing a desktop dialog ends the write. Other platforms and
-headless hosts use signed project permissions, approved through the CLI.
-Desktop's permission approval popup is currently available only on Linux.
+cancelling or failing a desktop dialog ends the write. Desktop on macOS and
+Windows has no secure input dialog, so writes there use signed project
+permissions too, approved in Desktop's approval popup or through the CLI.
 
 A SecretSpec write can be approved for one write only. The vault removes that
 permission when it authorizes the write, or after five minutes if unused, so the
