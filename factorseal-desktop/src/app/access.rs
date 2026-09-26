@@ -68,6 +68,7 @@ struct AccessView {
     guard: InputGuard,
     _submit: Subscription,
     _secret_submit: Subscription,
+    _activation: Subscription,
 }
 
 pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App) {
@@ -201,7 +202,11 @@ fn close(cx: &mut App) {
             })
             .detach();
         }
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        let _ = handle.update(cx, |_, window, _| {
+            // A popup closed while behind would leave its owner flashing.
+            window_activation::attention_settled(window);
+            window.remove_window();
+        });
     }
 }
 
@@ -410,6 +415,16 @@ impl AccessView {
                 }
             },
         );
+        // Losing the foreground before the user clicked inside would leave the
+        // request behind another app with nothing pointing at it.
+        let activation =
+            cx.observe_window_activation(window, |view: &mut AccessView, window, _| {
+                if window.is_window_active() {
+                    window_activation::attention_settled(window);
+                } else if !view.guard.armed {
+                    window_activation::deactivated_unseen(window);
+                }
+            });
         let group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -437,6 +452,7 @@ impl AccessView {
             guard: InputGuard::new(),
             _submit: submit,
             _secret_submit: secret_submit,
+            _activation: activation,
         }
     }
 
