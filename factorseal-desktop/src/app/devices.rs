@@ -1,6 +1,6 @@
 use super::{
     Arc, Button, Context, DesktopRuntime, DesktopView, Div, Input, SecretInputState, Snapshot, div,
-    h_flex, px, v_flex,
+    h_flex, px, text, v_flex,
 };
 use factorseal::desktop_worker::sync::network::Action;
 use gpui::prelude::*;
@@ -96,16 +96,16 @@ impl DesktopView {
         v_flex().size_full().items_center().justify_center().child(
             v_flex().w_full().max_w(gpui::rems(28.)).gap_5().p_6()
                 .child(v_flex().gap_2()
-                    .child(div().text_2xl().font_semibold().child("Name this device"))
+                    .child(div().text_2xl().font_semibold().child(text("welcome-title", "Name this device")))
                     .child(div().text_sm().text_color(theme.muted_foreground)
-                        .child("Choose a name you’ll recognize when pairing and syncing your personal secrets.")))
+                        .child(text("welcome-description", "Choose a name you’ll recognize when pairing and syncing your personal secrets."))))
                 .child(v_flex().gap_2()
-                    .child(div().text_sm().font_medium().child("Device name"))
-                    .child(Input::new(&self.device_name))
+                    .child(div().text_sm().font_medium().child(text("device-name-label", "Device name")))
+                    .child(Input::new(&self.device_name).aria_label("Device name"))
                     .child(div().text_xs().text_color(theme.muted_foreground)
-                        .child("We’ve filled in your computer’s hostname. You can change it.")))
+                        .child(text("device-name-hint", "We’ve filled in your computer’s hostname. You can change it."))))
                 .when_some(self.devices_notice.clone(), |panel, error| {
-                    panel.child(div().text_sm().text_color(theme.danger).child(error))
+                    panel.child(div().text_sm().text_color(theme.danger).child(text("error", error)))
                 })
                 .child(h_flex().justify_end().child(
                     Button::new("save-device-name").primary().label("Continue")
@@ -151,17 +151,31 @@ impl DesktopView {
                 }
                 devices.sort_by_key(|device| device.endpoint);
                 devices.dedup_by_key(|device| device.endpoint);
-                panel = panel.child(div().font_semibold().child(format!("Connect these {} devices?", devices.len())))
-                    .child(div().text_sm().child("Personal secrets and retained history from both vaults will be shared with all reader devices below. Device-specific secrets stay local."));
-                let mut list = v_flex().rounded_lg().border_1().border_color(theme.border);
-                for device in devices {
+                panel = panel.child(div().font_semibold().child(text("review-title", format!("Connect these {} devices?", devices.len()))))
+                    .child(div().text_sm().child(text("review-description", "Personal secrets and retained history from both vaults will be shared with all reader devices below. Device-specific secrets stay local.")));
+                let mut list = v_flex()
+                    .id("review-devices")
+                    .role(gpui::Role::List)
+                    .aria_label("Devices to connect")
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border);
+                for (index, device) in devices.into_iter().enumerate() {
+                    let local = device.endpoint == self.devices.endpoint;
                     list = list.child(
                         h_flex()
+                            .id(("review-device", index))
+                            .role(gpui::Role::ListItem)
+                            .aria_label(if local {
+                                format!("{}, this device", device.name)
+                            } else {
+                                device.name.clone()
+                            })
                             .px_4()
                             .py_2()
                             .gap_2()
                             .child(div().flex_1().child(device.name))
-                            .when(device.endpoint == self.devices.endpoint, |row| {
+                            .when(local, |row| {
                                 row.child(
                                     div()
                                         .text_xs()
@@ -173,17 +187,14 @@ impl DesktopView {
                 }
                 panel = panel
                     .child(list)
-                    .child(
-                        div()
-                            .text_sm()
-                            .child("Compare this code on both devices before approving."),
-                    )
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_semibold()
-                            .child(request.verification_code().unwrap_or_default()),
-                    );
+                    .child(div().text_sm().child(text(
+                        "code-hint",
+                        "Compare this code on both devices before approving.",
+                    )))
+                    .child(div().text_2xl().font_semibold().child(text(
+                        "verification-code",
+                        request.verification_code().unwrap_or_default(),
+                    )));
                 if let Ok(id) = request.id() {
                     let waiting = !state.joining && request.needs_merge_approval();
                     let approved_here = state.joining && !request.needs_merge_approval();
@@ -211,14 +222,15 @@ impl DesktopView {
                     );
                 }
             } else {
-                panel = panel.child(div().text_color(theme.danger).child(
+                panel = panel.child(div().text_color(theme.danger).child(text(
+                    "verify-error",
                     "Could not verify the devices in this connection. Cancel and try again.",
-                ));
+                )));
             }
         } else {
             match screen {
                 PairingScreen::Choose => {
-                    panel = panel.child(div().text_sm().child("Start on either device. Connecting combines the personal secrets of every device you approve."))
+                    panel = panel.child(div().text_sm().child(text("choose-description", "Start on either device. Connecting combines the personal secrets of every device you approve.")))
                         .child(Button::new("choose-show-code").primary().label("Show pairing code")
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.device_pairing = Some(PairingScreen::Show);
@@ -233,7 +245,7 @@ impl DesktopView {
                         if let Ok(modules) = invitation.qr_modules() {
                             panel = panel.child(qr(modules));
                         }
-                        panel = panel.child(div().text_sm().child("On the other device, open Connect a device → Paste pairing ticket. This code expires after five minutes."))
+                        panel = panel.child(div().text_sm().child(text("show-description", "On the other device, open Connect a device → Paste pairing ticket. This code expires after five minutes.")))
                             .child(Button::new("copy-pairing-ticket").label("Copy ticket").on_click(cx.listener(|view, _, _, cx| {
                                 if let Some(invitation) = &view.devices.state.invitation && let Ok(ticket) = invitation.ticket() {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(ticket.to_string()));
@@ -256,8 +268,8 @@ impl DesktopView {
                     }
                 }
                 PairingScreen::Paste => {
-                    panel = panel.child(div().text_sm().child("Paste the ticket copied from the other device. You’ll review all affected devices before anything is connected."))
-                        .child(div().font_medium().child("Pairing ticket"))
+                    panel = panel.child(div().text_sm().child(text("paste-description", "Paste the ticket copied from the other device. You’ll review all affected devices before anything is connected.")))
+                        .child(div().font_medium().child(text("ticket-label", "Pairing ticket")))
                         .child(self.pairing_ticket.clone())
                         .child(Button::new("use-pairing-ticket").primary().label("Review connection").disabled(busy)
                             .on_click(cx.listener(|view, _, _, cx| {
@@ -268,16 +280,17 @@ impl DesktopView {
                             })));
                 }
             }
-            panel = panel.child(div().text_xs().text_color(theme.muted_foreground).child(
+            panel = panel.child(div().text_xs().text_color(theme.muted_foreground).child(text(
+                "camera-note",
                 "Camera scanning is not built in yet. An external QR reader can copy the ticket.",
-            ));
+            )));
         }
         if let Some(error) = self.devices_notice.as_ref().or(self.devices.error.as_ref()) {
             panel = panel.child(
                 div()
                     .text_sm()
                     .text_color(theme.danger)
-                    .child(error.clone()),
+                    .child(text("error", error.clone())),
             );
         }
         let approved_here = state.joining
@@ -286,10 +299,15 @@ impl DesktopView {
                 .as_ref()
                 .is_some_and(|request| !request.needs_merge_approval());
         if approved_here {
-            panel =
-                panel.child(div().text_sm().text_color(theme.muted_foreground).child(
-                    "Your approval has been sent. Closing this screen does not withdraw it.",
-                ));
+            panel = panel.child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(text(
+                        "approval-sent",
+                        "Your approval has been sent. Closing this screen does not withdraw it.",
+                    )),
+            );
         }
         v_flex()
             .size_full()
@@ -299,7 +317,12 @@ impl DesktopView {
                     .w_full()
                     .justify_between()
                     .items_center()
-                    .child(div().text_lg().font_semibold().child(title))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(text("pairing-title", title)),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
@@ -338,7 +361,7 @@ impl DesktopView {
             return div()
                 .p_6()
                 .text_color(theme.muted_foreground)
-                .child("Loading devices…");
+                .child(text("devices-loading", "Loading devices…"));
         }
         let busy = self.devices_busy;
         let state = &self.devices.state;
@@ -356,9 +379,9 @@ impl DesktopView {
             .w_full()
             .gap_5()
             .when(state.conflicts > 0, |panel| {
-                panel.child(div().p_3().rounded_lg().bg(theme.secondary).child(format!(
-                    "{} items need conflict resolution",
-                    state.conflicts
+                panel.child(div().p_3().rounded_lg().bg(theme.secondary).child(text(
+                    "conflicts",
+                    format!("{} items need conflict resolution", state.conflicts),
                 )))
             });
         panel = panel.child(
@@ -406,21 +429,33 @@ impl DesktopView {
                 ),
         );
         if self.devices.devices.is_empty() {
-            panel =
-                panel.child(
-                    v_flex()
-                        .gap_2()
-                        .p_6()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(theme.border)
-                        .child(div().font_semibold().child("Connect your first device"))
-                        .child(div().text_sm().text_color(theme.muted_foreground).child(
-                            "Connect another device to start syncing your personal secrets.",
-                        )),
-                );
+            panel = panel.child(
+                v_flex()
+                    .gap_2()
+                    .p_6()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .font_semibold()
+                            .child(text("empty-title", "Connect your first device")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(text(
+                                "empty-description",
+                                "Connect another device to start syncing your personal secrets.",
+                            )),
+                    ),
+            );
         } else {
             let mut table = v_flex()
+                .id("devices")
+                .role(gpui::Role::List)
+                .aria_label("Devices")
                 .w_full()
                 .rounded_lg()
                 .border_1()
@@ -437,10 +472,24 @@ impl DesktopView {
                         .child(div().flex_1().child("DEVICE"))
                         .child(div().w(gpui::rems(10.)).child("ACCESS")),
                 );
-            for device in &self.devices.devices {
+            for (index, device) in self.devices.devices.iter().enumerate() {
                 let local = device.endpoint == self.devices.endpoint;
+                let access = if device.reader.is_some() {
+                    "Personal secrets"
+                } else {
+                    "Encrypted storage"
+                };
+                // The header row is drawn for sighted users; each row names
+                // its device and access, so a screen reader needs no table.
                 table = table.child(
                     h_flex()
+                        .id(("device", index))
+                        .role(gpui::Role::ListItem)
+                        .aria_label(if local {
+                            format!("{}, this device, access: {access}", device.name)
+                        } else {
+                            format!("{}, access: {access}", device.name)
+                        })
                         .px_4()
                         .py_4()
                         .gap_3()
@@ -471,22 +520,23 @@ impl DesktopView {
                                 .w(gpui::rems(10.))
                                 .text_sm()
                                 .text_color(theme.muted_foreground)
-                                .child(if device.reader.is_some() {
-                                    "Personal secrets"
-                                } else {
-                                    "Encrypted storage"
-                                }),
+                                .child(access),
                         ),
                 );
             }
             panel = panel.child(table);
         }
         if let Some(error) = self.devices_notice.as_ref().or(self.devices.error.as_ref()) {
-            panel = panel.child(div().text_color(theme.danger).child(error.clone()));
+            panel = panel.child(
+                div()
+                    .text_color(theme.danger)
+                    .child(text("error", error.clone())),
+            );
         }
-        panel = panel.child(div().text_xs().text_color(theme.muted_foreground).child(
+        panel = panel.child(div().text_xs().text_color(theme.muted_foreground).child(text(
+            "sync-note",
             "Sync runs automatically while FactorSeal is open, including when the vault is sealed.",
-        ));
+        )));
         div().flex_1().min_h_0().child(panel.overflow_y_scrollbar())
     }
 }

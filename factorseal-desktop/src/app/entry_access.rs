@@ -66,14 +66,20 @@ impl DesktopView {
         contents: &VaultContents,
         cx: &mut Context<Self>,
     ) -> Div {
-        let mut panel = v_flex()
-            .gap_3()
-            .child(div().text_lg().font_semibold().child("Access"));
+        let mut panel = v_flex().gap_3().child(
+            div()
+                .text_lg()
+                .font_semibold()
+                .child(text("access-heading", "Access")),
+        );
         if contents.permissions_loading {
-            return panel.child("Loading access…");
+            return panel.child(text("access-loading", "Loading access…"));
         }
         if let Some(error) = &contents.permissions_error {
-            return panel.child(format!("Could not load access: {error}"));
+            return panel.child(text(
+                "access-error",
+                format!("Could not load access: {error}"),
+            ));
         }
         let mut count = 0_usize;
         for permission in contents
@@ -112,8 +118,9 @@ impl DesktopView {
                 ));
             }
             let mut card = v_flex()
+                .id(("access-grant", count))
                 .gap_2()
-                .child(Self::render_detail_rows(details, cx));
+                .child(Self::render_detail_rows("details", details, cx));
             if matches!(permission.state, PermissionState::Granted { .. }) {
                 let id = permission.id.clone();
                 let inherited = !matches!(
@@ -121,7 +128,7 @@ impl DesktopView {
                     Some(PermissionTarget::Entry { .. } | PermissionTarget::ProjectEntry { .. })
                 );
                 if inherited {
-                    card = card.child(div().text_sm().text_color(cx.theme().muted_foreground).child("Revoking this grant removes its access to every entry in its scope."));
+                    card = card.child(div().text_sm().text_color(cx.theme().muted_foreground).child(text("inherited-note", "Revoking this grant removes its access to every entry in its scope.")));
                 }
                 card = card.child(
                     Button::new(("revoke-entry-access", count))
@@ -139,7 +146,10 @@ impl DesktopView {
             panel = panel.child(card);
         }
         if count == 0 {
-            panel = panel.child("No recorded access grants apply to this entry.");
+            panel = panel.child(text(
+                "access-none",
+                "No recorded access grants apply to this entry.",
+            ));
         }
         panel
     }
