@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Checks FactorSeal Desktop's approval popup on Windows from WSL2.
 #
-#   check.sh popup [--delay SECONDS] [--key KEY] [--observe SECONDS]
+#   check.sh popup [--delay SECONDS] [--key KEY] [--observe SECONDS] [--steal]
 #                  [--test-vault [--then grant|deny]]
 #       Send a WSL-relayed request and report whether the popup opened, whether
 #       it reached the foreground or flashed its taskbar button, a screenshot,
 #       and whether the vault holds the pending request with its WSL origin.
 #       --delay waits before sending, so a focus scenario can be set up.
+#       --steal hands the foreground back to the previous window as soon as
+#       the popup takes it; the popup must then flash.
 #       --then drives the popup afterwards (test vault only); grant also runs
 #       the grant check.
 #   check.sh grant --key KEY [--test-vault]
@@ -25,7 +27,7 @@ set -euo pipefail
 
 case ${1:-} in
     popup | grant | test-desktop) ;;
-    *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -63,6 +65,7 @@ key_given=no
 delay=0
 observe=12
 test_vault=no
+steal=no
 then=
 while [ $# -gt 0 ]; do
     case $1 in
@@ -70,6 +73,7 @@ while [ $# -gt 0 ]; do
         --delay) delay=$2; shift 2 ;;
         --observe) observe=$2; shift 2 ;;
         --test-vault) test_vault=yes; shift ;;
+        --steal) steal=yes; shift ;;
         --then) then=$2; shift 2 ;;
         *) die "unknown option $1" ;;
     esac
@@ -188,8 +192,11 @@ popup)
         sleep "$delay"
         require_unsealed
     fi
+    steal_args=()
+    [ "$steal" = yes ] && steal_args=(-Steal)
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$win_out\\observe.ps1" \
-        -OutDir "$win_out" -Seconds "$observe" -DesktopPid "$pid" >"$out/powershell.txt" 2>&1 &
+        -OutDir "$win_out" -Seconds "$observe" -DesktopPid "$pid" "${steal_args[@]}" \
+        >"$out/powershell.txt" 2>&1 &
     observer=$!
     # Windows PowerShell writes UTF-8 with a byte-order mark and CRLF endings.
     report() { sed '1s/^\xEF\xBB\xBF//' "$out/observer.txt" 2>/dev/null | tr -d '\r'; }
@@ -215,7 +222,15 @@ popup)
     echo "broker:        ${reply//$'\n'/ | }"
     echo "popup seen:    $seen ($(value popup_title))"
     echo "foreground:    $foreground (foreground window: $(value foreground_process) '$(value foreground_title)')"
-    echo "flashed:       $flashed ($(value flash_events) flash events in total)"
+    echo "flashed:       $flashed ($(value flash_events) flash events in total; popup owned by the main window: $(value popup_owned))"
+    if [ "$steal" = yes ]; then
+        # Only a popup that had the foreground and lost it tests the steal case.
+        if [ "$(value stolen)" = True ]; then
+            echo "steal:         the popup took the foreground and lost it again"
+        else
+            echo "steal:         not reproduced (popup took foreground: $(value popup_took_foreground), stolen: $(value stolen))"
+        fi
+    fi
     echo "rect:          $(value popup_rect)"
     [ -n "$(value popup_screenshot)" ] && echo "screenshot:    $out/popup.png (what was on screen at the popup's position)"
     [ -n "$(value taskbar_screenshot)" ] && echo "taskbar:       $out/taskbar.png"
