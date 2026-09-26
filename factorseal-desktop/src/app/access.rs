@@ -684,8 +684,13 @@ fn application_name(path: &std::path::Path) -> String {
 }
 
 fn requester_label(grants: &[&factorseal::Permission]) -> Option<String> {
-    single(grants.iter().map(|grant| &grant.principal))
-        .map(|principal| visible_text(&principal.application_id))
+    single(grants.iter().map(|grant| &grant.principal)).map(|principal| {
+        if grants.iter().all(|grant| is_secretspec_request(grant)) {
+            "SecretSpec".to_owned()
+        } else {
+            visible_text(&principal.application_id)
+        }
+    })
 }
 
 fn header_requester(grants: &[&factorseal::Permission], other_requests: bool) -> Option<String> {
@@ -821,6 +826,35 @@ fn single<T: PartialEq>(values: impl IntoIterator<Item = T>) -> Option<T> {
     let mut values = values.into_iter();
     let first = values.next()?;
     values.all(|value| value == first).then_some(first)
+}
+
+fn is_secretspec_request(grant: &factorseal::Permission) -> bool {
+    grant.scope == Some(factorseal::DocumentKind::SecretSpecProviderCache)
+}
+
+// A SecretSpec grant binds the provider, not the program that ran
+// `secretspec`, so say who it covers in those terms.
+fn grant_scope_note(grants: &[factorseal::Permission]) -> &'static str {
+    if grants.iter().any(is_secretspec_request) {
+        "Applies only to the listed entries, folder, and operation, for any program that runs SecretSpec in that folder. Manage access on each secret."
+    } else {
+        "Applies only to the listed entries, app, folder, and operation. Manage access on each secret."
+    }
+}
+
+// Outermost launcher first, e.g. `pwsh.exe → secretspec.exe`. The chain is
+// declared by the caller (see
+// `VaultApplicationContext::declared_launch_chain`), so the label says it
+// is not verified.
+fn launch_chain_label(chain: &[String]) -> Option<String> {
+    (!chain.is_empty()).then(|| {
+        let names: Vec<_> = chain
+            .iter()
+            .rev()
+            .map(|executable| visible_text(&application_name(std::path::Path::new(executable))))
+            .collect();
+        format!("{} (not verified)", names.join(" → "))
+    })
 }
 
 fn detail(
@@ -1165,6 +1199,9 @@ impl Render for AccessView {
                     ),
                 )));
             }
+            if let Some(chain) = launch_chain_label(&grant.application.declared_launch_chain) {
+                card = card.child(detail("Launched from", chain, cx));
+            }
             for (label, value) in [
                 (
                     "Profile",
@@ -1181,6 +1218,13 @@ impl Render for AccessView {
                 grant.principal.application_id.clone(),
                 cx,
             ));
+            for executable in grant.application.declared_launch_chain.iter().rev() {
+                technical = technical.child(detail(
+                    "Launcher (not verified)",
+                    visible_text(executable),
+                    cx,
+                ));
+            }
             if let Some(reason) = &grant.application.reason {
                 technical = technical.child(detail("Request", display_reason(reason), cx));
             }
@@ -1217,7 +1261,7 @@ impl Render for AccessView {
                         .border_1()
                         .border_color(theme.border)
                         .child(div().text_caption().text_color(theme.muted_foreground).child(
-                            "Project labels come from the requesting app. Process identity is verified by the operating system.",
+                            "Project labels and launchers come from the requesting app. The executable's identity is verified by the operating system, and access is granted to it.",
                         )),
                 )
             });
@@ -1336,7 +1380,7 @@ impl Render for AccessView {
                 .when(!expired, |details| details.child(div().id("access-request-details").size_full().px_6().pb_4().overflow_y_scroll().track_scroll(&self.details.scroll).child(requests))
                 .vertical_scrollbar(&self.details.scroll)))
             .when(!expired, |window| window.child(v_flex().p_6().gap_3().border_t_1().border_color(theme.border)
-                .child(div().text_caption().text_color(theme.muted_foreground).child(if !self.inputs.is_empty() { "Saves this value once. No access grant is created." } else if self.grants.is_empty() { "Unlock your vault to continue here." } else { "Applies only to the listed entries, app, folder, and operation. Manage access on each secret." }))
+                .child(div().text_caption().text_color(theme.muted_foreground).child(if !self.inputs.is_empty() { "Saves this value once. No access grant is created." } else if self.grants.is_empty() { "Unlock your vault to continue here." } else { grant_scope_note(&self.grants) }))
                 .when(metadata.is_some_and(|metadata| metadata.unlock_policy().groups().len() > 1), |element| element.child(groups))
                 .when((!self.grants.is_empty() || !self.requests.is_empty()) && self.inputs.is_empty(), |element| element.child(field_label("Allow access for", h_flex().gap_2()
                     .child(button("grant-hour").label("1 hour").selected(self.duration == HOUR_GRANT).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = HOUR_GRANT; cx.notify(); })))
@@ -1375,6 +1419,62 @@ mod tests {
         }
         let item = "/org/freedesktop/secrets/collection/factorseal/item/example";
         assert_eq!(unlock_target_label(item), format!("Locked item: {item}"));
+    }
+
+    #[test]
+    fn secretspec_requests_name_secretspec_and_where_it_was_launched_from() {
+        let path = |name: &str| {
+            std::env::temp_dir()
+                .join("bin")
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let caller = factorseal::CallerIdentity::new(
+            factorseal::CallerPlatform::Windows,
+            "S-1-5-21-1",
+            path("factorseal.exe"),
+            [7; 32],
+            None,
+        )
+        .expect("a valid caller");
+        let mut grant = factorseal::Permission {
+            target: None,
+            id: "p".to_owned(),
+            scope: Some(factorseal::DocumentKind::SecretSpecProviderCache),
+            operation: factorseal::PermissionOperation::Put,
+            principal: factorseal::PermissionPrincipal::from(&caller),
+            application: factorseal::VaultApplicationContext::new(
+                Some("demo".to_owned()),
+                None,
+                None,
+                None,
+            )
+            .expect("a valid context"),
+            state: factorseal::PermissionState::Pending {
+                created_at: 1,
+                expires_at: 2,
+                challenge: [0; 32],
+                awaited: false,
+            },
+        };
+        assert_eq!(requester_label(&[&grant]).as_deref(), Some("SecretSpec"));
+        assert!(
+            grant_scope_note(std::slice::from_ref(&grant))
+                .contains("any program that runs SecretSpec")
+        );
+        grant.scope = Some(factorseal::DocumentKind::LinuxSecretService);
+        assert_eq!(
+            requester_label(&[&grant]).as_deref(),
+            Some(path("factorseal.exe").as_str())
+        );
+        assert!(grant_scope_note(std::slice::from_ref(&grant)).contains("entries, app, folder"));
+
+        assert_eq!(launch_chain_label(&[]), None);
+        assert_eq!(
+            launch_chain_label(&[path("secretspec.exe"), path("pwsh.exe"),]).as_deref(),
+            Some("pwsh.exe → secretspec.exe (not verified)")
+        );
     }
 
     #[test]

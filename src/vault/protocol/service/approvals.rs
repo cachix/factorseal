@@ -111,6 +111,7 @@ impl ApprovalCandidate {
                 base_dir: Some(base_dir),
                 reason: Some(format!("System keyring: {service}")),
                 requested_permission_duration_seconds: None,
+                declared_launch_chain: Vec::new(),
             },
             scope: DocumentKind::LinuxSecretService,
             namespace: project.into_bytes(),

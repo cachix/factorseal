@@ -21,6 +21,8 @@ use super::CliError;
 
 #[path = "provider/address.rs"]
 mod address;
+#[path = "provider/launch_chain.rs"]
+mod launch_chain;
 
 const PROVIDER_URI: &str = "factorseal://default";
 
@@ -511,6 +513,7 @@ impl ProviderHandler for FactorsealProvider {
         .and_then(|context| {
             context.with_requested_permission_duration_seconds(requested_duration_seconds)
         })
+        .and_then(|context| context.with_declared_launch_chain(launch_chain::launch_chain()))
         .map_err(|error| map_vault_error(&error))?;
         if application_context.project.is_none() {
             return Err(RpcError::new(ErrorKind::InvalidParams));

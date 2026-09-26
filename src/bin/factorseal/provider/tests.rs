@@ -54,6 +54,7 @@ fn application_context() -> VaultApplicationContext {
         )),
         Some("test".to_owned()),
     )
+    .and_then(|context| context.with_declared_launch_chain(launch_chain::launch_chain()))
     .unwrap()
 }
 
@@ -628,6 +629,10 @@ async fn secretspec_request_waits_for_approval_and_completes() {
             .requested_permission_duration_seconds,
         Some(8 * 60 * 60)
     );
+    // The test harness launched this process, so the provider names it.
+    let chain = &permissions[0].application.declared_launch_chain;
+    assert!(!chain.is_empty());
+    assert_eq!(chain, &launch_chain::launch_chain());
 
     let unsealed = Vault::unseal_with_key_protector_group(
         &fixture.root,
