@@ -18,8 +18,11 @@ The user must do the steps only a person can. Give them the exact commands,
 say which shell they run in, and wait for them.
 
 Without the user, use the test vault: `check.sh test-desktop`, then
-`check.sh popup --test-vault --then grant` (or `--then deny`). The driver
-takes over the pointer for a few seconds, so say so first. Against the
+`check.sh popup --test-vault --then grant` (or `--then deny`). For
+SecretSpec writes and their one-time grants, `check.sh write-once` (popup)
+and `check.sh write-once --via cli` (`permissions approve` in a console).
+The driver takes over the pointer and keyboard for a few seconds, so say so
+first. Against the
 user's own vault:
 
 1. Ask the user to start Desktop and unlock the vault, from a normal

@@ -20,6 +20,12 @@
 #   check.sh test-desktop
 #       Create the throwaway test vault if needed, start a Desktop on it, and
 #       unlock it, so --test-vault runs need no person.
+#   check.sh write-once [--via popup|cli]
+#       On the test vault, write a new SecretSpec key through the provider as
+#       SecretSpec would, approve it with the default lifetime (in the popup,
+#       or with `factorseal permissions approve` in a console), and check that
+#       the default was "this write only": the grant covers one write, is
+#       gone after it, and the next write asks again.
 #
 # --test-vault targets the throwaway vault in %LOCALAPPDATA%\FactorSeal-check
 # and the Desktop running on it instead of the default vault. Needs the native
@@ -29,8 +35,8 @@
 set -euo pipefail
 
 case ${1:-} in
-    popup | grant | test-desktop) ;;
-    *) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    popup | grant | test-desktop | write-once) ;;
+    *) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -71,6 +77,7 @@ test_vault=no
 steal=no
 seal=no
 then=
+via=popup
 while [ $# -gt 0 ]; do
     case $1 in
         --key) key=$2; key_given=yes; shift 2 ;;
@@ -80,6 +87,7 @@ while [ $# -gt 0 ]; do
         --steal) steal=yes; shift ;;
         --seal) seal=yes; shift ;;
         --then) then=$2; shift 2 ;;
+        --via) via=$2; shift 2 ;;
         *) die "unknown option $1" ;;
     esac
 done
@@ -89,7 +97,11 @@ case $then in
 esac
 [ -z "$then" ] || [ "$test_vault" = yes ] || die "--then drives only the test vault; add --test-vault"
 [ "$seal" = no ] || [ -n "$then" ] || die "--seal needs --then grant or --then deny"
-[ "$command" = test-desktop ] && test_vault=yes
+case $via in
+    popup | cli) ;;
+    *) die "--via takes popup or cli" ;;
+esac
+case $command in test-desktop | write-once) test_vault=yes ;; esac
 
 root_args=()
 [ "$test_vault" = yes ] && root_args=(--root "$test_root")
@@ -153,7 +165,8 @@ if [ "$command" = test-desktop ]; then
     exit 0
 fi
 
-[ -x "$broker" ] || die "no broker at $broker; build it with: $here/build-windows.sh --broker"
+[ "$command" = write-once ] || [ -x "$broker" ] ||
+    die "no broker at $broker; build it with: $here/build-windows.sh --broker"
 require_unsealed
 pipe="\\\\.\\pipe\\factorseal-$installation"
 pid=$(desktop_pid)
@@ -317,6 +330,51 @@ popup)
 grant)
     [ "$key_given" = yes ] || die "grant needs --key KEY from the popup run"
     check_grant
+    echo "PASS"
+    ;;
+write-once)
+    key="ONCE_$(date +%H%M%S)"
+    # One provider.set, as SecretSpec sends it. Five seconds is enough for
+    # an answer: a write without a grant is answered interaction_required.
+    write() {
+        powershell provider-probe.ps1 -Cli "$(wslpath -w "$cli")" -Root "$test_root" \
+            -Method set -Project write-once-check -Key "$key" -Value "$1" \
+            -Directory "$test_dir" -Seconds 5 | sed -n 's/^set=//p'
+    }
+    asked() { sed -n 's/.*"interaction":{"kind":"authorization","id":"\(prm_[^"]*\)".*/\1/p' <<<"$1"; }
+
+    reply=$(write first)
+    id=$(asked "$reply")
+    [ -n "$id" ] || die "the first write did not ask for approval: $reply"
+    grep -q 'Put  pending' <<<"$(permission "$id")" || die "$id is not a pending write"
+    echo "first write:   asked for approval ($id)"
+
+    if [ "$via" = popup ]; then
+        result=$(powershell drive.ps1 -Action grant -DesktopPid "$pid" -PasswordFile "$test_password" || true)
+        sed 's/^/driver:        /' <<<"$result"
+        grep -q '^popup_closed=True' <<<"$result" || die "the driver could not grant the request"
+    else
+        result=$(powershell cli-approve.ps1 -Cli "$(wslpath -w "$cli")" -Root "$test_root" \
+            -PasswordFile "$test_password" -Id "$id" || true)
+        sed 's/^/cli:           /' <<<"$result"
+        grep -q '^exit=0$' <<<"$result" || die "permissions approve failed"
+    fi
+    record=$(permission "$id")
+    grep -q 'next write only' <<<"$record" || die "the default was not this write only: $record"
+    granted=$(sed -n 's/.*granted: \([0-9]*\).*/\1/p' <<<"$record" | head -1)
+    expires=$(sed -n 's/.*expires: \([0-9]*\).*/\1/p' <<<"$record" | head -1)
+    echo "grant:         next write only, within $((expires - granted)) s"
+
+    reply=$(write first)
+    grep -q '"stored":true' <<<"$reply" || die "the approved write was not stored: $reply"
+    [ -z "$(permission "$id")" ] || die "the write did not spend $id"
+    echo "retry:         stored, and the grant is gone"
+
+    reply=$(write second)
+    second=$(asked "$reply")
+    [ -n "$second" ] || die "the next write did not ask again: $reply"
+    factorseal permissions deny "$second" >/dev/null
+    echo "second write:  asked again ($second, denied)"
     echo "PASS"
     ;;
 esac
