@@ -8,7 +8,11 @@ param(
     [Parameter(Mandatory = $true)][string]$OutDir,
     [int]$Seconds = 12,
     # Picks one Desktop when several run (for example one on a test vault).
-    [int]$DesktopPid
+    [int]$DesktopPid,
+    # When the popup opens in the foreground, hand the foreground straight
+    # back to the window that had it before, as when a person keeps typing
+    # elsewhere. The popup must then flash.
+    [switch]$Steal
 )
 $ErrorActionPreference = 'Stop'
 $report = Join-Path $OutDir 'observer.txt'
@@ -31,6 +35,19 @@ public static class Win {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
+    // An owned popup has no taskbar button; its root owner's button stands for it.
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+
+    // Windows lets a process take the foreground right after it sent input,
+    // so tap Alt first.
+    public static bool Activate(IntPtr hwnd) {
+        keybd_event(0x12, 0, 0, UIntPtr.Zero);
+        keybd_event(0x12, 0, 2, UIntPtr.Zero);
+        return SetForegroundWindow(hwnd);
+    }
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 
     public static string Title(IntPtr hwnd) {
@@ -106,6 +123,18 @@ if (-not $desktop) { Emit 'error=FactorSeal Desktop is not running'; exit 2 }
 Emit "desktop_pid=$($desktop.Id)"
 
 $hook = New-Object FlashHook
+$other = $null
+if ($Steal) {
+    # Stands in for the app the person keeps working in. Desktop's own main
+    # window would not do: it owns the popup, which always stays above it.
+    $other = New-Object System.Windows.Forms.Form
+    $other.Text = 'FactorSeal check: another app'
+    $other.StartPosition = 'Manual'
+    $other.Location = New-Object System.Drawing.Point(40, 40)
+    $other.Size = New-Object System.Drawing.Size(360, 140)
+    # Shown without activation, so Desktop's state at the request is unchanged.
+    [void][Win]::ShowWindow($other.Handle, 4)
+}
 New-Item -ItemType File -Path (Join-Path $OutDir 'ready') | Out-Null
 
 $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
@@ -119,12 +148,30 @@ while ([DateTime]::UtcNow -lt $deadline) {
         $popup = [Win]::FindPopup($desktop.Id)
         if ($popup -ne [IntPtr]::Zero) {
             Emit "popup_seen_at=$([DateTime]::UtcNow.ToString('HH:mm:ss.fff'))"
+            if ($Steal) {
+                $took = $false
+                for ($i = 0; $i -lt 25 -and -not $took; $i++) {
+                    $took = [Win]::GetForegroundWindow() -eq $popup
+                    if (-not $took) { Start-Sleep -Milliseconds 20 }
+                }
+                Emit "popup_took_foreground=$took"
+                if ($took) {
+                    [void][Win]::Activate($other.Handle)
+                    # The switch completes asynchronously.
+                    Start-Sleep -Milliseconds 100
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Emit "stolen=$([Win]::GetForegroundWindow() -eq $other.Handle)"
+                }
+            }
             # Give activation and the first frame time to settle.
             Start-Sleep -Milliseconds 700
             [System.Windows.Forms.Application]::DoEvents()
             $foreground = [Win]::GetForegroundWindow()
             Emit "popup_title=$([Win]::Title($popup))"
-            Emit "popup_foreground=$([bool]($foreground -eq $popup))"
+            # An owned popup always stays above its owner, so it shows whenever
+            # the owner is in front.
+            $owner = [Win]::GetAncestor($popup, 3)
+            Emit "popup_foreground=$([bool]($foreground -eq $popup -or ($owner -ne $popup -and $foreground -eq $owner)))"
             Emit "foreground_title=$([Win]::Title($foreground))"
             Emit "foreground_process=$((Get-Process -Id ([Win]::Pid($foreground)) -ErrorAction SilentlyContinue).Name)"
             $rect = New-Object Win+RECT
@@ -149,8 +196,16 @@ while ([DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 50
 }
 $hook.Stop()
+if ($other) { $other.Close() }
 
 Emit "popup_seen=$([bool]($popup -ne [IntPtr]::Zero))"
-$flashed = $popup -ne [IntPtr]::Zero -and $hook.Flashed -contains $popup.ToInt64()
+$flashed = $false
+if ($popup -ne [IntPtr]::Zero) {
+    # GA_ROOTOWNER; the popup itself when it has no owner.
+    $button = [Win]::GetAncestor($popup, 3)
+    if ($button -eq [IntPtr]::Zero) { $button = $popup }
+    $flashed = $hook.Flashed -contains $button.ToInt64()
+    Emit "popup_owned=$($button -ne $popup)"
+}
 Emit "popup_flashed=$flashed"
 Emit "flash_events=$($hook.Flashed.Count)"

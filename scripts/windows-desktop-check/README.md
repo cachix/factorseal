@@ -19,6 +19,7 @@ by default `%USERPROFILE%\Projects\factorseal`; set `FACTORSEAL_WINDOWS_TREE`
 | `check.sh popup [--delay S] [--key K]` | WSL | Sends a request through the WSL broker and reports whether the popup opened, reached the foreground or flashed its taskbar button, with screenshots of the popup and the taskbar and a check that the vault holds the pending request. |
 | `check.sh grant --key K` | WSL | After the popup was approved, resends the request and checks that it succeeds without a new popup and that the grant stays within the 300-second WSL cap. |
 | `check.sh test-desktop` | WSL | Creates the throwaway test vault if needed, starts a Desktop on it, and unlocks it through `drive.ps1`. |
+| `check.sh popup --steal` | WSL | As soon as the popup takes the foreground, the observer hands it to a window of its own that stands in for another app. The popup must then flash. Needs the popup to take the foreground first, which happens when Desktop was just used, for example right after `test-desktop`. |
 | `check.sh popup --test-vault [--then grant\|deny]` | WSL | `popup` against the test vault and its Desktop; `--then` drives the popup afterwards, and `grant` also runs the grant check. `grant --test-vault` works the same way. |
 | `observe.ps1` | Windows | Used by `check.sh`; hooks taskbar-flash notifications and captures the screenshots. |
 | `uia-dump.ps1 [-Out FILE] [-DesktopPid P]` | Windows | Lists what UI Automation sees in Desktop's windows: control types, names, AutomationIds, and whether a value is exposed (never the value itself). |
@@ -85,10 +86,12 @@ covers it, and it releases it afterwards.
 - **Windows blocks UI Automation from a normal process into an elevated
   one.** Desktop no longer needs elevation, but if it is started elevated,
   `uia-dump.ps1` and `drive.ps1` from WSL see only window frames.
-- **UI Automation may list the popup under the main window** rather than at
-  the top level, when Windows makes the main window its owner. Find the popup
-  by its window title (as `observe.ps1` and `drive.ps1` do), not among the
-  UI Automation root's children.
+- **A popup opened while the main window is active is owned by it.** GPUI
+  makes such a dialog modal: the main window is disabled, the popup stays
+  above it, and the popup has no taskbar button, so the main window's button
+  flashes for it. UI Automation then lists the popup under the main window,
+  so find it by its window title (as `observe.ps1` and `drive.ps1` do).
+  `observe.ps1` counts the popup as in front when its owner is.
 - **An always-on-top window covers the taskbar too**, so `taskbar.png` then
   shows that window; rely on the flash count instead.
 - **The CLI needs `secretspec-provider`** for native SecretSpec on Windows.
