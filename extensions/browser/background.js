@@ -11,9 +11,12 @@ let recovery, nextRecovery=0;
 const connectionFailures=new Set(['desktop_missing','desktop_unavailable','native_disconnected','native_timeout']);
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const serialized=fn=>{ const result=queue.then(fn); queue=result.catch(()=>{}); return result; };
+// Closing the port ourselves does not fire its onDisconnect, so forget it and
+// its session here; the next request then connects again.
+function disconnect() {const closed=port;port=null;session=null;closed?.disconnect();}
 function rpc(request) {
   return new Promise((resolve,reject)=>{
-    const timer=setTimeout(()=>{waiting=null;port?.disconnect();reject(new Error('native_timeout'));},10000);
+    const timer=setTimeout(()=>{waiting=null;disconnect();reject(new Error('native_timeout'));},10000);
     waiting={resolve:value=>{clearTimeout(timer);resolve(core.validateResponse(value));},reject:error=>{clearTimeout(timer);reject(error);}};
     // The host can be gone (Desktop restarted) before onDisconnect fires; the
     // browser then throws here. Handle it as that disconnect, so recovery
@@ -107,7 +110,7 @@ async function run(action,context) {
           } catch {}
         }
         if((response.reason==='done' && action.type==='revoke') || ['pair_required','revoked','vault_rejected'].includes(response.reason))await api.storage.local.set({paired:false});
-        if(response.reason==='unauthorized')port?.disconnect();break;
+        if(response.reason==='unauthorized')disconnect();break;
       }
       if (response.type==='fill') {
         if (context && await current(flow) && active===flow) {

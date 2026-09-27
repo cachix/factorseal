@@ -12,11 +12,13 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
   const tab={id:1,windowId:1,active:true,url:'https://example.com/login'};
   const runtime={id:'factorseal-test',getURL:p=>`extension://factorseal/${p}`,onMessage:event(),onInstalled:event(),connectNative(){
     connects++;
-    const port={onMessage:event(),onDisconnect:event(),disconnect(){for(const fn of this.onDisconnect.listeners)fn();},postMessage(request){
+    // As in the browsers, onDisconnect reports only the host going away, not
+    // the extension closing the port itself; a closed port throws on use.
+    const port={onMessage:event(),onDisconnect:event(),closed:false,disconnect(){this.closed=true;},hostGone(){for(const fn of this.onDisconnect.listeners)fn();},postMessage(request){
       // Chrome throws this when the host is gone before onDisconnect fires.
-      if(deadPort){deadPort=false;throw new Error('Attempting to use a disconnected port object');}
+      if(deadPort||this.closed){deadPort=false;throw new Error('Attempting to use a disconnected port object');}
       (async()=>{
-        if(nativeError){runtime.lastError={message:nativeError};port.disconnect();delete runtime.lastError;return;}
+        if(nativeError){runtime.lastError={message:nativeError};port.hostGone();delete runtime.lastError;return;}
         let response;
         if(request.type==='hello') response={type:'hello',version:1,session:'a'.repeat(64)};
         else {
@@ -178,6 +180,15 @@ test('a native port that died before its disconnect was reported is reconnected'
   assert.notEqual(state.status,'Attempting to use a disconnected port object');
   assert.equal(h.connects,2);
   assert.equal(state.status,'idle');
+});
+test('after Desktop answers unauthorized, the next request connects again',async()=>{
+  const h=await harness({pairReason:'unauthorized'});
+  const sender={url:'extension://factorseal/popup.html'};
+  await h.message({type:'pair'},sender);
+  await until(()=>h.commands.length===1);
+  await h.message({type:'pair'},sender);
+  await until(()=>h.commands.length===2);
+  assert.equal(h.connects,2);
 });
 test('a request status shows only on the tab and site it was about',async()=>{
   const h=await harness({paired:true});
