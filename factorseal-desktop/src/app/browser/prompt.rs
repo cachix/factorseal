@@ -59,10 +59,10 @@ pub(super) fn sync(request: Option<Prompt>, cx: &mut App) {
         return;
     };
     let snapshot = cx.global::<DesktopWindow>().snapshot.clone();
-    if request.save_username.is_some()
-        && request.state == "matching"
-        && cx.global::<BrowserWindow>().0.is_none()
-    {
+    // An unsealed vault looks for matching logins first. Open only once there
+    // is something to approve: a page with no stored login must not take the
+    // foreground from the browser, only to close again.
+    if request.state == "matching" && cx.global::<BrowserWindow>().0.is_none() {
         return;
     }
     if let Some((_, view)) = cx.global::<BrowserWindow>().0.clone() {
