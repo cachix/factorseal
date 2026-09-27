@@ -1,9 +1,14 @@
-// Drives the browser extension in a test Edge profile through the Chrome
-// DevTools Protocol, and Desktop's browser prompt through drive.ps1, against
-// the throwaway test vault. Run by browser-check.sh with Windows' Node; see
-// README.md. Pages are served by the browser itself (Fetch domain) on made-up
-// https://*.factorseal.test origins, so nothing reaches the network, and each
-// run uses new origins, so logins saved by earlier runs do not interfere.
+// Drives the browser extension in test Edge and Chrome profiles through the
+// Chrome DevTools Protocol, and Desktop's browser prompt through drive.ps1,
+// against the throwaway test vault. Run by browser-check.sh with Windows'
+// Node; see README.md. Pages are served by the browser itself (Fetch domain)
+// on made-up https://*.factorseal.test origins, so nothing reaches the
+// network, and each run uses new origins, so logins saved by earlier runs do
+// not interfere.
+//
+// --browsers is a base64-encoded JSON list of the browsers to drive: {kind,
+// port, pid, load, fresh}. With one, the single-browser steps run; with two, the steps
+// that check that consent never crosses from one browser to the other.
 //
 // Clicks and typing in pages and in the extension popup go through
 // Input.dispatch*, which the page sees as trusted (isTrusted), as the save
@@ -15,7 +20,6 @@ import {promisify} from 'node:util';
 const run = promisify(execFile);
 const args = Object.fromEntries(process.argv.slice(2).map(a => a.match(/^--([^=]+)=(.*)$/s).slice(1)));
 const extensionId = 'eljopjcihlpjipbefddajpoiefpfgdca';
-const port = args.port || '9333';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 let failures = 0;
@@ -23,39 +27,6 @@ const report = (name, ok, detail = '') => {
     if (!ok) failures++;
     console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? `: ${detail}` : ''}`);
 };
-
-// --- DevTools Protocol -----------------------------------------------------
-
-const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
-const socket = new WebSocket(version.webSocketDebuggerUrl);
-await new Promise((resolve, reject) => {
-    socket.addEventListener('open', resolve, {once: true});
-    socket.addEventListener('error', reject, {once: true});
-});
-if (args.close) {
-    socket.send(JSON.stringify({id: 1, method: 'Browser.close'}));
-    await sleep(1000);
-    process.exit(0);
-}
-let nextId = 0;
-const calls = new Map();
-const listeners = new Set();
-socket.addEventListener('message', event => {
-    const message = JSON.parse(event.data);
-    if (message.id && calls.has(message.id)) {
-        const call = calls.get(message.id);
-        calls.delete(message.id);
-        if (message.error) call.reject(new Error(`${call.method}: ${message.error.message}`));
-        else call.resolve(message.result);
-    } else {
-        for (const listener of listeners) listener(message);
-    }
-});
-const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
-    const id = ++nextId;
-    calls.set(id, {resolve, reject, method});
-    socket.send(JSON.stringify({id, method, params, sessionId}));
-});
 
 async function until(what, condition, ms = 10000) {
     const deadline = Date.now() + ms;
@@ -67,84 +38,10 @@ async function until(what, condition, ms = 10000) {
     }
 }
 
-const targets = async () => (await send('Target.getTargets')).targetInfos;
-const attach = async targetId => (await send('Target.attachToTarget', {targetId, flatten: true})).sessionId;
-
-async function evaluate(sessionId, expression) {
-    const {result, exceptionDetails} = await send('Runtime.evaluate', {expression, awaitPromise: true, returnByValue: true}, sessionId);
-    if (exceptionDetails) throw new Error(exceptionDetails.exception?.description || exceptionDetails.text);
-    return result.value;
-}
-
-// A trusted click at the centre of the element the selector names.
-async function click(sessionId, selector) {
-    const box = await evaluate(sessionId, `(() => {
-        const e = document.querySelector(${JSON.stringify(selector)});
-        if (!e) return null;
-        e.scrollIntoView({block: 'center'});
-        const r = e.getBoundingClientRect();
-        return {x: r.left + r.width / 2, y: r.top + r.height / 2};
-    })()`);
-    if (!box) throw new Error(`no ${selector}`);
-    for (const type of ['mousePressed', 'mouseReleased'])
-        await send('Input.dispatchMouseEvent', {type, x: box.x, y: box.y, button: 'left', clickCount: 1}, sessionId);
-}
-
-async function type(sessionId, selector, text) {
-    await click(sessionId, selector);
-    await send('Input.insertText', {text}, sessionId);
-}
-
-// --- The extension -----------------------------------------------------------
-
-// Manifest V3 service workers stop when idle. Opening an extension page wakes
-// this one; an attached session then keeps it running.
-async function worker() {
-    const find = async () => (await targets()).find(t => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${extensionId}/`));
-    let target = await find();
-    if (!target) {
-        const {targetId} = await send('Target.createTarget', {url: `chrome-extension://${extensionId}/popup.html`, background: true});
-        target = await until('the extension service worker', find);
-        await send('Target.closeTarget', {targetId});
-    }
-    return attach(target.targetId);
-}
-
-// A browser left running from an earlier check still runs the extension it
-// loaded then: reload it from disk, as its reload button would.
-let background = await worker();
-const loaded = (await targets()).find(t => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${extensionId}/`)).targetId;
-await evaluate(background, 'chrome.runtime.reload()').catch(() => {});
-await until('the extension to reload', async () => !(await targets()).some(t => t.targetId === loaded));
-background = await worker();
-const extension = expression => evaluate(background, expression);
-
-// The toolbar popup, opened as a click on the toolbar button would.
-async function openPopup() {
-    await closePopup();
-    await extension(`chrome.windows.getLastFocused().then(w => chrome.action.openPopup({windowId: w.id}))`);
-    const target = await until('the extension popup', async () =>
-        (await targets()).find(t => t.url === `chrome-extension://${extensionId}/popup.html` && t.attached === false));
-    const session = await attach(target.targetId);
-    await until('the popup to render', () => evaluate(session, `document.readyState === 'complete'`));
-    return {session, targetId: target.targetId};
-}
-// Edge refuses to open the popup while the last one is still closing.
-async function closePopup() {
-    const popup = async () => (await targets()).filter(t => t.url === `chrome-extension://${extensionId}/popup.html`);
-    for (const t of await popup()) await send('Target.closeTarget', {targetId: t.targetId}).catch(() => {});
-    await until('the popup to close', async () => (await popup()).length === 0, 5000);
-}
-// The popup disables its buttons while a request is pending.
-async function press(popup, id) {
-    await until(`#${id} to be enabled`, () => evaluate(popup.session, `(() => { const b = document.getElementById(${JSON.stringify(id)}); return !!b && !b.disabled && !b.hidden && !!b.offsetParent; })()`), 10000)
-        .catch(async error => { throw new Error(`${error.message}; the popup says: ${await popupStatus(popup.session).catch(() => '?')}`); });
-    await click(popup.session, `#${id}`);
-}
-const popupOpen = async targetId => (await targets()).some(t => t.targetId === targetId);
-const popupStatus = session => evaluate(session, `document.getElementById('status').textContent`);
-
-// --- Pages -------------------------------------------------------------------
+const keyValues = stdout => Object.fromEntries(stdout.split(/\r?\n/).filter(l => l.includes('='))
+    .map(l => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+const powershell = (script, parameters) => run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...parameters],
+    {windowsHide: true}).then(r => keyValues(r.stdout), error => keyValues(error.stdout || String(error)));
 
 const fixture = name => readFile(new URL(`../../extensions/browser/fixtures/${name}`, import.meta.url), 'utf8');
 const pages = {
@@ -154,8 +51,131 @@ const pages = {
 <label>Password <input id="password" type="password" name="password"></label><button>Log in</button>`,
 };
 
-const tab = await (async () => {
+// --- One test browser --------------------------------------------------------
+
+async function connect({kind, port, pid, load, fresh}) {
+    const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    const socket = new WebSocket(version.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+        socket.addEventListener('open', resolve, {once: true});
+        socket.addEventListener('error', reject, {once: true});
+    });
+    let nextId = 0;
+    const calls = new Map();
+    const listeners = new Set();
+    socket.addEventListener('message', event => {
+        const message = JSON.parse(event.data);
+        if (message.id && calls.has(message.id)) {
+            const call = calls.get(message.id);
+            calls.delete(message.id);
+            if (message.error) call.reject(new Error(`${call.method}: ${message.error.message}`));
+            else call.resolve(message.result);
+        } else {
+            for (const listener of listeners) listener(message);
+        }
+    });
+    // A browser can leave a call unanswered (a closed target, a blocked
+    // dialog); fail the step instead of waiting forever.
+    const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+        const id = ++nextId;
+        const timer = setTimeout(() => {
+            calls.delete(id);
+            reject(new Error(`${kind}: ${method} got no answer in 20 s`));
+        }, 20000);
+        calls.set(id, {resolve: v => { clearTimeout(timer); resolve(v); }, reject: e => { clearTimeout(timer); reject(e); }, method});
+        socket.send(JSON.stringify({id, method, params, sessionId}));
+    });
+    const b = {kind, name: kind === 'chrome' ? 'Chrome' : 'Edge', socket, send};
+
+    const targets = async () => (await send('Target.getTargets')).targetInfos;
+    const attach = async targetId => (await send('Target.attachToTarget', {targetId, flatten: true})).sessionId;
+    const evaluate = async (sessionId, expression) => {
+        const {result, exceptionDetails} = await send('Runtime.evaluate', {expression, awaitPromise: true, returnByValue: true}, sessionId);
+        if (exceptionDetails) throw new Error(exceptionDetails.exception?.description || exceptionDetails.text);
+        return result.value;
+    };
+    // A trusted click at the centre of the element the selector names.
+    b.click = async (sessionId, selector) => {
+        const box = await evaluate(sessionId, `(() => {
+            const e = document.querySelector(${JSON.stringify(selector)});
+            if (!e) return null;
+            e.scrollIntoView({block: 'center'});
+            const r = e.getBoundingClientRect();
+            return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+        })()`);
+        if (!box) throw new Error(`no ${selector}`);
+        for (const type of ['mousePressed', 'mouseReleased'])
+            await send('Input.dispatchMouseEvent', {type, x: box.x, y: box.y, button: 'left', clickCount: 1}, sessionId);
+    };
+    b.type = async (sessionId, selector, text) => {
+        await b.click(sessionId, selector);
+        await send('Input.insertText', {text}, sessionId);
+    };
+
+    // Manifest V3 service workers stop when idle. Opening an extension page
+    // wakes this one; an attached session then keeps it running.
+    const worker = async () => {
+        const find = async () => (await targets()).find(t => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${extensionId}/`));
+        let target = await find();
+        if (!target) {
+            const {targetId} = await send('Target.createTarget', {url: `chrome-extension://${extensionId}/popup.html`, background: true});
+            target = await until('the extension service worker', find);
+            await send('Target.closeTarget', {targetId});
+        }
+        return attach(target.targetId);
+    };
+    // Chrome no longer honours --load-extension: load (or reload) the
+    // extension through the DevTools Protocol. A browser left running from an
+    // earlier check still runs the extension it loaded then: reload it from
+    // disk, as its reload button would.
+    const running = async () => (await targets()).find(t => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${extensionId}/`));
+    if (load) {
+        // Loading it again replaces a running worker; attaching to the old one
+        // leaves calls unanswered.
+        const old = await running();
+        await send('Extensions.loadUnpacked', {path: load});
+        if (old) await until('the old service worker to stop', async () => (await running())?.targetId !== old.targetId, 5000).catch(() => {});
+    } else {
+        const background = await worker();
+        const loaded = (await targets()).find(t => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${extensionId}/`)).targetId;
+        await evaluate(background, 'chrome.runtime.reload()').catch(() => {});
+        await until('the extension to reload', async () => !(await targets()).some(t => t.targetId === loaded));
+    }
+    const background = await worker();
+    b.extension = expression => evaluate(background, expression);
+    b.paired = () => b.extension(`chrome.storage.local.get('paired').then(s => s.paired === true)`);
+
+    // The toolbar popup, opened as a click on the toolbar button would.
+    const popupUrl = `chrome-extension://${extensionId}/popup.html`;
+    b.closePopup = async () => {
+        // Edge refuses to open the popup while the last one is still closing.
+        const popups = async () => (await targets()).filter(t => t.url === popupUrl);
+        for (const t of await popups()) await send('Target.closeTarget', {targetId: t.targetId}).catch(() => {});
+        await until('the popup to close', async () => (await popups()).length === 0, 5000);
+    };
+    b.openPopup = async () => {
+        await b.closePopup();
+        await b.extension(`chrome.windows.getLastFocused().then(w => chrome.action.openPopup({windowId: w.id}))`);
+        const target = await until('the extension popup', async () => (await targets()).find(t => t.url === popupUrl && t.attached === false));
+        const session = await attach(target.targetId);
+        await until('the popup to render', () => evaluate(session, `document.readyState === 'complete'`));
+        return {session, targetId: target.targetId};
+    };
+    b.popupStatus = popup => evaluate(popup.session, `document.getElementById('status').textContent`);
+    b.popupOpen = async popup => (await targets()).some(t => t.targetId === popup.targetId);
+    // The popup disables its buttons while a request is pending.
+    b.press = async (popup, id) => {
+        await until(`#${id} to be enabled`, () => evaluate(popup.session, `(() => { const b = document.getElementById(${JSON.stringify(id)}); return !!b && !b.disabled && !b.hidden && !!b.offsetParent; })()`), 10000)
+            .catch(async error => { throw new Error(`${error.message}; the popup says: ${await b.popupStatus(popup).catch(() => '?')}`); });
+        await b.click(popup.session, `#${id}`);
+    };
+
+    // One tab, whose requests to *.factorseal.test the browser answers itself.
+    // Tabs left from earlier runs still hold their login pages, which ask
+    // Desktop again whenever the browser gets the focus back; close them.
     const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
+    for (const t of await targets())
+        if (t.type === 'page' && t.targetId !== targetId) await send('Target.closeTarget', {targetId: t.targetId}).catch(() => {});
     const sessionId = await attach(targetId);
     let served = pages.login;
     listeners.add(message => {
@@ -168,8 +188,8 @@ const tab = await (async () => {
     });
     await send('Fetch.enable', {patterns: [{urlPattern: 'https://*.factorseal.test/*'}]}, sessionId);
     await send('Page.enable', {}, sessionId);
-    return {
-        targetId, session: sessionId,
+    b.tab = {
+        session: sessionId,
         async open(url, page = 'login') {
             served = pages[page];
             await send('Page.bringToFront', {}, sessionId);
@@ -178,50 +198,57 @@ const tab = await (async () => {
         },
         fields: () => evaluate(sessionId, `({username: document.querySelector('[name=username]').value, password: document.querySelector('[name=password]').value, url: location.href})`),
     };
-})();
 
-// Which window Windows has in front. Edge's own chrome.windows focus state
-// can stay true while another app is in front, so ask Windows.
-async function foreground(action = 'get') {
-    const {stdout} = await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', args.foreground,
-        '-Action', action, '-ProcessId', args.edgePid, '-TitleLike', '*Microsoft*Edge'], {windowsHide: true}).catch(error => ({stdout: error.stdout || ''}));
-    return Object.fromEntries(stdout.split(/\r?\n/).filter(l => l.includes('=')).map(l => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+    // Which window Windows has in front. The browser's own chrome.windows
+    // focus state can stay true while another app is in front, so ask
+    // Windows. A browser window, not one of the browser's own bubbles (such
+    // as the one about developer-mode extensions Edge shows after starting),
+    // which also take focus. Edge's titles end "— Microsoft​ Edge".
+    const title = kind === 'chrome' ? '*Google Chrome' : '*Microsoft*Edge';
+    b.foreground = (action = 'get') => powershell(args.foreground, ['-Action', action, '-ProcessId', pid, '-TitleLike', title]);
+    b.inFront = async (action = 'get') => (await b.foreground(action)).match === 'True';
+    // The extension asks Desktop only for a tab in a focused window, and a
+    // person is looking at the browser then; put it in front for real.
+    b.focus = async () => {
+        await send('Page.bringToFront', {}, sessionId);
+        await b.extension(`chrome.windows.getLastFocused().then(w => chrome.windows.update(w.id, {focused: true}))`);
+        if (!(await until(`the test ${b.name} in front`, () => b.inFront('raise'), 5000).then(() => true, () => false)))
+            throw new Error(`Windows kept the test ${b.name} out of the foreground (in front: ${(await b.foreground()).title})`);
+    };
+    // After Desktop's prompt closes, the browser should be in front again: the
+    // person is back on the page they were using, e.g. to submit the login.
+    b.focusedBack = () => until(`${b.name} to get the focus back`, () => b.inFront(), 3000).then(() => true, async () => {
+        const front = await b.foreground();
+        console.log(`      in front instead: ${front.title} (${front.process})`);
+        return false;
+    });
+    b.filled = () => until('the fields to fill', async () => { const f = await b.tab.fields(); return f.password && f; });
+
+    // A freshly started Edge shows its bubble about developer-mode extensions
+    // a few seconds in, taking the foreground; close it before any step runs.
+    // Chrome has none, so this only waits.
+    if (fresh) {
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline && !(await b.foreground('raise')).closed) await sleep(500);
+    }
+    return b;
 }
-// A browser window, not one of Edge's own bubbles (such as the one about
-// developer-mode extensions it shows after starting), which also take focus.
-const edgeInFront = async (action = 'get') => (await foreground(action)).match === 'True';
 
-// The extension asks Desktop only for a tab in a focused window, and a person
-// is looking at the browser then; put it in front for real.
-async function focusBrowser() {
-    await send('Page.bringToFront', {}, tab.session);
-    await extension(`chrome.windows.getLastFocused().then(w => chrome.windows.update(w.id, {focused: true}))`);
-    if (!(await until('the test browser in front', () => edgeInFront('raise'), 5000).then(() => true, () => false)))
-        throw new Error(`Windows kept the test browser out of the foreground (in front: ${(await foreground()).title})`);
-}
-
-// A freshly started Edge shows its bubble about developer-mode extensions a
-// few seconds in, taking the foreground; close it before any step runs.
-if (args.fresh) {
-    const deadline = Date.now() + 15000;
-    while (Date.now() < deadline && !(await foreground('raise')).closed) await sleep(500);
+const browsers = JSON.parse(Buffer.from(args.browsers, 'base64').toString());
+if (args.close) {
+    for (const {port} of browsers) {
+        const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+        const socket = new WebSocket(version.webSocketDebuggerUrl);
+        await new Promise(resolve => socket.addEventListener('open', resolve, {once: true}));
+        socket.send(JSON.stringify({id: 1, method: 'Browser.close'}));
+    }
+    await sleep(1000);
+    process.exit(0);
 }
 
 // --- Desktop's browser prompt --------------------------------------------------
 
-async function prompt(action, extra = []) {
-    const {stdout} = await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', args.drive,
-        '-Action', action, '-DesktopPid', args.desktopPid, '-Title', 'Browser access', ...extra], {windowsHide: true})
-        .catch(error => ({stdout: error.stdout || String(error)}));
-    return Object.fromEntries(stdout.split(/\r?\n/).filter(l => l.includes('=')).map(l => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
-}
-// After Desktop's prompt closes, the browser should be in front again: the
-// person is back on the page they were using, e.g. to submit the filled login.
-const browserFocused = () => until('the browser to get the focus back', () => edgeInFront(), 3000).then(() => true, async () => {
-    const front = await foreground();
-    console.log(`      in front instead: ${front.title} (${front.process})`);
-    return false;
-});
+const prompt = (action, extra = []) => powershell(args.drive, ['-Action', action, '-DesktopPid', args.desktopPid, '-Title', 'Browser access', ...extra]);
 const promptOpen = async () => (await prompt('find')).popup_open === 'True';
 async function waitPrompt(ms = 10000) {
     await until('the browser prompt', promptOpen, ms);
@@ -236,154 +263,203 @@ async function staysQuiet(ms = 4000) {
 const password = ['-PasswordFile', args.passwordFile];
 const vault = async (...command) => (await run(args.cli, ['--root', args.root, ...command], {windowsHide: true})).stdout;
 
-// --- Scenarios -------------------------------------------------------------------
+// --- Steps -------------------------------------------------------------------------
 
 const stamp = Date.now().toString(36);
 const origin = name => `https://${name}-${stamp}.factorseal.test`;
 const site = origin('login');
 const username = `check-${stamp}`;
 const secret = `pw-${stamp}-${Math.random().toString(36).slice(2)}`;
+const account = ['-Name', `* · ${username}`];
 
-// --only=name,name runs just those steps (pairing still runs when needed).
+// --only=name,name runs just the steps whose names start so; pairing and
+// saving always run.
 const only = args.only?.split(',');
-// Steps after 'save' fill the login it stored.
 let saved = false;
 const needsSave = () => { if (!saved) throw new Error('needs the save step, which stores the login it fills'); };
 async function step(name, body) {
-    if (only && name !== 'pair' && !only.includes(name)) return;
+    if (only && !['pair', 'save'].includes(name.split(':')[0]) && !only.some(o => name.startsWith(o))) return;
     try { await body(); } catch (error) { report(name, false, error.message); }
 }
 
-await step('pair', async () => {
-    if ((await extension(`chrome.storage.local.get('paired').then(s => s.paired === true)`))) {
-        report('pair', true, 'already paired');
-        return;
-    }
-    await tab.open(`${site}/`);
-    await focusBrowser();
-    const popup = await openPopup();
-    await press(popup, 'pair');
-    const found = await waitPrompt();
-    report('pair: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
-    await prompt('press', ['-Name', 'Pair browser']);
-    await until('pairing to finish', () => extension(`chrome.storage.local.get('paired').then(s => s.paired === true)`), 15000);
-    report('pair', true);
-});
+const connected = [];
+for (const description of browsers) connected.push(await connect(description));
+const prefix = connected.length > 1 ? b => `${b.name} ` : () => '';
 
-await step('save', async () => {
-    await tab.open(`${site}/`);
-    await focusBrowser();
-    // Nothing is stored for the new origin yet: no prompt on load.
-    report('save: no prompt before submitting', await staysQuiet(3000));
-    await type(tab.session, '[name=username]', username);
-    await type(tab.session, '[name=password]', secret);
-    await click(tab.session, 'button[type=submit]');
-    const found = await waitPrompt().catch(async error => {
-        const facts = await extension(`chrome.windows.getLastFocused({populate: true}).then(w => JSON.stringify({status, focused: w.focused, activeTab: w.tabs.find(t => t.active)?.url}))`);
-        const fields = JSON.stringify(await tab.fields());
-        throw new Error(`${error.message}; extension: ${facts}; page: ${fields}; front: ${(await foreground()).title}`);
-    });
-    report('save: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
-    await prompt('press', ['-Name', 'Save login']);
-    await until('the save to finish', () => extension(`status === 'saved'`), 15000);
-    saved = true;
-    report('save', true);
-});
-
-await step('resubmit unchanged', async () => {
-    needsSave();
-    await tab.open(`${site}/`);
-    await focusBrowser();
-    // The stored login is offered on load; deny that first.
-    await waitPrompt();
-    await prompt('deny');
-    await type(tab.session, '[name=username]', username);
-    await type(tab.session, '[name=password]', secret);
-    await click(tab.session, 'button[type=submit]');
-    report('resubmit unchanged: no save prompt', await staysQuiet(4000));
-});
-
-await step('fill', async () => {
-    needsSave();
-    await tab.open(`${site}/`);
-    await focusBrowser();
-    const found = await waitPrompt();
-    report('fill: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
-    await prompt('press', ['-Name', `* · ${username}`]);
-    const fields = await until('the fields to fill', async () => { const f = await tab.fields(); return f.password && f; });
-    report('fill: fields filled', fields.username === username && fields.password === secret);
-    report('fill: not submitted', fields.url === `${site}/`);
-    report('fill: the browser gets the focus back', await browserFocused());
-});
-
-for (const [how, action] of [['Deny', 'deny'], ['Escape', 'escape']]) {
-    await step(`${how}`, async () => {
-        needsSave();
-        await tab.open(`${site}/`);
-        await focusBrowser();
-        await waitPrompt();
-        await prompt(action);
-        await until('the denial', () => extension(`status === 'denied'`), 5000);
-        report(`${how}: the browser gets the focus back`, await browserFocused());
-        const fields = await tab.fields();
-        report(`${how}: denied, fields empty`, !fields.username && !fields.password);
-        // Typing changes the page; that must not ask again.
-        await type(tab.session, '[name=username]', 'x');
-        report(`${how}: typing afterwards stays quiet`, await staysQuiet(3000));
+for (const b of connected) {
+    await step(`pair: ${b.name}`, async () => {
+        if (await b.paired()) {
+            report(`${prefix(b)}pair`, true, 'already paired');
+            return;
+        }
+        await b.tab.open(`${site}/`);
+        await b.focus();
+        const popup = await b.openPopup();
+        await b.press(popup, 'pair');
+        const found = await waitPrompt();
+        report(`${prefix(b)}pair: prompt opens`, true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
+        await prompt('press', ['-Name', 'Pair browser']);
+        await until('pairing to finish', b.paired, 15000);
+        report(`${prefix(b)}pair`, true);
     });
 }
 
-await step('no match', async () => {
-    await tab.open(`${origin('nomatch')}/`);
-    await focusBrowser();
-    report('no match: no prompt while unsealed', await staysQuiet(4000));
-    report('no match: the browser keeps the focus', await edgeInFront());
-    const popup = await openPopup();
-    const status = await until('a status', () => popupStatus(popup.session), 5000);
-    report('no match: popup says so', status === 'No matching login found.', status);
-    await closePopup();
-});
+const [b, other] = connected;
+const {tab, extension} = b;
 
-await step('Check this page', async () => {
-    await tab.open(`${origin('formless')}/`, 'formless');
-    await focusBrowser();
-    let popup = await openPopup();
-    await press(popup, 'retry');
-    const status = await until('a status', () => popupStatus(popup.session), 10000);
-    report('Check this page: no form is reported', status === 'No complete login form found on this page.', status);
-    report('Check this page: popup stays open without a form', await popupOpen(popup.targetId));
-    await closePopup();
-    needsSave();
+await step('save', async () => {
     await tab.open(`${site}/`);
-    await focusBrowser();
-    await waitPrompt();
-    await prompt('deny');
-    popup = await openPopup();
-    await press(popup, 'retry');
-    await sleep(1000);
-    report('Check this page: popup closes with a form', !(await popupOpen(popup.targetId)));
-    await focusBrowser();
-    await waitPrompt();
-    report('Check this page: the page is checked again', true);
-    await prompt('deny');
+    await b.focus();
+    // Nothing is stored for the new origin yet: no prompt on load.
+    report(`${prefix(b)}save: no prompt before submitting`, await staysQuiet(3000));
+    await b.type(tab.session, '[name=username]', username);
+    await b.type(tab.session, '[name=password]', secret);
+    await b.click(tab.session, 'button[type=submit]');
+    const found = await waitPrompt().catch(async error => {
+        const facts = await extension(`chrome.windows.getLastFocused({populate: true}).then(w => JSON.stringify({status, focused: w.focused, activeTab: w.tabs.find(t => t.active)?.url}))`);
+        throw new Error(`${error.message}; extension: ${facts}; page: ${JSON.stringify(await tab.fields())}; front: ${(await b.foreground()).title}`);
+    });
+    report(`${prefix(b)}save: prompt opens`, true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
+    await prompt('press', ['-Name', 'Save login']);
+    await until('the save to finish', () => extension(`status === 'saved'`), 15000);
+    saved = true;
+    report(`${prefix(b)}save`, true);
 });
 
-await step('sealed fill', async () => {
-    needsSave();
-    await vault('seal');
-    await tab.open(`${site}/`);
-    await focusBrowser();
-    const found = await waitPrompt();
-    report('sealed fill: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
-    report('sealed fill: prompt lies on one screen', found.on_screen === 'True', found.bounds);
-    const unlocked = await prompt('unlock-popup', [...password, '-Name', `* · ${username}`]);
-    report('sealed fill: unlocks, then offers the login', unlocked.unlocked === 'True');
-    await prompt('press', ['-Name', `* · ${username}`]);
-    const fields = await until('the fields to fill', async () => { const f = await tab.fields(); return f.password && f; });
-    report('sealed fill: fields filled', fields.username === username && fields.password === secret);
-});
+if (!other) {
+    await step('resubmit unchanged', async () => {
+        needsSave();
+        await tab.open(`${site}/`);
+        await b.focus();
+        // The stored login is offered on load; deny that first.
+        await waitPrompt();
+        await prompt('deny');
+        await b.type(tab.session, '[name=username]', username);
+        await b.type(tab.session, '[name=password]', secret);
+        await b.click(tab.session, 'button[type=submit]');
+        report('resubmit unchanged: no save prompt', await staysQuiet(4000));
+    });
 
-await closePopup();
+    await step('fill', async () => {
+        needsSave();
+        await tab.open(`${site}/`);
+        await b.focus();
+        const found = await waitPrompt();
+        report('fill: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
+        await prompt('press', account);
+        const fields = await b.filled();
+        report('fill: fields filled', fields.username === username && fields.password === secret);
+        report('fill: not submitted', fields.url === `${site}/`);
+        report('fill: the browser gets the focus back', await b.focusedBack());
+    });
+
+    for (const [how, action] of [['Deny', 'deny'], ['Escape', 'escape']]) {
+        await step(`${how}`, async () => {
+            needsSave();
+            await tab.open(`${site}/`);
+            await b.focus();
+            await waitPrompt();
+            await prompt(action);
+            await until('the denial', () => extension(`status === 'denied'`), 5000);
+            report(`${how}: the browser gets the focus back`, await b.focusedBack());
+            const fields = await tab.fields();
+            report(`${how}: denied, fields empty`, !fields.username && !fields.password);
+            // Typing changes the page; that must not ask again.
+            await b.type(tab.session, '[name=username]', 'x');
+            report(`${how}: typing afterwards stays quiet`, await staysQuiet(3000));
+        });
+    }
+
+    await step('no match', async () => {
+        await tab.open(`${origin('nomatch')}/`);
+        await b.focus();
+        report('no match: no prompt while unsealed', await staysQuiet(4000));
+        report('no match: the browser keeps the focus', await b.inFront());
+        const popup = await b.openPopup();
+        const status = await until('a status', () => b.popupStatus(popup), 5000);
+        report('no match: popup says so', status === 'No matching login found.', status);
+        await b.closePopup();
+    });
+
+    await step('Check this page', async () => {
+        await tab.open(`${origin('formless')}/`, 'formless');
+        await b.focus();
+        let popup = await b.openPopup();
+        await b.press(popup, 'retry');
+        const status = await until('a status', () => b.popupStatus(popup), 10000);
+        report('Check this page: no form is reported', status === 'No complete login form found on this page.', status);
+        report('Check this page: popup stays open without a form', await b.popupOpen(popup));
+        await b.closePopup();
+        needsSave();
+        await tab.open(`${site}/`);
+        await b.focus();
+        await waitPrompt();
+        await prompt('deny');
+        popup = await b.openPopup();
+        await b.press(popup, 'retry');
+        await sleep(1000);
+        report('Check this page: popup closes with a form', !(await b.popupOpen(popup)));
+        await b.focus();
+        await waitPrompt();
+        report('Check this page: the page is checked again', true);
+        await prompt('deny');
+    });
+
+    await step('sealed fill', async () => {
+        needsSave();
+        await vault('seal');
+        await tab.open(`${site}/`);
+        await b.focus();
+        const found = await waitPrompt();
+        report('sealed fill: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
+        report('sealed fill: prompt lies on one screen', found.on_screen === 'True', found.bounds);
+        const unlocked = await prompt('unlock-popup', [...password, ...account]);
+        report('sealed fill: unlocks, then offers the login', unlocked.unlocked === 'True');
+        await prompt('press', account);
+        const fields = await b.filled();
+        report('sealed fill: fields filled', fields.username === username && fields.password === secret);
+    });
+} else {
+    // Two browser profiles, each paired, each with its own session with
+    // Desktop. A request waiting in one must not be answered for the other:
+    // Desktop takes one request at a time and tells the other it is busy, and
+    // the approval fills only the page that asked.
+    const empty = async c => { const f = await c.tab.fields(); return !f.username && !f.password; };
+    for (const [first, second, answer] of [[b, other, 'approve'], [other, b, 'deny']]) {
+        const name = `consent: ${first.name} asks, ${second.name} waits, ${answer}`;
+        await step(name, async () => {
+            needsSave();
+            await first.tab.open(`${site}/`);
+            await first.focus();
+            await waitPrompt();
+            await second.tab.open(`${site}/`);
+            await second.focus();
+            await until(`${second.name} to be told Desktop is busy`, () => second.extension(`status === 'busy'`), 10000);
+            report(`${name}: the second browser is told Desktop is busy`, true);
+            if (answer === 'approve') {
+                await prompt('press', account);
+                const fields = await first.filled();
+                report(`${name}: the asking browser is filled`, fields.username === username && fields.password === secret);
+            } else {
+                await prompt('deny');
+                await until('the denial', () => first.extension(`status === 'denied'`), 5000);
+                report(`${name}: the asking browser is denied`, await empty(first));
+            }
+            await sleep(1500);
+            report(`${name}: nothing reaches the waiting browser`, await empty(second) && await second.extension(`status === 'busy'`));
+            // The waiting browser's own request, asked again, gets its own prompt.
+            await second.focus();
+            const popup = await second.openPopup();
+            await second.press(popup, 'retry');
+            await second.focus();
+            await waitPrompt();
+            await prompt('press', account);
+            const fields = await second.filled();
+            report(`${name}: asked again, the second browser gets its own fill`, fields.username === username && fields.password === secret);
+        });
+    }
+}
+
+for (const c of connected) { await c.closePopup().catch(() => {}); c.socket.close(); }
 console.log(failures ? `FAIL (${failures})` : 'PASS');
-socket.close();
 process.exit(failures ? 1 : 0);
