@@ -41,7 +41,8 @@ promptly; it seals itself after a few idle minutes.
 ## Check the browser extension
 
 Run `./scripts/windows-desktop-check/browser-check.sh` (inside the devenv
-shell) instead of asking the user to click through Edge. It uses its own Edge
+shell; `--browser=chrome` or `--browser=both` for Chrome and for consent
+across browsers) instead of asking the user to click through a browser. It uses its own Edge
 profile and the test vault, and drives both the extension and Desktop's
 browser prompt; say first that it takes over the pointer for a while.
 `--only=STEP` reruns single steps. Ask the user only for what it cannot

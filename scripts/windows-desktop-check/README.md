@@ -23,8 +23,8 @@ by default `%USERPROFILE%\Projects\factorseal`; set `FACTORSEAL_WINDOWS_TREE`
 | `check.sh popup --test-vault --seal --then grant\|deny` | WSL | Seals the vault while the request waits and checks that the popup stays open. `grant` unlocks from the popup and grants; `deny` denies while sealed, unlocks from the main window, and checks that the request stays denied. |
 | `check.sh popup --test-vault [--then grant\|deny]` | WSL | `popup` against the test vault and its Desktop; `--then` drives the popup afterwards, and `grant` also runs the grant check. `grant --test-vault` works the same way. |
 | `check.sh write-once [--via popup\|cli]` | WSL | On the test vault, writes a new SecretSpec key through the provider, approves it with the default lifetime in the popup or with `factorseal permissions approve`, and checks that the default was "this write only": one write is stored, the grant is gone, and the next write asks again. |
-| `browser-check.sh [--restart-browser] [--only=STEP,...]` | WSL | Checks the browser extension end to end in a separate Edge profile against the test vault's Desktop: pairing, saving, resubmitting unchanged, filling, Deny, Escape, a site with no stored login, **Check this page**, and a fill started while sealed. See [Browser extension](#browser-extension). |
-| `browser-check.mjs` | Windows (Node) | Used by `browser-check.sh`; drives the test Edge through the DevTools Protocol and Desktop's browser prompt through `drive.ps1`. |
+| `browser-check.sh [--browser=edge\|chrome\|both] [--restart-browser] [--only=STEP,...]` | WSL | Checks the browser extension end to end in a separate Edge or Chrome profile against the test vault's Desktop: pairing, saving, resubmitting unchanged, filling, Deny, Escape, a site with no stored login, **Check this page**, and a fill started while sealed. `both` pairs both and checks that consent never crosses from one browser to the other. See [Browser extension](#browser-extension). |
+| `browser-check.mjs` | Windows (Node) | Used by `browser-check.sh`; drives the test browsers through the DevTools Protocol and Desktop's browser prompt through `drive.ps1`. |
 | `foreground.ps1 -Action get\|raise [-ProcessId P]` | Windows | Used by `browser-check.mjs`; reports which window Windows has in front, or brings a process's window there. A browser's own focus state (`chrome.windows`) can say it is focused while another app is in front. |
 | `observe.ps1` | Windows | Used by `check.sh`; hooks taskbar-flash notifications and captures the screenshots. |
 | `uia-dump.ps1 [-Out FILE] [-DesktopPid P]` | Windows | Lists what UI Automation, and so a screen reader, sees in Desktop's windows: control types, names (the popup's text included), AutomationIds, whether a radio button is selected, and whether a value is exposed (never the value itself). An owned popup is listed twice, as UI Automation lists it: on its own and under the main window. |
@@ -115,11 +115,14 @@ covers it, and it releases it afterwards.
 ## Browser extension
 
 `browser-check.sh` needs Node in WSL (the devenv shell has it) and on Windows.
-It starts a separate Edge with its own profile in
-`%LOCALAPPDATA%\FactorSeal-check\edge-profile`, remote debugging on port
-9333, and the extension loaded unpacked from
-`%LOCALAPPDATA%\FactorSeal-check\extension-chromium`. Your own Edge and its
-profile are left alone: Edge refuses remote debugging on the default profile.
+It starts a separate Edge (or Chrome) with its own profile in
+`%LOCALAPPDATA%\FactorSeal-check\edge-profile` (`chrome-profile`), remote
+debugging on port 9333 (9334), and the extension loaded unpacked from
+`%LOCALAPPDATA%\FactorSeal-check\extension-chromium`. Edge loads it with
+`--load-extension`; Chrome ignores that since version 137, so the check loads
+it with the DevTools Protocol's `Extensions.loadUnpacked`, which needs
+`--enable-unsafe-extension-debugging`. Your own browsers and their profiles
+are left alone: they refuse remote debugging on the default profile.
 The extension keeps its ID in any profile (its manifest has a fixed `key`),
 and browsers find native messaging hosts per Windows user, so the test Edge
 reaches the same Desktop.
@@ -131,7 +134,13 @@ reaches the same Desktop.
   if that is not the test Desktop; stop the test Desktop and rerun.
 - The test copy of the extension has site access granted at install, since
   Edge's permission dialog cannot be answered through the DevTools Protocol.
-- The first run pairs the profile; later runs reuse the pairing.
+- The first run pairs the profile; later runs reuse the pairing. The check
+  closes tabs left from earlier runs: their login pages would ask Desktop
+  again whenever the browser gets the focus back.
+- `--browser=both` checks that consent stays with the browser that asked:
+  while Edge's request waits, Chrome is told Desktop is busy; approving fills
+  only Edge; Chrome, asked again, gets its own prompt. Then the same with the
+  roles swapped and a denial.
 - Windows decides whether the browser may take the foreground. If a step says
   Windows kept the test browser out of the foreground, click it once and
   rerun.
