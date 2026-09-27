@@ -1,5 +1,7 @@
 # Drives FactorSeal Desktop like a person: unlocks the main window or a popup
-# kept open by a seal, or grants or denies the approval popup. UI Automation
+# kept open by a seal, grants or denies the approval popup, or presses a named
+# button or Escape in it. -Title picks another popup by the end of its title,
+# such as 'Browser access' for the browser extension's prompt. UI Automation
 # finds the controls; the clicks and keystrokes are real input, since the
 # popup accepts approval only after a mouse click inside it and one second
 # without changes. Every click first checks that the target window is in the
@@ -9,9 +11,12 @@
 # Use it only with a throwaway vault (test-vault.ps1): the password is typed
 # from -PasswordFile. Prints key=value lines; the password is never printed.
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('find', 'unlock', 'unlock-popup', 'grant', 'deny')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('find', 'unlock', 'unlock-popup', 'grant', 'deny', 'press', 'escape')][string]$Action,
     [Parameter(Mandatory = $true)][int]$DesktopPid,
     [string]$PasswordFile,
+    [string]$Title,
+    # press: the button to click. unlock-popup: the button to wait for once unlocked.
+    [string]$Name,
     [int]$Seconds = 15
 )
 $ErrorActionPreference = 'Stop'
@@ -109,6 +114,14 @@ public static class Input {
         }
     }
 
+    public static void Key(ushort vk) {
+        var down = new INPUT { type = INPUT_KEYBOARD };
+        down.u.ki.wVk = vk;
+        var up = down;
+        up.u.ki.dwFlags = KEYEVENTF_KEYUP;
+        Send(new[] { down, up });
+    }
+
     public static void Type(string text) {
         foreach (char c in text) {
             var down = new INPUT { type = INPUT_KEYBOARD };
@@ -152,13 +165,20 @@ if (-not (Get-Process -Id $DesktopPid -ErrorAction SilentlyContinue)) { Fail "De
 # The main window is titled "FactorSeal Desktop"; the popup's title ends in
 # "Secret access" (see observe.ps1).
 function FindWindow {
-    $suffix = if ($Action -eq 'unlock') { 'FactorSeal Desktop' } else { 'Secret access' }
+    $suffix = if ($Title) { $Title } elseif ($Action -eq 'unlock') { 'FactorSeal Desktop' } else { 'Secret access' }
     $hwnd = [Input]::Find($DesktopPid, $suffix)
     if ($hwnd -eq [IntPtr]::Zero) { return $null }
     $auto::FromHandle($hwnd)
 }
 
+# A name with * matches as a wildcard, as the browser prompt's account
+# buttons are named "title · username".
 function Find($window, [string]$name) {
+    if ($name.Contains('*')) {
+        $all = $window.FindAll($scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+        foreach ($element in $all) { if ($element.Current.Name -like $name) { return $element } }
+        return $null
+    }
     $byName = New-Object System.Windows.Automation.PropertyCondition($auto::NameProperty, $name)
     $window.FindFirst($scope::Descendants, $byName)
 }
@@ -187,8 +207,21 @@ function ClickOn($window, $element, [string]$what) {
 }
 
 # Reports whether the popup is open, without touching anything.
+# Also reports where it is, and whether it lies wholly on one screen.
 if ($Action -eq 'find') {
-    Emit "popup_open=$([bool](FindWindow))"
+    $window = FindWindow
+    Emit "popup_open=$([bool]$window)"
+    if ($window) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $rect = $window.Current.BoundingRectangle
+        Emit "bounds=$([int]$rect.X),$([int]$rect.Y),$([int]$rect.Width),$([int]$rect.Height)"
+        $inside = [System.Windows.Forms.Screen]::AllScreens | Where-Object {
+            $b = $_.Bounds
+            $rect.X -ge $b.X -and $rect.Y -ge $b.Y -and $rect.Right -le $b.Right -and $rect.Bottom -le $b.Bottom
+        }
+        Emit "on_screen=$([bool]$inside)"
+        Emit "foreground=$([Input]::GetForegroundWindow() -eq [IntPtr]$window.Current.NativeWindowHandle)"
+    }
     exit 0
 }
 
@@ -203,7 +236,7 @@ function TypeInto($window, [string]$text) {
 }
 
 $password = $null
-if ($Action -ne 'deny') {
+if ($Action -in 'unlock', 'unlock-popup', 'grant') {
     if (-not $PasswordFile) { Fail "-PasswordFile is required to $Action" }
     $password = [System.IO.File]::ReadAllText($PasswordFile).TrimEnd("`r", "`n")
 }
@@ -277,7 +310,17 @@ switch ($Action) {
         $button = WaitFor $window 'Unlock to continue' 5
         if (-not $button) { Fail 'no enabled Unlock to continue button' }
         ClickOn $window $button 'Unlock to continue'
-        Emit "unlocked=$([bool](WaitFor $window 'Grant access' 30))"
+        Emit "unlocked=$([bool](WaitFor $window $(if ($Name) { $Name } else { 'Grant access' }) 30))"
+    }
+    'press' {
+        $button = WaitFor $window $Name 10
+        if (-not $button) { Fail "no enabled $Name button" }
+        ClickOn $window $button $Name
+    }
+    'escape' {
+        if ([Input]::GetForegroundWindow() -ne $hwnd) { Fail 'the window lost the foreground before Escape' }
+        [Input]::Key(0x1B)
+        Emit 'pressed=Escape'
     }
     'deny' {
         $button = WaitFor $window 'Deny' 5
@@ -291,7 +334,7 @@ switch ($Action) {
 }
 $password = $null
 
-if ($Action -in 'grant', 'deny') {
+if ($Action -in 'grant', 'deny', 'press', 'escape') {
     # The popup closes once no request is left.
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while ((FindWindow) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }

@@ -134,7 +134,9 @@ require_unsealed() {
 if [ "$command" = test-desktop ]; then
     powershell test-vault.ps1 -Cli "$(wslpath -w "$cli")" | sed 's/^/test vault:    /'
     pid=$(desktop_pid)
+    started=no
     if [ -z "$pid" ]; then
+        started=yes
         # Detached, with no handle to this shell, so the launch returns.
         setsid "$desktop" --root "$test_root" </dev/null >/dev/null 2>&1 &
         for _ in $(seq 50); do
@@ -153,6 +155,12 @@ if [ "$command" = test-desktop ]; then
         echo "vault:         unsealed"
         echo "PASS"
         exit 0
+    fi
+    if [ "$started" = no ]; then
+        # The browser host starts Desktop in the tray, without a window;
+        # starting it again shows the running one's window.
+        setsid "$desktop" --root "$test_root" </dev/null >/dev/null 2>&1 &
+        sleep 2
     fi
     result=$(powershell drive.ps1 -Action unlock -DesktopPid "$pid" -PasswordFile "$test_password" -Seconds 30 || true)
     sed 's/^/driver:        /' <<<"$result"
