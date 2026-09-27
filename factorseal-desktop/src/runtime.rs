@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use factorseal::browser::desktop::WorkerFailure;
 use factorseal::security::LockedBytes;
 use factorseal::{
     DocumentKind, MAX_LIST_PAGE_SIZE, NativeVaultClient, UnlockGroup, UnlockPolicy, Vault,
@@ -154,13 +155,19 @@ impl DesktopRuntime {
     pub(crate) fn browser_request(
         &self,
         action: factorseal::browser::WorkerAction,
-    ) -> Result<factorseal::browser::WorkerReply, String> {
-        let metadata = Vault::inspect(&self.config.root).map_err(|e| e.to_string())?;
-        let request =
-            VaultRequest::new(VaultAction::Browser { action }).map_err(|e| e.to_string())?;
-        match self.request_live(&metadata, &request)? {
-            VaultResponseBody::Browser { reply } => Ok(reply),
-            _ => Err("unexpected browser worker response".into()),
+    ) -> Result<factorseal::browser::WorkerReply, WorkerFailure> {
+        let metadata = Vault::inspect(&self.config.root).map_err(|_| WorkerFailure::Rejected)?;
+        let request = VaultRequest::new(VaultAction::Browser { action })
+            .map_err(|_| WorkerFailure::Rejected)?;
+        let response = native_client(&self.config, &metadata)
+            .request(&request)
+            .map_err(|_| WorkerFailure::Rejected)?;
+        match response.result {
+            Ok(VaultResponseBody::Browser { reply }) => Ok(reply),
+            Err(error) if error.code == factorseal::VaultResponseErrorCode::Conflict => {
+                Err(WorkerFailure::Changed)
+            }
+            _ => Err(WorkerFailure::Rejected),
         }
     }
     pub(crate) fn new(config: RuntimeConfig) -> (Arc<Self>, smol::channel::Receiver<Snapshot>) {
