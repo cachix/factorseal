@@ -144,6 +144,8 @@ if [ "$command" = test-desktop ]; then
         done
         [ -n "$pid" ] || die "the test Desktop did not start"
         echo "desktop:       started, pid $pid"
+        # Typing into a window that has only just appeared loses keystrokes.
+        sleep 2
     else
         echo "desktop:       running, pid $pid"
     fi
