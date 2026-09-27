@@ -5,10 +5,12 @@
 #   browser-check.sh [--browser=edge|chrome|both] [--restart-browser] [--only=STEP,...]
 #       Builds the extension, loads it into a separate browser profile kept in
 #       %LOCALAPPDATA%\FactorSeal-check\<browser>-profile (Edge by default),
-#       and drives it against
-#       the test vault's Desktop: pairing (first run only), saving a login,
-#       resubmitting it unchanged, filling it, Deny, Escape, a site with no
-#       stored login, "Check this page" with and without a login form, and a
+#       and drives it against the test vault's Desktop: pairing (first run
+#       only), saving a login, resubmitting it unchanged, saving from a
+#       registration form, updating a stored login's password (and failing
+#       when the login changes during review), filling it, Deny, Escape, a
+#       site with no stored login, "Check this page" with and without a login
+#       form, and a
 #       fill that starts while the vault is sealed. Desktop's prompt is driven
 #       through drive.ps1, so the check takes over the Windows desktop while
 #       it runs. --restart-browser closes the test browser first; --only runs
@@ -33,7 +35,7 @@ for argument in "$@"; do
         --browser=edge | --browser=chrome | --browser=both) browser=${argument#--browser=} ;;
         --restart-browser) restart=yes ;;
         --only=?*) extra+=("$argument") ;;
-        *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac
 done
 

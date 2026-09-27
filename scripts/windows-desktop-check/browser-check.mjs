@@ -14,7 +14,7 @@
 // Input.dispatch*, which the page sees as trusted (isTrusted), as the save
 // flow requires.
 import {execFile} from 'node:child_process';
-import {readFile, rm} from 'node:fs/promises';
+import {readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {promisify} from 'node:util';
@@ -48,6 +48,7 @@ const powershell = (script, parameters) => run('powershell.exe', ['-NoProfile', 
 const fixture = name => readFile(new URL(`../../extensions/browser/fixtures/${name}`, import.meta.url), 'utf8');
 const pages = {
     login: await fixture('login.html'),
+    register: await fixture('register.html'),
     // Fields a person would call a login form, without a <form> element.
     formless: `<!doctype html><title>Formless</title><label>Username <input id="username" name="username"></label>
 <label>Password <input id="password" type="password" name="password"></label><button>Log in</button>`,
@@ -282,6 +283,25 @@ async function reads(name, texts) {
 const password = ['-PasswordFile', args.passwordFile];
 const vault = async (...command) => (await run(args.cli, ['--root', args.root, ...command], {windowsHide: true})).stdout;
 
+// Personal logins in the test vault, read and written as Bitwarden JSON: the
+// check seeds logins and changes one behind the prompt's back. The file holds
+// test passwords only, and only for as long as the command runs.
+const bitwarden = join(tmpdir(), `factorseal-check-${process.pid}.json`);
+async function logins(site) {
+    await vault('export', '--format', 'bitwarden-json', bitwarden);
+    try {
+        return JSON.parse(await readFile(bitwarden, 'utf8')).items.filter(i => i.login?.uris?.some(u => u.uri === site));
+    } finally { await rm(bitwarden, {force: true}); }
+}
+// Adds the logins, or replaces those with the same IDs.
+async function storeLogins(site, items) {
+    await writeFile(bitwarden, JSON.stringify({encrypted: false, folders: [], items: items.map(({id, name, notes, username, password}) =>
+        ({id, type: 1, name, notes, favorite: false, login: {username, password, uris: [{match: null, uri: site}]}}))}));
+    try { await vault('import', '--format', 'bitwarden-json', '--replace-existing', bitwarden); } finally { await rm(bitwarden, {force: true}); }
+}
+// The number Desktop's main window shows next to Personal secrets.
+const personalCount = async () => Number((await screenReader()).map(n => n.match(/^Personal secrets, (\d+) items?$/)).find(Boolean)?.[1]);
+
 // --- Steps -------------------------------------------------------------------------
 
 const stamp = Date.now().toString(36);
@@ -370,6 +390,91 @@ if (!other) {
         await b.type(tab.session, '[name=password]', secret);
         await b.click(tab.session, 'button[type=submit]');
         report('resubmit unchanged: no save prompt', await staysQuiet(4000));
+    });
+
+    // A registration form (with a password confirmation) saves a new login,
+    // which Desktop lists at once and the login page then fills.
+    await step('register', async () => {
+        const site = origin('register');
+        const email = `${username}@example.test`;
+        await tab.open(`${site}/register`, 'register');
+        await b.focus();
+        const before = await personalCount();
+        await b.type(tab.session, '[name=username]', email);
+        await b.type(tab.session, '[name=password]', secret);
+        await b.type(tab.session, '[name=confirmation]', secret);
+        await b.click(tab.session, 'button[type=submit]');
+        await waitPrompt();
+        await reads('register', ['Save login', site, `Username: ${email}`, 'Password: ••••••••']);
+        await prompt('press', ['-Name', 'Save login']);
+        await until('the save to finish', () => extension(`status === 'saved'`), 15000);
+        report('register: saved', true);
+        await until('Desktop to list the login', async () => await personalCount() === before + 1, 5000)
+            .then(() => report('register: Desktop lists it without reopening', true),
+                async () => report('register: Desktop lists it without reopening', false, `${before} items before, ${await personalCount()} after`));
+        await tab.open(`${site}/`);
+        await b.focus();
+        await waitPrompt();
+        await prompt('press', ['-Name', `* · ${email}`]);
+        const fields = await b.filled();
+        report('register: the login page fills it', fields.username === email && fields.password === secret);
+    });
+
+    // A new password for a stored username updates that login and nothing
+    // else: two accounts share the site, and the other one stays as it was.
+    const updateSite = origin('update');
+    const accounts = ['a', 'b'].map(x => ({id: `check-${stamp}-${x}`, name: `Account ${x.toUpperCase()}`,
+        notes: `notes of ${x}`, username: `${username}-${x}`, password: `old-${x}-${stamp}`}));
+    const [updated, untouched] = accounts;
+    const offerUpdate = async (newPassword, what) => {
+        await tab.open(`${updateSite}/`);
+        await b.focus();
+        // The stored logins are offered on load; deny that first.
+        await waitPrompt();
+        await prompt('deny');
+        await b.type(tab.session, '[name=username]', updated.username);
+        await b.type(tab.session, '[name=password]', newPassword);
+        await b.click(tab.session, 'button[type=submit]');
+        await waitPrompt();
+        const names = await screenReader();
+        const offer = `Update password: ${updated.name} · ${updated.username}`;
+        report(`${what}: offers to update that account only`, names.includes(offer) && names.includes('Save as new login')
+            && !names.some(n => n.includes(untouched.username)), names.filter(n => n.startsWith('Update password')).join(', '));
+        return offer;
+    };
+    const byId = (items, id) => items.find(i => i.id === id);
+
+    await step('update password', async () => {
+        await storeLogins(updateSite, accounts);
+        const newPassword = `new-a-${stamp}`;
+        const offer = await offerUpdate(newPassword, 'update password');
+        await prompt('press', ['-Name', offer]);
+        await until('the update to finish', () => extension(`status === 'saved'`), 15000);
+        const items = await logins(updateSite);
+        const a = byId(items, updated.id), other = byId(items, untouched.id);
+        report('update password: no new login', items.length === 2, `${items.length} logins for the site`);
+        report('update password: the account has the new password', a?.login.password === newPassword);
+        report('update password: its other fields stay', a?.name === updated.name && a?.notes === updated.notes && a?.login.username === updated.username);
+        report('update password: the other account stays', other?.login.password === untouched.password && other?.notes === untouched.notes);
+        updated.password = newPassword;
+    });
+
+    await step('update conflict', async () => {
+        if (!(await logins(updateSite)).length) await storeLogins(updateSite, accounts);
+        const offer = await offerUpdate(`rejected-${stamp}`, 'update conflict');
+        // Someone changes the login while the update waits for review.
+        const changed = {...updated, notes: `changed during review ${stamp}`};
+        await storeLogins(updateSite, [changed]);
+        await prompt('press', ['-Name', offer]);
+        await until('the update to fail', () => extension(`status === 'save_failed'`), 15000)
+            .then(() => report('update conflict: the update fails', true),
+                async () => report('update conflict: the update fails', false, `status: ${await extension('status')}`));
+        const a = byId(await logins(updateSite), updated.id);
+        report('update conflict: the change made during review stays', a?.notes === changed.notes && a?.login.password === changed.password);
+        const popup = await b.openPopup();
+        const status = await until('a status', () => b.popupStatus(popup), 5000);
+        report('update conflict: popup says so', status === 'Login could not be saved. It may have changed; try again.', status);
+        await b.closePopup();
     });
 
     await step('fill', async () => {
