@@ -257,23 +257,23 @@ impl Render for BrowserView {
         } else {
             "Fill a login"
         };
+        // Text needs an ID to reach screen readers and UI Automation.
         let mut summary = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted)
-            .child(div().text_heading().font_semibold().child(if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() }))
-            .child(if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else if one_time { "Add this website’s one-time password to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." });
+            .child(div().text_heading().font_semibold().child(text("site", if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() })))
+            .child(text("description", if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else if one_time { "Add this website’s one-time password to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." }));
         if let Some(username) = &self.request.save_username {
             summary = summary
-                .child(div().child(format!("Username: {username}")))
-                .child(div().child("Password: ••••••••"));
+                .child(div().child(text("username", format!("Username: {username}"))))
+                .child(div().child(text("password", "Password: ••••••••")));
         }
         if let Some(code) = &self.request.code {
             summary = summary.child(div().min_w_0().truncate().child(format!("Code for {code}")));
         }
         if pairing || revoking {
-            summary = summary.child(
-                div()
-                    .text_body()
-                    .child(format!("Profile key: {}…", &self.request.key[..16])),
-            );
+            summary = summary.child(div().text_body().child(text(
+                "profile-key",
+                format!("Profile key: {}…", &self.request.key[..16]),
+            )));
         }
         let mut requests = v_flex().gap_4().child(summary).child(
             button("browser-technical-details")
@@ -290,11 +290,10 @@ impl Render for BrowserView {
                 })),
         );
         if self.details {
-            requests = requests.child(
-                div()
-                    .text_caption()
-                    .child(format!("Profile public key: {}", self.request.key)),
-            );
+            requests = requests.child(div().text_caption().child(text(
+                "public-key",
+                format!("Profile public key: {}", self.request.key),
+            )));
         }
         if reviewing {
             for (index, candidate) in self.request.candidates.iter().enumerate() {
@@ -325,7 +324,12 @@ impl Render for BrowserView {
                 ));
             }
         }
-        let mut groups = h_flex().gap_2().flex_wrap();
+        let mut groups = h_flex()
+            .id("unlock-group")
+            .role(gpui::Role::RadioGroup)
+            .aria_label("Unlock with")
+            .gap_2()
+            .flex_wrap();
         if let Some(metadata) = self.snapshot.metadata() {
             for (index, group) in metadata.unlock_policy().groups().iter().enumerate() {
                 let selected = self.group.as_ref() == Some(group);
@@ -333,6 +337,8 @@ impl Render for BrowserView {
                 groups = groups.child(
                     button(("browser-factor", index))
                         .label(group.to_string())
+                        .role(Some(gpui::Role::RadioButton))
+                        .toggled(selected)
                         .selected(selected)
                         .disabled(unlocking)
                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -402,10 +408,15 @@ impl Render for BrowserView {
                                 div()
                                     .text_body()
                                     .text_color(theme.muted_foreground)
-                                    .child("FactorSeal"),
+                                    .child(text("brand", "FactorSeal")),
                             ),
                     )
-                    .child(div().text_heading().font_semibold().child(title)),
+                    .child(
+                        div()
+                            .text_heading()
+                            .font_semibold()
+                            .child(text("browser-title", title)),
+                    ),
             )
             .child(
                 div()
@@ -427,7 +438,7 @@ impl Render for BrowserView {
                         div()
                             .text_caption()
                             .text_color(theme.muted_foreground)
-                            .child(status),
+                            .child(text("status", status)),
                     )
                     .when(
                         !unsealed
@@ -445,11 +456,10 @@ impl Render for BrowserView {
                     .when(
                         matches!(self.snapshot, Snapshot::Uninitialized { .. }),
                         |element| {
-                            element.child(
-                                div()
-                                    .text_body()
-                                    .child("Set up your vault in FactorSeal Desktop first."),
-                            )
+                            element.child(div().text_body().child(text(
+                                "setup-note",
+                                "Set up your vault in FactorSeal Desktop first.",
+                            )))
                         },
                     )
                     .child(

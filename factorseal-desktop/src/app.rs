@@ -290,10 +290,15 @@ fn sidebar_label(icon: impl Into<gpui_component::Icon>, label: &'static str) -> 
         .child(div().min_w_0().truncate().child(label))
 }
 
-fn field_label(label: &'static str, field: impl IntoElement) -> Div {
+/// A field under its label. The group is named by the label, so a screen
+/// reader announces the field by it, and the label itself is exposed too.
+fn field_label(label: &'static str, field: impl IntoElement) -> gpui::Stateful<Div> {
     v_flex()
+        .id(label)
+        .role(gpui::Role::Group)
+        .aria_label(label)
         .gap_2()
-        .child(div().text_body().font_medium().child(text(label, label)))
+        .child(div().text_body().font_medium().child(text("label", label)))
         .child(field)
 }
 
@@ -4005,7 +4010,7 @@ impl DesktopView {
             .map(|(_, message)| message.clone())
     }
 
-    fn render_setup_field(&self, field: SetupField, cx: &Context<Self>) -> Div {
+    fn render_setup_field(&self, field: SetupField, cx: &Context<Self>) -> gpui::Stateful<Div> {
         let (label, id, input) = match field {
             SetupField::Confirmation => (
                 "Confirm password",
