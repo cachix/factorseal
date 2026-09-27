@@ -7,12 +7,14 @@ const core=await readFile(new URL('./core.js',import.meta.url),'utf8');
 const background=await readFile(new URL('./background.js',import.meta.url),'utf8');
 const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);}});
 async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false}={}) {
-  let stored=paired?{paired:true}:{},polls=0,signatures=0,connects=0,saving=false;
+  let stored=paired?{paired:true}:{},polls=0,signatures=0,connects=0,saving=false,deadPort=false;
   const fills=[],commands=[],registrations=[],injections=[];
   const tab={id:1,windowId:1,active:true,url:'https://example.com/login'};
   const runtime={id:'factorseal-test',getURL:p=>`extension://factorseal/${p}`,onMessage:event(),onInstalled:event(),connectNative(){
     connects++;
     const port={onMessage:event(),onDisconnect:event(),disconnect(){for(const fn of this.onDisconnect.listeners)fn();},postMessage(request){
+      // Chrome throws this when the host is gone before onDisconnect fires.
+      if(deadPort){deadPort=false;throw new Error('Attempting to use a disconnected port object');}
       (async()=>{
         if(nativeError){runtime.lastError={message:nativeError};port.disconnect();delete runtime.lastError;return;}
         let response;
@@ -55,7 +57,7 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
   vm.runInNewContext(core,context);vm.runInNewContext(background,context);
   const message=(m,sender)=>new Promise(resolve=>runtime.onMessage.listeners[0](m,sender,resolve));
   const sender={id:runtime.id,frameId:0,tab,url:tab.url};
-  return {message,sender,fills,commands,registrations,injections,setNativeError(value){nativeError=value;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
+  return {message,sender,fills,commands,registrations,injections,setNativeError(value){nativeError=value;},killPort(){deadPort=true;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
 }
 async function until(condition){for(let i=0;i<300;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw new Error('timed out');}
 test('submitted save survives navigation and never persists credentials in extension storage',async()=>{
@@ -158,4 +160,22 @@ test('denied pairing does not unlock the paired UI',async()=>{
   assert.equal((await h.message({type:'status'},popupSender)).paired,false);
   assert.equal(h.registrations.length,0);
   assert.equal(h.injections.length,0);
+});
+
+test('a native port that died before its disconnect was reported is reconnected',async()=>{
+  const h=await harness();
+  const sender={url:'extension://factorseal/popup.html'};
+  await h.message({type:'pair'},sender);
+  await until(()=>h.commands.length===1);
+  h.killPort();
+  await h.message({type:'pair'},sender);
+  let state;
+  for(let i=0;i<200;i++){
+    state=await h.message({type:'status'},sender);
+    if(state.status==='idle'&&h.connects===2)break;
+    await new Promise(r=>setTimeout(r,5));
+  }
+  assert.notEqual(state.status,'Attempting to use a disconnected port object');
+  assert.equal(h.connects,2);
+  assert.equal(state.status,'idle');
 });
