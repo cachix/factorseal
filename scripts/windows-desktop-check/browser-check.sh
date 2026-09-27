@@ -149,4 +149,5 @@ node_windows "$(wslpath -w "$here/browser-check.mjs")" \
     --root="$test_dir\\vault" \
     --passwordFile="$test_dir\\password" \
     --foreground="$(wslpath -w "$here/foreground.ps1")" \
+    --uiaDump="$(wslpath -w "$here/uia-dump.ps1")" \
     "${extra[@]}"
