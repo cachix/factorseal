@@ -227,10 +227,14 @@ fn vault_card(theme: &gpui_component::theme::Theme) -> Div {
         .border_color(theme.border)
 }
 
-fn field_label(label: &'static str, field: impl IntoElement) -> Div {
-    v_flex()
+/// A field under its label. The group is named by the label, so a screen
+/// reader announces the field by it, and the label itself is exposed too.
+fn field_label(label: &'static str, field: impl IntoElement) -> gpui::Stateful<Div> {
+    named_group(label, label)
+        .flex()
+        .flex_col()
         .gap_2()
-        .child(div().text_sm().font_medium().child(label))
+        .child(div().text_sm().font_medium().child(text("label", label)))
         .child(field)
 }
 
