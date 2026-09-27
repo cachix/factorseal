@@ -120,9 +120,15 @@ public static class Input {
         }
     }
 
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
+
     // Windows lets a process take the foreground right after it sent input,
-    // so tap Alt first. Alt alone does nothing in Desktop's windows.
+    // so tap Alt first. Alt alone does nothing in Desktop's windows. A
+    // minimized window can still be the foreground one, but its controls are
+    // off-screen, so restore it too.
     public static bool Raise(IntPtr hwnd) {
+        if (IsIconic(hwnd)) ShowWindow(hwnd, 9);
         var down = new INPUT { type = INPUT_KEYBOARD };
         down.u.ki.wVk = VK_MENU;
         var up = down;
@@ -211,7 +217,7 @@ while (-not $window -and [DateTime]::UtcNow -lt $deadline) {
 if (-not $window) { Fail "no $(if ($Action -eq 'unlock') { 'main window' } else { 'approval popup' }) within $Seconds s" }
 Emit "window=$($window.Current.Name)"
 $hwnd = [IntPtr]$window.Current.NativeWindowHandle
-if ([Input]::GetForegroundWindow() -ne $hwnd) {
+if ([Input]::GetForegroundWindow() -ne $hwnd -or [Input]::IsIconic($hwnd)) {
     [void][Input]::Raise($hwnd)
     Start-Sleep -Milliseconds 300
 }
