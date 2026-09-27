@@ -14,6 +14,7 @@ struct BrowserView {
     error: Option<String>,
     pair_after_unlock: bool,
     _submit: Subscription,
+    _activation: Subscription,
 }
 
 pub(super) fn setup(cx: &mut App) {
@@ -25,7 +26,11 @@ fn close(cx: &mut App) {
         view.update(cx, |view, cx| {
             view.password.update(cx, SecretInputState::clear);
         });
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        let _ = handle.update(cx, |_, window, _| {
+            // A popup closed while behind would leave its taskbar button flashing.
+            super::super::window_activation::attention_settled(window);
+            window.remove_window();
+        });
     }
 }
 
@@ -128,6 +133,12 @@ fn open(request: &Prompt, snapshot: &Snapshot, cx: &mut App) {
                 error: None,
                 pair_after_unlock: false,
                 _submit: submit,
+                // Seen now: stop any flashing that asked for attention.
+                _activation: cx.observe_window_activation(window, |_, window, _| {
+                    if window.is_window_active() {
+                        super::super::window_activation::attention_settled(window);
+                    }
+                }),
             }
         });
         entity = Some(view.clone());
@@ -147,7 +158,19 @@ fn open(request: &Prompt, snapshot: &Snapshot, cx: &mut App) {
         opened = cx.open_window(options(false, cx), &mut build);
     }
     match opened {
-        Ok(handle) => cx.global_mut::<BrowserWindow>().0 = Some((handle.into(), entity.unwrap())),
+        Ok(handle) => {
+            cx.global_mut::<BrowserWindow>().0 = Some((handle.into(), entity.unwrap()));
+            if !layered {
+                // Windows often refuses the foreground to an app the user is
+                // not using (here the browser has it), which left the popup
+                // behind with nothing pointing at it: also flag it in the
+                // taskbar, as the secret-access popup does.
+                let _ = handle.update(cx, |_, window, _| {
+                    super::super::window_activation::show(window, true);
+                    super::super::window_activation::request_attention(window);
+                });
+            }
+        }
         Err(error) => {
             eprintln!("FactorSeal: could not open browser approval window: {error}");
             deny(&request.session, request.generation, cx);
