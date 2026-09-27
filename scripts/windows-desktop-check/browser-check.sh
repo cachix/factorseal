@@ -10,10 +10,12 @@
 #       registration form, updating a stored login's password (and failing
 #       when the login changes during review), filling it, Deny, Escape, a
 #       site with no stored login, "Check this page" with and without a login
-#       form, and a
-#       fill that starts while the vault is sealed. Desktop's prompt is driven
-#       through drive.ps1, so the check takes over the Windows desktop while
-#       it runs. --restart-browser closes the test browser first; --only runs
+#       form, a fill that starts while the vault is sealed, a fill held
+#       between the choice and its release while the login changes, the
+#       profile is disconnected in Settings, or Desktop's wait lapses, and a
+#       profile disconnected in Settings without the extension hearing.
+#       Desktop's prompt is driven through drive.ps1, so the check takes over
+#       the Windows desktop while it runs. --restart-browser closes the test browser first; --only runs
 #       just the steps whose names start so (see browser-check.mjs); pairing
 #       and saving always run. --browser=both pairs both test browsers and
 #       checks that consent never crosses from one to the other: while one
@@ -35,7 +37,7 @@ for argument in "$@"; do
         --browser=edge | --browser=chrome | --browser=both) browser=${argument#--browser=} ;;
         --restart-browser) restart=yes ;;
         --only=?*) extra+=("$argument") ;;
-        *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        *) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac
 done
 
