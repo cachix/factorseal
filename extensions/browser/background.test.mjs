@@ -57,7 +57,7 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
   vm.runInNewContext(core,context);vm.runInNewContext(background,context);
   const message=(m,sender)=>new Promise(resolve=>runtime.onMessage.listeners[0](m,sender,resolve));
   const sender={id:runtime.id,frameId:0,tab,url:tab.url};
-  return {message,sender,fills,commands,registrations,injections,setNativeError(value){nativeError=value;},killPort(){deadPort=true;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
+  return {message,sender,tab,fills,commands,registrations,injections,setNativeError(value){nativeError=value;},killPort(){deadPort=true;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
 }
 async function until(condition){for(let i=0;i<300;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw new Error('timed out');}
 test('submitted save survives navigation and never persists credentials in extension storage',async()=>{
@@ -178,4 +178,19 @@ test('a native port that died before its disconnect was reported is reconnected'
   assert.notEqual(state.status,'Attempting to use a disconnected port object');
   assert.equal(h.connects,2);
   assert.equal(state.status,'idle');
+});
+test('a request status shows only on the tab and site it was about',async()=>{
+  const h=await harness({paired:true});
+  const popup={url:'extension://factorseal/popup.html'};
+  assert.equal((await h.message({type:'save',document:'doc',username:'alice',password:'secret'},h.sender)).accepted,true);
+  let state;
+  await until(()=>h.commands.some(c=>c.action.type==='poll'));
+  for(let i=0;i<300;i++){state=await h.message({type:'status'},popup);if(state.status==='saved')break;await new Promise(r=>setTimeout(r,10));}
+  assert.equal(state.status,'saved');
+  h.tab.id=2;
+  assert.equal((await h.message({type:'status'},popup)).status,'idle');
+  h.tab.id=1;h.tab.url='https://other.test/login';
+  assert.equal((await h.message({type:'status'},popup)).status,'idle');
+  h.tab.url='https://example.com/login';
+  assert.equal((await h.message({type:'status'},popup)).status,'saved');
 });

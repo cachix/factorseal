@@ -4,6 +4,8 @@ const api = globalThis.browser || globalThis.chrome;
 const core = globalThis.FactorSealCore;
 let port, waiting, session, sequence=0, active, keyPromise;
 let status='Disconnected';
+// The tab and site a request's status is about; the popup shows it only there.
+let statusScope=null;
 let queue=Promise.resolve();
 let recovery, nextRecovery=0;
 const connectionFailures=new Set(['desktop_missing','desktop_unavailable','native_disconnected','native_timeout']);
@@ -86,7 +88,7 @@ async function cancel() {
 async function run(action,context) {
   if (active) return {status:'Another browser request is pending'};
   const flow={...context,kind:action.type,token:crypto.randomUUID()}; active=flow;
-  status='connecting';
+  status='connecting';statusScope=context?{tab:context.tab,origin:context.origin}:null;
   try {
     let response=await send(action);
     const deadline=Date.now()+300000;
@@ -154,7 +156,9 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
         const paired=(await api.storage.local.get('paired')).paired===true;
         const [tab]=await api.tabs.query?.({active:true,currentWindow:true})||[];
         let site;try{site=core.origin(tab?.url);}catch{}
-        return {status,paired,platform:(await api.runtime.getPlatformInfo?.())?.os,pending:active?.kind||null,profile:(await keys()).public.slice(0,16),
+        // Another page's result ("Request denied.") would read as this page's.
+        const elsewhere=!active && statusScope && (statusScope.tab!==tab?.id || statusScope.origin!==site) && !connectionFailures.has(status);
+        return {status:elsewhere?'idle':status,paired,platform:(await api.runtime.getPlatformInfo?.())?.os,pending:active?.kind||null,profile:(await keys()).public.slice(0,16),
           detection:await api.permissions.contains({origins:['https://*/*']}),site,
           paused:site?((await api.storage.local.get('paused')).paused||[]).includes(site):false};
       }
@@ -163,10 +167,10 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
       if (message.type==='cancel') {await cancel();return {status:'Cancelled'};}
       if(message.type==='save-page'){
         const [tab]=await api.tabs.query({active:true,currentWindow:true});
-        core.origin(tab?.url);
+        const origin=core.origin(tab?.url);
         await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
         const result=await api.tabs.sendMessage(tab.id,{type:'save-current'},{frameId:0});
-        if(!result?.offered)status='No complete login form found on this page.';
+        if(!result?.offered){status='No complete login form found on this page.';statusScope={tab:tab.id,origin};}
         return {status};
       }
       if (message.type==='retry') {const [tab]=await api.tabs.query({active:true,currentWindow:true});await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});await api.tabs.sendMessage(tab.id,{type:'retry'},{frameId:0});return {status:'Checking page'};}
