@@ -14,7 +14,9 @@
 // Input.dispatch*, which the page sees as trusted (isTrusted), as the save
 // flow requires.
 import {execFile} from 'node:child_process';
-import {readFile} from 'node:fs/promises';
+import {readFile, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {promisify} from 'node:util';
 
 const run = promisify(execFile);
@@ -144,6 +146,8 @@ async function connect({kind, port, pid, load, fresh}) {
     const background = await worker();
     b.extension = expression => evaluate(background, expression);
     b.paired = () => b.extension(`chrome.storage.local.get('paired').then(s => s.paired === true)`);
+    // The profile's public key, which Desktop shows to tell profiles apart.
+    b.key = () => b.extension(`chrome.storage.local.get('pairing').then(s => s.pairing?.public)`);
 
     // The toolbar popup, opened as a click on the toolbar button would.
     const popupUrl = `chrome-extension://${extensionId}/popup.html`;
@@ -260,6 +264,21 @@ async function staysQuiet(ms = 4000) {
     while (Date.now() < deadline) { if (await promptOpen()) return false; await sleep(300); }
     return true;
 }
+// What a screen reader finds in Desktop's windows: every name UI Automation
+// exposes. Read from a UTF-8 file, as console output mangles "•" and "…".
+async function screenReader() {
+    const out = join(tmpdir(), `factorseal-uia-${process.pid}.txt`);
+    await powershell(args.uiaDump, ['-DesktopPid', args.desktopPid, '-Out', out]);
+    const dump = (await readFile(out, 'utf8')).replace(/^\uFEFF/, '');
+    await rm(out, {force: true});
+    return [...dump.matchAll(/ name='([^']*)'/g)].map(m => m[1]);
+}
+// Reports which of the texts a screen reader cannot find in the prompt.
+async function reads(name, texts) {
+    const names = await screenReader();
+    const missing = texts.filter(t => !names.includes(t));
+    report(`${name}: a screen reader reads the prompt`, !missing.length, missing.length ? `missing ${JSON.stringify(missing)}` : '');
+}
 const password = ['-PasswordFile', args.passwordFile];
 const vault = async (...command) => (await run(args.cli, ['--root', args.root, ...command], {windowsHide: true})).stdout;
 
@@ -282,25 +301,36 @@ async function step(name, body) {
     try { await body(); } catch (error) { report(name, false, error.message); }
 }
 
+// A request left waiting by an interrupted run would answer for this one.
+if (await promptOpen()) {
+    await prompt('deny');
+    console.log('      denied a prompt left open by an earlier run');
+}
+
 const connected = [];
 for (const description of browsers) connected.push(await connect(description));
 const prefix = connected.length > 1 ? b => `${b.name} ` : () => '';
 
+// Pairs a browser profile through the popup and Desktop's prompt.
+async function pairProfile(b) {
+    await b.tab.open(`${site}/`);
+    await b.focus();
+    const popup = await b.openPopup();
+    await b.press(popup, 'pair');
+    const found = await waitPrompt();
+    report(`${prefix(b)}pair: prompt opens`, true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
+    await reads(`${prefix(b)}pair`, ['Pair browser profile', 'Browser extension',
+        'Allow this browser profile to request logins. Every fill still needs your approval.',
+        `Profile key: ${(await b.key()).slice(0, 16)}…`, 'Pair browser', 'Deny']);
+    await prompt('press', ['-Name', 'Pair browser']);
+    await until('pairing to finish', b.paired, 15000);
+    report(`${prefix(b)}pair`, true);
+}
+
 for (const b of connected) {
     await step(`pair: ${b.name}`, async () => {
-        if (await b.paired()) {
-            report(`${prefix(b)}pair`, true, 'already paired');
-            return;
-        }
-        await b.tab.open(`${site}/`);
-        await b.focus();
-        const popup = await b.openPopup();
-        await b.press(popup, 'pair');
-        const found = await waitPrompt();
-        report(`${prefix(b)}pair: prompt opens`, true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
-        await prompt('press', ['-Name', 'Pair browser']);
-        await until('pairing to finish', b.paired, 15000);
-        report(`${prefix(b)}pair`, true);
+        if (await b.paired()) report(`${prefix(b)}pair`, true, 'already paired');
+        else await pairProfile(b);
     });
 }
 
@@ -320,6 +350,8 @@ await step('save', async () => {
         throw new Error(`${error.message}; extension: ${facts}; page: ${JSON.stringify(await tab.fields())}; front: ${(await b.foreground()).title}`);
     });
     report(`${prefix(b)}save: prompt opens`, true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
+    await reads(`${prefix(b)}save`, ['Save login', site, 'Save this website’s login to Personal secrets.',
+        `Username: ${username}`, 'Password: ••••••••', 'Applies only to this request.']);
     await prompt('press', ['-Name', 'Save login']);
     await until('the save to finish', () => extension(`status === 'saved'`), 15000);
     saved = true;
@@ -346,6 +378,8 @@ if (!other) {
         await b.focus();
         const found = await waitPrompt();
         report('fill: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
+        await reads('fill', ['Fill a login', site, 'Choose one account to fill once. The browser will check the original page again.',
+            'Applies only to this request.']);
         await prompt('press', account);
         const fields = await b.filled();
         report('fill: fields filled', fields.username === username && fields.password === secret);
@@ -413,11 +447,29 @@ if (!other) {
         const found = await waitPrompt();
         report('sealed fill: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
         report('sealed fill: prompt lies on one screen', found.on_screen === 'True', found.bounds);
+        await reads('sealed fill', ['Fill a login', site, 'Unlock your vault to continue here.', 'Vault password', 'Unlock to continue']);
         const unlocked = await prompt('unlock-popup', [...password, ...account]);
         report('sealed fill: unlocks, then offers the login', unlocked.unlocked === 'True');
         await prompt('press', account);
         const fields = await b.filled();
         report('sealed fill: fields filled', fields.username === username && fields.password === secret);
+    });
+
+    // Disconnecting also goes through Desktop; then the profile pairs again.
+    await step('pair again', async () => {
+        // A page with no stored login, so no fill request keeps the popup busy.
+        await tab.open(`${origin('pairing')}/`);
+        await b.focus();
+        const popup = await b.openPopup();
+        await b.send('Runtime.evaluate', {expression: `document.getElementById('profile').open = true`}, popup.session);
+        await b.press(popup, 'revoke');
+        await waitPrompt();
+        await reads('disconnect', ['Disconnect browser profile', 'Browser extension',
+            'Remove this profile’s permission to request logins.', `Profile key: ${(await b.key()).slice(0, 16)}…`, 'Disconnect profile']);
+        await prompt('press', ['-Name', 'Disconnect profile']);
+        await until('the profile to disconnect', async () => !(await b.paired()), 15000);
+        report('disconnect', true);
+        await pairProfile(b);
     });
 } else {
     // Two browser profiles, each paired, each with its own session with
@@ -429,13 +481,21 @@ if (!other) {
         const name = `consent: ${first.name} asks, ${second.name} waits, ${answer}`;
         await step(name, async () => {
             needsSave();
-            await first.tab.open(`${site}/`);
+            // Each browser is in front before its page loads, as when a person
+            // opens the page: the extension asks only for a focused window.
             await first.focus();
+            await first.tab.open(`${site}/`);
             await waitPrompt();
-            await second.tab.open(`${site}/`);
             await second.focus();
-            await until(`${second.name} to be told Desktop is busy`, () => second.extension(`status === 'busy'`), 10000);
+            await second.tab.open(`${site}/`);
+            await until(`${second.name} to be told Desktop is busy`, () => second.extension(`status === 'busy'`), 10000)
+                .catch(async error => { throw new Error(`${error.message}; its status: ${await second.extension('status')}; prompt open: ${await promptOpen()}`); });
             report(`${name}: the second browser is told Desktop is busy`, true);
+            // The prompt names the profile that asked, not the one waiting.
+            await prompt('press', ['-Name', 'Technical details +']);
+            const names = await screenReader();
+            report(`${name}: the prompt shows the asking profile's key`,
+                names.includes(`Profile public key: ${await first.key()}`) && !names.includes(`Profile public key: ${await second.key()}`));
             if (answer === 'approve') {
                 await prompt('press', account);
                 const fields = await first.filled();
