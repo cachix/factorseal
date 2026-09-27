@@ -172,22 +172,26 @@ function FindWindow {
 }
 
 # A name with * matches as a wildcard, as the browser prompt's account
-# buttons are named "title · username".
-function Find($window, [string]$name) {
+# buttons are named "title · username". -Button skips text with the same
+# name, such as the browser prompt's title "Save login" above its button.
+function Find($window, [string]$name, [switch]$Button) {
+    $condition = [System.Windows.Automation.Condition]::TrueCondition
+    if ($Button) {
+        $condition = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+    }
     if ($name.Contains('*')) {
-        $all = $window.FindAll($scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-        foreach ($element in $all) { if ($element.Current.Name -like $name) { return $element } }
+        foreach ($element in $window.FindAll($scope::Descendants, $condition)) { if ($element.Current.Name -like $name) { return $element } }
         return $null
     }
     $byName = New-Object System.Windows.Automation.PropertyCondition($auto::NameProperty, $name)
-    $window.FindFirst($scope::Descendants, $byName)
+    $window.FindFirst($scope::Descendants, (New-Object System.Windows.Automation.AndCondition($byName, $condition)))
 }
 
 # Waits for a named control to be enabled and returns it.
-function WaitFor($window, [string]$name, [int]$seconds) {
+function WaitFor($window, [string]$name, [int]$seconds, [switch]$Button) {
     $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
     while ([DateTime]::UtcNow -lt $deadline) {
-        $element = Find $window $name
+        $element = Find $window $name -Button:$Button
         if ($element -and $element.Current.IsEnabled) { return $element }
         Start-Sleep -Milliseconds 100
     }
@@ -267,7 +271,7 @@ switch ($Action) {
         ClickOn $window $field 'password field'
         Start-Sleep -Milliseconds 200
         TypeInto $window $password
-        $button = WaitFor $window 'Unlock vault' 2
+        $button = WaitFor $window 'Unlock vault' 2 -Button
         if (-not $button) { Fail 'no enabled Unlock vault button' }
         ClickOn $window $button 'Unlock vault'
         # The password field goes away once the vault is unsealed. It also
@@ -296,7 +300,7 @@ switch ($Action) {
         # The guard also waits one second after the popup's requests change.
         Start-Sleep -Milliseconds 1200
         TypeInto $window $password
-        $button = WaitFor $window 'Grant access' 10
+        $button = WaitFor $window 'Grant access' 10 -Button
         if (-not $button) { Fail 'no enabled Grant access button' }
         ClickOn $window $button 'Grant access'
     }
@@ -307,13 +311,13 @@ switch ($Action) {
         ClickOn $window $field 'password field'
         Start-Sleep -Milliseconds 1200
         TypeInto $window $password
-        $button = WaitFor $window 'Unlock to continue' 5
+        $button = WaitFor $window 'Unlock to continue' 5 -Button
         if (-not $button) { Fail 'no enabled Unlock to continue button' }
         ClickOn $window $button 'Unlock to continue'
-        Emit "unlocked=$([bool](WaitFor $window $(if ($Name) { $Name } else { 'Grant access' }) 30))"
+        Emit "unlocked=$([bool](WaitFor $window $(if ($Name) { $Name } else { 'Grant access' }) 30 -Button))"
     }
     'press' {
-        $button = WaitFor $window $Name 10
+        $button = WaitFor $window $Name 10 -Button
         if (-not $button) { Fail "no enabled $Name button" }
         ClickOn $window $button $Name
     }
@@ -323,7 +327,7 @@ switch ($Action) {
         Emit 'pressed=Escape'
     }
     'deny' {
-        $button = WaitFor $window 'Deny' 5
+        $button = WaitFor $window 'Deny' 5 -Button
         if (-not $button) { Fail 'no enabled Deny button' }
         ClickOn $window $button 'Deny'
     }
