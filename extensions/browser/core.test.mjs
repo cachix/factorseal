@@ -76,6 +76,10 @@ test('explicit save and corrected submissions use the current fields',()=>{
   const saves=p.messages.filter(m=>m.type==='save');
   assert.equal(saves.length,2);assert.equal(saves[1].password,'corrected');
 });
+test('checking the page again reports whether it has a login form',()=>{
+  assert.equal(page().message({type:'retry'}).found,true);
+  for(const options of [{hidden:true},{crossOrigin:true},{newPassword:true}])assert.equal(page(options).message({type:'retry'}).found,false);
+});
 test('hidden, cross-origin, and signup forms do not prompt',async()=>{
   for(const options of [{hidden:true},{crossOrigin:true},{newPassword:true}]){const p=page(options);await new Promise(r=>setImmediate(r));assert.equal(p.detected,0);}
 });
