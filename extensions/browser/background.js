@@ -13,7 +13,11 @@ function rpc(request) {
   return new Promise((resolve,reject)=>{
     const timer=setTimeout(()=>{waiting=null;port?.disconnect();reject(new Error('native_timeout'));},10000);
     waiting={resolve:value=>{clearTimeout(timer);resolve(core.validateResponse(value));},reject:error=>{clearTimeout(timer);reject(error);}};
-    port.postMessage(request);
+    // The host can be gone (Desktop restarted) before onDisconnect fires; the
+    // browser then throws here. Handle it as that disconnect, so recovery
+    // reconnects instead of leaving the raw error as the status.
+    try { port.postMessage(request); }
+    catch { waiting=null;session=null;port=null;active=null;status='Disconnected';clearTimeout(timer);reject(new Error('native_disconnected')); }
   });
 }
 async function keys() {
