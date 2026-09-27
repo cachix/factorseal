@@ -23,10 +23,13 @@ by default `%USERPROFILE%\Projects\factorseal`; set `FACTORSEAL_WINDOWS_TREE`
 | `check.sh popup --test-vault --seal --then grant\|deny` | WSL | Seals the vault while the request waits and checks that the popup stays open. `grant` unlocks from the popup and grants; `deny` denies while sealed, unlocks from the main window, and checks that the request stays denied. |
 | `check.sh popup --test-vault [--then grant\|deny]` | WSL | `popup` against the test vault and its Desktop; `--then` drives the popup afterwards, and `grant` also runs the grant check. `grant --test-vault` works the same way. |
 | `check.sh write-once [--via popup\|cli]` | WSL | On the test vault, writes a new SecretSpec key through the provider, approves it with the default lifetime in the popup or with `factorseal permissions approve`, and checks that the default was "this write only": one write is stored, the grant is gone, and the next write asks again. |
+| `browser-check.sh [--restart-browser] [--only=STEP,...]` | WSL | Checks the browser extension end to end in a separate Edge profile against the test vault's Desktop: pairing, saving, resubmitting unchanged, filling, Deny, Escape, a site with no stored login, **Check this page**, and a fill started while sealed. See [Browser extension](#browser-extension). |
+| `browser-check.mjs` | Windows (Node) | Used by `browser-check.sh`; drives the test Edge through the DevTools Protocol and Desktop's browser prompt through `drive.ps1`. |
+| `foreground.ps1 -Action get\|raise [-ProcessId P]` | Windows | Used by `browser-check.mjs`; reports which window Windows has in front, or brings a process's window there. A browser's own focus state (`chrome.windows`) can say it is focused while another app is in front. |
 | `observe.ps1` | Windows | Used by `check.sh`; hooks taskbar-flash notifications and captures the screenshots. |
 | `uia-dump.ps1 [-Out FILE] [-DesktopPid P]` | Windows | Lists what UI Automation, and so a screen reader, sees in Desktop's windows: control types, names (the popup's text included), AutomationIds, whether a radio button is selected, and whether a value is exposed (never the value itself). An owned popup is listed twice, as UI Automation lists it: on its own and under the main window. |
 | `test-vault.ps1 -Cli EXE` | Windows | Used by `check.sh`; creates a password-only vault in `%LOCALAPPDATA%\FactorSeal-check` with a random password in an owner-only file. Leaves an existing one alone. |
-| `drive.ps1 -Action find\|unlock\|unlock-popup\|grant\|deny -DesktopPid P [-PasswordFile F]` | Windows | Used by `check.sh`; reports whether the popup is open, unlocks Desktop's main window or a popup kept open by a seal, or grants or denies the popup. Finds controls through UI Automation, then clicks and types with real input, because the popup accepts approval only after a click inside it. |
+| `drive.ps1 -Action find\|unlock\|unlock-popup\|grant\|deny\|press\|escape -DesktopPid P [-PasswordFile F] [-Title T] [-Name N]` | Windows | Used by `check.sh` and `browser-check.mjs`; reports whether the popup is open (and where, and whether it is in front), unlocks Desktop's main window or a popup kept open by a seal, grants or denies the popup, or presses the button named `-Name` (`*` is a wildcard) or Escape in it. `-Title` picks another popup by the end of its title, such as `'Browser access'`. Finds controls through UI Automation, then clicks and types with real input, because the popup accepts approval only after a click inside it. |
 | `screenshot.ps1 -DesktopPid P -Out FILE` | Windows | Saves a PNG of the approval popup, raised and kept topmost for the capture, to see how it looks. |
 | `provider-probe.ps1 -Cli EXE [-Root DIR] [-Method get\|set] [-Key K] [-Directory D]` | Windows | Talks to `factorseal provider` directly as SecretSpec would (initialize, then one get or set) and prints the replies and the provider's standard error. Makes requests the `secretspec` CLI cannot, such as a write to an undeclared key. A get reply contains the value, so use `-Root` with the test vault. |
 | `cli-approve.ps1 -Cli EXE -Root DIR -PasswordFile F -Id ID [-Answer A]` | Windows | Used by `check.sh write-once --via cli`. Runs `permissions approve` in its own console window, since its prompts need a terminal, and types the answer and Enter only while that window is in the foreground. |
@@ -108,3 +111,28 @@ covers it, and it releases it afterwards.
   `factorseal-parser.exe`; without it, unlocking can hang.
 - Windows PowerShell 5.1 writes files with a UTF-8 byte-order mark and CRLF
   line endings; the scripts strip both when reading on the WSL side.
+
+## Browser extension
+
+`browser-check.sh` needs Node in WSL (the devenv shell has it) and on Windows.
+It starts a separate Edge with its own profile in
+`%LOCALAPPDATA%\FactorSeal-check\edge-profile`, remote debugging on port
+9333, and the extension loaded unpacked from
+`%LOCALAPPDATA%\FactorSeal-check\extension-chromium`. Your own Edge and its
+profile are left alone: Edge refuses remote debugging on the default profile.
+The extension keeps its ID in any profile (its manifest has a fixed `key`),
+and browsers find native messaging hosts per Windows user, so the test Edge
+reaches the same Desktop.
+
+- Pages are served by the browser itself on made-up origins such as
+  `https://login-<run>.factorseal.test`, from `extensions/browser/fixtures`.
+  Nothing goes over the network, and each run uses new origins.
+- Browsers reach the vault of the Desktop that started last. The check stops
+  if that is not the test Desktop; stop the test Desktop and rerun.
+- The test copy of the extension has site access granted at install, since
+  Edge's permission dialog cannot be answered through the DevTools Protocol.
+- The first run pairs the profile; later runs reuse the pairing.
+- Windows decides whether the browser may take the foreground. If a step says
+  Windows kept the test browser out of the foreground, click it once and
+  rerun.
+
