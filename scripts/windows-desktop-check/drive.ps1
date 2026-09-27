@@ -1,7 +1,8 @@
 # Drives FactorSeal Desktop like a person: unlocks the main window or a popup
 # kept open by a seal, grants or denies the approval popup, or presses a named
 # button or Escape in it. -Title picks another popup by the end of its title,
-# such as 'Browser access' for the browser extension's prompt. UI Automation
+# such as 'Browser access' for the browser extension's prompt, or the main
+# window ('FactorSeal Desktop') to press one of its buttons. UI Automation
 # finds the controls; the clicks and keystrokes are real input, since the
 # popup accepts approval only after a mouse click inside it and one second
 # without changes. Every click first checks that the target window is in the
@@ -11,13 +12,16 @@
 # Use it only with a throwaway vault (test-vault.ps1): the password is typed
 # from -PasswordFile. Prints key=value lines; the password is never printed.
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('find', 'unlock', 'unlock-popup', 'grant', 'deny', 'press', 'escape')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('find', 'unlock', 'unlock-popup', 'grant', 'deny', 'press', 'show', 'escape')][string]$Action,
     [Parameter(Mandatory = $true)][int]$DesktopPid,
     [string]$PasswordFile,
     [string]$Title,
-    # press: the button to click. unlock-popup: the button to wait for once unlocked.
+    # press, show: the button to click or scroll into view. unlock-popup: the button to wait for once unlocked.
     [string]$Name,
-    [int]$Seconds = 15
+    # How long to wait for the window, and for show also for the button.
+    [int]$Seconds = 15,
+    # grant, deny, press, escape: return without waiting for the popup to close.
+    [switch]$NoWait
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -71,7 +75,7 @@ public static class Input {
         SetWindowPos(hwnd, new IntPtr(pinned ? -1 : -2), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
     }
     const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
-    const uint MOUSEEVENTF_LEFTDOWN = 0x2, MOUSEEVENTF_LEFTUP = 0x4;
+    const uint MOUSEEVENTF_LEFTDOWN = 0x2, MOUSEEVENTF_LEFTUP = 0x4, MOUSEEVENTF_WHEEL = 0x800;
     const uint KEYEVENTF_KEYUP = 0x2, KEYEVENTF_UNICODE = 0x4;
     const ushort VK_MENU = 0x12;
 
@@ -94,6 +98,15 @@ public static class Input {
         var up = new INPUT { type = INPUT_MOUSE };
         up.u.mi.dwFlags = MOUSEEVENTF_LEFTUP;
         Send(new[] { down, up });
+    }
+
+    // Turns the mouse wheel over a screen point: negative scrolls down.
+    public static void Wheel(int x, int y, int delta) {
+        SetCursorPos(x, y);
+        var wheel = new INPUT { type = INPUT_MOUSE };
+        wheel.u.mi.dwFlags = MOUSEEVENTF_WHEEL;
+        wheel.u.mi.mouseData = unchecked((uint)delta);
+        Send(new[] { wheel });
     }
 
     // Empty the focused field: End, then Backspace until nothing is left.
@@ -173,11 +186,14 @@ function FindWindow {
 
 # A name with * matches as a wildcard, as the browser prompt's account
 # buttons are named "title · username". -Button skips text with the same
-# name, such as the browser prompt's title "Save login" above its button.
+# name, such as the browser prompt's title "Save login" above its button; it
+# also takes links, such as Settings' "Back to your vault".
 function Find($window, [string]$name, [switch]$Button) {
     $condition = [System.Windows.Automation.Condition]::TrueCondition
     if ($Button) {
-        $condition = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+        $condition = New-Object System.Windows.Automation.OrCondition(
+            (New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
+            (New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::Hyperlink)))
     }
     if ($name.Contains('*')) {
         foreach ($element in $window.FindAll($scope::Descendants, $condition)) { if ($element.Current.Name -like $name) { return $element } }
@@ -196,6 +212,26 @@ function WaitFor($window, [string]$name, [int]$seconds, [switch]$Button) {
         Start-Sleep -Milliseconds 100
     }
     $null
+}
+
+# Desktop reports a control scrolled out of view as on screen, and cannot
+# scroll it into view through UI Automation (gpui-ce #282), so turn the mouse
+# wheel over the control's column until it lies in the visible part of the
+# window: below the title bar and Desktop's header, and above its footer and
+# the taskbar. The window is pinned on top, so the wheel reaches it.
+function ScrollIntoView($window, $element) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $bounds = $window.Current.BoundingRectangle
+    $area = [System.Windows.Forms.Screen]::FromHandle([IntPtr]$window.Current.NativeWindowHandle).WorkingArea
+    $top = [Math]::Max($bounds.Top, $area.Top) + 150
+    $bottom = [Math]::Min($bounds.Bottom, $area.Bottom) - 100
+    for ($turn = 0; $turn -lt 40; $turn++) {
+        $rect = $element.Current.BoundingRectangle
+        $y = $rect.Y + $rect.Height / 2
+        if ($y -gt $top -and $y -lt $bottom) { return }
+        [Input]::Wheel([int]($rect.X + $rect.Width / 2), [int](($top + $bottom) / 2), $(if ($y -ge $bottom) { -120 } else { 120 }))
+        Start-Sleep -Milliseconds 100
+    }
 }
 
 function ClickOn($window, $element, [string]$what) {
@@ -319,7 +355,14 @@ switch ($Action) {
     'press' {
         $button = WaitFor $window $Name 10 -Button
         if (-not $button) { Fail "no enabled $Name button" }
+        ScrollIntoView $window $button
         ClickOn $window $button $Name
+    }
+    'show' {
+        $button = WaitFor $window $Name $Seconds -Button
+        if (-not $button) { Fail "no enabled $Name button" }
+        ScrollIntoView $window $button
+        Emit "shown=$Name"
     }
     'escape' {
         if ([Input]::GetForegroundWindow() -ne $hwnd) { Fail 'the window lost the foreground before Escape' }
@@ -338,8 +381,8 @@ switch ($Action) {
 }
 $password = $null
 
-if ($Action -in 'grant', 'deny', 'press', 'escape') {
-    # The popup closes once no request is left.
+if (($Action -in 'grant', 'deny', 'press', 'escape') -and $Title -ne 'FactorSeal Desktop' -and -not $NoWait) {
+    # The popup closes once no request is left. The main window stays.
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while ((FindWindow) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
     Emit "popup_closed=$(-not (FindWindow))"

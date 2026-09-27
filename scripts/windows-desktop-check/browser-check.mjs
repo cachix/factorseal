@@ -227,6 +227,15 @@ async function connect({kind, port, pid, load, fresh}) {
         console.log(`      in front instead: ${front.title} (${front.process})`);
         return false;
     });
+    // Holds a fill between the person's choice in Desktop and its release:
+    // the extension checks the page once more before it confirms, and that
+    // check waits until letGo() in the extension.
+    b.hold = () => b.extension(`(() => {
+        const tabs = chrome.tabs, send = tabs.sendMessage;
+        globalThis.checkHeld = false;
+        const gate = new Promise(resolve => { globalThis.letGo = () => { tabs.sendMessage = send; resolve(); }; });
+        tabs.sendMessage = async (...a) => { if (a[1]?.type === 'check') { globalThis.checkHeld = true; await gate; } return send.apply(tabs, a); };
+    })()`);
     b.filled = () => until('the fields to fill', async () => { const f = await b.tab.fields(); return f.password && f; });
 
     // A freshly started Edge shows its bubble about developer-mode extensions
@@ -253,6 +262,7 @@ if (args.close) {
 
 // --- Desktop's browser prompt --------------------------------------------------
 
+const mainWindow = (action, extra = []) => powershell(args.drive, ['-Action', action, '-DesktopPid', args.desktopPid, '-Title', 'FactorSeal Desktop', ...extra]);
 const prompt = (action, extra = []) => powershell(args.drive, ['-Action', action, '-DesktopPid', args.desktopPid, '-Title', 'Browser access', ...extra]);
 const promptOpen = async () => (await prompt('find')).popup_open === 'True';
 async function waitPrompt(ms = 10000) {
@@ -299,8 +309,15 @@ async function storeLogins(site, items) {
         ({id, type: 1, name, notes, favorite: false, login: {username, password, uris: [{match: null, uri: site}]}}))}));
     try { await vault('import', '--format', 'bitwarden-json', '--replace-existing', bitwarden); } finally { await rm(bitwarden, {force: true}); }
 }
-// The number Desktop's main window shows next to Personal secrets.
-const personalCount = async () => Number((await screenReader()).map(n => n.match(/^Personal secrets, (\d+) items?$/)).find(Boolean)?.[1]);
+// The number Desktop's main window shows next to Personal secrets, in the
+// sidebar Settings hides.
+async function personalCount() {
+    const count = async () => Number((await screenReader()).map(n => n.match(/^Personal secrets, (\d+) items?$/)).find(Boolean)?.[1]);
+    const shown = await count();
+    if (!Number.isNaN(shown)) return shown;
+    await mainWindow('press', ['-Name', 'Back to your vault']);
+    return count();
+}
 
 // --- Steps -------------------------------------------------------------------------
 
@@ -409,7 +426,8 @@ if (!other) {
         await prompt('press', ['-Name', 'Save login']);
         await until('the save to finish', () => extension(`status === 'saved'`), 15000);
         report('register: saved', true);
-        await until('Desktop to list the login', async () => await personalCount() === before + 1, 5000)
+        // Each reading of what a screen reader finds takes a second or two.
+        await until('Desktop to list the login', async () => await personalCount() === before + 1, 15000)
             .then(() => report('register: Desktop lists it without reopening', true),
                 async () => report('register: Desktop lists it without reopening', false, `${before} items before, ${await personalCount()} after`));
         await tab.open(`${site}/`);
@@ -475,6 +493,118 @@ if (!other) {
         const status = await until('a status', () => b.popupStatus(popup), 5000);
         report('update conflict: popup says so', status === 'Login could not be saved. It may have changed; try again.', status);
         await b.closePopup();
+    });
+
+    // A fill is released only if, at release, the login is still the one the
+    // person chose and the profile is still paired. Something changes while
+    // the fill is held between the choice and the release.
+    const heldFill = async (site, name, meanwhile) => {
+        // In front before the page loads: Desktop may be, after Settings.
+        await b.focus();
+        await tab.open(`${site}/`);
+        await waitPrompt();
+        await b.hold();
+        const chosen = Date.now();
+        // The prompt stays open until the fill is released.
+        await prompt('press', ['-Name', name, '-NoWait']);
+        await until('the fill to wait for its page check', () => extension('globalThis.checkHeld'), 5000);
+        const started = Date.now();
+        console.log(`      held ${started - chosen} ms after the choice`);
+        await meanwhile();
+        const took = Date.now() - started;
+        await extension('letGo()');
+        await until('the request to finish', () => extension('active === null'), 10000);
+        await sleep(500);
+        const fields = await tab.fields();
+        return {status: await extension('status'), empty: !fields.username && !fields.password, took};
+    };
+    // Desktop's Settings lists each paired profile with a button to
+    // disconnect it, named by the start of the profile's key. Settings is
+    // opened first, so that only the click falls within a held fill.
+    const disconnectButton = async () => `Disconnect * · ${(await b.key()).slice(0, 16)}*`;
+    const openSettings = async () => {
+        // Settings may still be open from an earlier step.
+        if (!(await mainWindow('show', ['-Name', await disconnectButton(), '-Seconds', '2'])).error) return;
+        await mainWindow('press', ['-Name', 'Settings']);
+        const shown = await mainWindow('show', ['-Name', await disconnectButton()]);
+        if (shown.error) throw new Error(`Settings: ${shown.error}`);
+    };
+    const closeSettings = () => mainWindow('press', ['-Name', 'Back to your vault']);
+    const disconnectInSettings = async () => {
+        const pressed = await mainWindow('press', ['-Name', await disconnectButton()]);
+        if (pressed.error) throw new Error(`Settings: ${pressed.error}`);
+    };
+    // Pairs the profile again after a step disconnected it, whether or not
+    // the extension heard.
+    const pairAgain = async () => {
+        await extension(`chrome.storage.local.set({paired: false})`);
+        await pairProfile(b);
+    };
+
+    // The hold alone does not stop a fill.
+    await step('held fill', async () => {
+        needsSave();
+        const {status, empty} = await heldFill(site, account[1], async () => {});
+        const fields = await tab.fields();
+        report('held fill: filled once let go', !empty && fields.username === username && fields.password === secret, status);
+    });
+
+    // Desktop waits 5 s after the choice for the extension to confirm the
+    // page; after that the choice lapses and the next fill asks again.
+    await step('held too long', async () => {
+        needsSave();
+        const {status, empty} = await heldFill(site, account[1], () => sleep(6000));
+        report('held too long: nothing is filled', empty, status);
+        report('held too long: the extension is told it expired', status === 'unauthorized', status);
+        await tab.open(`${site}/`);
+        await b.focus();
+        await waitPrompt();
+        await prompt('press', account);
+        const fields = await b.filled();
+        report('held too long: the next fill asks and fills', fields.username === username && fields.password === secret);
+    });
+
+    await step('login changed after choice', async () => {
+        const site = origin('changed');
+        const login = {id: `check-${stamp}-changed`, name: 'Changed', notes: '', username: `${username}-changed`, password: `before-${stamp}`};
+        await storeLogins(site, [login]);
+        const changed = {...login, password: `after-${stamp}`};
+        const {status, empty, took} = await heldFill(site, `* · ${login.username}`, () => storeLogins(site, [changed]));
+        report('login changed after choice: nothing is filled', empty, `status ${status}, changed in ${took} ms`);
+        report('login changed after choice: the profile stays paired', await b.paired(), `status ${status}`);
+    });
+
+    await step('disconnected after choice', async () => {
+        needsSave();
+        await openSettings();
+        const {status, empty, took} = await heldFill(site, account[1], disconnectInSettings);
+        report('disconnected after choice: nothing is filled', empty, `disconnected in ${took} ms`);
+        report('disconnected after choice: the extension is told', status === 'revoked' && !(await b.paired()), status);
+        await closeSettings();
+        await pairAgain();
+    });
+
+    // Disconnected in Settings while the extension is not asking anything, so
+    // it does not hear of it: its next request must not reach a login.
+    await step('disconnected in Settings', async () => {
+        needsSave();
+        await tab.open(`${origin('settings')}/`);
+        await openSettings();
+        await disconnectInSettings();
+        await closeSettings();
+        report('disconnected in Settings: the extension has not heard', await b.paired());
+        // The browser is in front before the page loads, as when a person
+        // opens it: the extension asks only for a focused window.
+        await b.focus();
+        await tab.open(`${site}/`);
+        report('disconnected in Settings: the old profile gets no prompt', await staysQuiet(4000));
+        const fields = await tab.fields();
+        report('disconnected in Settings: nothing is filled', !fields.username && !fields.password);
+        const status = await until('an answer from Desktop', () => extension(
+            `statusScope?.origin === ${JSON.stringify(site)} && !['connecting', 'matching'].includes(status) && status`), 5000)
+            .catch(() => extension('status'));
+        report('disconnected in Settings: the old profile must pair again', status === 'pair_required' && !(await b.paired()), status);
+        await pairAgain();
     });
 
     await step('fill', async () => {
@@ -547,8 +677,8 @@ if (!other) {
     await step('sealed fill', async () => {
         needsSave();
         await vault('seal');
-        await tab.open(`${site}/`);
         await b.focus();
+        await tab.open(`${site}/`);
         const found = await waitPrompt();
         report('sealed fill: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
         report('sealed fill: prompt lies on one screen', found.on_screen === 'True', found.bounds);
