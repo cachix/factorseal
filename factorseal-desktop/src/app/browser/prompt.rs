@@ -246,19 +246,20 @@ impl Render for BrowserView {
         } else {
             "Fill a login"
         };
+        // Text needs an ID to reach screen readers and UI Automation.
         let mut summary = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted)
-            .child(div().text_lg().font_semibold().child(if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() }))
-            .child(if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." });
+            .child(div().text_lg().font_semibold().child(text("site", if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() })))
+            .child(text("description", if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." }));
         if let Some(username) = &self.request.save_username {
             summary = summary
-                .child(div().child(format!("Username: {username}")))
-                .child(div().child("Password: ••••••••"));
+                .child(div().child(text("username", format!("Username: {username}"))))
+                .child(div().child(text("password", "Password: ••••••••")));
         }
         if pairing || revoking {
             summary = summary.child(
                 div()
                     .text_sm()
-                    .child(format!("Profile key: {}…", &self.request.key[..16])),
+                    .child(text("profile-key", format!("Profile key: {}…", &self.request.key[..16]))),
             );
         }
         let mut requests = v_flex().gap_4().child(summary).child(
@@ -279,7 +280,7 @@ impl Render for BrowserView {
             requests = requests.child(
                 div()
                     .text_xs()
-                    .child(format!("Profile public key: {}", self.request.key)),
+                    .child(text("public-key", format!("Profile public key: {}", self.request.key))),
             );
         }
         if reviewing {
@@ -296,7 +297,12 @@ impl Render for BrowserView {
                 );
             }
         }
-        let mut groups = h_flex().gap_2().flex_wrap();
+        let mut groups = h_flex()
+            .id("unlock-group")
+            .role(gpui::Role::RadioGroup)
+            .aria_label("Unlock with")
+            .gap_2()
+            .flex_wrap();
         if let Some(metadata) = self.snapshot.metadata() {
             for (index, group) in metadata.unlock_policy().groups().iter().enumerate() {
                 let selected = self.group.as_ref() == Some(group);
@@ -304,6 +310,8 @@ impl Render for BrowserView {
                 groups = groups.child(
                     Button::new(("browser-factor", index))
                         .label(group.to_string())
+                        .role(Some(gpui::Role::RadioButton))
+                        .toggled(selected)
                         .selected(selected)
                         .disabled(unlocking)
                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -373,10 +381,10 @@ impl Render for BrowserView {
                                 div()
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
-                                    .child("FactorSeal"),
+                                    .child(text("brand", "FactorSeal")),
                             ),
                     )
-                    .child(div().text_xl().font_semibold().child(title)),
+                    .child(div().text_xl().font_semibold().child(text("browser-title", title))),
             )
             .child(
                 div()
@@ -398,7 +406,7 @@ impl Render for BrowserView {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(status),
+                            .child(text("status", status)),
                     )
                     .when(
                         !unsealed
@@ -419,7 +427,7 @@ impl Render for BrowserView {
                             element.child(
                                 div()
                                     .text_sm()
-                                    .child("Set up your vault in FactorSeal Desktop first."),
+                                    .child(text("setup-note", "Set up your vault in FactorSeal Desktop first.")),
                             )
                         },
                     )
