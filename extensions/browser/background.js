@@ -173,7 +173,14 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
         if(!result?.offered){status='No complete login form found on this page.';statusScope={tab:tab.id,origin};}
         return {status};
       }
-      if (message.type==='retry') {const [tab]=await api.tabs.query({active:true,currentWindow:true});await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});await api.tabs.sendMessage(tab.id,{type:'retry'},{frameId:0});return {status:'Checking page'};}
+      if (message.type==='retry') {
+        const [tab]=await api.tabs.query({active:true,currentWindow:true});
+        const origin=core.origin(tab?.url);
+        await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
+        const result=await api.tabs.sendMessage(tab.id,{type:'retry'},{frameId:0});
+        if(!result?.found){status='No complete login form found on this page.';statusScope={tab:tab.id,origin};return {status,found:false};}
+        return {status:'Checking page',found:true};
+      }
       if (message.type==='pause') {
         const [tab]=await api.tabs.query({active:true,currentWindow:true});
         const site=core.origin(tab.url);const paused=(await api.storage.local.get('paused')).paused||[];

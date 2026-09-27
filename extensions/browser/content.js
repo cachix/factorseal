@@ -75,7 +75,7 @@
       submitted=false;
       reply({offered:forms.length===1 && offerSave(forms[0])});return;
     }
-    if(message.type==='retry'){attempted=false;schedule();reply({ok:true});return;}
+    if(message.type==='retry'){attempted=false;schedule();reply({found:!!form()});return;}
     const ok=message.document===documentId && valid();
     if(message.type==='check'){reply({valid:ok,document:documentId});return;}
     if(message.type==='fill') {

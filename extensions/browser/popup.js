@@ -42,7 +42,11 @@ for(const button of document.querySelectorAll('button'))button.onclick=async()=>
     } else if(button.id==='enable'){
       const allowed=await api.permissions.request({origins:['https://*/*']});
       notice=allowed?'Detection enabled. Reload the login page.':'Site access declined.';
-    } else {await api.runtime.sendMessage({type:button.id});notice='';}
+    } else {
+      const result=await api.runtime.sendMessage({type:button.id});notice='';
+      // The page checks itself once it has focus again, which the open popup keeps.
+      if(button.id==='retry'&&result?.found)globalThis.close();
+    }
   } catch {notice='Request unavailable. Open Desktop and try again.';}
   finally {busy=false;button.disabled=false;await refresh();}
 };

@@ -49,7 +49,7 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
   const api={runtime,storage:{local:{get:async key=>({[key]:stored[key]}),set:async values=>Object.assign(stored,values),setAccessLevel:async()=>{}}},
     permissions:{contains:async()=>true,onAdded:event(),onRemoved:event()},
     scripting:{getRegisteredContentScripts:async()=>registrations,registerContentScripts:async scripts=>registrations.push(...scripts),executeScript:async options=>injections.push(options),unregisterContentScripts:async()=>{}},
-    tabs:{query:async()=>[tab],get:async()=>tab,sendMessage:async(_tab,m)=>{if(m.type==='check')return {valid:true,document:m.document};fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
+    tabs:{query:async()=>[tab],get:async()=>tab,sendMessage:async(_tab,m)=>{if(m.type==='check')return {valid:true,document:m.document};if(m.type==='retry')return {found:tab.form!==false};fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
     windows:{get:async()=>({focused:true}),onFocusChanged:event()}};
   const navigator=chrome?{userAgentData:{brands:[{brand:'Chromium'}]}}:{userAgent:'Firefox/129'};
   const context={navigator,crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,btoa,setTimeout:(fn,ms)=>setTimeout(fn,ms===350?1:ms),clearTimeout,console};
@@ -193,4 +193,15 @@ test('a request status shows only on the tab and site it was about',async()=>{
   assert.equal((await h.message({type:'status'},popup)).status,'idle');
   h.tab.url='https://example.com/login';
   assert.equal((await h.message({type:'status'},popup)).status,'saved');
+});
+test('Check this page reports a page without a login form, on that page only',async()=>{
+  const h=await harness({paired:true});
+  const popup={url:'extension://factorseal/popup.html'};
+  assert.equal((await h.message({type:'retry'},popup)).found,true);
+  assert.equal((await h.message({type:'status'},popup)).status,'Disconnected');
+  h.tab.form=false;
+  assert.equal((await h.message({type:'retry'},popup)).found,false);
+  assert.equal((await h.message({type:'status'},popup)).status,'No complete login form found on this page.');
+  h.tab.id=2;
+  assert.equal((await h.message({type:'status'},popup)).status,'idle');
 });
