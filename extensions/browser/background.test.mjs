@@ -6,7 +6,7 @@ import {webcrypto} from 'node:crypto';
 const core=await readFile(new URL('./core.js',import.meta.url),'utf8');
 const background=await readFile(new URL('./background.js',import.meta.url),'utf8');
 const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);}});
-async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false}={}) {
+async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false,forgotten=0}={}) {
   let stored=paired?{paired:true}:{},polls=0,signatures=0,connects=0,saving=false,deadPort=false;
   const fills=[],commands=[],registrations=[],injections=[];
   const tab={id:1,windowId:1,active:true,url:'https://example.com/login'};
@@ -26,7 +26,8 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
           const publicKey=await webcrypto.subtle.importKey('raw',Buffer.from(key,'hex'),'Ed25519',false,['verify']);
           assert.equal(await webcrypto.subtle.verify('Ed25519',publicKey,Buffer.from(signature,'hex'),new TextEncoder().encode(payload)),true);signatures++;
           const command=JSON.parse(payload);commands.push(command);
-          if(command.action.type==='pair')response={type:'finished',reason:pairReason};
+          if(forgotten>0){forgotten--;response={type:'finished',reason:'unauthorized'};}
+          else if(command.action.type==='pair')response={type:'finished',reason:pairReason};
           else if(command.action.type==='revoke')response={type:'finished',reason:'done'};
           else if(command.action.type==='detect'){response={type:'state',state:'awaiting_unseal'};}
           else if(command.action.type==='save'){
@@ -184,11 +185,30 @@ test('a native port that died before its disconnect was reported is reconnected'
 test('after Desktop answers unauthorized, the next request connects again',async()=>{
   const h=await harness({pairReason:'unauthorized'});
   const sender={url:'extension://factorseal/popup.html'};
-  await h.message({type:'pair'},sender);
-  await until(()=>h.commands.length===1);
+  // Each request is refused, sent once more on a new connection, refused again.
   await h.message({type:'pair'},sender);
   await until(()=>h.commands.length===2);
+  await h.message({type:'pair'},sender);
+  await until(()=>h.commands.length===4);
+  assert.equal(h.connects,4);
+});
+test('a request Desktop refuses for a forgotten session connects again and is sent once more',async()=>{
+  const h=await harness({forgotten:1});
+  const sender={url:'extension://factorseal/popup.html'};
+  await h.message({type:'pair'},sender);
+  await until(()=>h.stored.paired===true);
   assert.equal(h.connects,2);
+  assert.deepEqual(h.commands.map(c=>c.action.type),['pair','pair']);
+  assert.notEqual(h.commands[0].session,undefined);
+});
+test('a request refused twice is not sent a third time',async()=>{
+  const h=await harness({forgotten:5});
+  const sender={url:'extension://factorseal/popup.html'};
+  await h.message({type:'pair'},sender);
+  await until(()=>h.commands.length===2);
+  await new Promise(r=>setTimeout(r,50));
+  assert.equal(h.commands.length,2);
+  assert.notEqual(h.stored.paired,true);
 });
 test('a request status shows only on the tab and site it was about',async()=>{
   const h=await harness({paired:true});

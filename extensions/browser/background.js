@@ -94,6 +94,9 @@ async function run(action,context) {
   status='connecting';statusScope=context?{tab:context.tab,origin:context.origin}:null;
   try {
     let response=await send(action);
+    // Desktop forgets a session when it restarts or after ten idle minutes,
+    // and refuses it before acting on anything. Connect again and ask once more.
+    if(response.type==='finished' && response.reason==='unauthorized'){disconnect();response=await send(action);}
     const deadline=Date.now()+300000;
     while (active===flow && Date.now()<deadline) {
       if (response.type==='finished') {
