@@ -6,7 +6,7 @@ import {webcrypto} from 'node:crypto';
 const core=await readFile(new URL('./core.js',import.meta.url),'utf8');
 const background=await readFile(new URL('./background.js',import.meta.url),'utf8');
 const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);}});
-async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false,forgotten=0}={}) {
+async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false,forgotten=0,focused=true}={}) {
   let stored=paired?{paired:true}:{},polls=0,signatures=0,connects=0,saving=false,deadPort=false;
   const fills=[],commands=[],registrations=[],injections=[];
   const tab={id:1,windowId:1,active:true,url:'https://example.com/login'};
@@ -52,8 +52,8 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
   const api={runtime,storage:{local:{get:async key=>({[key]:stored[key]}),set:async values=>Object.assign(stored,values),setAccessLevel:async()=>{}}},
     permissions:{contains:async()=>true,onAdded:event(),onRemoved:event()},
     scripting:{getRegisteredContentScripts:async()=>registrations,registerContentScripts:async scripts=>registrations.push(...scripts),executeScript:async options=>injections.push(options),unregisterContentScripts:async()=>{}},
-    tabs:{query:async()=>[tab],get:async()=>tab,sendMessage:async(_tab,m)=>{if(m.type==='check')return {valid:true,document:m.document};if(m.type==='retry')return {found:tab.form!==false};fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
-    windows:{get:async()=>({focused:true}),onFocusChanged:event()}};
+    tabs:{query:async()=>[tab],get:async()=>tab,sendMessage:async(_tab,m)=>{if(m.type==='check')return {valid:true,document:m.document};if(m.type==='retry')return {found:tab.form!==false};if(m.type==='save-current')return {offered:true};fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
+    windows:{get:async()=>({focused}),onFocusChanged:event()}};
   const navigator=chrome?{userAgentData:{brands:[{brand:'Chromium'}]}}:{userAgent:'Firefox/129'};
   const context={navigator,crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,btoa,setTimeout:(fn,ms)=>setTimeout(fn,ms===350?1:ms),clearTimeout,console};
   context[chrome?'chrome':'browser']=api;
@@ -209,6 +209,16 @@ test('a request refused twice is not sent a third time',async()=>{
   await new Promise(r=>setTimeout(r,50));
   assert.equal(h.commands.length,2);
   assert.notEqual(h.stored.paired,true);
+});
+test('Save login from this page is taken once while the popup keeps the focus',async()=>{
+  const h=await harness({paired:true,focused:false});
+  const popup={url:'extension://factorseal/popup.html'};
+  const save=document=>h.message({type:'save',document,username:'alice',password:'secret'},h.sender);
+  assert.equal((await save('before')).accepted,false);
+  assert.equal((await h.message({type:'save-page'},popup)).offered,true);
+  assert.equal((await save('page')).accepted,true);
+  await until(()=>h.commands.some(c=>c.action.type==='save'));
+  assert.equal((await save('again')).accepted,false);
 });
 test('a request status shows only on the tab and site it was about',async()=>{
   const h=await harness({paired:true});

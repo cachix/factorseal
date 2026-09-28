@@ -44,8 +44,9 @@ for(const button of document.querySelectorAll('button'))button.onclick=async()=>
       notice=allowed?'Detection enabled. Reload the login page.':'Site access declined.';
     } else {
       const result=await api.runtime.sendMessage({type:button.id});notice='';
-      // The page checks itself once it has focus again, which the open popup keeps.
-      if(button.id==='retry'&&result?.found)globalThis.close();
+      // The page checks itself, or offers its login, once it has focus again,
+      // which the open popup keeps.
+      if((button.id==='retry'&&result?.found)||(button.id==='save-page'&&result?.offered))globalThis.close();
     }
   } catch {notice='Request unavailable. Open Desktop and try again.';}
   finally {busy=false;button.disabled=false;await refresh();}
