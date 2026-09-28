@@ -16,7 +16,7 @@
 import {execFile} from 'node:child_process';
 import {readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {promisify} from 'node:util';
 
 const run = promisify(execFile);
@@ -56,7 +56,8 @@ const pages = {
 
 // --- One test browser --------------------------------------------------------
 
-async function connect({kind, port, pid, load, fresh}) {
+async function connect(description) {
+    const {kind, port, pid, load, fresh} = description;
     const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
     const socket = new WebSocket(version.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
@@ -88,7 +89,7 @@ async function connect({kind, port, pid, load, fresh}) {
         calls.set(id, {resolve: v => { clearTimeout(timer); resolve(v); }, reject: e => { clearTimeout(timer); reject(e); }, method});
         socket.send(JSON.stringify({id, method, params, sessionId}));
     });
-    const b = {kind, name: kind === 'chrome' ? 'Chrome' : 'Edge', socket, send};
+    const b = {kind, name: kind === 'chrome' ? 'Chrome' : 'Edge', socket, send, description};
 
     const targets = async () => (await send('Target.getTargets')).targetInfos;
     const attach = async targetId => (await send('Target.attachToTarget', {targetId, flatten: true})).sessionId;
@@ -144,8 +145,10 @@ async function connect({kind, port, pid, load, fresh}) {
         await evaluate(background, 'chrome.runtime.reload()').catch(() => {});
         await until('the extension to reload', async () => !(await targets()).some(t => t.targetId === loaded));
     }
-    const background = await worker();
+    let background = await worker();
     b.extension = expression => evaluate(background, expression);
+    // After the service worker restarted: attach to the new one.
+    b.reattach = async () => { background = await worker(); };
     b.paired = () => b.extension(`chrome.storage.local.get('paired').then(s => s.paired === true)`);
     // The profile's public key, which Desktop shows to tell profiles apart.
     b.key = () => b.extension(`chrome.storage.local.get('pairing').then(s => s.pairing?.public)`);
@@ -201,7 +204,8 @@ async function connect({kind, port, pid, load, fresh}) {
             await send('Page.navigate', {url}, sessionId);
             await until(`${url} to load`, () => evaluate(sessionId, `location.href === ${JSON.stringify(url)} && document.readyState === 'complete'`));
         },
-        fields: () => evaluate(sessionId, `({username: document.querySelector('[name=username]').value, password: document.querySelector('[name=password]').value, url: location.href})`),
+        // Empty on a page without the form, such as a new browser's blank tab.
+        fields: () => evaluate(sessionId, `({username: document.querySelector('[name=username]')?.value ?? '', password: document.querySelector('[name=password]')?.value ?? '', url: location.href})`),
     };
 
     // Which window Windows has in front. The browser's own chrome.windows
@@ -317,6 +321,76 @@ async function personalCount() {
     if (!Number.isNaN(shown)) return shown;
     await mainWindow('press', ['-Name', 'Back to your vault']);
     return count();
+}
+
+// --- Restarts ------------------------------------------------------------------
+
+const ps = async script => (await run('powershell.exe', ['-NoProfile', '-Command', script], {windowsHide: true})).stdout.trim();
+// Starts a program on its own. Through Start-Process: a child of this
+// process would inherit the pipe to WSL and keep browser-check.sh waiting.
+const start = (file, list) => ps(`Start-Process -FilePath '${file}' -ArgumentList ${list.map(a => `'${a.replaceAll("'", "''")}'`).join(', ')}`);
+const debuggable = port => fetch(`http://127.0.0.1:${port}/json/version`).then(r => r.ok, () => false);
+
+// Stops the native host a test browser started (browser, then cmd.exe, then
+// factorseal-browser.exe), and no other; returns how many it stopped.
+const stopHost = async b => Number(await ps(`$n = 0
+    Get-CimInstance Win32_Process -Filter "Name='factorseal-browser.exe'" | ForEach-Object {
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.ParentProcessId)"
+        if ($parent.ParentProcessId -eq ${b.description.pid}) { Stop-Process -Id $_.ProcessId -Force; $n++ }
+    }
+    $n`));
+
+// Stops the extension's service worker, as the browser does when it is
+// idle, and attaches to the one that starts next.
+async function stopWorker(b) {
+    const workers = async () => (await b.send('Target.getTargets')).targetInfos
+        .filter(t => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${extensionId}/`));
+    const [old] = await workers();
+    const stopped = async () => !(await workers()).some(t => t.targetId === old.targetId);
+    await b.send('Target.closeTarget', {targetId: old.targetId}).catch(() => {});
+    // Edge sometimes keeps a worker with an open native port running; the
+    // ServiceWorker domain stops it anyway.
+    if (!(await until('the service worker to stop', stopped, 5000).then(() => true, () => false))) {
+        await b.send('ServiceWorker.enable', {}, b.tab.session);
+        await b.send('ServiceWorker.stopAllWorkers', {}, b.tab.session);
+        await until('the service worker to stop', stopped, 10000);
+    }
+    await b.reattach();
+}
+
+// Stops the test Desktop and its vault worker, starts it again and unlocks
+// it, as a person would after a crash or a reboot.
+async function restartDesktop() {
+    const test = `$_.CommandLine -like '*FactorSeal-check*'`;
+    await ps(`Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'factorseal-desktop.exe' -or
+        ($_.Name -eq 'factorseal.exe' -and $_.CommandLine -like '*desktop-worker*')) -and ${test} } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`);
+    await sleep(1000);
+    await start(join(dirname(args.cli), 'factorseal-desktop.exe'), ['--root', args.root]);
+    args.desktopPid = await until('the test Desktop to start', () => ps(`Get-CimInstance Win32_Process -Filter "Name='factorseal-desktop.exe'" |
+        Where-Object { ${test} } | Select-Object -First 1 -ExpandProperty ProcessId`), 15000);
+    // Typing into a window that has only just appeared loses keystrokes.
+    await sleep(2000);
+    const unlocked = await powershell(args.drive, ['-Action', 'unlock', '-DesktopPid', args.desktopPid, ...password, '-Seconds', '30']);
+    if (unlocked.unlocked !== 'True') throw new Error(`could not unlock the restarted Desktop: ${unlocked.error ?? '?'}`);
+}
+
+// Closes the test browser and starts it again on the same profile; returns
+// the new connection to it.
+async function restartBrowser(b) {
+    const d = b.description;
+    await b.send('Browser.close').catch(() => {});
+    b.socket.close();
+    await until(`the test ${b.name} to close`, async () => !(await debuggable(d.port)), 15000);
+    await sleep(1000);
+    await start(d.executable, [`--user-data-dir=${d.profile}`, `--remote-debugging-port=${d.port}`,
+        d.kind === 'edge' ? `--load-extension=${d.extension}` : '--enable-unsafe-extension-debugging',
+        '--no-first-run', '--no-default-browser-check', 'about:blank']);
+    await until(`the test ${b.name} to start`, () => debuggable(d.port), 20000);
+    const pid = await until(`the test ${b.name}'s process`, () => ps(`Get-CimInstance Win32_Process -Filter "Name='${d.executable.split('\\').pop()}'" |
+        Where-Object { $_.CommandLine -like '*FactorSeal-check*${d.kind}-profile*' -and $_.CommandLine -notlike '*--type=*' } |
+        Select-Object -First 1 -ExpandProperty ProcessId`), 10000);
+    return connect({...d, pid, fresh: true});
 }
 
 // --- Steps -------------------------------------------------------------------------
@@ -705,6 +779,63 @@ if (!other) {
         await until('the profile to disconnect', async () => !(await b.paired()), 15000);
         report('disconnect', true);
         await pairProfile(b);
+    });
+
+    // Restarting any part while a fill waits in Desktop drops that request
+    // for good: answering its prompt afterwards fills nothing. The profile
+    // stays paired, and a new request asks to fill, not to pair.
+    const waitingFill = async c => {
+        await c.focus();
+        await c.tab.open(`${site}/`);
+        await waitPrompt();
+    };
+    const afterRestart = async (name, c) => {
+        const open = await promptOpen();
+        console.log(`      after the restart: extension status ${await c.extension('status')}, old prompt ${open ? 'open' : 'closed'}`);
+        if (open) await prompt('press', account);
+        await sleep(6000);
+        const old = await c.tab.fields();
+        report(`${name}: the old request fills nothing`, !old.username && !old.password);
+        report(`${name}: the profile stays paired`, await c.paired());
+        await c.focus();
+        await c.tab.open(`${site}/`);
+        await waitPrompt(15000);
+        const names = await screenReader();
+        report(`${name}: a new request asks to fill, not to pair`, names.includes('Fill a login') && !names.includes('Pair browser profile'));
+        await prompt('press', account);
+        const fields = await c.filled();
+        report(`${name}: the new request fills`, fields.username === username && fields.password === secret);
+    };
+
+    await step('restart native host', async () => {
+        needsSave();
+        await waitingFill(b);
+        report('restart native host: stopped', await stopHost(b) > 0);
+        await until('the extension to notice', () => extension('active === null'), 5000);
+        await afterRestart('restart native host', b);
+    });
+
+    await step('restart service worker', async () => {
+        needsSave();
+        await waitingFill(b);
+        await stopWorker(b);
+        await afterRestart('restart service worker', b);
+    });
+
+    await step('restart Desktop', async () => {
+        needsSave();
+        await waitingFill(b);
+        await restartDesktop();
+        await afterRestart('restart Desktop', b);
+    });
+
+    // Last: the steps above hold the connection to the old browser.
+    await step('restart browser', async () => {
+        needsSave();
+        await waitingFill(b);
+        const c = await restartBrowser(b);
+        connected.push(c);
+        await afterRestart('restart browser', c);
     });
 } else {
     // Two browser profiles, each paired, each with its own session with
