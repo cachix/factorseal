@@ -8,6 +8,8 @@ let status='Disconnected';
 let statusScope=null;
 let queue=Promise.resolve();
 let recovery, nextRecovery=0;
+// A save the person asked for from the popup, which keeps the focus from the page.
+let explicitSave=null;
 const connectionFailures=new Set(['desktop_missing','desktop_unavailable','native_disconnected','native_timeout']);
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const serialized=fn=>{ const result=queue.then(fn); queue=result.catch(()=>{}); return result; };
@@ -175,9 +177,10 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
         const [tab]=await api.tabs.query({active:true,currentWindow:true});
         const origin=core.origin(tab?.url);
         await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
+        explicitSave={tab:tab.id,until:Date.now()+5000};
         const result=await api.tabs.sendMessage(tab.id,{type:'save-current'},{frameId:0});
-        if(!result?.offered){status='No complete login form found on this page.';statusScope={tab:tab.id,origin};}
-        return {status};
+        if(!result?.offered){explicitSave=null;status='No complete login form found on this page.';statusScope={tab:tab.id,origin};}
+        return {status,offered:!!result?.offered};
       }
       if (message.type==='retry') {
         const [tab]=await api.tabs.query({active:true,currentWindow:true});
@@ -200,7 +203,11 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
       return {accepted:true};
     }
     const tab=await api.tabs.get(sender.tab.id);const win=await api.windows.get(tab.windowId);
-    if (!tab.active || !win.focused) return {accepted:false};
+    // Only a page the person is looking at may ask, or a save they asked for
+    // from the popup just now, once.
+    const explicit=message.type==='save' && explicitSave?.tab===tab.id && Date.now()<explicitSave.until;
+    if(explicit)explicitSave=null;
+    if (!tab.active || (!win.focused && !explicit)) return {accepted:false};
     const site=core.origin(sender.url);if(core.origin(tab.url)!==site)return {accepted:false};
     if (((await api.storage.local.get('paused')).paused||[]).includes(site)) return {accepted:false};
     if(message.type==='save'){
