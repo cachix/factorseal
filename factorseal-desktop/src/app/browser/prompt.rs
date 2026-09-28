@@ -256,11 +256,10 @@ impl Render for BrowserView {
                 .child(div().child(text("password", "Password: ••••••••")));
         }
         if pairing || revoking {
-            summary = summary.child(
-                div()
-                    .text_sm()
-                    .child(text("profile-key", format!("Profile key: {}…", &self.request.key[..16]))),
-            );
+            summary = summary.child(div().text_sm().child(text(
+                "profile-key",
+                format!("Profile key: {}…", &self.request.key[..16]),
+            )));
         }
         let mut requests = v_flex().gap_4().child(summary).child(
             Button::new("browser-technical-details")
@@ -277,11 +276,10 @@ impl Render for BrowserView {
                 })),
         );
         if self.details {
-            requests = requests.child(
-                div()
-                    .text_xs()
-                    .child(text("public-key", format!("Profile public key: {}", self.request.key))),
-            );
+            requests = requests.child(div().text_xs().child(text(
+                "public-key",
+                format!("Profile public key: {}", self.request.key),
+            )));
         }
         if reviewing {
             for (index, candidate) in self.request.candidates.iter().enumerate() {
@@ -384,7 +382,12 @@ impl Render for BrowserView {
                                     .child(text("brand", "FactorSeal")),
                             ),
                     )
-                    .child(div().text_xl().font_semibold().child(text("browser-title", title))),
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_semibold()
+                            .child(text("browser-title", title)),
+                    ),
             )
             .child(
                 div()
@@ -424,11 +427,10 @@ impl Render for BrowserView {
                     .when(
                         matches!(self.snapshot, Snapshot::Uninitialized { .. }),
                         |element| {
-                            element.child(
-                                div()
-                                    .text_sm()
-                                    .child(text("setup-note", "Set up your vault in FactorSeal Desktop first.")),
-                            )
+                            element.child(div().text_sm().child(text(
+                                "setup-note",
+                                "Set up your vault in FactorSeal Desktop first.",
+                            )))
                         },
                     )
                     .child(
