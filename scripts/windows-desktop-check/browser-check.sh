@@ -13,9 +13,11 @@
 #       form, a fill that starts while the vault is sealed, a fill held
 #       between the choice and its release while the login changes, the
 #       profile is disconnected in Settings, or Desktop's wait lapses, and a
-#       profile disconnected in Settings without the extension hearing.
-#       Desktop's prompt is driven through drive.ps1, so the check takes over
-#       the Windows desktop while it runs. --restart-browser closes the test browser first; --only runs
+#       profile disconnected in Settings without the extension hearing, and
+#       restarting the native host, the extension's service worker, Desktop,
+#       and the browser while a fill waits. Desktop's prompt is driven
+#       through drive.ps1, so the check takes over the Windows desktop while
+#       it runs. --restart-browser closes the test browser first; --only runs
 #       just the steps whose names start so (see browser-check.mjs); pairing
 #       and saving always run. --browser=both pairs both test browsers and
 #       checks that consent never crosses from one to the other: while one
@@ -37,7 +39,7 @@ for argument in "$@"; do
         --browser=edge | --browser=chrome | --browser=both) browser=${argument#--browser=} ;;
         --restart-browser) restart=yes ;;
         --only=?*) extra+=("$argument") ;;
-        *) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        *) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac
 done
 
@@ -131,7 +133,9 @@ start_browser() {
             Where-Object { \$_.CommandLine -like '*FactorSeal-check*$kind-profile*' -and \$_.CommandLine -notlike '*--type=*' } |
             Select-Object -First 1 -ExpandProperty ProcessId" </dev/null | tr -d '\r')
     [ -n "$pid" ] || die "could not find the test $name's browser process"
-    printf '{"kind":"%s","port":%s,"pid":"%s","load":"%s","fresh":%s}' "$kind" "$port" "$pid" "$load" "$fresh"
+    # How to start it again, for the check that restarts the browser.
+    printf '{"kind":"%s","port":%s,"pid":"%s","load":"%s","fresh":%s,"executable":"%s","profile":"%s","extension":"%s"}' \
+        "$kind" "$port" "$pid" "$load" "$fresh" "${executable//\\/\\\\}" "${profile//\\/\\\\}" "${extension//\\/\\\\}"
 }
 
 # Base64: PowerShell drops the double quotes of JSON on the way to Node.
