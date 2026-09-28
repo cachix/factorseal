@@ -50,6 +50,14 @@ const pages = {
     login: await fixture('login.html'),
     register: await fixture('register.html'),
     // Fields a person would call a login form, without a <form> element.
+    // A login form whose password field is hidden.
+    hidden: `<!doctype html><title>Hidden</title><form action="/login" onsubmit="event.preventDefault()">
+<label>Username <input name="username" autocomplete="username"></label><input name="password" type="password" style="display:none">
+<button type="submit">Log in</button></form>`,
+    // A login form that sends the login to another site.
+    crossOrigin: `<!doctype html><title>Elsewhere</title><form action="https://elsewhere.factorseal.test/login" onsubmit="event.preventDefault()">
+<label>Username <input name="username" autocomplete="username"></label><label>Password <input name="password" type="password" autocomplete="current-password"></label>
+<button type="submit">Log in</button></form>`,
     formless: `<!doctype html><title>Formless</title><label>Username <input id="username" name="username"></label>
 <label>Password <input id="password" type="password" name="password"></label><button>Log in</button>`,
 };
@@ -178,35 +186,42 @@ async function connect(description) {
         await b.click(popup.session, `#${id}`);
     };
 
-    // One tab, whose requests to *.factorseal.test the browser answers itself.
+    // A tab whose requests to *.factorseal.test the browser answers itself,
+    // with the page last named in open().
+    const makeTab = async () => {
+        const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
+        const sessionId = await attach(targetId);
+        let served = pages.login;
+        listeners.add(message => {
+            if (message.method !== 'Fetch.requestPaused' || message.sessionId !== sessionId) return;
+            const {requestId, request} = message.params;
+            const body = request.url.endsWith('/favicon.ico') ? '' : served;
+            send('Fetch.fulfillRequest', {requestId, responseCode: body ? 200 : 404,
+                responseHeaders: [{name: 'Content-Type', value: 'text/html; charset=utf-8'}],
+                body: Buffer.from(body).toString('base64')}, sessionId).catch(() => {});
+        });
+        await send('Fetch.enable', {patterns: [{urlPattern: 'https://*.factorseal.test/*'}]}, sessionId);
+        await send('Page.enable', {}, sessionId);
+        return {
+            session: sessionId,
+            targetId,
+            async open(url, page = 'login') {
+                served = pages[page];
+                await send('Page.bringToFront', {}, sessionId);
+                await send('Page.navigate', {url}, sessionId);
+                await until(`${url} to load`, () => evaluate(sessionId, `location.href === ${JSON.stringify(url)} && document.readyState === 'complete'`));
+            },
+            // Empty on a page without the form, such as a new browser's blank tab.
+            fields: () => evaluate(sessionId, `({username: document.querySelector('[name=username]')?.value ?? '', password: document.querySelector('[name=password]')?.value ?? '', url: location.href})`),
+            close: () => send('Target.closeTarget', {targetId}),
+        };
+    };
+    b.tab = await makeTab();
+    b.newTab = makeTab;
     // Tabs left from earlier runs still hold their login pages, which ask
     // Desktop again whenever the browser gets the focus back; close them.
-    const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
     for (const t of await targets())
-        if (t.type === 'page' && t.targetId !== targetId) await send('Target.closeTarget', {targetId: t.targetId}).catch(() => {});
-    const sessionId = await attach(targetId);
-    let served = pages.login;
-    listeners.add(message => {
-        if (message.method !== 'Fetch.requestPaused' || message.sessionId !== sessionId) return;
-        const {requestId, request} = message.params;
-        const body = request.url.endsWith('/favicon.ico') ? '' : served;
-        send('Fetch.fulfillRequest', {requestId, responseCode: body ? 200 : 404,
-            responseHeaders: [{name: 'Content-Type', value: 'text/html; charset=utf-8'}],
-            body: Buffer.from(body).toString('base64')}, sessionId).catch(() => {});
-    });
-    await send('Fetch.enable', {patterns: [{urlPattern: 'https://*.factorseal.test/*'}]}, sessionId);
-    await send('Page.enable', {}, sessionId);
-    b.tab = {
-        session: sessionId,
-        async open(url, page = 'login') {
-            served = pages[page];
-            await send('Page.bringToFront', {}, sessionId);
-            await send('Page.navigate', {url}, sessionId);
-            await until(`${url} to load`, () => evaluate(sessionId, `location.href === ${JSON.stringify(url)} && document.readyState === 'complete'`));
-        },
-        // Empty on a page without the form, such as a new browser's blank tab.
-        fields: () => evaluate(sessionId, `({username: document.querySelector('[name=username]')?.value ?? '', password: document.querySelector('[name=password]')?.value ?? '', url: location.href})`),
-    };
+        if (t.type === 'page' && t.targetId !== b.tab.targetId) await send('Target.closeTarget', {targetId: t.targetId}).catch(() => {});
 
     // Which window Windows has in front. The browser's own chrome.windows
     // focus state can stay true while another app is in front, so ask
@@ -218,8 +233,8 @@ async function connect(description) {
     b.inFront = async (action = 'get') => (await b.foreground(action)).match === 'True';
     // The extension asks Desktop only for a tab in a focused window, and a
     // person is looking at the browser then; put it in front for real.
-    b.focus = async () => {
-        await send('Page.bringToFront', {}, sessionId);
+    b.focus = async (t = b.tab) => {
+        await send('Page.bringToFront', {}, t.session);
         await b.extension(`chrome.windows.getLastFocused().then(w => chrome.windows.update(w.id, {focused: true}))`);
         if (!(await until(`the test ${b.name} in front`, () => b.inFront('raise'), 5000).then(() => true, () => false)))
             throw new Error(`Windows kept the test ${b.name} out of the foreground (in front: ${(await b.foreground()).title})`);
@@ -779,6 +794,162 @@ if (!other) {
         await until('the profile to disconnect', async () => !(await b.paired()), 15000);
         report('disconnect', true);
         await pairProfile(b);
+    });
+
+    // Saving: a submitted login waits in Desktop, and only an approval stores
+    // it. Every value submitted is kept here, to look for in the extension's
+    // storage at the end.
+    const submittedValues = [];
+    const submit = async (t, user, password) => {
+        submittedValues.push(user, password);
+        await b.type(t.session, '[name=username]', user);
+        await b.type(t.session, '[name=password]', password);
+        await b.click(t.session, 'button[type=submit]');
+    };
+    const saveOpens = async (site, name, t = tab) => {
+        await b.focus(t);
+        await t.open(`${site}/`);
+        await b.focus(t);
+        await submit(t, `${username}-${name}`, `${secret}-${name}`);
+        await waitPrompt();
+    };
+    const nothingStored = async (name, site) => {
+        const items = await logins(site);
+        report(`${name}: nothing is stored`, items.length === 0, `${items.length} logins`);
+    };
+
+    await step('save survives navigation', async () => {
+        const site = origin('savenav');
+        await saveOpens(site, 'nav');
+        // The site moves on after the login, as most do.
+        await tab.open(`${origin('after')}/`);
+        report('save survives navigation: the prompt stays open', await promptOpen());
+        await prompt('press', ['-Name', 'Save login']);
+        await until('the save', () => extension(`status === 'saved'`), 15000);
+        const items = await logins(site);
+        report('save survives navigation: stored once approved', items.length === 1
+            && items[0].login.username === `${username}-nav` && items[0].login.password === `${secret}-nav`);
+    });
+
+    await step('save denied', async () => {
+        const site = origin('savedeny');
+        await saveOpens(site, 'deny');
+        await prompt('deny');
+        await until('the denial', () => extension(`status === 'denied'`), 5000);
+        await nothingStored('save denied', site);
+    });
+
+    await step('save tab closed', async () => {
+        const site = origin('saveclose');
+        const other = await b.newTab();
+        await saveOpens(site, 'close', other);
+        await other.close();
+        report('save tab closed: the prompt closes', await until('the prompt to close', async () => !(await promptOpen()), 10000).then(() => true, () => false));
+        await nothingStored('save tab closed', site);
+    });
+
+    await step('save disconnected', async () => {
+        const site = origin('saverevoke');
+        await openSettings();
+        await saveOpens(site, 'revoke');
+        await disconnectInSettings();
+        await until('the extension to hear', () => extension(`status === 'revoked'`), 10000)
+            .then(() => report('save disconnected: the extension is told', true),
+                async () => report('save disconnected: the extension is told', false, await extension('status')));
+        await closeSettings();
+        await nothingStored('save disconnected', site);
+        await pairAgain();
+    });
+
+    await step('save sealed', async () => {
+        const site = origin('saveseal');
+        await saveOpens(site, 'seal');
+        await vault('seal');
+        await until('the extension to hear', () => extension(`status === 'sealed'`), 10000)
+            .then(() => report('save sealed: the extension is told', true),
+                async () => report('save sealed: the extension is told', false, await extension('status')));
+        report('save sealed: the prompt closes', await until('the prompt to close', async () => !(await promptOpen()), 10000).then(() => true, () => false));
+        const unlocked = await mainWindow('unlock', password);
+        if (unlocked.unlocked !== 'True') throw new Error(`could not unlock Desktop again: ${unlocked.error ?? '?'}`);
+        await nothingStored('save sealed', site);
+    });
+
+    await step('save from this page', async () => {
+        const site = origin('savepage');
+        const user = `${username}-page`, pagePassword = `${secret}-page`;
+        submittedValues.push(user, pagePassword);
+        await b.focus();
+        await tab.open(`${site}/`);
+        await b.focus();
+        await b.type(tab.session, '[name=username]', user);
+        await b.type(tab.session, '[name=password]', pagePassword);
+        const popup = await b.openPopup();
+        await b.press(popup, 'save-page');
+        await sleep(1000);
+        report('save from this page: the popup closes', !(await b.popupOpen(popup)));
+        await waitPrompt();
+        await prompt('press', ['-Name', 'Save login']);
+        await until('the save', () => extension(`status === 'saved'`), 15000);
+        const items = await logins(site);
+        report('save from this page: stored without submitting', items.length === 1
+            && items[0].login.username === user && items[0].login.password === pagePassword);
+    });
+
+    // A login the site rejected: submitting it again unchanged asks nothing;
+    // corrected and submitted, it is offered with the correction.
+    await step('save after editing', async () => {
+        const site = origin('saveedit');
+        await saveOpens(site, 'edit');
+        await prompt('deny');
+        await until('the denial', () => extension(`status === 'denied'`), 5000);
+        await b.click(tab.session, 'button[type=submit]');
+        report('save after editing: resubmitting unchanged asks nothing', await staysQuiet(3000));
+        const corrected = `${secret}-edit-corrected`;
+        submittedValues.push(corrected);
+        await b.type(tab.session, '[name=password]', '-corrected');
+        await b.click(tab.session, 'button[type=submit]');
+        await waitPrompt();
+        await prompt('press', ['-Name', 'Save login']);
+        await until('the save', () => extension(`status === 'saved'`), 15000);
+        const items = await logins(site);
+        report('save after editing: the correction is stored', items.length === 1 && items[0].login.password === corrected,
+            items.map(i => i.login.password === corrected ? 'corrected' : 'other').join(', '));
+    });
+
+    await step('no save offered', async () => {
+        const quietAfter = async (what, url, page, fill) => {
+            await b.focus();
+            await tab.open(url, page);
+            await b.focus();
+            await fill();
+            await b.click(tab.session, 'button[type=submit]');
+            report(`no save offered: ${what}`, await staysQuiet(3000));
+        };
+        await quietAfter('passwords that do not match', `${origin('mismatch')}/register`, 'register', async () => {
+            submittedValues.push(`${username}@mismatch.test`, `${secret}-one`, `${secret}-two`);
+            await b.type(tab.session, '[name=username]', `${username}@mismatch.test`);
+            await b.type(tab.session, '[name=password]', `${secret}-one`);
+            await b.type(tab.session, '[name=confirmation]', `${secret}-two`);
+        });
+        await quietAfter('a hidden password field', `${origin('hidden')}/`, 'hidden', async () => {
+            submittedValues.push(`${username}-hidden`, `${secret}-hidden`);
+            await b.type(tab.session, '[name=username]', `${username}-hidden`);
+            await b.send('Runtime.evaluate', {expression: `document.querySelector('[name=password]').value = ${JSON.stringify(`${secret}-hidden`)}`}, tab.session);
+        });
+        await quietAfter('a form sent to another site', `${origin('crossorigin')}/`, 'crossOrigin', async () => {
+            submittedValues.push(`${username}-cross`, `${secret}-cross`);
+            await b.type(tab.session, '[name=username]', `${username}-cross`);
+            await b.type(tab.session, '[name=password]', `${secret}-cross`);
+        });
+    });
+
+    // The extension keeps its pairing and paused sites, never what was typed.
+    await step('extension storage', async () => {
+        const kept = await extension(`Promise.all([chrome.storage.local.get(null), chrome.storage.session.get(null)]).then(v => JSON.stringify(v))`);
+        const found = [...submittedValues, secret, username].filter(v => kept.includes(v));
+        report('extension storage: holds no submitted values', found.length === 0, found.length ? `found ${found.length}` : `${submittedValues.length} values looked for`);
+        const keys = Object.keys(JSON.parse(kept)[0]);
+        report('extension storage: only pairing and paused sites', keys.every(k => ['pairing', 'paired', 'paused'].includes(k)), keys.join(', '));
     });
 
     // Restarting any part while a fill waits in Desktop drops that request
