@@ -15,7 +15,11 @@
 #       profile is disconnected in Settings, or Desktop's wait lapses, and a
 #       profile disconnected in Settings without the extension hearing, and
 #       restarting the native host, the extension's service worker, Desktop,
-#       and the browser while a fill waits. Desktop's prompt is driven
+#       and the browser while a fill waits; a save interrupted by
+#       navigation, denial, closing its tab, disconnecting or sealing; "Save
+#       login from this page"; correcting a login; forms that must not offer
+#       a save; and that the extension stores none of the submitted values.
+#       Desktop's prompt is driven
 #       through drive.ps1, so the check takes over the Windows desktop while
 #       it runs. --restart-browser closes the test browser first; --only runs
 #       just the steps whose names start so (see browser-check.mjs); pairing
@@ -39,7 +43,7 @@ for argument in "$@"; do
         --browser=edge | --browser=chrome | --browser=both) browser=${argument#--browser=} ;;
         --restart-browser) restart=yes ;;
         --only=?*) extra+=("$argument") ;;
-        *) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        *) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac
 done
 
