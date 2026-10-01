@@ -32,24 +32,31 @@ fn main() {
 #[cfg(windows)]
 mod windows_impl {
     use factorseal::vault::{
-        PermissionWaitStatus, VaultAction, VaultApplicationContext, VaultClient, VaultRequest,
-        VaultResponseBody, VaultResponseError, WindowsVaultClient, WireSecretAddress,
+        MAX_PERMISSION_WAIT_MS, PermissionWaitStatus, SecretSpecAddress, VaultAction,
+        VaultApplicationContext, VaultClient, VaultRequest, VaultResponseBody, VaultResponseError,
+        WindowsVaultClient,
     };
 
     const USAGE: &str =
-        "usage: factorseal-wsl-broker <pipe-name> <distro> <status|get> [namespace] [item] [field]";
+        "usage: factorseal-wsl-broker <pipe-name> <distro> status | get <project> <profile> <key>";
 
     /// `VaultAction` deliberately doesn't derive `Clone` (some variants carry
     /// secret material), so the request this broker sends twice -- once
     /// before approval, once after -- is rebuilt from this small, plainly
     /// clonable description instead of cloning a constructed `VaultAction`.
+    ///
+    /// `get` targets the SecretSpec provider cache (`GetCache`), not the raw
+    /// `Get` primitive: only cache actions with a declared project make
+    /// `ApprovalCandidate::for_request` create a pending approval at all, so
+    /// this is the only shape of request this broker can actually get a
+    /// human to approve.
     #[derive(Clone)]
     enum RequestedAction {
         Status,
-        Get {
-            namespace: Vec<u8>,
-            item: String,
-            field: Option<String>,
+        GetCache {
+            project: String,
+            profile: String,
+            key: String,
         },
     }
 
@@ -60,26 +67,34 @@ mod windows_impl {
         ) -> Result<Self, &'static str> {
             match name {
                 "status" => Ok(Self::Status),
-                "get" => Ok(Self::Get {
-                    namespace: args.next().ok_or(USAGE)?.into_bytes(),
-                    item: args.next().ok_or(USAGE)?,
-                    field: args.next(),
+                "get" => Ok(Self::GetCache {
+                    project: args.next().ok_or(USAGE)?,
+                    profile: args.next().ok_or(USAGE)?,
+                    key: args.next().ok_or(USAGE)?,
                 }),
                 _ => Err(USAGE),
             }
         }
 
-        fn into_vault_action(self) -> VaultAction {
+        fn project(&self) -> Option<&str> {
             match self {
-                Self::Status => VaultAction::Status,
-                Self::Get {
-                    namespace,
-                    item,
-                    field,
-                } => VaultAction::Get {
-                    namespace,
-                    address: WireSecretAddress::new(item, field),
-                },
+                Self::Status => None,
+                Self::GetCache { project, .. } => Some(project),
+            }
+        }
+
+        fn into_vault_action(self) -> Result<VaultAction, String> {
+            match self {
+                Self::Status => Ok(VaultAction::Status),
+                Self::GetCache {
+                    project,
+                    profile,
+                    key,
+                } => Ok(VaultAction::GetCache {
+                    project: project.clone(),
+                    address: SecretSpecAddress::convention(project, profile, key)
+                        .map_err(|error| error.to_string())?,
+                }),
             }
         }
     }
@@ -92,7 +107,7 @@ mod windows_impl {
         let requested = RequestedAction::parse(&action_name, &mut args)?;
 
         let application = VaultApplicationContext::new(
-            None,
+            requested.project().map(str::to_owned),
             None,
             None,
             Some(format!("Relayed from WSL distro {distro}")),
@@ -103,7 +118,7 @@ mod windows_impl {
         let client = WindowsVaultClient::new(pipe_name);
         match send(
             &client,
-            requested.clone().into_vault_action(),
+            requested.clone().into_vault_action()?,
             application.clone(),
         )? {
             Ok(body) => print_result(&body),
@@ -115,9 +130,14 @@ mod windows_impl {
                     "approval required (id {}); approve in Factorseal Desktop, then this will retry once...",
                     interaction.id
                 );
+                // One bounded wait, not a polling loop: a client that keeps
+                // reacquiring the service's single state lock can starve a
+                // concurrent caller (e.g. `factorseal permissions list`)
+                // under Windows' unfair SRWLOCK. Exit and let the caller
+                // re-run instead of monopolizing the lock indefinitely.
                 let wait_request = VaultRequest::new(VaultAction::WaitPermission {
                     id: interaction.id,
-                    timeout_ms: 120_000,
+                    timeout_ms: MAX_PERMISSION_WAIT_MS,
                 })
                 .map_err(|error| error.to_string())?;
                 let wait_response = client
@@ -130,10 +150,13 @@ mod windows_impl {
                 };
                 match status {
                     PermissionWaitStatus::Granted => {
-                        match send(&client, requested.into_vault_action(), application)? {
+                        match send(&client, requested.into_vault_action()?, application)? {
                             Ok(body) => print_result(&body),
                             Err(error) => return Err(describe(&error)),
                         }
+                    }
+                    PermissionWaitStatus::Pending => {
+                        println!("still pending; approve it, then run this command again");
                     }
                     other => return Err(format!("approval not granted: {other:?}")),
                 }
