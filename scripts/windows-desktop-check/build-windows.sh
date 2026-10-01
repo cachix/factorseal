@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Builds and checks FactorSeal natively on Windows, driven from WSL2.
 #
-#   build-windows.sh [release]
+#   build-windows.sh [release] [--broker]
 #       Mirror this checkout to the Windows copy, then build release binaries
 #       there: Desktop, and the CLI with its helpers and SecretSpec provider.
 #       Refuses to start while Desktop or the CLI runs, since Windows locks
 #       their executables.
-#   build-windows.sh check
+#   build-windows.sh check [--broker]
 #       Mirror, then run clippy and Desktop's tests natively. Leaves the
 #       release executables alone, so it can run while Desktop is open.
+#   --broker also cross-compiles the WSL broker on the WSL side.
 #
 # Desktop cannot be cross-compiled (its renderer needs Windows' shader
 # compiler), so the Windows copy is built in place through interop. The copy
@@ -17,10 +18,12 @@
 set -euo pipefail
 
 mode=release
+broker=no
 for argument in "$@"; do
     case $argument in
         release | check) mode=$argument ;;
-        *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        --broker) broker=yes ;;
+        *) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac
 done
 
@@ -80,6 +83,12 @@ check)
     windows "cargo test --locked -p factorseal-desktop"
     ;;
 esac
+
+if [ "$broker" = yes ]; then
+    echo "Cross-compiling the WSL broker"
+    (cd "$repo" && devenv shell -- cargo xwin build --locked --release \
+        --target x86_64-pc-windows-msvc --bin factorseal-wsl-broker --features vault-client)
+fi
 
 if [ "$mode" = release ]; then
     echo
