@@ -16,9 +16,10 @@ use crate::vault::{
 
 // Version 12 adds revision-bound permission pages and logical keyring transfers.
 // Version 16 adds reviewed browser credential saves to the manager-only boundary.
-// Version 17 adds the caller-declared WSL origin hint and launch chain on
-// VaultApplicationContext, and single-use write approvals.
-pub(super) const PROTOCOL_VERSION: u8 = 17;
+// Version 17 adds the caller-declared WSL origin hint on VaultApplicationContext.
+// Version 18 adds the caller-declared launch chain on VaultApplicationContext,
+// and single-use write approvals.
+pub(super) const PROTOCOL_VERSION: u8 = 18;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
