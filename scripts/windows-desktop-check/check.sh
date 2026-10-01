@@ -324,7 +324,12 @@ popup)
         drive unlock
         grep -q '^unlocked=True' <<<"$result" || die "the driver could not unlock the main window"
         wait_state unsealed || die "the vault is still sealed"
-        sleep 3
+        # Desktop sends it once its own view of the vault is unsealed again,
+        # which can trail the vault's status by several seconds.
+        for _ in $(seq 20); do
+            grep -q 'pending' <<<"$(permission "$id")" || break
+            sleep 1
+        done
         drive find
         grep -q '^popup_open=False' <<<"$result" || die "the denied request came back after unlocking"
     fi
