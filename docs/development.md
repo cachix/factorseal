@@ -29,6 +29,9 @@ The macOS app bundle comes from `packaging/macos/Factorseal.xcodeproj`. Xcode
 runs `cargo build` through `packaging/macos/cargo-build.sh` and then assembles
 and signs the bundle. See [packaging](../packaging/README.md#macos-builds).
 
+To build and check Desktop on Windows from a WSL2 checkout, including its
+approval popup, see [Windows Desktop checks from WSL2](../scripts/windows-desktop-check/README.md).
+
 For Apple credential-exchange SDK and Rust interoperability checks on macOS 26+
 with Xcode 26+, run `bash scripts/test-apple-exchange.sh`. See the
 [Apple test setup](../platform/macos/credential-exchange/README.md) for CI artifacts and the separate
