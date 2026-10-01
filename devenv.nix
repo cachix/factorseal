@@ -46,6 +46,16 @@
     targets = [ "x86_64-pc-windows-msvc" ];
   };
 
+  # Claude Code project configuration. devenv generates .claude/ (gitignored)
+  # when the shell starts; edit the sources named here, not the generated files.
+  claude.code = {
+    enable = true;
+    skills.windows-desktop-check = {
+      description = "Build FactorSeal natively on Windows from WSL2 and check FactorSeal Desktop's approval popup there (foreground or taskbar flash, pending request in the vault, WSL grant cap, UI Automation tree, hangs). Use when a task needs a Windows build of Desktop or the CLI, or verifying Desktop's approval popup, the WSL broker, or native SecretSpec requests on Windows.";
+      content = builtins.readFile ./scripts/windows-desktop-check/skill.md;
+    };
+  };
+
   enterTest = ''
     bash scripts/test-with-dbus.sh cargo test --workspace --all-targets --all-features
   '';
