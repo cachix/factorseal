@@ -25,6 +25,9 @@ $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo fmt --all -- --check
 ```
 
+To build and check Desktop on Windows from a WSL2 checkout, including its
+approval popup, see [Windows Desktop checks from WSL2](../scripts/windows-desktop-check/README.md).
+
 For Apple credential-exchange SDK and Rust interoperability checks on macOS 26+
 with Xcode 26+, run `bash scripts/test-apple-exchange.sh`. See the
 [Apple test setup](../platform/apple/README.md) for CI artifacts and the separate
