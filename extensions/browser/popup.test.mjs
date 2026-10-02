@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 const source=await readFile(new URL('./popup.js',import.meta.url),'utf8');
-function popup(state,{allowed=true}={}){
-  const calls=[];
+function popup(state,{allowed=true,reply}={}){
+  const calls=[];let closed=false;
   const nodes=new Map();
   const element=id=>{if(!nodes.has(id))nodes.set(id,{id,hidden:false,disabled:false,textContent:''});return nodes.get(id);};
-  const buttons=['pair','enable','retry','pause','cancel','revoke'].map(element);
-  const context=vm.createContext({document:{getElementById:element,querySelectorAll:()=>buttons},browser:{runtime:{sendMessage:async message=>{calls.push(message.type);return state;}},permissions:{request:async()=>{calls.push('site-permission');return allowed;}}},setTimeout:()=>{}});
+  const buttons=['pair','enable','retry','save-page','pause','cancel','revoke'].map(element);
+  const context=vm.createContext({document:{getElementById:element,querySelectorAll:()=>buttons},browser:{runtime:{sendMessage:async message=>{calls.push(message.type);return reply?.[message.type]??state;}},permissions:{request:async()=>{calls.push('site-permission');return allowed;}}},setTimeout:()=>{},close:()=>{closed=true;}});
   vm.runInContext(source,context);context.render(state);
-  return {element,render:context.render,calls};
+  return {element,render:context.render,calls,get closed(){return closed;}};
 }
 for(const allowed of [true,false])test(`pairing requests site access in the same click (allowed: ${allowed})`,async()=>{
   const {element,calls}=popup({paired:false,status:'idle'},{allowed});
@@ -73,4 +73,18 @@ test('approved pairing reveals permission onboarding, then page controls; revoca
   render({paired:false,status:'revoked'});
   assert.equal(element('controls').hidden,true);
   assert.equal(element('pair').hidden,false);
+});
+for(const offered of [true,false])test(`Save login from this page closes the popup only when the page offers a login (offered: ${offered})`,async()=>{
+  const state={paired:true,detection:true,site:'https://example.com',status:'idle'};
+  const p=popup(state,{reply:{'save-page':{offered,status:offered?'idle':'No complete login form found on this page.'},status:offered?state:{...state,status:'No complete login form found on this page.'}}});
+  await p.element('save-page').onclick();
+  assert.equal(p.closed,offered);
+  if(!offered)assert.equal(p.element('status').textContent,'No complete login form found on this page.');
+});
+for(const found of [true,false])test(`Check this page closes the popup only when the page has a login form (found: ${found})`,async()=>{
+  const state={paired:true,detection:true,site:'https://example.com',status:'idle'};
+  const p=popup(state,{reply:{retry:{found,status:found?'Checking page':'No complete login form found on this page.'},status:found?state:{...state,status:'No complete login form found on this page.'}}});
+  await p.element('retry').onclick();
+  assert.equal(p.closed,found);
+  if(!found)assert.equal(p.element('status').textContent,'No complete login form found on this page.');
 });

@@ -1,19 +1,37 @@
-//! Bounded, in-memory entry approval lifecycle.
+//! Bounded entry approval lifecycle.
+//!
+//! Pending approvals are held in memory and written through to the vault
+//! store, so a request still waiting for review survives the vault sealing
+//! and is offered again after the next unseal. Resolved outcomes and the
+//! creation rate window stay in memory only.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
-use crate::vault::{DocumentKind, Provenance, VaultError, VaultResult, VaultStore};
+use crate::vault::{
+    DocumentKind, DocumentOperation, Provenance, SecretAddress, ServiceReason, VaultError,
+    VaultResult, VaultStore,
+};
 
 use super::super::grant::{GrantTarget, promote_permission};
 use super::super::{
     CallerIdentity, GrantPermission, Permission, PermissionOperation, PermissionPrincipal,
-    PermissionState, PermissionWaitStatus, VaultAction, VaultApplicationContext,
-    VaultInteractionReference,
+    PermissionState, PermissionWaitStatus, SINGLE_USE_GRANT_SECONDS, VaultAction,
+    VaultApplicationContext, VaultInteractionReference,
 };
 use crate::vault::signature::{permission_payload, verify};
+
+/// The lifetime a person signed when approving: a duration (`None` for
+/// until revoked), or a single use.
+#[derive(Clone, Copy)]
+pub(super) struct ApprovedLifetime {
+    pub duration_seconds: Option<u64>,
+    pub single_use: bool,
+}
 
 const APPROVAL_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_PENDING_APPROVALS: usize = 128;
@@ -24,6 +42,11 @@ const MAX_NEW_APPROVALS: usize = 128;
 
 pub(super) const PERMISSION_CONTROL_NAMESPACE: &[u8] = b"factorseal/permissions/v1";
 
+// Local-only like grants: `Authorization` documents are never listed,
+// exported, archived, or replicated.
+const PENDING_DOCUMENT_NAMESPACE: &[u8] = b"factorseal/pending-approvals/v1";
+const PENDING_VERSION: u8 = 1;
+
 pub(super) struct ApprovalCandidate {
     caller: CallerIdentity,
     application: VaultApplicationContext,
@@ -32,8 +55,12 @@ pub(super) struct ApprovalCandidate {
     address: Option<crate::SecretAddress>,
     permission: GrantPermission,
     operation: PermissionOperation,
+    /// A write that carries an expiry; shown so prompts pick their default.
+    expiring_write: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApprovalRecord {
     summary: Permission,
     caller: CallerIdentity,
@@ -41,6 +68,13 @@ struct ApprovalRecord {
     namespace: Vec<u8>,
     address: Option<crate::SecretAddress>,
     permission: GrantPermission,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredApprovals {
+    version: u8,
+    records: Vec<ApprovalRecord>,
 }
 
 struct ResolvedRecord {
@@ -58,6 +92,8 @@ pub(super) struct PendingApprovals {
     // Successful creations only, retained across denial/approval. The global
     // rate cap bounds this queue even if callers continually change identity.
     recent_creations: VecDeque<(Instant, [u8; 32])>,
+    // `records` changed since they were last written to the store.
+    unsaved: bool,
 }
 
 impl ApprovalCandidate {
@@ -83,12 +119,15 @@ impl ApprovalCandidate {
                 base_dir: Some(base_dir),
                 reason: Some(format!("System keyring: {service}")),
                 requested_permission_duration_seconds: None,
+                declared_wsl_origin: None,
+                declared_launch_chain: Vec::new(),
             },
             scope: DocumentKind::LinuxSecretService,
             namespace: project.into_bytes(),
             address,
             permission,
             operation,
+            expiring_write: false,
         }
     }
 
@@ -182,8 +221,19 @@ impl ApprovalCandidate {
             address: Some(address),
             permission,
             operation,
+            expiring_write: matches!(
+                action,
+                VaultAction::PutCache {
+                    evict_at: Some(_),
+                    ..
+                }
+            ),
         })
     }
+}
+
+fn pending_address() -> VaultResult<SecretAddress> {
+    SecretAddress::new("pending", None)
 }
 
 impl PendingApprovals {
@@ -193,6 +243,93 @@ impl PendingApprovals {
 
     pub(super) fn changed(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Restore the approvals that were still pending when the vault last
+    /// sealed. Unreadable or unsupported data yields an empty set: dropping
+    /// a waiting request only makes its caller ask again.
+    pub(super) fn load(store: &VaultStore, now: u64) -> Self {
+        let mut approvals = Self::default();
+        let stored = pending_address()
+            .and_then(|address| {
+                store.get_at(
+                    DocumentKind::Authorization,
+                    PENDING_DOCUMENT_NAMESPACE,
+                    &address,
+                    now,
+                )
+            })
+            .ok()
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<StoredApprovals>(&bytes).ok())
+            .filter(|stored| stored.version == PENDING_VERSION);
+        let Some(stored) = stored else {
+            return approvals;
+        };
+        let saved = stored.records.len();
+        approvals.records = stored
+            .records
+            .into_iter()
+            .filter(|record| {
+                matches!(record.summary.state, PermissionState::Pending { .. })
+                    && record.caller.validate().is_ok()
+            })
+            .take(MAX_PENDING_APPROVALS)
+            .collect();
+        approvals.unsaved = approvals.records.len() != saved;
+        approvals.purge_expired(now);
+        approvals
+    }
+
+    /// Write the pending approvals through to the store if they changed.
+    pub(super) fn save(&mut self, store: &VaultStore, now: u64) -> VaultResult<()> {
+        #[derive(Serialize)]
+        struct Borrowed<'a> {
+            version: u8,
+            records: &'a VecDeque<ApprovalRecord>,
+        }
+
+        if !self.unsaved {
+            return Ok(());
+        }
+        let address = pending_address()?;
+        let operation = if self.records.is_empty() {
+            DocumentOperation::Delete { address }
+        } else {
+            let value = Zeroizing::new(
+                serde_json::to_vec(&Borrowed {
+                    version: PENDING_VERSION,
+                    records: &self.records,
+                })
+                .map_err(|error| VaultError::Protocol(error.to_string()))?,
+            );
+            // The store drops the document by itself once every request in
+            // it has expired, even if the vault is never unsealed again.
+            let evict_at = self
+                .records
+                .iter()
+                .filter_map(|record| match record.summary.state {
+                    PermissionState::Pending { expires_at, .. } => Some(expires_at),
+                    PermissionState::Granted { .. } => None,
+                })
+                .max();
+            DocumentOperation::Put {
+                address,
+                value,
+                evict_at,
+            }
+        };
+        store.mutate(
+            DocumentKind::Authorization,
+            PENDING_DOCUMENT_NAMESPACE,
+            vec![operation],
+            // Pending approvals are stored by the same authorization path as
+            // the grants they may become.
+            &Provenance::service(ServiceReason::GrantStorage),
+            now,
+        )?;
+        self.unsaved = false;
+        Ok(())
     }
 
     fn purge_expired(&mut self, now: u64) {
@@ -221,6 +358,7 @@ impl PendingApprovals {
         self.resolved.retain(|record| record.retain_until > now);
         if self.records.len() != before {
             self.revision = self.revision.wrapping_add(1);
+            self.unsaved = true;
         }
     }
 
@@ -277,6 +415,11 @@ impl PendingApprovals {
                 && record.namespace == candidate.namespace
                 && record.scope == candidate.scope
                 && record.permission == candidate.permission
+                && matches!(
+                    record.summary.state,
+                    PermissionState::Pending { expiring_write, .. }
+                        if expiring_write == candidate.expiring_write
+                )
         }) {
             let PermissionState::Pending { expires_at, .. } = existing.summary.state else {
                 unreachable!("queue stores only pending records");
@@ -335,6 +478,7 @@ impl PendingApprovals {
                 created_at: now,
                 expires_at,
                 challenge,
+                expiring_write: candidate.expiring_write,
             },
         };
         self.records.push_back(ApprovalRecord {
@@ -349,6 +493,7 @@ impl PendingApprovals {
             .push_back((monotonic_now, fingerprint));
         crate::security::events::record(crate::security::events::Kind::ApprovalCreated);
         self.revision = self.revision.wrapping_add(1);
+        self.unsaved = true;
         Ok(VaultInteractionReference { id, expires_at })
     }
 
@@ -371,6 +516,7 @@ impl PendingApprovals {
             .position(|record| record.summary.id == id)
             .ok_or_else(|| VaultError::Protocol("permission is missing or expired".to_owned()))?;
         let record = self.records.remove(index).expect("located above");
+        self.unsaved = true;
         crate::security::events::record(crate::security::events::Kind::ApprovalDenied);
         let expires_at = match record.summary.state {
             PermissionState::Pending { expires_at, .. } => expires_at,
@@ -412,10 +558,14 @@ impl PendingApprovals {
         store: &VaultStore,
         id: &str,
         signature: &[u8],
-        grant_duration_seconds: Option<u64>,
+        lifetime: ApprovedLifetime,
         now: u64,
         provenance: &Provenance,
     ) -> VaultResult<()> {
+        let ApprovedLifetime {
+            duration_seconds: grant_duration_seconds,
+            single_use,
+        } = lifetime;
         self.purge_expired(now);
         let index = self
             .records
@@ -428,9 +578,30 @@ impl PendingApprovals {
         };
         verify(
             store.device().public_signing_key(),
-            &permission_payload(&record.summary.id, &challenge, grant_duration_seconds),
+            &permission_payload(
+                &record.summary.id,
+                &challenge,
+                grant_duration_seconds,
+                single_use,
+            ),
             signature,
         )?;
+        // Only a SecretSpec write consumes a single-use grant (see
+        // `grant::require_grant_consuming`); any other request would keep it
+        // until it expires, so refuse to create one.
+        if single_use
+            && (record.scope != DocumentKind::SecretSpecProviderCache
+                || record.permission != GrantPermission::Put)
+        {
+            return Err(VaultError::Protocol(
+                "only a SecretSpec write can be approved for one write".to_owned(),
+            ));
+        }
+        let grant_duration_seconds = if single_use {
+            Some(SINGLE_USE_GRANT_SECONDS)
+        } else {
+            grant_duration_seconds
+        };
         let grant_expires_at = grant_duration_seconds
             .map(|duration| now.checked_add(duration).ok_or(VaultError::Expired))
             .transpose()?;
@@ -444,6 +615,7 @@ impl PendingApprovals {
         permission.state = PermissionState::Granted {
             granted_at: now,
             expires_at: grant_expires_at,
+            single_use,
         };
         promote_permission(
             store,
@@ -465,6 +637,7 @@ impl PendingApprovals {
         )?;
         let caller_fingerprint = record.caller.fingerprint();
         self.records.remove(index);
+        self.unsaved = true;
         crate::security::events::record(crate::security::events::Kind::ApprovalGranted);
         self.push_resolved(
             id.to_owned(),
@@ -500,6 +673,7 @@ mod tests {
             address: Some(crate::SecretAddress::new("test-entry", None).unwrap()),
             permission: GrantPermission::Get,
             operation: PermissionOperation::Get,
+            expiring_write: false,
         }
     }
 

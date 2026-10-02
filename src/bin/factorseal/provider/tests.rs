@@ -54,6 +54,7 @@ fn application_context() -> VaultApplicationContext {
         )),
         Some("test".to_owned()),
     )
+    .and_then(|context| context.with_declared_launch_chain(launch_chain::launch_chain()))
     .unwrap()
 }
 
@@ -628,6 +629,10 @@ async fn secretspec_request_waits_for_approval_and_completes() {
             .requested_permission_duration_seconds,
         Some(8 * 60 * 60)
     );
+    // The test harness launched this process, so the provider names it.
+    let chain = &permissions[0].application.declared_launch_chain;
+    assert!(!chain.is_empty());
+    assert_eq!(chain, &launch_chain::launch_chain());
 
     let unsealed = Vault::unseal_with_key_protector_group(
         &fixture.root,
@@ -648,6 +653,7 @@ async fn secretspec_request_waits_for_approval_and_completes() {
             id: permissions[0].id.clone(),
             signature,
             duration_seconds: Some(8 * 60 * 60),
+            single_use: false,
         })
         .unwrap(),
         fixture.now + 3,
@@ -659,6 +665,66 @@ async fn secretspec_request_waits_for_approval_and_completes() {
         })
     ));
     assert_eq!(pending_request.await.unwrap().unwrap(), GetResult::Missing);
+
+    client.close(deadline()).await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn secretspec_request_left_pending_asks_for_interaction_before_its_deadline() {
+    let fixture = ApprovalIntegrationFixture::new();
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    let server = tokio::spawn(serve_provider(
+        server_read,
+        server_write,
+        fixture.provider(),
+        ServerConfig::default(),
+    ));
+    let (client, _) = Client::connect::<_, _, _, InitializedApplication>(
+        client_read,
+        client_write,
+        approval_initialize(),
+        deadline(),
+    )
+    .await
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let result = client
+        .call::<_, GetResult>(
+            wire::method::GET,
+            &AddressParams { address: address() },
+            unix_time_ms().unwrap() + 3_000,
+        )
+        .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "the provider must answer before the caller's deadline"
+    );
+    let Err(secretspec_ipc::Error::Remote(error)) = result else {
+        panic!("expected the provider to ask for interaction, got {result:?}");
+    };
+    assert_eq!(error.data.kind, ErrorKind::InteractionRequired);
+    let interaction = error.data.interaction.expect("the pending approval");
+    assert!(interaction.id.starts_with("prm_"));
+
+    // The approval stays pending for a retry once it is granted.
+    let listed = fixture.service.handle(
+        &fixture.manager,
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+        fixture.now + 5,
+    );
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
+        panic!("expected permissions");
+    };
+    assert!(
+        permissions
+            .iter()
+            .any(|permission| permission.id == interaction.id
+                && matches!(permission.state, PermissionState::Pending { .. }))
+    );
 
     client.close(deadline()).await.unwrap();
     server.await.unwrap().unwrap();

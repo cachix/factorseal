@@ -296,8 +296,9 @@ pkgs.testers.runNixOSTest {
         claim = "/home/alice/.config/secretspec/providers.d/factorseal.secretspec.json"
         locked.succeed(f"test $(stat -c %a {claim}) = 600")
         locked.succeed(
-            f"jq -e 'keys == [\"executable\"] and "
-            f".executable == \"${package}/bin/factorseal\"' {claim}"
+            f"jq -e 'keys == [\"environment\", \"executable\"] and "
+            f".executable == \"${package}/bin/factorseal\" and "
+            f".environment == [\"FACTORSEAL_ROOT\", \"FACTORSEAL_SOCKET\"]' {claim}"
         )
 
         # The unit lives in the user manager, which sits outside every logind

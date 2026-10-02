@@ -13,7 +13,12 @@ struct BrowserView {
     details: bool,
     error: Option<String>,
     pair_after_unlock: bool,
+    // Keys reach only the focused element's path. Without the password
+    // field (vault unsealed) Escape never reached the root's handler; the
+    // root takes focus then.
+    focus: gpui::FocusHandle,
     _submit: Subscription,
+    _activation: Subscription,
 }
 
 pub(super) fn setup(cx: &mut App) {
@@ -25,7 +30,11 @@ fn close(cx: &mut App) {
         view.update(cx, |view, cx| {
             view.password.update(cx, SecretInputState::clear);
         });
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        let _ = handle.update(cx, |_, window, _| {
+            // A popup closed while behind would leave its taskbar button flashing.
+            super::super::window_activation::attention_settled(window);
+            window.remove_window();
+        });
     }
 }
 
@@ -50,10 +59,10 @@ pub(super) fn sync(request: Option<Prompt>, cx: &mut App) {
         return;
     };
     let snapshot = cx.global::<DesktopWindow>().snapshot.clone();
-    if request.save_username.is_some()
-        && request.state == "matching"
-        && cx.global::<BrowserWindow>().0.is_none()
-    {
+    // An unsealed vault looks for matching logins first. Open only once there
+    // is something to approve: a page with no stored login must not take the
+    // foreground from the browser, only to close again.
+    if request.state == "matching" && cx.global::<BrowserWindow>().0.is_none() {
         return;
     }
     if let Some((_, view)) = cx.global::<BrowserWindow>().0.clone() {
@@ -127,7 +136,14 @@ fn open(request: &Prompt, snapshot: &Snapshot, cx: &mut App) {
                 details: false,
                 error: None,
                 pair_after_unlock: false,
+                focus: cx.focus_handle(),
                 _submit: submit,
+                // Seen now: stop any flashing that asked for attention.
+                _activation: cx.observe_window_activation(window, |_, window, _| {
+                    if window.is_window_active() {
+                        super::super::window_activation::attention_settled(window);
+                    }
+                }),
             }
         });
         entity = Some(view.clone());
@@ -147,7 +163,19 @@ fn open(request: &Prompt, snapshot: &Snapshot, cx: &mut App) {
         opened = cx.open_window(options(false, cx), &mut build);
     }
     match opened {
-        Ok(handle) => cx.global_mut::<BrowserWindow>().0 = Some((handle.into(), entity.unwrap())),
+        Ok(handle) => {
+            cx.global_mut::<BrowserWindow>().0 = Some((handle.into(), entity.unwrap()));
+            if !layered {
+                // Windows often refuses the foreground to an app the user is
+                // not using (here the browser has it), which left the popup
+                // behind with nothing pointing at it: also flag it in the
+                // taskbar, as the secret-access popup does.
+                let _ = handle.update(cx, |_, window, _| {
+                    super::super::window_activation::show(window, true);
+                    super::super::window_activation::request_attention(window);
+                });
+            }
+        }
         Err(error) => {
             eprintln!("FactorSeal: could not open browser approval window: {error}");
             deny(&request.session, request.generation, cx);
@@ -218,20 +246,20 @@ impl Render for BrowserView {
         } else {
             "Fill a login"
         };
+        // Text needs an ID to reach screen readers and UI Automation.
         let mut summary = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted)
-            .child(div().text_lg().font_semibold().child(if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() }))
-            .child(if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." });
+            .child(div().text_lg().font_semibold().child(text("site", if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() })))
+            .child(text("description", if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." }));
         if let Some(username) = &self.request.save_username {
             summary = summary
-                .child(div().child(format!("Username: {username}")))
-                .child(div().child("Password: ••••••••"));
+                .child(div().child(text("username", format!("Username: {username}"))))
+                .child(div().child(text("password", "Password: ••••••••")));
         }
         if pairing || revoking {
-            summary = summary.child(
-                div()
-                    .text_sm()
-                    .child(format!("Profile key: {}…", &self.request.key[..16])),
-            );
+            summary = summary.child(div().text_sm().child(text(
+                "profile-key",
+                format!("Profile key: {}…", &self.request.key[..16]),
+            )));
         }
         let mut requests = v_flex().gap_4().child(summary).child(
             Button::new("browser-technical-details")
@@ -248,11 +276,10 @@ impl Render for BrowserView {
                 })),
         );
         if self.details {
-            requests = requests.child(
-                div()
-                    .text_xs()
-                    .child(format!("Profile public key: {}", self.request.key)),
-            );
+            requests = requests.child(div().text_xs().child(text(
+                "public-key",
+                format!("Profile public key: {}", self.request.key),
+            )));
         }
         if reviewing {
             for (index, candidate) in self.request.candidates.iter().enumerate() {
@@ -268,7 +295,12 @@ impl Render for BrowserView {
                 );
             }
         }
-        let mut groups = h_flex().gap_2().flex_wrap();
+        let mut groups = h_flex()
+            .id("unlock-group")
+            .role(gpui::Role::RadioGroup)
+            .aria_label("Unlock with")
+            .gap_2()
+            .flex_wrap();
         if let Some(metadata) = self.snapshot.metadata() {
             for (index, group) in metadata.unlock_policy().groups().iter().enumerate() {
                 let selected = self.group.as_ref() == Some(group);
@@ -276,6 +308,8 @@ impl Render for BrowserView {
                 groups = groups.child(
                     Button::new(("browser-factor", index))
                         .label(group.to_string())
+                        .role(Some(gpui::Role::RadioButton))
+                        .toggled(selected)
                         .selected(selected)
                         .disabled(unlocking)
                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -290,6 +324,11 @@ impl Render for BrowserView {
                 .group
                 .as_ref()
                 .is_some_and(|group| group.requires(factorseal::UnlockFactorKind::Password));
+        // The password field keeps its focus handle while hidden, so focus
+        // the root whenever the field is not drawn; otherwise Escape is lost.
+        if !needs_password && !self.focus.is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
         let error = self.error.clone().or_else(|| match &self.snapshot {
             Snapshot::Sealed { error, .. } | Snapshot::Unsealed { error, .. } => error.clone(),
             Snapshot::Error(error) => Some(error.clone()),
@@ -312,6 +351,7 @@ impl Render for BrowserView {
         };
         v_flex()
             .size_full()
+            .track_focus(&self.focus)
             .border_1()
             .border_color(theme.border)
             .capture_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
@@ -339,10 +379,15 @@ impl Render for BrowserView {
                                 div()
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
-                                    .child("FactorSeal"),
+                                    .child(text("brand", "FactorSeal")),
                             ),
                     )
-                    .child(div().text_xl().font_semibold().child(title)),
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_semibold()
+                            .child(text("browser-title", title)),
+                    ),
             )
             .child(
                 div()
@@ -364,7 +409,7 @@ impl Render for BrowserView {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(status),
+                            .child(text("status", status)),
                     )
                     .when(
                         !unsealed
@@ -382,11 +427,10 @@ impl Render for BrowserView {
                     .when(
                         matches!(self.snapshot, Snapshot::Uninitialized { .. }),
                         |element| {
-                            element.child(
-                                div()
-                                    .text_sm()
-                                    .child("Set up your vault in FactorSeal Desktop first."),
-                            )
+                            element.child(div().text_sm().child(text(
+                                "setup-note",
+                                "Set up your vault in FactorSeal Desktop first.",
+                            )))
                         },
                     )
                     .child(

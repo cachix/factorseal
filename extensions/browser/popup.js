@@ -1,7 +1,7 @@
 const api=globalThis.browser||globalThis.chrome;
 const element=id=>document.getElementById(id);
 const status=element('status');
-const labels={save_failed:'Login could not be saved. It may have changed; try again.',saved:'Login saved in FactorSeal.',already_saved:'This login is already saved.',awaiting_unseal:'Unseal FactorSeal in Desktop to continue.',matching:'Checking for matching logins…',awaiting_approval:'Approve this request in Desktop.',awaiting_context:'Checking the login page…',releasing:'Filling your login…',saving:'Saving approval…',pair_required:'Pair this browser profile with Desktop first.',no_match:'No matching login found.',denied:'Request denied.',cancelled:'Request cancelled.',expired:'Request expired. Try again.',sealed:'Vault sealed.',revoked:'Browser profile disconnected.',done:'',busy:'Another request is pending.',vault_rejected:'The vault rejected this request. Pair with Desktop to try again.',desktop_unavailable:'Open FactorSeal Desktop, then try again.',native_disconnected:'Could not connect. Open FactorSeal Desktop and try again.',unauthorized:'Connection expired. Try again.',idle:'',Disconnected:'',Cancelled:'Request cancelled.'};
+const labels={save_failed:'Login could not be saved. It may have changed; try again.',saved:'Login saved in FactorSeal.',already_saved:'This login is already saved.',awaiting_unseal:'Unseal FactorSeal in Desktop to continue.',matching:'Checking for matching logins…',awaiting_approval:'Approve this request in Desktop.',awaiting_context:'Checking the login page…',releasing:'Filling your login…',saving:'Saving approval…',pair_required:'Pair this browser profile with Desktop first.',no_match:'No matching login found.',denied:'Request denied.',changed:'This login changed in FactorSeal. Try again.',cancelled:'Request cancelled.',expired:'Request expired. Try again.',sealed:'Vault sealed.',revoked:'Browser profile disconnected.',done:'',busy:'Another request is pending.',vault_rejected:'The vault rejected this request. Pair with Desktop to try again.',desktop_unavailable:'Open FactorSeal Desktop, then try again.',native_disconnected:'Could not connect. Open FactorSeal Desktop and try again.',unauthorized:'Connection expired. Try again.',idle:'',Disconnected:'',Cancelled:'Request cancelled.'};
 let busy=false,notice='',previousStatus;
 function render(state) {
   const paired=state.paired===true;
@@ -42,7 +42,12 @@ for(const button of document.querySelectorAll('button'))button.onclick=async()=>
     } else if(button.id==='enable'){
       const allowed=await api.permissions.request({origins:['https://*/*']});
       notice=allowed?'Detection enabled. Reload the login page.':'Site access declined.';
-    } else {await api.runtime.sendMessage({type:button.id});notice='';}
+    } else {
+      const result=await api.runtime.sendMessage({type:button.id});notice='';
+      // The page checks itself, or offers its login, once it has focus again,
+      // which the open popup keeps.
+      if((button.id==='retry'&&result?.found)||(button.id==='save-page'&&result?.offered))globalThis.close();
+    }
   } catch {notice='Request unavailable. Open Desktop and try again.';}
   finally {busy=false;button.disabled=false;await refresh();}
 };
