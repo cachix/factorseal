@@ -136,7 +136,7 @@ async function connect(description) {
         }
         return attach(target.targetId);
     };
-    // Chrome no longer honours --load-extension: load (or reload) the
+    // Chrome and Edge no longer honour --load-extension: load (or reload) the
     // extension through the DevTools Protocol. A browser left running from an
     // earlier check still runs the extension it loaded then: reload it from
     // disk, as its reload button would.
@@ -399,7 +399,7 @@ async function restartBrowser(b) {
     await until(`the test ${b.name} to close`, async () => !(await debuggable(d.port)), 15000);
     await sleep(1000);
     await start(d.executable, [`--user-data-dir=${d.profile}`, `--remote-debugging-port=${d.port}`,
-        d.kind === 'edge' ? `--load-extension=${d.extension}` : '--enable-unsafe-extension-debugging',
+        '--enable-unsafe-extension-debugging',
         '--no-first-run', '--no-default-browser-check', 'about:blank']);
     await until(`the test ${b.name} to start`, () => debuggable(d.port), 20000);
     const pid = await until(`the test ${b.name}'s process`, () => ps(`Get-CimInstance Win32_Process -Filter "Name='${d.executable.split('\\').pop()}'" |
