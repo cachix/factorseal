@@ -30,9 +30,9 @@
 #
 # The test copy of the extension has its site access granted at install:
 # the browser's permission dialog cannot be answered through the DevTools
-# Protocol. Otherwise it is the extension as built. Edge loads it with
-# --load-extension; Chrome ignores that since version 137, so the check loads
-# it through the DevTools Protocol (Extensions.loadUnpacked) instead.
+# Protocol. Otherwise it is the extension as built. Chrome ignores
+# --load-extension since version 137 and Edge since version 154, so the check
+# loads it through the DevTools Protocol (Extensions.loadUnpacked) in both.
 set -euo pipefail
 
 restart=no
@@ -101,7 +101,8 @@ start_browser() {
             name=Edge
             executable='C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
             port=9333
-            flags="'--load-extension=\"$extension\"'"
+            flags="'--enable-unsafe-extension-debugging'"
+            load=${extension//\\/\\\\}
             ;;
         chrome)
             name=Chrome

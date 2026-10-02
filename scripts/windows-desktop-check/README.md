@@ -118,9 +118,9 @@ covers it, and it releases it afterwards.
 It starts a separate Edge (or Chrome) with its own profile in
 `%LOCALAPPDATA%\FactorSeal-check\edge-profile` (`chrome-profile`), remote
 debugging on port 9333 (9334), and the extension loaded unpacked from
-`%LOCALAPPDATA%\FactorSeal-check\extension-chromium`. Edge loads it with
-`--load-extension`; Chrome ignores that since version 137, so the check loads
-it with the DevTools Protocol's `Extensions.loadUnpacked`, which needs
+`%LOCALAPPDATA%\FactorSeal-check\extension-chromium`. Chrome ignores
+`--load-extension` since version 137 and Edge since version 154, so the check
+loads it with the DevTools Protocol's `Extensions.loadUnpacked`, which needs
 `--enable-unsafe-extension-debugging`. Your own browsers and their profiles
 are left alone: they refuse remote debugging on the default profile.
 The extension keeps its ID in any profile (its manifest has a fixed `key`),
