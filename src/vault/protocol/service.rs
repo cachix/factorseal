@@ -536,9 +536,19 @@ impl VaultService {
                 id,
                 signature,
                 duration_seconds,
+                single_use,
             } => {
                 require_live_manager(&state, caller, clock, valid_until)?;
-                state.approve(&id, &signature, duration_seconds, clock.wall(), &provenance)?;
+                state.approve(
+                    &id,
+                    &signature,
+                    approvals::ApprovedLifetime {
+                        duration_seconds,
+                        single_use,
+                    },
+                    clock.wall(),
+                    &provenance,
+                )?;
                 let (now, monotonic_now) = clock.sample();
                 state.touch(now, monotonic_now)?;
                 return Ok(VaultResponseBody::PermissionChanged {

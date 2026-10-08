@@ -47,6 +47,13 @@ envelope is encrypted with a credential-bound symmetric PRF output.
   process, or held by another one reports `Error::NotAvailable`, so a caller
   sees the same structured outcome as a machine with no TPM instead of an
   opaque device error.
+- Windows releases the TPM storage hierarchy authorization only to
+  administrators. When TBS refuses it, TPM sealing uses the empty
+  authorization Windows keeps by default; the storage primary comes from the
+  hierarchy seed, not this value, so both paths derive the same key. A
+  refused authorization is reported as an error. Hierarchy authorization is
+  outside the TPM's dictionary-attack lockout, so the attempt cannot lock the
+  TPM.
 - Windows rejects the explicit TBS emulator interface for TPM sealing and
   requires a user-verifying platform authenticator with PRF support for the
   biometric policy. It uses standard WebAuthn PRF input transformation, fresh

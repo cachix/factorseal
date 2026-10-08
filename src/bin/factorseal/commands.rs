@@ -1186,12 +1186,14 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
             created_at: 1,
             expires_at: 99,
             challenge: [0; 32],
+            expiring_write: false,
         },
     };
     permission.principal.application_id = attack.to_owned();
     permission.principal.user_id = attack.to_owned();
     permission.principal.signer_id = Some(attack.to_owned());
     permission.application.base_dir = Some(attack.to_owned());
+    permission.application.declared_launch_chain = vec![attack.to_owned(), attack.to_owned()];
     permission.target = Some(Box::new(factorseal::PermissionTarget::Entry {
         namespace: attack.as_bytes().to_vec(),
         address: factorseal::SecretAddress::Local {
@@ -1207,13 +1209,31 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
             .all(|byte| byte.is_ascii() && (!byte.is_ascii_control() || *byte == b'\n'))
     );
     let rendered = String::from_utf8(output).unwrap();
-    assert_eq!(rendered.lines().count(), 6);
+    assert_eq!(rendered.lines().count(), 7);
+    assert!(rendered.contains("launched from (not verified): "));
     assert!(rendered.contains("\\u{1b}[2J"));
     assert!(rendered.contains("\\u{202e}"));
     assert!(rendered.contains("trusted:") && rendered.contains("declared:"));
     let long = "é".repeat(600);
     assert!(PromptReason(&long).to_string().ends_with("[truncated]"));
     assert!(!PromptText(&long).to_string().contains("[truncated]"));
+}
+
+/// Caller-declared, not authenticated -- see
+/// `VaultApplicationContext::declared_launch_chain`. The grant binds the
+/// executable, not these. Outermost launcher first.
+fn write_launch_chain(output: &mut impl Write, chain: &[String]) -> std::io::Result<()> {
+    if chain.is_empty() {
+        return Ok(());
+    }
+    write!(output, "  launched from (not verified): ")?;
+    for (index, executable) in chain.iter().rev().enumerate() {
+        if index > 0 {
+            write!(output, " -> ")?;
+        }
+        write!(output, "{}", PromptText(executable))?;
+    }
+    writeln!(output)
 }
 
 fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<(), CliError> {
@@ -1256,9 +1276,11 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
         PermissionState::Granted {
             granted_at,
             expires_at,
+            single_use,
         } => format!(
-            "granted  granted: {granted_at}  expires: {}",
-            expires_at.map_or_else(|| "never".to_owned(), |value| value.to_string())
+            "granted  granted: {granted_at}  expires: {}{}",
+            expires_at.map_or_else(|| "never".to_owned(), |value| value.to_string()),
+            if single_use { "  next write only" } else { "" }
         ),
     };
     writeln!(
@@ -1291,6 +1313,20 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
         )
     })
     .and_then(|()| writeln!(output, "  reason: {reason}"))
+    .and_then(|()| {
+        if let Some(distro) = approval.application.declared_wsl_origin.as_deref() {
+            // Caller-declared, not authenticated -- see
+            // `VaultApplicationContext::declared_wsl_origin`. Surfaced here so a
+            // human approving via the CLI sees the same context the Desktop UI
+            // shows: this is a short-lived lease regardless of duration
+            // requested, since a relayed WSL caller has none of the
+            // executable-identity assurance a native one has.
+            writeln!(output, "  relayed from WSL distro: {}", PromptText(distro))
+        } else {
+            Ok(())
+        }
+    })
+    .and_then(|()| write_launch_chain(output, &approval.application.declared_launch_chain))
     .and_then(|()| {
         if let Some(duration) = approval.application.requested_permission_duration_seconds {
             writeln!(
@@ -1328,16 +1364,34 @@ fn format_grant_duration(seconds: u64) -> String {
     format!("{seconds}s")
 }
 
+/// What a person approving a permission chose it to last.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ParsedGrantDuration {
+pub(super) enum GrantLifetime {
+    /// One write, for a request that allows it (see
+    /// `Permission::allows_single_use`).
+    Once,
     Forever,
     Seconds(u64),
 }
 
-pub(super) fn parse_grant_duration(value: &str) -> Option<ParsedGrantDuration> {
+impl GrantLifetime {
+    /// The approval's duration, and whether it is single-use.
+    fn parts(self) -> (Option<u64>, bool) {
+        match self {
+            Self::Once => (None, true),
+            Self::Forever => (None, false),
+            Self::Seconds(seconds) => (Some(seconds), false),
+        }
+    }
+}
+
+pub(super) fn parse_grant_lifetime(value: &str) -> Option<GrantLifetime> {
     let value = value.trim().to_ascii_lowercase();
     if value == "forever" {
-        return Some(ParsedGrantDuration::Forever);
+        return Some(GrantLifetime::Forever);
+    }
+    if value == "once" {
+        return Some(GrantLifetime::Once);
     }
     let (number, multiplier) = match value.as_bytes().last().copied() {
         Some(b's') => (&value[..value.len() - 1], 1),
@@ -1352,20 +1406,38 @@ pub(super) fn parse_grant_duration(value: &str) -> Option<ParsedGrantDuration> {
         .ok()
         .filter(|number| *number > 0)
         .and_then(|number| number.checked_mul(multiplier))
-        .map(ParsedGrantDuration::Seconds)
+        .map(GrantLifetime::Seconds)
 }
 
-pub(super) fn read_grant_duration(
+/// Ask how long an approval lasts. A request that allows it can be
+/// approved `once`, for that write only. That is the default for a plain
+/// SecretSpec write, as in Desktop's popup; otherwise the caller's requested
+/// duration, or an hour, is (see `Permission::defaults_to_single_use`).
+pub(super) fn read_grant_lifetime(
     input: &mut impl BufRead,
     output: &mut impl Write,
-    requested_default: Option<u64>,
-) -> Result<Option<u64>, CliError> {
-    let default = requested_default.unwrap_or(DEFAULT_GRANT_DURATION_SECONDS);
+    approval: &Permission,
+) -> Result<GrantLifetime, CliError> {
+    let once_allowed = approval.allows_single_use();
+    let default = if approval.defaults_to_single_use() {
+        GrantLifetime::Once
+    } else {
+        GrantLifetime::Seconds(
+            approval
+                .application
+                .requested_permission_duration_seconds
+                .unwrap_or(DEFAULT_GRANT_DURATION_SECONDS),
+        )
+    };
     loop {
         write!(
             output,
             "Permission duration [{}]: ",
-            format_grant_duration(default)
+            match default {
+                GrantLifetime::Once => "once (this write only)".to_owned(),
+                GrantLifetime::Forever => "forever".to_owned(),
+                GrantLifetime::Seconds(seconds) => format_grant_duration(seconds),
+            }
         )
         .and_then(|()| output.flush())
         .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
@@ -1378,16 +1450,22 @@ pub(super) fn read_grant_duration(
             return Err(CliError::ApprovalPrompt("input was closed".to_owned()));
         }
         if answer.trim().is_empty() {
-            return Ok(Some(default));
+            return Ok(default);
         }
-        if let Some(duration) = parse_grant_duration(&answer) {
-            return Ok(match duration {
-                ParsedGrantDuration::Forever => None,
-                ParsedGrantDuration::Seconds(seconds) => Some(seconds),
-            });
+        match parse_grant_lifetime(&answer) {
+            Some(GrantLifetime::Once) if !once_allowed => {}
+            Some(lifetime) => return Ok(lifetime),
+            None => {}
         }
-        writeln!(output, "Enter a duration such as 30m, 8h, 7d, or forever.")
-            .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
+        if once_allowed {
+            writeln!(
+                output,
+                "Enter once for this write only, or a duration such as 30m, 8h, 7d, or forever."
+            )
+        } else {
+            writeln!(output, "Enter a duration such as 30m, 8h, 7d, or forever.")
+        }
+        .map_err(|error| CliError::ApprovalPrompt(error.to_string()))?;
     }
 }
 
@@ -1504,25 +1582,14 @@ fn prompt_permissions(
                 handled.insert(approval.id.clone());
                 match decision {
                     ApprovalDecision::Approve => {
-                        let (grant_duration_seconds, group) = {
+                        let (lifetime, group) = {
                             let mut input = stdin.lock();
                             let mut output = stderr.lock();
-                            let duration = read_grant_duration(
-                                &mut input,
-                                &mut output,
-                                approval.application.requested_permission_duration_seconds,
-                            )?;
+                            let lifetime = read_grant_lifetime(&mut input, &mut output, approval)?;
                             let group = prompt_unlock_group(root, &mut input, &mut output)?;
-                            (duration, group)
+                            (lifetime, group)
                         };
-                        approve(
-                            root,
-                            socket,
-                            factor,
-                            &approval.id,
-                            grant_duration_seconds,
-                            Some(&group),
-                        )?;
+                        approve(root, socket, factor, &approval.id, lifetime, Some(&group))?;
                     }
                     ApprovalDecision::Deny => change_permission(
                         root,
@@ -1556,28 +1623,17 @@ fn approve_with_prompted_group(
         .find(|approval| approval.id == id)
         .ok_or_else(|| VaultError::Protocol("permission is missing or expired".to_owned()))?;
     let device = Vault::inspect(root)?;
-    let (grant_duration_seconds, group) = {
+    let (lifetime, group) = {
         let mut input = stdin.lock();
         let mut output = stderr.lock();
-        let duration = read_grant_duration(
-            &mut input,
-            &mut output,
-            approval.application.requested_permission_duration_seconds,
-        )?;
+        let lifetime = read_grant_lifetime(&mut input, &mut output, approval)?;
         let group = match device.unlock_policy().groups() {
             [group] => group.clone(),
             groups => read_unlock_group_choice(groups, &mut input, &mut output)?,
         };
-        (duration, group)
+        (lifetime, group)
     };
-    approve(
-        root,
-        socket,
-        factor,
-        id,
-        grant_duration_seconds,
-        Some(&group),
-    )
+    approve(root, socket, factor, id, lifetime, Some(&group))
 }
 
 fn approve(
@@ -1585,9 +1641,10 @@ fn approve(
     socket: Option<&Path>,
     factor: FactorSource<'_>,
     id: &str,
-    grant_duration_seconds: Option<u64>,
+    lifetime: GrantLifetime,
     requested_group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
+    let (grant_duration_seconds, single_use) = lifetime.parts();
     let client = native_client(root, socket)?;
     let (_, pending) = permissions(&client, None)?;
     let approval = pending
@@ -1615,6 +1672,9 @@ fn approve(
     if let Some(duration) = grant_duration_seconds {
         helper.arg("--duration-seconds").arg(duration.to_string());
     }
+    if single_use {
+        helper.arg("--single-use");
+    }
     if let Some(group) = requested_group {
         helper.arg("--unlock").arg(group.to_string());
     }
@@ -1641,6 +1701,7 @@ fn approve(
             id: id.to_owned(),
             signature,
             duration_seconds: grant_duration_seconds,
+            single_use,
         },
         PermissionChange::Granted,
     )
@@ -1652,6 +1713,7 @@ pub(super) fn sign_permission(
     id: &str,
     challenge: &str,
     duration: Option<u64>,
+    single_use: bool,
     group: Option<&UnlockGroup>,
 ) -> Result<(), CliError> {
     super::platform::harden_key_owner()?;
@@ -1662,7 +1724,7 @@ pub(super) fn sign_permission(
         .ok_or_else(|| VaultError::Protocol("invalid permission challenge".to_owned()))?;
     let device = Vault::inspect(root)?;
     let unsealed = unseal_selected(root, &device, group, factor)?;
-    let signature = unsealed.sign_permission_challenge(id, &challenge, duration)?;
+    let signature = unsealed.sign_permission_approval(id, &challenge, duration, single_use)?;
     drop(unsealed);
     std::io::stdout()
         .write_all(hex::encode(signature).as_bytes())
