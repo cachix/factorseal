@@ -2,6 +2,7 @@
 //! Masked by default. Ordinary personal fields can opt into visible text;
 //! secret fields never send plaintext to the renderer or text-query callbacks.
 
+use crate::controls::ControlStyle as _;
 use factorseal::security::LockedBytes;
 use gpui::{
     App, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle,
@@ -425,13 +426,9 @@ impl Render for SecretInputState {
         let input = div()
             .w_full()
             .h(px(40.))
-            .px_3()
-            .py_2()
-            .overflow_hidden()
             .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
             .bg(crate::theming::input_background(cx))
+            .text_field(self.focus.is_focused(window), window, cx)
             .track_focus(&self.focus)
             .key_context("FactorsealSecret")
             .on_key_down(cx.listener(Self::key_down))
@@ -446,79 +443,81 @@ impl Render for SecretInputState {
                 }),
             )
             .child(
-                canvas(
-                    move |_, window, _| {
-                        let style = window.text_style();
-                        let run = TextRun {
-                            len: text.len(),
-                            font: style.font(),
-                            color,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                            letter_spacing: style.letter_spacing,
-                        };
-                        window.text_system().shape_line(text, px(14.), &[run], None)
-                    },
-                    move |bounds, line, window, cx| {
-                        let input = entity.read(cx);
-                        let focus = input.focus.clone();
-                        let display_index =
-                            |index| rendered_index(&input.secret.text, index, input.masked);
-                        let selection = display_index(input.selection.start)
-                            ..display_index(input.selection.end);
-                        let caret = line.x_for_index(if input.reversed {
-                            selection.start
-                        } else {
-                            selection.end
-                        });
-                        let offset = (caret - bounds.size.width + px(2.)).max(px(0.));
-                        let origin = bounds.origin - gpui::point(offset, px(0.));
-                        if focus.is_focused(window) {
-                            if selection.is_empty() {
-                                window.paint_quad(gpui::fill(
-                                    Bounds::new(
-                                        origin + gpui::point(caret, px(0.)),
-                                        gpui::size(px(1.), bounds.size.height),
-                                    ),
-                                    cx.theme().foreground,
-                                ));
+                div().size_full().px_3().py_2().overflow_hidden().child(
+                    canvas(
+                        move |_, window, _| {
+                            let style = window.text_style();
+                            let run = TextRun {
+                                len: text.len(),
+                                font: style.font(),
+                                color,
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                                letter_spacing: style.letter_spacing,
+                            };
+                            window.text_system().shape_line(text, px(14.), &[run], None)
+                        },
+                        move |bounds, line, window, cx| {
+                            let input = entity.read(cx);
+                            let focus = input.focus.clone();
+                            let display_index =
+                                |index| rendered_index(&input.secret.text, index, input.masked);
+                            let selection = display_index(input.selection.start)
+                                ..display_index(input.selection.end);
+                            let caret = line.x_for_index(if input.reversed {
+                                selection.start
                             } else {
-                                window.paint_quad(gpui::fill(
-                                    Bounds::from_corners(
-                                        origin
-                                            + gpui::point(
-                                                line.x_for_index(selection.start),
-                                                px(0.),
-                                            ),
-                                        origin
-                                            + gpui::point(
-                                                line.x_for_index(selection.end),
-                                                bounds.size.height,
-                                            ),
-                                    ),
-                                    cx.theme().selection,
-                                ));
+                                selection.end
+                            });
+                            let offset = (caret - bounds.size.width + px(2.)).max(px(0.));
+                            let origin = bounds.origin - gpui::point(offset, px(0.));
+                            if focus.is_focused(window) {
+                                if selection.is_empty() {
+                                    window.paint_quad(gpui::fill(
+                                        Bounds::new(
+                                            origin + gpui::point(caret, px(0.)),
+                                            gpui::size(px(1.), bounds.size.height),
+                                        ),
+                                        cx.theme().foreground,
+                                    ));
+                                } else {
+                                    window.paint_quad(gpui::fill(
+                                        Bounds::from_corners(
+                                            origin
+                                                + gpui::point(
+                                                    line.x_for_index(selection.start),
+                                                    px(0.),
+                                                ),
+                                            origin
+                                                + gpui::point(
+                                                    line.x_for_index(selection.end),
+                                                    bounds.size.height,
+                                                ),
+                                        ),
+                                        cx.theme().selection,
+                                    ));
+                                }
                             }
-                        }
-                        window.handle_input(
-                            &focus,
-                            ElementInputHandler::new(bounds, entity.clone()),
-                            cx,
-                        );
-                        let _ = line.paint(
-                            origin,
-                            bounds.size.height,
-                            gpui::TextAlign::Left,
-                            None,
-                            window,
-                            cx,
-                        );
-                        entity.update(cx, |input, _| input.last_layout = Some((line, origin)));
-                    },
-                )
-                .w_full()
-                .h_full(),
+                            window.handle_input(
+                                &focus,
+                                ElementInputHandler::new(bounds, entity.clone()),
+                                cx,
+                            );
+                            let _ = line.paint(
+                                origin,
+                                bounds.size.height,
+                                gpui::TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                            entity.update(cx, |input, _| input.last_layout = Some((line, origin)));
+                        },
+                    )
+                    .w_full()
+                    .h_full(),
+                ),
             );
         div()
             .w_full()

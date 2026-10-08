@@ -101,7 +101,12 @@ impl DesktopView {
                         .child("Choose a name you’ll recognize when pairing and syncing your personal secrets.")))
                 .child(v_flex().gap_2()
                     .child(div().text_sm().font_medium().child("Device name"))
-                    .child(Input::new(&self.device_name))
+                    .child({
+                        let device_name = self.device_name.clone();
+                        crate::controls::hover_field("device-name-field", move |border| {
+                            Input::new(&device_name).border_color(border)
+                        })
+                    })
                     .child(div().text_xs().text_color(theme.muted_foreground)
                         .child("We’ve filled in your computer’s hostname. You can change it.")))
                 .when_some(self.devices_notice.clone(), |panel, error| {

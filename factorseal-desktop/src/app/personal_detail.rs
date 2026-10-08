@@ -133,8 +133,7 @@ impl DesktopView {
                 .child(
                     div()
                         .id("personal-item-breadcrumb")
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(theme.muted_foreground))
+                        .text_control(cx)
                         .child("Personal secrets")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.show_personal_panel(PersonalPanel::Overview, cx);
