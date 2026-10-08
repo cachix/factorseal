@@ -287,15 +287,16 @@ impl DesktopView {
             };
             panel = panel.child(
                 h_flex()
+                    .id(("browser", index))
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .child(div().font_semibold().child(browser.name()))
+                    .child(div().font_semibold().child(text("name", browser.name())))
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(state),
+                            .child(text("state", state)),
                     )
                     .when(
                         self.settings_open && paired_count == 0 && !extension_installed,

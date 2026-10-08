@@ -468,7 +468,6 @@ impl DesktopRuntime {
         })
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn approve_permissions(
         &self,
         metadata: &VaultMetadata,
@@ -476,6 +475,7 @@ impl DesktopRuntime {
         group: factorseal::UnlockGroup,
         password: Zeroizing<Vec<u8>>,
         duration: Option<u64>,
+        single_use: bool,
     ) -> Result<(), String> {
         let requests = permissions
             .iter()
@@ -484,7 +484,7 @@ impl DesktopRuntime {
                 else {
                     return Err("permission is no longer pending".to_owned());
                 };
-                Ok((permission.id.clone(), challenge, duration))
+                Ok((permission.id.clone(), challenge, duration, single_use))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let password = LockedBytes::from_zeroizing(password).map_err(|error| error.to_string())?;
@@ -504,6 +504,7 @@ impl DesktopRuntime {
                     id: permission.id.clone(),
                     signature,
                     duration_seconds: duration,
+                    single_use,
                 })
                 .map_err(|error| error.to_string())?,
             )?;
@@ -511,7 +512,6 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn deny_permission(
         &self,
         metadata: &VaultMetadata,
@@ -622,6 +622,13 @@ impl DesktopRuntime {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            // CREATE_NO_WINDOW: Desktop has no console to share, so the worker
+            // would otherwise open its own console window.
+            command.creation_flags(0x0800_0000);
+        }
         let child = command
             .spawn()
             .map_err(|e| format!("could not start vault worker: {e}"))?;
