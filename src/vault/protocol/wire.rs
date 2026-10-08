@@ -14,12 +14,26 @@ use crate::vault::{
     DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
 };
 
+// Version 12 adds revision-bound permission pages and logical keyring transfers.
 // Version 16 adds reviewed browser credential saves to the manager-only boundary.
-pub(super) const PROTOCOL_VERSION: u8 = 16;
+// Version 17 adds the caller-declared WSL origin hint on VaultApplicationContext.
+// Version 18 adds the caller-declared launch chain on VaultApplicationContext,
+// and single-use write approvals.
+pub(super) const PROTOCOL_VERSION: u8 = 18;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
 pub const MAX_PERMISSION_WAIT_MS: u64 = 5_000;
+/// Maximum lifetime for a grant created from a WSL-relayed request,
+/// regardless of the duration requested or approved. See
+/// [`VaultApplicationContext::declared_wsl_origin`].
+pub const MAX_WSL_GRANT_SECONDS: u64 = 300;
+/// How long a single-use write permission waits for its write. See
+/// [`VaultAction::ApprovePermission`].
+pub const SINGLE_USE_GRANT_SECONDS: u64 = 300;
+/// Maximum number of executables in
+/// [`VaultApplicationContext::declared_launch_chain`].
+pub const MAX_DECLARED_LAUNCH_CHAIN: usize = 4;
 /// Maximum number of metadata-only entries returned by one list request.
 ///
 /// Eight complete native SecretSpec addresses still fit below the one-MiB
@@ -319,6 +333,25 @@ pub struct VaultApplicationContext {
     /// display context until the user chooses and signs the actual duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_permission_duration_seconds: Option<u64>,
+    /// Caller-declared WSL distro name for a request relayed through the
+    /// interop broker. Never authenticates anything and never affects the
+    /// caller's fingerprint: transport authentication still resolves the
+    /// broker's own SID and executable digest exactly as any other Windows
+    /// client. It is display context for the approval prompt, and it caps
+    /// the lifetime of any grant approved for such a request at
+    /// `MAX_WSL_GRANT_SECONDS`, since it carries no equivalent of the
+    /// executable-identity hint a native caller gets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_wsl_origin: Option<String>,
+    /// Caller-declared executables that launched the caller, nearest first:
+    /// for the SecretSpec provider, `secretspec` and then whatever ran it.
+    /// Display context only. The caller reads it from the process table, and
+    /// a parent process can be named arbitrarily at creation on Windows, so
+    /// it never affects grants, matching or the caller's fingerprint. A grant
+    /// approved for such a request still binds the transport-authenticated
+    /// caller (the provider), not these executables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_launch_chain: Vec<String>,
 }
 
 impl VaultApplicationContext {
@@ -334,6 +367,8 @@ impl VaultApplicationContext {
             base_dir,
             reason,
             requested_permission_duration_seconds: None,
+            declared_wsl_origin: None,
+            declared_launch_chain: Vec::new(),
         };
         context.validate()?;
         Ok(context)
@@ -344,6 +379,18 @@ impl VaultApplicationContext {
         duration: Option<u64>,
     ) -> VaultResult<Self> {
         self.requested_permission_duration_seconds = duration;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_declared_wsl_origin(mut self, distro: Option<String>) -> VaultResult<Self> {
+        self.declared_wsl_origin = distro;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_declared_launch_chain(mut self, chain: Vec<String>) -> VaultResult<Self> {
+        self.declared_launch_chain = chain;
         self.validate()?;
         Ok(self)
     }
@@ -389,6 +436,25 @@ impl VaultApplicationContext {
         if self.requested_permission_duration_seconds == Some(0) {
             return Err(VaultError::Protocol(
                 "requested permission duration must be positive".to_owned(),
+            ));
+        }
+        if self
+            .declared_wsl_origin
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > MAX_APPLICATION_COMPONENT_BYTES)
+        {
+            return Err(VaultError::Protocol(
+                "declared WSL origin is empty or too long".to_owned(),
+            ));
+        }
+        if self.declared_launch_chain.len() > MAX_DECLARED_LAUNCH_CHAIN
+            || self
+                .declared_launch_chain
+                .iter()
+                .any(|value| value.is_empty() || value.len() > MAX_APPLICATION_COMPONENT_BYTES)
+        {
+            return Err(VaultError::Protocol(
+                "declared launch chain is too long or has an empty entry".to_owned(),
             ));
         }
         Ok(())
@@ -700,9 +766,16 @@ pub enum VaultAction {
     ApprovePermission {
         id: String,
         signature: Vec<u8>,
-        /// User-selected permission lifetime. `None` means no expiry.
+        /// User-selected permission lifetime. `None` means no expiry,
+        /// unless `single_use` is set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_seconds: Option<u64>,
+        /// Allow one write only: the vault removes the permission when it
+        /// authorizes the first write, and after `SINGLE_USE_GRANT_SECONDS`
+        /// if none comes. Only for a SecretSpec write request, and never
+        /// with a duration. The signature covers this choice.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        single_use: bool,
     },
     DenyPermission {
         id: String,
@@ -814,8 +887,14 @@ impl VaultAction {
                 id,
                 signature,
                 duration_seconds,
+                single_use,
             } => {
                 validate_permission_id(id)?;
+                if *single_use && duration_seconds.is_some() {
+                    return Err(VaultError::Protocol(
+                        "a single-use approval takes no duration".to_owned(),
+                    ));
+                }
                 if signature.is_empty() || signature.len() > 16 * 1024 {
                     return Err(VaultError::Protocol(
                         "permission signature is empty or too long".to_owned(),
@@ -1230,6 +1309,31 @@ pub enum PermissionTarget {
 }
 
 impl Permission {
+    /// Whether this request can be approved for one write only (see
+    /// [`VaultAction::ApprovePermission`]): the vault accepts that only for
+    /// a SecretSpec write.
+    #[must_use]
+    pub fn allows_single_use(&self) -> bool {
+        self.scope == Some(DocumentKind::SecretSpecProviderCache)
+            && self.operation == PermissionOperation::Put
+    }
+
+    /// Whether an approval prompt should offer one write only as its
+    /// default. Not for an expiring write: SecretSpec's cache refreshes an
+    /// entry on its own each time it expires, and a single-use approval
+    /// would ask again at every refresh.
+    #[must_use]
+    pub fn defaults_to_single_use(&self) -> bool {
+        self.allows_single_use()
+            && !matches!(
+                self.state,
+                PermissionState::Pending {
+                    expiring_write: true,
+                    ..
+                }
+            )
+    }
+
     /// Whether this grant covers the entry, subject to its caller, operation,
     /// lifetime, and (for project grants) working-directory restrictions.
     #[must_use]
@@ -1284,11 +1388,18 @@ pub enum PermissionState {
         created_at: u64,
         expires_at: u64,
         challenge: [u8; 32],
+        /// The request writes a value that expires, as SecretSpec's cache
+        /// does when it refreshes an entry on its own.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        expiring_write: bool,
     },
     Granted {
         granted_at: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<u64>,
+        /// Covers one write, and is removed when that write is authorized.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        single_use: bool,
     },
 }
 
@@ -1591,6 +1702,7 @@ mod entry_access_tests {
             state: PermissionState::Granted {
                 granted_at: 1,
                 expires_at: None,
+                single_use: false,
             },
         }
     }

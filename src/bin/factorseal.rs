@@ -197,6 +197,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             id,
             challenge,
             duration_seconds,
+            single_use,
             unlock,
         } => commands::sign_permission(
             &root,
@@ -204,6 +205,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             &id,
             &challenge,
             duration_seconds,
+            single_use,
             unlock.as_ref(),
         ),
         Command::Init { unlock, fips } => initialize(&root, unlock, factor, fips),
