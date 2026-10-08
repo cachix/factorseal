@@ -2,6 +2,7 @@ use crate::secret_input::SecretInputState;
 #[cfg(target_os = "linux")]
 mod access;
 mod approval_window;
+mod breadcrumb;
 mod browser;
 mod devices;
 mod entry_access;
@@ -2945,7 +2946,6 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) -> Div {
         if self.personal_panel == PersonalPanel::NewItem {
-            let muted = cx.theme().muted_foreground;
             return v_flex()
                 .size_full()
                 .min_h_0()
@@ -2953,24 +2953,10 @@ impl DesktopView {
                 .gap_4()
                 .p_6()
                 .child(
-                    h_flex()
+                    div()
                         .flex_none()
-                        .items_center()
-                        .flex_wrap()
-                        .gap_2()
                         .text_xl()
                         .font_semibold()
-                        .child(
-                            div()
-                                .id("personal-secrets-breadcrumb")
-                                .cursor_pointer()
-                                .hover(move |style| style.text_color(muted))
-                                .child("Personal secrets")
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.show_personal_panel(PersonalPanel::Overview, cx);
-                                })),
-                        )
-                        .child(div().text_color(muted).child("→"))
                         .child("New Item"),
                 )
                 .child(
@@ -3122,32 +3108,6 @@ impl DesktopView {
             .and_then(VaultSelection::page_title)
     }
 
-    fn render_vault_breadcrumb(&self, cx: &mut Context<Self>) -> Div {
-        let title = self.vault_page_title();
-        let theme = cx.theme();
-        if let Some(title) = title {
-            h_flex()
-                .items_center()
-                .gap_2()
-                .text_2xl()
-                .font_semibold()
-                .child(
-                    div()
-                        .id("vault-breadcrumb")
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(theme.muted_foreground))
-                        .child("Your vault")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.show_vault_browser(cx);
-                        })),
-                )
-                .child(div().text_color(theme.muted_foreground).child("→"))
-                .child(title)
-        } else {
-            h_flex().text_2xl().font_semibold().child("Your vault")
-        }
-    }
-
     fn render_vault_workspace(
         &self,
         contents: &VaultContents,
@@ -3216,53 +3176,58 @@ impl DesktopView {
             .items_center()
             .flex_wrap()
             .gap_3()
-            .child(self.render_vault_breadcrumb(cx))
-            .when(self.vault_page_title().is_none(), |row| {
-                row.child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("vault-devices")
-                                .small()
-                                .label("Devices")
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.select_vault_item(VaultSelection::Devices, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("transfer-credentials")
-                                .small()
-                                .disabled(self.transfer_busy)
-                                .label("Transfer credentials")
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.select_vault_item(VaultSelection::TransferCredentials, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("backup-vault")
-                                .small()
-                                .disabled(self.transfer_busy)
-                                .label("Back up vault")
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.select_vault_item(VaultSelection::BackupVault, cx);
-                                })),
-                        ),
-                )
-            });
+            .child(div().text_2xl().font_semibold().child("Your vault"))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("vault-devices")
+                            .small()
+                            .label("Devices")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.select_vault_item(VaultSelection::Devices, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("transfer-credentials")
+                            .small()
+                            .disabled(self.transfer_busy)
+                            .label("Transfer credentials")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.select_vault_item(VaultSelection::TransferCredentials, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("backup-vault")
+                            .small()
+                            .disabled(self.transfer_busy)
+                            .label("Back up vault")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.select_vault_item(VaultSelection::BackupVault, cx);
+                            })),
+                    ),
+            );
+        let subtitle = |text| {
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let intro = match self.selected_vault_item {
+            Some(VaultSelection::Devices) => {
+                Some(v_flex().child(subtitle("Pair devices to sync your personal secrets.")))
+            }
+            _ if self.vault_page_title().is_some() => None,
+            _ => Some(v_flex().gap_1().child(header_title).child(subtitle(
+                "On this device. Available to authorized applications.",
+            ))),
+        };
         v_flex()
             .size_full()
             .min_h_0()
             .overflow_hidden()
             .gap_5()
-            .child(v_flex().flex_none().gap_1().child(header_title).child(
-                div().text_sm().text_color(theme.muted_foreground).child(
-                    if self.selected_vault_item == Some(VaultSelection::Devices) {
-                        "Pair devices to sync your personal secrets."
-                    } else {
-                        "On this device. Available to authorized applications."
-                    },
-                ),
-            ))
+            .when_some(intro, |page, intro| page.child(intro.flex_none()))
             .child(self.render_vault_workspace(contents, compact, cx))
             .when_some(contents_error.map(str::to_owned), |element, error| {
                 element.child(
@@ -3600,41 +3565,7 @@ impl Render for DesktopView {
                     .gap_4()
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .id("vault-home")
-                                    .items_center()
-                                    .gap_2()
-                                    .when(self.settings_open, |element| {
-                                        element
-                                            .cursor_pointer()
-                                            .hover(|style| style.text_color(theme.muted_foreground))
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.settings_open = false;
-                                                cx.notify();
-                                            }))
-                                    })
-                                    .child(brand_mark(36., theme.foreground))
-                                    .child(
-                                        div()
-                                            .text_size(rems(23. / 16.))
-                                            .font_semibold()
-                                            .child("FactorSeal"),
-                                    ),
-                            )
-                            .when(self.settings_open, |element| {
-                                element
-                                    .child(
-                                        gpui_component::Icon::new(IconName::ChevronRight)
-                                            .text_color(theme.muted_foreground),
-                                    )
-                                    .child(div().text_lg().font_semibold().child("Settings"))
-                            }),
-                    )
+                    .child(self.render_breadcrumb(cx))
                     .child(
                         h_flex()
                             .gap_2()

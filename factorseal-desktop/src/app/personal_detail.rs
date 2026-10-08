@@ -130,17 +130,6 @@ impl DesktopView {
                 .gap_2()
                 .text_xl()
                 .font_semibold()
-                .child(
-                    div()
-                        .id("personal-item-breadcrumb")
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(theme.muted_foreground))
-                        .child("Personal secrets")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.show_personal_panel(PersonalPanel::Overview, cx);
-                        })),
-                )
-                .child(div().text_color(theme.muted_foreground).child("→"))
                 .child(title)
                 .child(
                     div()
