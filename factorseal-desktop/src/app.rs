@@ -78,11 +78,19 @@ struct DesktopWindow {
     view: Arc<std::sync::Mutex<Option<gpui::Entity<DesktopView>>>>,
     handle: Option<AnyWindowHandle>,
     visible: bool,
+    /// When the window last lost the focus. Clicking the tray icon makes the
+    /// taskbar active first on Windows, so a window that was in front is no
+    /// longer focused when the click arrives.
+    deactivated_at: Option<std::time::Instant>,
     snapshot: Snapshot,
     refresh_generation: u64,
 }
 
 impl Global for DesktopWindow {}
+
+/// How long after losing the focus the window still counts as in front for
+/// a tray icon click.
+const TRAY_CLICK_FOCUS_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 struct RuntimeGlobal(Arc<DesktopRuntime>);
 
@@ -929,6 +937,15 @@ impl DesktopView {
         }
     }
 
+    /// Records when the window loses the focus, for the tray icon's toggle.
+    fn track_deactivation(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.observe_window_activation(window, |_, window, cx| {
+            if !window.is_window_active() && cx.has_global::<DesktopWindow>() {
+                cx.global_mut::<DesktopWindow>().deactivated_at = Some(std::time::Instant::now());
+            }
+        })
+    }
+
     fn new(
         runtime: Arc<DesktopRuntime>,
         snapshot: Snapshot,
@@ -936,6 +953,7 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) -> Self {
         Self::poll_devices(Arc::clone(&runtime), cx);
+        let activation = Self::track_deactivation(window, cx);
         let settings = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
         let selected_group = snapshot
             .metadata()
@@ -1031,7 +1049,7 @@ impl DesktopView {
             system_integrations_expanded: true,
             #[cfg(target_os = "linux")]
             wifi_migration: wifi::State::default(),
-            _subscriptions: vec![password_submit, vault_search_change],
+            _subscriptions: vec![password_submit, vault_search_change, activation],
         }
     }
 
@@ -3829,11 +3847,15 @@ fn toggle_desktop_window(cx: &mut App) {
     let desktop = cx.global::<DesktopWindow>();
     let visible = desktop.visible;
     let handle = desktop.handle;
-    let focused = handle.is_some_and(|handle| {
-        handle
-            .update(cx, |_, window, _| window.is_window_active())
-            .unwrap_or(false)
-    });
+    let just_deactivated = desktop
+        .deactivated_at
+        .is_some_and(|at| at.elapsed() < TRAY_CLICK_FOCUS_GRACE);
+    let focused = just_deactivated
+        || handle.is_some_and(|handle| {
+            handle
+                .update(cx, |_, window, _| window.is_window_active())
+                .unwrap_or(false)
+        });
     if visible && focused {
         hide_desktop(cx);
     } else {
@@ -4064,6 +4086,7 @@ pub(crate) fn setup(
         view: Arc::clone(&view_holder),
         handle: None,
         visible: false,
+        deactivated_at: None,
         snapshot: initial.clone(),
         refresh_generation: 0,
     });

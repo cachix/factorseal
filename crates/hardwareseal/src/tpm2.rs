@@ -37,6 +37,15 @@ pub(super) trait Transport {
     fn owner_auth(&mut self) -> Result<Zeroizing<Vec<u8>>, Error> {
         Ok(Zeroizing::new(Vec::new()))
     }
+
+    /// Explain a storage hierarchy authorization the TPM refused.
+    fn owner_auth_rejected(&self) -> Error {
+        Error::Hardware(
+            "the TPM refused the storage hierarchy authorization: the storage \
+             hierarchy has an authorization value this process does not have"
+                .to_owned(),
+        )
+    }
 }
 
 pub(super) struct SealedObject {
@@ -108,7 +117,12 @@ fn create_primary(transport: &mut impl Transport) -> Result<u32, Error> {
     body.sized(|_| {});
     body.u32(0);
 
-    let response = submit(transport, TPM_ST_SESSIONS, TPM_CC_CREATE_PRIMARY, body)?;
+    let response = match submit(transport, TPM_ST_SESSIONS, TPM_CC_CREATE_PRIMARY, body) {
+        Err(Rejected(code)) if is_bad_session_auth(code) => {
+            return Err(transport.owner_auth_rejected());
+        }
+        result => result?,
+    };
     response_handle(&response)
 }
 
@@ -172,7 +186,50 @@ fn unseal_loaded(transport: &mut impl Transport, child: u32) -> Result<Zeroizing
 fn flush(transport: &mut impl Transport, handle: u32) -> Result<(), Error> {
     let mut body = Writer::default();
     body.u32(handle);
-    submit(transport, TPM_ST_NO_SESSIONS, TPM_CC_FLUSH_CONTEXT, body).map(drop)
+    submit(transport, TPM_ST_NO_SESSIONS, TPM_CC_FLUSH_CONTEXT, body)?;
+    Ok(())
+}
+
+/// Why a submitted command produced no usable response.
+enum SubmitError {
+    /// The TPM answered with this nonzero response code.
+    Rejected(u32),
+    /// The transport failed or the response was malformed.
+    Failed(Error),
+}
+
+use SubmitError::{Failed, Rejected};
+
+impl From<SubmitError> for Error {
+    fn from(error: SubmitError) -> Self {
+        match error {
+            Rejected(code) => Self::Hardware(format!(
+                "TPM command failed with response code 0x{code:08x}"
+            )),
+            Failed(error) => error,
+        }
+    }
+}
+
+impl From<Error> for SubmitError {
+    fn from(error: Error) -> Self {
+        Failed(error)
+    }
+}
+
+/// Whether a response code reports a wrong password in the command's session.
+///
+/// Format-one codes with the session bit set name the failing session in bits
+/// 8..11; the error number is TPM_RC_BAD_AUTH or TPM_RC_AUTH_FAIL.
+const fn is_bad_session_auth(code: u32) -> bool {
+    const RC_FMT1: u32 = 0x080;
+    const RC_SESSION: u32 = 0x800;
+    const RC_AUTH_FAIL: u32 = 0x00e;
+    const RC_BAD_AUTH: u32 = 0x022;
+    code & !0xfff == 0
+        && code & RC_FMT1 != 0
+        && code & RC_SESSION != 0
+        && matches!(code & 0x03f, RC_AUTH_FAIL | RC_BAD_AUTH)
 }
 
 fn submit(
@@ -180,7 +237,7 @@ fn submit(
     tag: u16,
     command_code: u32,
     body: Writer,
-) -> Result<Zeroizing<Vec<u8>>, Error> {
+) -> Result<Zeroizing<Vec<u8>>, SubmitError> {
     let started = std::time::Instant::now();
     let body = body.finish();
     let length = u32::try_from(RESPONSE_HEADER_BYTES + body.len())
@@ -195,7 +252,7 @@ fn submit(
     let response = transport.execute(&command);
     let outcome = match response {
         Ok(response) => validate_response(&response).map(|()| response),
-        Err(error) => Err(error),
+        Err(error) => Err(Failed(error)),
     };
     crate::timing::record(
         "tpm_command",
@@ -230,21 +287,21 @@ pub(super) fn fuzz_response(bytes: &[u8]) {
     }
 }
 
-fn validate_response(response: &[u8]) -> Result<(), Error> {
+fn validate_response(response: &[u8]) -> Result<(), SubmitError> {
     if response.len() < RESPONSE_HEADER_BYTES || response.len() > MAX_RESPONSE_BYTES {
-        return Err(Error::Hardware("invalid TPM response length".to_owned()));
+        return Err(Failed(Error::Hardware(
+            "invalid TPM response length".to_owned(),
+        )));
     }
     let declared = read_u32(response, 2)? as usize;
     if declared != response.len() {
-        return Err(Error::Hardware(
+        return Err(Failed(Error::Hardware(
             "TPM response length does not match its header".to_owned(),
-        ));
+        )));
     }
     let response_code = read_u32(response, 6)?;
     if response_code != 0 {
-        return Err(Error::Hardware(format!(
-            "TPM command failed with response code 0x{response_code:08x}"
-        )));
+        return Err(Rejected(response_code));
     }
     Ok(())
 }
@@ -399,6 +456,86 @@ mod tests {
     fn responses_reject_length_mismatch() {
         let response = [0x80, 0x01, 0, 0, 0, 11, 0, 0, 0, 0];
         assert!(validate_response(&response).is_err());
+    }
+
+    /// Answers every command with one response code and records the commands.
+    struct Scripted {
+        owner_auth: &'static [u8],
+        response_code: u32,
+        commands: Vec<Vec<u8>>,
+    }
+
+    impl Scripted {
+        fn new(owner_auth: &'static [u8], response_code: u32) -> Self {
+            Self {
+                owner_auth,
+                response_code,
+                commands: Vec::new(),
+            }
+        }
+    }
+
+    impl Transport for Scripted {
+        fn execute(&mut self, command: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+            self.commands.push(command.to_vec());
+            let mut response = vec![0x80, 0x01, 0, 0, 0, 14];
+            response.extend_from_slice(&self.response_code.to_be_bytes());
+            response.extend_from_slice(&0x8000_0000_u32.to_be_bytes());
+            Ok(Zeroizing::new(response))
+        }
+
+        fn owner_auth(&mut self) -> Result<Zeroizing<Vec<u8>>, Error> {
+            Ok(Zeroizing::new(self.owner_auth.to_vec()))
+        }
+
+        fn owner_auth_rejected(&self) -> Error {
+            Error::Hardware("scripted rejection".to_owned())
+        }
+    }
+
+    /// The password carried by a create-primary command's single session.
+    fn create_primary_password(command: &[u8]) -> &[u8] {
+        // Header (10), handle (4), auth area size (4), TPM_RS_PW (4), empty
+        // nonce (2), attributes (1), then the TPM2B password.
+        let length = read_u16(command, 25).expect("password length") as usize;
+        &command[27..27 + length]
+    }
+
+    #[test]
+    fn create_primary_sends_the_transport_owner_auth() {
+        for auth in [&b""[..], b"hierarchy-password"] {
+            let mut transport = Scripted::new(auth, 0);
+            let primary = create_primary(&mut transport).expect("create primary");
+            assert_eq!(primary, 0x8000_0000);
+            assert_eq!(create_primary_password(&transport.commands[0]), auth);
+        }
+    }
+
+    #[test]
+    fn refused_hierarchy_auth_is_reported_by_the_transport() {
+        for code in [0x0000_09a2, 0x0000_098e] {
+            let mut transport = Scripted::new(b"", code);
+            let error = create_primary(&mut transport).expect_err("bad auth");
+            assert_eq!(
+                error.to_string(),
+                "hardware security operation failed: scripted rejection"
+            );
+        }
+        let error = create_primary(&mut Scripted::new(b"", 0x0000_0101)).expect_err("failure");
+        assert!(error.to_string().contains("0x00000101"), "{error}");
+    }
+
+    #[test]
+    fn bad_session_auth_codes_are_recognized() {
+        assert!(is_bad_session_auth(0x0000_09a2));
+        assert!(is_bad_session_auth(0x0000_098e));
+        assert!(is_bad_session_auth(0x0000_0aa2));
+        // Same error numbers attributed to a handle or parameter, a
+        // format-zero code, and a vendor/TBS code.
+        assert!(!is_bad_session_auth(0x0000_01a2));
+        assert!(!is_bad_session_auth(0x0000_00a2));
+        assert!(!is_bad_session_auth(0x0000_0922));
+        assert!(!is_bad_session_auth(0x8028_09a2));
     }
 
     #[cfg(target_os = "linux")]

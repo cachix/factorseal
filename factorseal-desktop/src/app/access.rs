@@ -949,6 +949,20 @@ impl Render for AccessView {
                     card = card.child(detail(label, value.clone(), cx));
                 }
             }
+            if let Some(distro) = &grant.application.declared_wsl_origin {
+                // Caller-declared, not authenticated -- see
+                // `VaultApplicationContext::declared_wsl_origin`. Shown
+                // prominently because it changes what this approval actually
+                // grants: a short-lived lease regardless of the duration
+                // chosen below, since this caller has none of the
+                // executable-identity assurance a native one has.
+                card = card.child(detail("Relayed from WSL distro", distro.clone(), cx));
+            }
+            card = card.child(detail(
+                "Requested by",
+                application_name(std::path::Path::new(&grant.principal.application_id)),
+                cx,
+            ));
             technical = technical.child(detail(
                 "Executable",
                 grant.principal.application_id.clone(),
