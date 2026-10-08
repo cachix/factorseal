@@ -6,15 +6,19 @@ import {webcrypto} from 'node:crypto';
 const core=await readFile(new URL('./core.js',import.meta.url),'utf8');
 const background=await readFile(new URL('./background.js',import.meta.url),'utf8');
 const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);}});
-async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false}={}) {
-  let stored=paired?{paired:true}:{},polls=0,signatures=0,connects=0,saving=false;
+async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false,forgotten=0,focused=true}={}) {
+  let stored=paired?{paired:true}:{},polls=0,signatures=0,connects=0,saving=false,deadPort=false;
   const fills=[],commands=[],registrations=[],injections=[];
   const tab={id:1,windowId:1,active:true,url:'https://example.com/login'};
   const runtime={id:'factorseal-test',getURL:p=>`extension://factorseal/${p}`,onMessage:event(),onInstalled:event(),connectNative(){
     connects++;
-    const port={onMessage:event(),onDisconnect:event(),disconnect(){for(const fn of this.onDisconnect.listeners)fn();},postMessage(request){
+    // As in the browsers, onDisconnect reports only the host going away, not
+    // the extension closing the port itself; a closed port throws on use.
+    const port={onMessage:event(),onDisconnect:event(),closed:false,disconnect(){this.closed=true;},hostGone(){for(const fn of this.onDisconnect.listeners)fn();},postMessage(request){
+      // Chrome throws this when the host is gone before onDisconnect fires.
+      if(deadPort||this.closed){deadPort=false;throw new Error('Attempting to use a disconnected port object');}
       (async()=>{
-        if(nativeError){runtime.lastError={message:nativeError};port.disconnect();delete runtime.lastError;return;}
+        if(nativeError){runtime.lastError={message:nativeError};port.hostGone();delete runtime.lastError;return;}
         let response;
         if(request.type==='hello') response={type:'hello',version:1,session:'a'.repeat(64)};
         else {
@@ -22,7 +26,8 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
           const publicKey=await webcrypto.subtle.importKey('raw',Buffer.from(key,'hex'),'Ed25519',false,['verify']);
           assert.equal(await webcrypto.subtle.verify('Ed25519',publicKey,Buffer.from(signature,'hex'),new TextEncoder().encode(payload)),true);signatures++;
           const command=JSON.parse(payload);commands.push(command);
-          if(command.action.type==='pair')response={type:'finished',reason:pairReason};
+          if(forgotten>0){forgotten--;response={type:'finished',reason:'unauthorized'};}
+          else if(command.action.type==='pair')response={type:'finished',reason:pairReason};
           else if(command.action.type==='revoke')response={type:'finished',reason:'done'};
           else if(command.action.type==='detect'){response={type:'state',state:'awaiting_unseal'};}
           else if(command.action.type==='save'){
@@ -47,15 +52,15 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
   const api={runtime,storage:{local:{get:async key=>({[key]:stored[key]}),set:async values=>Object.assign(stored,values),setAccessLevel:async()=>{}}},
     permissions:{contains:async()=>true,onAdded:event(),onRemoved:event()},
     scripting:{getRegisteredContentScripts:async()=>registrations,registerContentScripts:async scripts=>registrations.push(...scripts),executeScript:async options=>injections.push(options),unregisterContentScripts:async()=>{}},
-    tabs:{query:async()=>[tab],get:async()=>tab,sendMessage:async(_tab,m)=>{if(m.type==='check')return {valid:true,document:m.document};fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
-    windows:{get:async()=>({focused:true}),onFocusChanged:event()}};
+    tabs:{query:async()=>[tab],get:async()=>tab,sendMessage:async(_tab,m)=>{if(m.type==='check')return {valid:true,document:m.document};if(m.type==='retry')return {found:tab.form!==false};if(m.type==='save-current')return {offered:true};fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
+    windows:{get:async()=>({focused}),onFocusChanged:event()}};
   const navigator=chrome?{userAgentData:{brands:[{brand:'Chromium'}]}}:{userAgent:'Firefox/129'};
   const context={navigator,crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,btoa,setTimeout:(fn,ms)=>setTimeout(fn,ms===350?1:ms),clearTimeout,console};
   context[chrome?'chrome':'browser']=api;
   vm.runInNewContext(core,context);vm.runInNewContext(background,context);
   const message=(m,sender)=>new Promise(resolve=>runtime.onMessage.listeners[0](m,sender,resolve));
   const sender={id:runtime.id,frameId:0,tab,url:tab.url};
-  return {message,sender,fills,commands,registrations,injections,setNativeError(value){nativeError=value;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
+  return {message,sender,tab,fills,commands,registrations,injections,setNativeError(value){nativeError=value;},killPort(){deadPort=true;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
 }
 async function until(condition){for(let i=0;i<300;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw new Error('timed out');}
 test('submitted save survives navigation and never persists credentials in extension storage',async()=>{
@@ -158,4 +163,86 @@ test('denied pairing does not unlock the paired UI',async()=>{
   assert.equal((await h.message({type:'status'},popupSender)).paired,false);
   assert.equal(h.registrations.length,0);
   assert.equal(h.injections.length,0);
+});
+
+test('a native port that died before its disconnect was reported is reconnected',async()=>{
+  const h=await harness();
+  const sender={url:'extension://factorseal/popup.html'};
+  await h.message({type:'pair'},sender);
+  await until(()=>h.commands.length===1);
+  h.killPort();
+  await h.message({type:'pair'},sender);
+  let state;
+  for(let i=0;i<200;i++){
+    state=await h.message({type:'status'},sender);
+    if(state.status==='idle'&&h.connects===2)break;
+    await new Promise(r=>setTimeout(r,5));
+  }
+  assert.notEqual(state.status,'Attempting to use a disconnected port object');
+  assert.equal(h.connects,2);
+  assert.equal(state.status,'idle');
+});
+test('after Desktop answers unauthorized, the next request connects again',async()=>{
+  const h=await harness({pairReason:'unauthorized'});
+  const sender={url:'extension://factorseal/popup.html'};
+  // Each request is refused, sent once more on a new connection, refused again.
+  await h.message({type:'pair'},sender);
+  await until(()=>h.commands.length===2);
+  await h.message({type:'pair'},sender);
+  await until(()=>h.commands.length===4);
+  assert.equal(h.connects,4);
+});
+test('a request Desktop refuses for a forgotten session connects again and is sent once more',async()=>{
+  const h=await harness({forgotten:1});
+  const sender={url:'extension://factorseal/popup.html'};
+  await h.message({type:'pair'},sender);
+  await until(()=>h.stored.paired===true);
+  assert.equal(h.connects,2);
+  assert.deepEqual(h.commands.map(c=>c.action.type),['pair','pair']);
+  assert.notEqual(h.commands[0].session,undefined);
+});
+test('a request refused twice is not sent a third time',async()=>{
+  const h=await harness({forgotten:5});
+  const sender={url:'extension://factorseal/popup.html'};
+  await h.message({type:'pair'},sender);
+  await until(()=>h.commands.length===2);
+  await new Promise(r=>setTimeout(r,50));
+  assert.equal(h.commands.length,2);
+  assert.notEqual(h.stored.paired,true);
+});
+test('Save login from this page is taken once while the popup keeps the focus',async()=>{
+  const h=await harness({paired:true,focused:false});
+  const popup={url:'extension://factorseal/popup.html'};
+  const save=document=>h.message({type:'save',document,username:'alice',password:'secret'},h.sender);
+  assert.equal((await save('before')).accepted,false);
+  assert.equal((await h.message({type:'save-page'},popup)).offered,true);
+  assert.equal((await save('page')).accepted,true);
+  await until(()=>h.commands.some(c=>c.action.type==='save'));
+  assert.equal((await save('again')).accepted,false);
+});
+test('a request status shows only on the tab and site it was about',async()=>{
+  const h=await harness({paired:true});
+  const popup={url:'extension://factorseal/popup.html'};
+  assert.equal((await h.message({type:'save',document:'doc',username:'alice',password:'secret'},h.sender)).accepted,true);
+  let state;
+  await until(()=>h.commands.some(c=>c.action.type==='poll'));
+  for(let i=0;i<300;i++){state=await h.message({type:'status'},popup);if(state.status==='saved')break;await new Promise(r=>setTimeout(r,10));}
+  assert.equal(state.status,'saved');
+  h.tab.id=2;
+  assert.equal((await h.message({type:'status'},popup)).status,'idle');
+  h.tab.id=1;h.tab.url='https://other.test/login';
+  assert.equal((await h.message({type:'status'},popup)).status,'idle');
+  h.tab.url='https://example.com/login';
+  assert.equal((await h.message({type:'status'},popup)).status,'saved');
+});
+test('Check this page reports a page without a login form, on that page only',async()=>{
+  const h=await harness({paired:true});
+  const popup={url:'extension://factorseal/popup.html'};
+  assert.equal((await h.message({type:'retry'},popup)).found,true);
+  assert.equal((await h.message({type:'status'},popup)).status,'Disconnected');
+  h.tab.form=false;
+  assert.equal((await h.message({type:'retry'},popup)).found,false);
+  assert.equal((await h.message({type:'status'},popup)).status,'No complete login form found on this page.');
+  h.tab.id=2;
+  assert.equal((await h.message({type:'status'},popup)).status,'idle');
 });

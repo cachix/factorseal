@@ -9,6 +9,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Why the vault worker refused a browser action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerFailure {
+    /// The login changed after the lookup that offered it.
+    Changed,
+    Rejected,
+}
+
 #[derive(Clone, Debug)]
 pub struct Prompt {
     pub session: String,
@@ -341,7 +349,7 @@ impl Hub {
             })
             .collect()
     }
-    pub fn complete(&mut self, work: &Work, result: Result<WorkerReply, String>) {
+    pub fn complete(&mut self, work: &Work, result: Result<WorkerReply, WorkerFailure>) {
         self.expire();
         let Some(s) = self.sessions.get_mut(&work.session) else {
             return;
@@ -386,15 +394,15 @@ impl Hub {
                 s.flow = None;
                 s.result = Some(Response::finished("done"));
             }
-            Err(_) => {
+            Err(failure) => {
                 s.flow = None;
-                s.result = Some(Response::finished(
-                    if matches!(work.action, WorkerAction::Save { .. }) {
-                        "save_failed"
-                    } else {
-                        "vault_rejected"
-                    },
-                ));
+                // A login changed since it was offered is not a pairing
+                // problem: the profile stays paired and can try again.
+                s.result = Some(Response::finished(match (&work.action, failure) {
+                    (WorkerAction::Save { .. }, _) => "save_failed",
+                    (_, WorkerFailure::Changed) => "changed",
+                    (_, WorkerFailure::Rejected) => "vault_rejected",
+                }));
             }
         }
     }
@@ -500,6 +508,55 @@ mod tests {
         h.handle(Request::Signed {
             message: signed(s, n, a),
         })
+    }
+    #[test]
+    fn a_login_changed_before_release_is_not_a_pairing_failure() {
+        for (failure, reason) in [
+            (WorkerFailure::Changed, "changed"),
+            (WorkerFailure::Rejected, "vault_rejected"),
+        ] {
+            let mut h = Hub::default();
+            let s = session(&mut h);
+            h.paired
+                .insert(hex::encode(key().verifying_key().as_bytes()));
+            send(
+                &mut h,
+                &s,
+                1,
+                Action::Detect {
+                    origin: "https://example.com".into(),
+                    document: "doc".into(),
+                },
+            );
+            h.snapshot(true);
+            let lookup = h.take_work().pop().unwrap();
+            let ticket = "t".repeat(64);
+            h.complete(
+                &lookup,
+                Ok(WorkerReply::Candidates {
+                    ticket: ticket.clone(),
+                    candidates: vec![Candidate {
+                        id: "login".into(),
+                        title: "Example".into(),
+                        username: "alice".into(),
+                        digest: "d".repeat(64),
+                    }],
+                }),
+            );
+            let generation = h.prompt().unwrap().generation;
+            h.approve(&s, generation, Some(0));
+            send(&mut h, &s, 2, Action::Confirm { nonce: ticket });
+            let release = h.take_work().pop().unwrap();
+            assert!(matches!(release.action, WorkerAction::Release { .. }));
+            h.complete(&release, Err(failure));
+            assert!(
+                matches!(send(&mut h,&s,3,Action::Poll),Response::Finished{reason: r} if r==reason)
+            );
+            assert!(
+                h.paired
+                    .contains(&hex::encode(key().verifying_key().as_bytes()))
+            );
+        }
     }
     #[test]
     fn sealed_detection_prompts_without_lookup_and_resumes_after_unlock() {

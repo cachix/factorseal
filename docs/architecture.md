@@ -216,12 +216,16 @@ the `factorseal` scheme in SecretSpec's user provider directory:
 
 ```json
 {
-  "executable": "/absolute/path/to/factorseal"
+  "executable": "/absolute/path/to/factorseal",
+  "environment": ["FACTORSEAL_ROOT", "FACTORSEAL_SOCKET"]
 }
 ```
 
 The public claim is named `factorseal.secretspec.json`; users do not create or
-manage it. The agent refreshes its canonical executable path at startup so
+manage it. SecretSpec 0.21 and later start a provider with only a fixed base
+environment plus the variables its claim lists, so the claim lists the two that
+choose a different vault or service endpoint; earlier releases ignore the
+field. The agent refreshes its canonical executable path at startup so
 packaged upgrades remain discoverable. SecretSpec always launches the claimed
 executable with the fixed `provider` argument. The provider URI is
 `factorseal://default`. Factorseal requires SecretSpec to supply a project
@@ -232,8 +236,11 @@ on its protocol streams, a sealed service is reported to SecretSpec as
 `interaction_required`.
 
 When a project lacks a cache permission, Factorseal creates a pending permission
-with a stable opaque ID and retains it in memory for seven days. Equivalent
-requests reuse the ID and refresh its expiry. Grant, deny, or later revoke it
+with a stable opaque ID and retains it for seven days. Pending permissions are
+also written to the encrypted vault, local to the device like grants, so a
+request still waiting for review survives the vault sealing and is offered
+again after the next unseal. Equivalent requests reuse the ID; a request's
+expiry is fixed when it is created. Grant, deny, or later revoke it
 through one command family:
 
 ```console
@@ -251,8 +258,11 @@ bounded set of concurrent local connections, allowing provider requests to
 create pending permissions while CLI and future GUI notification listeners wait.
 The SecretSpec endpoint waits internally for its own pending permission while
 the original provider request remains within its deadline. Approval completes
-that request without exposing permission-management APIs to SecretSpec; a later
-approval remains useful when the caller retries after its deadline.
+that request without exposing permission-management APIs to SecretSpec. If the
+permission is still pending shortly before the deadline (SecretSpec allows 30
+seconds per operation), the endpoint answers `interaction_required` with the
+permission's reference instead of letting the request time out; a later
+approval remains useful when the caller retries.
 
 With the headless agent, SecretSpec writes use these signed project permissions.
 With Desktop, each write uses the secure input dialog described below. The

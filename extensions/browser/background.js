@@ -4,16 +4,27 @@ const api = globalThis.browser || globalThis.chrome;
 const core = globalThis.FactorSealCore;
 let port, waiting, session, sequence=0, active, keyPromise;
 let status='Disconnected';
+// The tab and site a request's status is about; the popup shows it only there.
+let statusScope=null;
 let queue=Promise.resolve();
 let recovery, nextRecovery=0;
+// A save the person asked for from the popup, which keeps the focus from the page.
+let explicitSave=null;
 const connectionFailures=new Set(['desktop_missing','desktop_unavailable','native_disconnected','native_timeout']);
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const serialized=fn=>{ const result=queue.then(fn); queue=result.catch(()=>{}); return result; };
+// Closing the port ourselves does not fire its onDisconnect, so forget it and
+// its session here; the next request then connects again.
+function disconnect() {const closed=port;port=null;session=null;closed?.disconnect();}
 function rpc(request) {
   return new Promise((resolve,reject)=>{
-    const timer=setTimeout(()=>{waiting=null;port?.disconnect();reject(new Error('native_timeout'));},10000);
+    const timer=setTimeout(()=>{waiting=null;disconnect();reject(new Error('native_timeout'));},10000);
     waiting={resolve:value=>{clearTimeout(timer);resolve(core.validateResponse(value));},reject:error=>{clearTimeout(timer);reject(error);}};
-    port.postMessage(request);
+    // The host can be gone (Desktop restarted) before onDisconnect fires; the
+    // browser then throws here. Handle it as that disconnect, so recovery
+    // reconnects instead of leaving the raw error as the status.
+    try { port.postMessage(request); }
+    catch { waiting=null;session=null;port=null;active=null;status='Disconnected';clearTimeout(timer);reject(new Error('native_disconnected')); }
   });
 }
 async function keys() {
@@ -82,9 +93,12 @@ async function cancel() {
 async function run(action,context) {
   if (active) return {status:'Another browser request is pending'};
   const flow={...context,kind:action.type,token:crypto.randomUUID()}; active=flow;
-  status='connecting';
+  status='connecting';statusScope=context?{tab:context.tab,origin:context.origin}:null;
   try {
     let response=await send(action);
+    // Desktop forgets a session when it restarts or after ten idle minutes,
+    // and refuses it before acting on anything. Connect again and ask once more.
+    if(response.type==='finished' && response.reason==='unauthorized'){disconnect();response=await send(action);}
     const deadline=Date.now()+300000;
     while (active===flow && Date.now()<deadline) {
       if (response.type==='finished') {
@@ -101,7 +115,7 @@ async function run(action,context) {
           } catch {}
         }
         if((response.reason==='done' && action.type==='revoke') || ['pair_required','revoked','vault_rejected'].includes(response.reason))await api.storage.local.set({paired:false});
-        if(response.reason==='unauthorized')port?.disconnect();break;
+        if(response.reason==='unauthorized')disconnect();break;
       }
       if (response.type==='fill') {
         if (context && await current(flow) && active===flow) {
@@ -150,7 +164,9 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
         const paired=(await api.storage.local.get('paired')).paired===true;
         const [tab]=await api.tabs.query?.({active:true,currentWindow:true})||[];
         let site;try{site=core.origin(tab?.url);}catch{}
-        return {status,paired,platform:(await api.runtime.getPlatformInfo?.())?.os,pending:active?.kind||null,profile:(await keys()).public.slice(0,16),
+        // Another page's result ("Request denied.") would read as this page's.
+        const elsewhere=!active && statusScope && (statusScope.tab!==tab?.id || statusScope.origin!==site) && !connectionFailures.has(status);
+        return {status:elsewhere?'idle':status,paired,platform:(await api.runtime.getPlatformInfo?.())?.os,pending:active?.kind||null,profile:(await keys()).public.slice(0,16),
           detection:await api.permissions.contains({origins:['https://*/*']}),site,
           paused:site?((await api.storage.local.get('paused')).paused||[]).includes(site):false};
       }
@@ -159,13 +175,21 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
       if (message.type==='cancel') {await cancel();return {status:'Cancelled'};}
       if(message.type==='save-page'){
         const [tab]=await api.tabs.query({active:true,currentWindow:true});
-        core.origin(tab?.url);
+        const origin=core.origin(tab?.url);
         await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
+        explicitSave={tab:tab.id,until:Date.now()+5000};
         const result=await api.tabs.sendMessage(tab.id,{type:'save-current'},{frameId:0});
-        if(!result?.offered)status='No complete login form found on this page.';
-        return {status};
+        if(!result?.offered){explicitSave=null;status='No complete login form found on this page.';statusScope={tab:tab.id,origin};}
+        return {status,offered:!!result?.offered};
       }
-      if (message.type==='retry') {const [tab]=await api.tabs.query({active:true,currentWindow:true});await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});await api.tabs.sendMessage(tab.id,{type:'retry'},{frameId:0});return {status:'Checking page'};}
+      if (message.type==='retry') {
+        const [tab]=await api.tabs.query({active:true,currentWindow:true});
+        const origin=core.origin(tab?.url);
+        await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
+        const result=await api.tabs.sendMessage(tab.id,{type:'retry'},{frameId:0});
+        if(!result?.found){status='No complete login form found on this page.';statusScope={tab:tab.id,origin};return {status,found:false};}
+        return {status:'Checking page',found:true};
+      }
       if (message.type==='pause') {
         const [tab]=await api.tabs.query({active:true,currentWindow:true});
         const site=core.origin(tab.url);const paused=(await api.storage.local.get('paused')).paused||[];
@@ -179,7 +203,11 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
       return {accepted:true};
     }
     const tab=await api.tabs.get(sender.tab.id);const win=await api.windows.get(tab.windowId);
-    if (!tab.active || !win.focused) return {accepted:false};
+    // Only a page the person is looking at may ask, or a save they asked for
+    // from the popup just now, once.
+    const explicit=message.type==='save' && explicitSave?.tab===tab.id && Date.now()<explicitSave.until;
+    if(explicit)explicitSave=null;
+    if (!tab.active || (!win.focused && !explicit)) return {accepted:false};
     const site=core.origin(sender.url);if(core.origin(tab.url)!==site)return {accepted:false};
     if (((await api.storage.local.get('paused')).paused||[]).includes(site)) return {accepted:false};
     if(message.type==='save'){

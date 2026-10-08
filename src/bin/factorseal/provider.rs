@@ -24,6 +24,11 @@ mod address;
 
 const PROVIDER_URI: &str = "factorseal://default";
 
+/// How long before the caller's deadline the provider stops waiting for an
+/// approval, so its answer still arrives in time. SecretSpec gives an
+/// operation a fixed 30 seconds, and a person may take longer to approve.
+const APPROVAL_ANSWER_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
 fn accepts_provider_uri(uri: &str) -> bool {
     uri == "factorseal://" || uri == PROVIDER_URI
 }
@@ -164,7 +169,10 @@ impl FactorsealProvider {
             }
             PermissionWaitStatus::Denied => Err(RpcError::new(ErrorKind::PermissionDenied)),
             PermissionWaitStatus::Expired => Err(RpcError::new(ErrorKind::DeadlineExceeded)),
-            PermissionWaitStatus::Pending => unreachable!("permission wait loops while pending"),
+            // Still waiting for a person: say so, with the approval to act
+            // on. The approval stays pending, so a retry after it is granted
+            // succeeds.
+            PermissionWaitStatus::Pending => Err(RpcError::interaction_required(Some(interaction))),
         }
     }
 
@@ -391,19 +399,26 @@ impl FactorsealProvider {
             .ok_or_else(|| RpcError::new(ErrorKind::OperationFailed))
     }
 
+    /// Wait for a pending permission to be resolved, returning
+    /// [`PermissionWaitStatus::Pending`] shortly before the request's deadline.
     async fn wait_for_permission(
         &self,
         context: &RequestContext,
         id: &str,
     ) -> RpcResult<PermissionWaitStatus> {
+        let Some(answer_by) = context.deadline.checked_sub(APPROVAL_ANSWER_MARGIN) else {
+            return Ok(PermissionWaitStatus::Pending);
+        };
         loop {
             if context.cancellation.is_cancelled() {
                 return Err(RpcError::new(ErrorKind::Cancelled));
             }
-            let remaining = context
-                .deadline
+            let Some(remaining) = answer_by
                 .checked_duration_since(tokio::time::Instant::now())
-                .ok_or_else(|| RpcError::new(ErrorKind::DeadlineExceeded))?;
+                .filter(|remaining| !remaining.is_zero())
+            else {
+                return Ok(PermissionWaitStatus::Pending);
+            };
             let timeout_ms = u64::try_from(remaining.as_millis())
                 .unwrap_or(u64::MAX)
                 .clamp(1, MAX_PERMISSION_WAIT_MS);

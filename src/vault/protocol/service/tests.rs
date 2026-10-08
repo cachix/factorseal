@@ -1731,6 +1731,193 @@ fn approval_is_entry_scoped_and_requires_a_vault_signature() {
     ));
 }
 
+/// Seal `service` and open the same vault again, as an unlock after a seal
+/// does.
+fn reopen_after_seal(
+    directory: &tempfile::TempDir,
+    service: VaultService,
+    now: u64,
+) -> VaultService {
+    service.seal().unwrap();
+    let started = Instant::now();
+    while !service.is_seal_complete() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "seal did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(service);
+    let root = directory.path().join("factorseal");
+    let store = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
+    VaultService::new(store, now, UnsealLeasePolicy::default()).unwrap()
+}
+
+/// Real time: a reopened store sweeps expired records by the system clock.
+fn wall_clock() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn cache_request(project: &str) -> VaultRequest {
+    VaultRequest::new_with_application(
+        VaultAction::GetCache {
+            project: project.to_owned(),
+            address: project_address(project),
+        },
+        VaultApplicationContext::new(Some(project.to_owned()), None, None, None).unwrap(),
+    )
+    .unwrap()
+}
+
+fn pending_ids(service: &VaultService, manager: &CallerIdentity, now: u64) -> Vec<String> {
+    let listed = service.handle(
+        manager,
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+        now,
+    );
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
+        panic!("expected permissions");
+    };
+    permissions
+        .into_iter()
+        .filter(|permission| matches!(permission.state, PermissionState::Pending { .. }))
+        .map(|permission| permission.id)
+        .collect()
+}
+
+fn permission_manager() -> CallerIdentity {
+    CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.cli",
+        [9; 32],
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn pending_approval_survives_sealing_and_is_approved_after_unseal() {
+    let now = wall_clock();
+    let (directory, service) = service(now, UnsealLeasePolicy::default());
+    let provider = caller();
+    let manager = permission_manager();
+    service.authorize_permission_manager(&manager, now).unwrap();
+    let interaction = service
+        .handle(&provider, cache_request("demo"), now + 1)
+        .result
+        .unwrap_err()
+        .interaction
+        .unwrap();
+
+    let service = reopen_after_seal(&directory, service, now + 50);
+    assert_eq!(
+        pending_ids(&service, &manager, now + 51),
+        [interaction.id.as_str()]
+    );
+    // The caller's retry finds the same request instead of starting over.
+    let repeated = service
+        .handle(&provider, cache_request("demo"), now + 52)
+        .result
+        .unwrap_err()
+        .interaction
+        .unwrap();
+    assert_eq!(repeated.id, interaction.id);
+    assert_eq!(repeated.expires_at, interaction.expires_at);
+
+    let listed = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+        now + 53,
+    );
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
+        panic!("expected permissions");
+    };
+    let PermissionState::Pending { challenge, .. } = &permissions[0].state else {
+        panic!("expected a pending permission");
+    };
+    let root = directory.path().join("factorseal");
+    let signature = Vault::unseal_for_test(&root)
+        .unwrap()
+        .sign_permission_challenge(&interaction.id, challenge, Some(60 * 60))
+        .unwrap();
+    let approved = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ApprovePermission {
+            id: interaction.id.clone(),
+            signature,
+            duration_seconds: Some(60 * 60),
+        })
+        .unwrap(),
+        now + 54,
+    );
+    assert!(matches!(
+        approved.result,
+        Ok(VaultResponseBody::PermissionChanged {
+            status: PermissionChange::Granted
+        })
+    ));
+    assert!(matches!(
+        service
+            .handle(&provider, cache_request("demo"), now + 55)
+            .result,
+        Ok(VaultResponseBody::Secret { value: None })
+    ));
+
+    // A granted request is no longer pending after the next seal either.
+    let service = reopen_after_seal(&directory, service, now + 60);
+    assert!(pending_ids(&service, &manager, now + 61).is_empty());
+}
+
+#[test]
+fn denied_and_expired_approvals_do_not_return_after_unseal() {
+    let now = wall_clock();
+    let (directory, service) = service(now, UnsealLeasePolicy::default());
+    let provider = caller();
+    let manager = permission_manager();
+    service.authorize_permission_manager(&manager, now).unwrap();
+    let denied = service
+        .handle(&provider, cache_request("denied"), now + 1)
+        .result
+        .unwrap_err()
+        .interaction
+        .unwrap();
+    let kept = service
+        .handle(&provider, cache_request("kept"), now + 2)
+        .result
+        .unwrap_err()
+        .interaction
+        .unwrap();
+    assert!(matches!(
+        service
+            .handle(
+                &manager,
+                VaultRequest::new(VaultAction::DenyPermission {
+                    id: denied.id.clone()
+                })
+                .unwrap(),
+                now + 3,
+            )
+            .result,
+        Ok(VaultResponseBody::PermissionChanged {
+            status: PermissionChange::Denied
+        })
+    ));
+
+    let service = reopen_after_seal(&directory, service, now + 10);
+    assert_eq!(
+        pending_ids(&service, &manager, now + 11),
+        [kept.id.as_str()]
+    );
+
+    // Unsealed again after the request's seven-day lifetime.
+    let service = reopen_after_seal(&directory, service, kept.expires_at + 1);
+    assert!(pending_ids(&service, &manager, kept.expires_at + 2).is_empty());
+}
+
 #[test]
 fn approval_overload_returns_no_interaction_and_preserves_existing_requests() {
     let (_directory, service) = service(100, UnsealLeasePolicy::default());

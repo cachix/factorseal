@@ -13,6 +13,10 @@ struct BrowserView {
     details: bool,
     error: Option<String>,
     pair_after_unlock: bool,
+    // Keys reach only the focused element's path. Without the password
+    // field (vault unsealed) Escape never reached the root's handler; the
+    // root takes focus then.
+    focus: gpui::FocusHandle,
     _submit: Subscription,
 }
 
@@ -50,10 +54,10 @@ pub(super) fn sync(request: Option<Prompt>, cx: &mut App) {
         return;
     };
     let snapshot = cx.global::<DesktopWindow>().snapshot.clone();
-    if request.save_username.is_some()
-        && request.state == "matching"
-        && cx.global::<BrowserWindow>().0.is_none()
-    {
+    // An unsealed vault looks for matching logins first. Open only once there
+    // is something to approve: a page with no stored login must not take the
+    // foreground from the browser, only to close again.
+    if request.state == "matching" && cx.global::<BrowserWindow>().0.is_none() {
         return;
     }
     if let Some((_, view)) = cx.global::<BrowserWindow>().0.clone() {
@@ -127,6 +131,7 @@ fn open(request: &Prompt, snapshot: &Snapshot, cx: &mut App) {
                 details: false,
                 error: None,
                 pair_after_unlock: false,
+                focus: cx.focus_handle(),
                 _submit: submit,
             }
         });
@@ -290,6 +295,11 @@ impl Render for BrowserView {
                 .group
                 .as_ref()
                 .is_some_and(|group| group.requires(factorseal::UnlockFactorKind::Password));
+        // The password field keeps its focus handle while hidden, so focus
+        // the root whenever the field is not drawn; otherwise Escape is lost.
+        if !needs_password && !self.focus.is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
         let error = self.error.clone().or_else(|| match &self.snapshot {
             Snapshot::Sealed { error, .. } | Snapshot::Unsealed { error, .. } => error.clone(),
             Snapshot::Error(error) => Some(error.clone()),
@@ -312,6 +322,7 @@ impl Render for BrowserView {
         };
         v_flex()
             .size_full()
+            .track_focus(&self.focus)
             .border_1()
             .border_color(theme.border)
             .capture_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
