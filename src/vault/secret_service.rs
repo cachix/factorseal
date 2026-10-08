@@ -32,7 +32,11 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 use zbus::{Connection, fdo};
 use zeroize::Zeroizing;
 
-use super::{VaultClient, VaultError, VaultResult};
+use super::secret_service_prompt::AccessDecision;
+use super::{
+    SecretServiceAccessContext, SecretServiceAccessRequest, SecretServiceInputRequest, VaultClient,
+    VaultError, VaultResult,
+};
 
 mod agent;
 mod interfaces;
@@ -92,85 +96,6 @@ pub trait SecretServicePrompter: Send + Sync + 'static {
     fn request_access(&self, mut request: SecretServiceAccessRequest) {
         request.allow();
         self.request_unlock();
-    }
-}
-
-/// Information supplied with a credential lookup. Attributes are caller-provided;
-/// the bus authenticates the sender, and process paths are best-effort OS data.
-#[derive(Clone, Debug, Default)]
-pub struct SecretServiceAccessContext {
-    pub attributes: std::collections::BTreeMap<String, String>,
-    pub sender: String,
-    pub process_id: Option<u32>,
-    pub executable: Option<std::path::PathBuf>,
-    pub working_directory: Option<std::path::PathBuf>,
-}
-
-/// A pending lookup requiring a decision before it can resume after unlocking.
-pub struct SecretServiceAccessRequest {
-    pub context: SecretServiceAccessContext,
-    decision: Option<oneshot::Sender<AccessDecision>>,
-}
-
-/// One user-confirmed write. No durable write grant is created.
-pub struct SecretServiceInputRequest {
-    pub context: SecretServiceAccessContext,
-    pub initial: Option<super::WireSecret>,
-    decision: Option<oneshot::Sender<Option<super::WireSecret>>>,
-}
-
-impl SecretServiceInputRequest {
-    pub fn save(&mut self, value: super::WireSecret) {
-        if let Some(sender) = self.decision.take() {
-            let _ = sender.send(Some(value));
-        }
-    }
-    pub fn deny(&mut self) {
-        if let Some(sender) = self.decision.take() {
-            let _ = sender.send(None);
-        }
-    }
-    #[must_use]
-    pub fn is_expired(&self) -> bool {
-        self.decision
-            .as_ref()
-            .is_some_and(oneshot::Sender::is_closed)
-    }
-}
-
-enum AccessDecision {
-    Allow,
-    Deny,
-}
-
-impl SecretServiceAccessRequest {
-    /// Allow this pending lookup. This does not create a persistent vault grant.
-    pub fn allow(&mut self) {
-        if let Some(decision) = self.decision.take() {
-            let _ = decision.send(AccessDecision::Allow);
-        }
-    }
-
-    /// Deny explicitly; dropping the request means its dialog was dismissed.
-    pub fn deny(&mut self) {
-        if let Some(decision) = self.decision.take() {
-            let _ = decision.send(AccessDecision::Deny);
-        }
-    }
-
-    /// Whether the client stopped waiting before deciding.
-    #[must_use]
-    pub fn is_expired(&self) -> bool {
-        self.decision
-            .as_ref()
-            .is_some_and(oneshot::Sender::is_closed)
-    }
-
-    #[must_use]
-    pub fn is_pending(&self) -> bool {
-        self.decision
-            .as_ref()
-            .is_some_and(|decision| !decision.is_closed())
     }
 }
 

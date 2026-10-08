@@ -468,7 +468,6 @@ impl DesktopRuntime {
         })
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn approve_permissions(
         &self,
         metadata: &VaultMetadata,
@@ -511,7 +510,6 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn deny_permission(
         &self,
         metadata: &VaultMetadata,
@@ -622,6 +620,13 @@ impl DesktopRuntime {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            // CREATE_NO_WINDOW: Desktop has no console to share, so the worker
+            // would otherwise open its own console window.
+            command.creation_flags(0x0800_0000);
+        }
         let child = command
             .spawn()
             .map_err(|e| format!("could not start vault worker: {e}"))?;

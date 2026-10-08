@@ -25,6 +25,9 @@ $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo fmt --all -- --check
 ```
 
+To build and check Desktop on Windows from a WSL2 checkout, including its
+approval popup, see [Windows Desktop checks from WSL2](../scripts/windows-desktop-check/README.md).
+
 For Apple credential-exchange SDK and Rust interoperability checks on macOS 26+
 with Xcode 26+, run `bash scripts/test-apple-exchange.sh`. See the
 [Apple test setup](../platform/apple/README.md) for CI artifacts and the separate
@@ -61,6 +64,25 @@ they require fixture behavior Factorseal does not implement. The NixOS VM test
 separately checks installed SecretSpec discovery, approvals, CRUD, project
 isolation, and cache expiry. This is not full protocol conformance on every
 desktop platform.
+
+The package builders (`packaging/build-unix.sh` and
+`packaging/build-windows.ps1`) leave out `secretspec-provider` until the
+SecretSpec IPC API is published, so those builds have no SecretSpec endpoint.
+The CLI writes SecretSpec's discovery claim, `factorseal.secretspec.json`, only
+when built with that feature. It writes it during `factorseal init`, when the
+agent starts, and when Desktop starts its vault worker. Without the claim,
+SecretSpec cannot find the `factorseal` provider. To test SecretSpec against a
+native macOS or Windows build, add the feature to the CLI build, for example on
+Windows:
+
+```console
+> cargo build --release --no-default-features --features vault,cli,hardware,secretspec-provider,personal-sync-network --bin factorseal
+```
+
+The claim is written to SecretSpec's per-user provider directory:
+`$XDG_CONFIG_HOME/secretspec/providers.d` (or `~/.config/secretspec/providers.d`)
+on Linux, `~/Library/Application Support/SecretSpec/providers.d` on macOS, and
+`%APPDATA%\SecretSpec\providers.d` on Windows.
 
 ## Release status
 
