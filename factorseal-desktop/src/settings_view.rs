@@ -224,14 +224,16 @@ impl SettingsView {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(div().font_medium().child(label))
-            .child(
-                div().w(rems(18.)).max_w_full().flex_none().p_1().child(
-                    Select::new(&self.controls[index])
+            .child(div().w(rems(18.)).max_w_full().flex_none().p_1().child({
+                let control = self.controls[index].clone();
+                crate::controls::hover_field(("settings-select", index), move |border| {
+                    Select::new(&control)
                         .accessibility_label(label)
                         .search_placeholder(label)
-                        .w_full(),
-                ),
-            )
+                        .border_color(border)
+                        .w_full()
+                })
+            }))
     }
 
     fn appearance(&self, cx: &mut Context<Self>) -> Div {
@@ -249,7 +251,8 @@ impl SettingsView {
                     .gap_3()
                     .py_4()
                     .child("Reduced motion")
-                    .child(
+                    .child(crate::controls::toggle_frame(
+                        "reduced-motion-frame",
                         Switch::new("reduced-motion")
                             .accessibility_label("Reduced motion")
                             .checked(appearance::current(cx).reduced_motion)
@@ -258,7 +261,7 @@ impl SettingsView {
                                 settings.reduced_motion = *checked;
                                 view.save(settings, window, cx);
                             })),
-                    ),
+                    )),
             )
     }
 
@@ -291,14 +294,14 @@ impl SettingsView {
             .child(
                 h_flex().justify_between().gap_3()
                     .child("Automatically send crash reports")
-                    .child(Switch::new("automatic-crash-reports")
+                    .child(crate::controls::toggle_frame("automatic-crash-reports-frame", Switch::new("automatic-crash-reports")
                         .accessibility_label("Automatically send crash reports")
                         .checked(appearance::current(cx).automatic_crash_reports)
                         .on_click(cx.listener(|view, checked: &bool, window, cx| {
                             let mut settings = appearance::current(cx).clone();
                             settings.automatic_crash_reports = *checked;
                             view.save(settings, window, cx);
-                        }))),
+                        })))),
             )
             .child(
                 Button::new("export-diagnostics")

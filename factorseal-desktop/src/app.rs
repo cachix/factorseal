@@ -45,7 +45,6 @@ use gpui_component::{
     dialog::{Cancel as CancelDialog, Confirm as ConfirmDialog, DialogFooter},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
-    link::Link,
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     spinner::Spinner,
@@ -55,11 +54,12 @@ use gpui_component::{
 use gpui_tray::{Icon, Tray};
 use zeroize::Zeroizing;
 
+use crate::controls::ClickStyle as _;
 use crate::runtime::{
     DesktopRuntime, PERSONAL_SECRET_NAMESPACE, RuntimeConfig, Snapshot, TransferKey,
     TransferSummary, VaultContents,
 };
-use crate::{branding, theming};
+use crate::{branding, controls, theming};
 use factorseal::transfer::{
     PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
     TransferFormat, read_transfer_file, write_private_file,
@@ -270,16 +270,19 @@ fn hardware_backend_label(backend: &str) -> &str {
     }
 }
 
-fn setup_protection_description() -> Div {
+fn setup_protection_description(cx: &App) -> Div {
     if cfg!(target_os = "linux") {
         h_flex()
             .gap_1()
             .flex_wrap()
             .child("Your password and this device's")
             .child(
-                Link::new("tpm-explanation-link")
-                    .href("https://trustedcomputinggroup.org/about/what-is-a-trusted-platform-module-tpm/")
-                    .child("TPM"),
+                controls::link(
+                    "tpm-explanation-link",
+                    "https://trustedcomputinggroup.org/about/what-is-a-trusted-platform-module-tpm/",
+                    cx,
+                )
+                .child("TPM"),
             )
             .child("protect your vault. Both are required to unlock it.")
     } else {
@@ -765,11 +768,15 @@ impl DesktopView {
                     v_flex()
                         .gap_2()
                         .child(div().text_sm().child("Describe the issue and how to reproduce it."))
-                        .child(
-                            Textarea::new(&description)
-                                .aria_label("Issue description")
-                                .h(rems(176. / 16.)),
-                        )
+                        .child({
+                            let description = description.clone();
+                            controls::hover_field("issue-description-field", move |border| {
+                                Textarea::new(&description)
+                                    .aria_label("Issue description")
+                                    .border_color(border)
+                                    .h(rems(176. / 16.))
+                            })
+                        })
                         .child(div().text_xs().text_color(cx.theme().muted_foreground)
                             .child("Up to 4,000 characters. Leave out passwords and other secrets.")),
                 )
@@ -900,9 +907,12 @@ impl DesktopView {
                             .child(branding::TAGLINE),
                     )
                     .child(
-                        Link::new("footer-security-link")
-                            .href("https://factorseal.dev/security")
-                            .child(security_label),
+                        controls::link(
+                            "footer-security-link",
+                            "https://factorseal.dev/security",
+                            cx,
+                        )
+                        .child(security_label),
                     ),
             )
     }
@@ -1903,15 +1913,12 @@ impl DesktopView {
                 .px_3()
                 .py_2()
                 .rounded_lg()
-                .cursor_pointer()
+                .fill_control(category_selected, cx)
                 .when(category_selected, |element| {
                     element
                         .bg(theme.primary)
                         .text_color(theme.primary_foreground)
                         .font_semibold()
-                })
-                .when(!category_selected, |element| {
-                    element.hover(|style| style.bg(theme.sidebar_accent))
                 })
                 .child(
                     div()
@@ -1985,15 +1992,12 @@ impl DesktopView {
                     .px_3()
                     .py_2()
                     .rounded_lg()
-                    .cursor_pointer()
+                    .fill_control(selected, cx)
                     .when(selected, |element| {
                         element
                             .bg(theme.primary)
                             .text_color(theme.primary_foreground)
                             .font_semibold()
-                    })
-                    .when(!selected, |element| {
-                        element.hover(|style| style.bg(theme.sidebar_accent))
                     })
                     .child("Personal secrets")
                     .child(
@@ -2062,11 +2066,10 @@ impl DesktopView {
                     .px_3()
                     .mt_2()
                     .mb_1()
-                    .cursor_pointer()
+                    .quiet_text_control(cx)
                     .text_xs()
                     .font_semibold()
                     .text_color(theme.muted_foreground)
-                    .hover(|style| style.text_color(theme.foreground))
                     .child("System integrations")
                     .child(if expanded { "⌄" } else { "›" })
                     .on_click(cx.listener(|view, _, _, cx| {
@@ -2104,32 +2107,34 @@ impl DesktopView {
 
     fn render_vault_search(&self, has_query: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
-        div().flex_none().pr_5().child(
-            Input::new(&self.vault_search)
-                .bg(theming::input_background(cx))
-                .prefix(search_icon(theme.muted_foreground))
-                .when(has_query, |input| {
-                    input.suffix(
-                        div()
-                            .id("clear-vault-search")
-                            .p_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .text_color(theme.muted_foreground)
-                            .hover(|style| {
-                                style.bg(theme.sidebar_accent).text_color(theme.foreground)
-                            })
-                            .child(close_icon(theme.muted_foreground))
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                let search = view.vault_search.clone();
-                                search.update(cx, |search, cx| {
-                                    search.set_value("", window, cx);
-                                });
-                            })),
-                    )
-                })
-                .small(),
-        )
+        let search = self.vault_search.clone();
+        let background = theming::input_background(cx);
+        let clear = has_query.then(|| {
+            div()
+                .id("clear-vault-search")
+                .p_1()
+                .rounded_sm()
+                .fill_control(false, cx)
+                .text_color(theme.muted_foreground)
+                .child(close_icon(theme.muted_foreground))
+                .on_click(cx.listener(|view, _, window, cx| {
+                    let search = view.vault_search.clone();
+                    search.update(cx, |search, cx| {
+                        search.set_value("", window, cx);
+                    });
+                }))
+        });
+        div()
+            .flex_none()
+            .pr_5()
+            .child(controls::hover_field("vault-search-field", move |border| {
+                Input::new(&search)
+                    .bg(background)
+                    .border_color(border)
+                    .prefix(search_icon(theme.muted_foreground))
+                    .when_some(clear, gpui_component::input::Input::suffix)
+                    .small()
+            }))
     }
 
     fn render_vault_sidebar(
@@ -2279,8 +2284,7 @@ impl DesktopView {
                     .px_4()
                     .py_3()
                     .when(index > 0, |row| row.border_t_1().border_color(theme.border))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.muted))
+                    .fill_control(false, cx)
                     .child(
                         // Take the row's width: with only min_w_0 the
                         // layout shrank the column below its text, which
@@ -2435,7 +2439,7 @@ impl DesktopView {
                     element.child(
                         h_flex()
                             .pt_1()
-                            .child(Link::new(id).href(url).child(format!("{label} ↗"))),
+                            .child(controls::link(id, url, cx).child(format!("{label} ↗"))),
                     )
                 }),
         )
@@ -2518,7 +2522,13 @@ impl DesktopView {
             )
             .child(field_label(
                 "Name",
-                Input::new(&self.personal_name).bg(theming::input_background(cx)),
+                {
+                    let name = self.personal_name.clone();
+                    let background = theming::input_background(cx);
+                    controls::hover_field("personal-name-field", move |border| {
+                        Input::new(&name).bg(background).border_color(border)
+                    })
+                },
             ))
             .children(
                 self.personal_fields
@@ -2553,10 +2563,18 @@ impl DesktopView {
                                 row.child(
                                     h_flex()
                                         .gap_2()
-                                        .child(
-                                            Input::new(&field.label)
-                                                .bg(theming::input_background(cx)),
-                                        )
+                                        .child({
+                                            let label = field.label.clone();
+                                            let background = theming::input_background(cx);
+                                            controls::hover_field(
+                                                ("personal-field-label", index),
+                                                move |border| {
+                                                    Input::new(&label)
+                                                        .bg(background)
+                                                        .border_color(border)
+                                                },
+                                            )
+                                        })
                                         .child(
                                             Button::new(("personal-field-type", index))
                                                 .label(format!("{} ▾", field.field_type.label()))
@@ -2860,11 +2878,21 @@ impl DesktopView {
                                 "Only Personal secrets are exported. Password-manager interchange files are plaintext and are not protected by FactorSeal after they are written."
                             }),
                     )
-                    .when(!is_import, |panel| panel.child(plaintext_control)),
+                    .when(!is_import, |panel| {
+                        panel.child(
+                            controls::toggle_frame("confirm-plaintext-export-frame", plaintext_control)
+                                .disabled(self.transfer_busy)
+                                .own_focus_ring(),
+                        )
+                    }),
             );
         }
         if is_import {
-            form = form.child(replace_control);
+            form = form.child(
+                controls::toggle_frame("replace-import-conflicts-frame", replace_control)
+                    .disabled(self.transfer_busy)
+                    .own_focus_ring(),
+            );
         }
         form = form
             .when_some(self.transfer_notice.clone(), |form, notice| match notice {
@@ -2963,8 +2991,7 @@ impl DesktopView {
                         .child(
                             div()
                                 .id("personal-secrets-breadcrumb")
-                                .cursor_pointer()
-                                .hover(move |style| style.text_color(muted))
+                                .text_control(cx)
                                 .child("Personal secrets")
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.show_personal_panel(PersonalPanel::Overview, cx);
@@ -3134,8 +3161,7 @@ impl DesktopView {
                 .child(
                     div()
                         .id("vault-breadcrumb")
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(theme.muted_foreground))
+                        .text_control(cx)
                         .child("Your vault")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.show_vault_browser(cx);
@@ -3338,8 +3364,7 @@ impl DesktopView {
                                 .child("Seal now")
                                 .when(*owned, |action| {
                                     action
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(theme.sidebar_accent))
+                                        .fill_control(false, cx)
                                         .on_click(cx.listener(|view, _, _, cx| view.seal(cx)))
                                 })
                                 .when(!*owned, |action| action.text_color(theme.muted_foreground)),
@@ -3405,7 +3430,7 @@ impl DesktopView {
                     .bg(theme.muted)
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child(setup_protection_description()),
+                    .child(setup_protection_description(cx)),
             )
             .when(has_multiple_methods, |element| element.child(methods))
             .when(cfg!(target_os = "linux"), |element| {
@@ -3419,8 +3444,7 @@ impl DesktopView {
                             ),
                     )
                     .child(
-                        Link::new("security-link")
-                            .href("https://factorseal.dev/security")
+                        controls::link("security-link", "https://factorseal.dev/security", cx)
                             .child("How device protection works"),
                     )
             })
@@ -3610,13 +3634,12 @@ impl Render for DesktopView {
                                     .items_center()
                                     .gap_2()
                                     .when(self.settings_open, |element| {
-                                        element
-                                            .cursor_pointer()
-                                            .hover(|style| style.text_color(theme.muted_foreground))
-                                            .on_click(cx.listener(|view, _, _, cx| {
+                                        element.text_control(cx).on_click(cx.listener(
+                                            |view, _, _, cx| {
                                                 view.settings_open = false;
                                                 cx.notify();
-                                            }))
+                                            },
+                                        ))
                                     })
                                     .child(brand_mark(36., theme.foreground))
                                     .child(
