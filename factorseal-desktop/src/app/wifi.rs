@@ -28,6 +28,8 @@ impl DesktopView {
                 .child("Move saved passwords from NetworkManager and your current keyring into FactorSeal. Use this when FactorSeal is your only Wi-Fi secret agent. Existing connections stay active; one-time passwords are left unchanged.")
                 .child(Button::new("migrate-wifi-passwords")
                     .primary()
+                    .icon(Glyph::Transfer)
+                    .loading(self.wifi_migration.busy)
                     .label(if self.wifi_migration.busy { "Moving Wi-Fi passwords…" } else { "Move existing Wi-Fi passwords" })
                     .disabled(self.wifi_migration.busy)
                     .on_click(cx.listener(|view, _, _, cx| view.start_wifi_migration(cx))));

@@ -113,6 +113,7 @@ impl DesktopView {
                 card = card.child(
                     Button::new(("revoke-entry-access", count))
                         .small()
+                        .icon(IconName::CircleX)
                         .label(if inherited {
                             "Revoke inherited grant"
                         } else {

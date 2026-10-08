@@ -160,7 +160,7 @@ impl DesktopView {
                     .child("Loading item…"),
             );
         };
-        panel = panel.child(self.render_personal_value(NAME_INDEX, "Name", false, cx));
+        panel = panel.child(self.render_personal_value(NAME_INDEX, "Name", false, false, cx));
         let mut index = 0;
         for section in &item.sections {
             if !section.fields.is_empty() {
@@ -171,12 +171,13 @@ impl DesktopView {
                     index,
                     &field.label,
                     field_is_secret(field),
+                    field.field_type == PersonalFieldType::Url,
                     cx,
                 ));
                 index += 1;
             }
         }
-        panel = panel.child(self.render_personal_value(index, "Notes", true, cx));
+        panel = panel.child(self.render_personal_value(index, "Notes", true, false, cx));
         panel
     }
 
@@ -344,11 +345,26 @@ impl DesktopView {
         self.copy_personal_value(value, personal_actions::CopiedField::Saved(index), cx);
     }
 
+    fn open_link_button(&self, index: usize, cx: &App) -> Option<Button> {
+        let input = self.personal_detail.inputs.get(&index)?;
+        let url = input.input.read(cx).value().trim().to_owned();
+        Some(
+            Button::new(("open-personal-link", index))
+                .flex_none()
+                .small()
+                .icon(IconName::ExternalLink)
+                .label("Open")
+                .disabled(!(url.starts_with("https://") || url.starts_with("http://")))
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+        )
+    }
+
     fn render_personal_value(
         &self,
         index: usize,
         label: &str,
         secret: bool,
+        link: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme();
@@ -356,6 +372,9 @@ impl DesktopView {
             return div();
         };
         let value = div().flex_1().min_w_0().child(input.input.clone());
+        let copied =
+            self.copied_personal_field == Some(personal_actions::CopiedField::Saved(index));
+        let revealed = self.personal_detail.revealed.contains(&index);
         v_flex()
             .gap_2()
             .p_3()
@@ -377,21 +396,15 @@ impl DesktopView {
                         Button::new(("copy-personal-field", index))
                             .flex_none()
                             .small()
-                            .label(
-                                if self.copied_personal_field
-                                    == Some(personal_actions::CopiedField::Saved(index))
-                                {
-                                    "Copied"
-                                } else {
-                                    "Copy"
-                                },
-                            )
+                            .icon(if copied { IconName::Check } else { IconName::Copy })
+                            .label(if copied { "Copied" } else { "Copy" })
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 view.copy_saved_personal_field(index, cx);
                             })),
                     )
+                    .when(link, |row| row.children(self.open_link_button(index, cx)))
                     .when(self.can_generate_saved_field(index), |row| {
-                        row.child(Button::new(("generate-saved-passphrase", index)).small().label("Generate")
+                        row.child(Button::new(("generate-saved-passphrase", index)).small().icon(IconName::Asterisk).label("Generate")
                             .tooltip("Generate a 12-word BIP-39 passphrase; save with Enter or by leaving the field")
                             .on_click(cx.listener(move |view, _, window, cx| view.generate_saved_passphrase(index, window, cx))))
                     })
@@ -400,11 +413,8 @@ impl DesktopView {
                             Button::new(("reveal-personal-field", index))
                                 .flex_none()
                                 .small()
-                                .label(if self.personal_detail.revealed.contains(&index) {
-                                    "Hide"
-                                } else {
-                                    "Reveal"
-                                })
+                                .icon(if revealed { IconName::EyeOff } else { IconName::Eye })
+                                .label(if revealed { "Hide" } else { "Reveal" })
                                 .on_click(cx.listener(move |view, _, _, cx| {
                                     if !view.personal_detail.revealed.remove(&index) {
                                         view.personal_detail.revealed.insert(index);
@@ -444,6 +454,7 @@ impl DesktopView {
                 row.child(
                     Button::new(("retry-personal-save", index))
                         .small()
+                        .icon(Glyph::Refresh)
                         .label("Retry")
                         .on_click(
                             cx.listener(move |view, _, _, cx| view.save_personal_field(index, cx)),
