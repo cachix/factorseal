@@ -10,7 +10,7 @@ use crate::vault::{
     VaultResult, VaultStore,
 };
 
-use super::wire::append_digest_bytes;
+use super::wire::{MAX_WSL_GRANT_SECONDS, append_digest_bytes};
 use super::{CallerIdentity, Permission, PermissionState};
 
 // Version 3 stores each operation independently so one permission's lifetime
@@ -43,6 +43,9 @@ struct AccessGrant {
     target_digest: [u8; 32],
     permissions: BTreeSet<GrantPermission>,
     expires_at: Option<u64>,
+    /// Satisfies only `require_grant_consuming`, which removes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    single_use: bool,
 }
 
 /// Which executable currently holds an exclusive grant on one target, so the
@@ -201,6 +204,7 @@ pub(super) fn prepare_grant(
             target_digest,
             permissions: BTreeSet::from([permission]),
             expires_at,
+            single_use: false,
         };
         let bytes = Zeroizing::new(
             serde_json::to_vec(&grant).map_err(|error| VaultError::Protocol(error.to_string()))?,
@@ -355,6 +359,7 @@ pub(super) fn store_exclusive_grant(
             target_digest,
             permissions: BTreeSet::from([*permission]),
             expires_at: None,
+            single_use: false,
         };
         operations.push(DocumentOperation::Put {
             address: grant_address(caller_fingerprint, target_digest, *permission)?,
@@ -404,7 +409,12 @@ pub(super) fn promote_permission(
     provenance: &Provenance,
 ) -> VaultResult<()> {
     caller.validate()?;
-    let PermissionState::Granted { expires_at, .. } = permission.state else {
+    let PermissionState::Granted {
+        expires_at,
+        single_use,
+        ..
+    } = permission.state
+    else {
         return Err(VaultError::Protocol(
             "promoted permission must be granted".to_owned(),
         ));
@@ -412,6 +422,26 @@ pub(super) fn promote_permission(
     if expires_at.is_some_and(|deadline| deadline <= now) {
         return Err(VaultError::Expired);
     }
+    // A request relayed from WSL carries no equivalent of the
+    // executable-identity hint a native caller gets (see
+    // `VaultApplicationContext::declared_wsl_origin`): the grant this
+    // approval creates still works exactly like any native grant (the
+    // normal retry-after-approval flow depends on that), but its lifetime
+    // is capped far below whatever duration was requested or approved,
+    // regardless of an explicit "until revoked" choice. Both the persisted
+    // grant and the permission record shown in the Desktop UI reflect the
+    // same clamped deadline, so neither one overstates how long access
+    // actually lasts.
+    let expires_at = if permission.application.declared_wsl_origin.is_some() {
+        let capped = now + MAX_WSL_GRANT_SECONDS;
+        let clamped = expires_at.map_or(capped, |deadline| deadline.min(capped));
+        if let PermissionState::Granted { expires_at, .. } = &mut permission.state {
+            *expires_at = Some(clamped);
+        }
+        Some(clamped)
+    } else {
+        expires_at
+    };
     let caller_fingerprint = caller.fingerprint();
     let target_digest = grant_target_digest(&target);
     let address = grant_address(caller_fingerprint, target_digest, grant_permission)?;
@@ -421,10 +451,16 @@ pub(super) fn promote_permission(
         target_digest,
         permissions: BTreeSet::from([grant_permission]),
         expires_at,
+        single_use,
     };
     let grant_bytes = Zeroizing::new(
         serde_json::to_vec(&grant).map_err(|error| VaultError::Protocol(error.to_string()))?,
     );
+    let operations = vec![DocumentOperation::Put {
+        address,
+        value: grant_bytes,
+        evict_at: grant.expires_at,
+    }];
 
     permission.scope = Some(match target {
         GrantTarget::Kind { kind } => kind,
@@ -444,17 +480,7 @@ pub(super) fn promote_permission(
         target_digest,
         grant_permission,
     });
-    write_registry(
-        store,
-        &registry,
-        vec![DocumentOperation::Put {
-            address,
-            value: grant_bytes,
-            evict_at: grant.expires_at,
-        }],
-        provenance,
-        now,
-    )
+    write_registry(store, &registry, operations, provenance, now)
 }
 
 pub(super) fn list_granted_permissions(
@@ -585,6 +611,90 @@ pub(super) fn require_grant_until(
     requirement: GrantRequirement<'_>,
     now: u64,
 ) -> VaultResult<Option<u64>> {
+    match find_grant(store, caller, requirement, now)? {
+        FoundGrant::Reusable { expires_at } => Ok(expires_at),
+        FoundGrant::SingleUse { .. } | FoundGrant::None => Err(VaultError::AuthorizationRequired),
+    }
+}
+
+/// As [`require_grant_until`], but a single-use grant also satisfies the
+/// requirement and is removed before this returns. A reusable grant is
+/// preferred, so a single-use one is spent only when nothing else allows
+/// the operation. Call this immediately before the operation, after every
+/// other check: the grant is gone even if the operation then fails, which
+/// fails closed. The caller must hold the live-state lock, as every request
+/// does, so two operations cannot spend one grant.
+pub(super) fn require_grant_consuming(
+    store: &VaultStore,
+    caller: &CallerIdentity,
+    requirement: GrantRequirement<'_>,
+    now: u64,
+    provenance: &Provenance,
+) -> VaultResult<Option<u64>> {
+    match find_grant(store, caller, requirement, now)? {
+        FoundGrant::Reusable { expires_at } => Ok(expires_at),
+        FoundGrant::SingleUse {
+            target_digest,
+            expires_at,
+        } => {
+            consume_grant(
+                store,
+                caller.fingerprint(),
+                target_digest,
+                requirement.permission,
+                now,
+                provenance,
+            )?;
+            Ok(expires_at)
+        }
+        FoundGrant::None => Err(VaultError::AuthorizationRequired),
+    }
+}
+
+enum FoundGrant {
+    Reusable {
+        expires_at: Option<u64>,
+    },
+    SingleUse {
+        target_digest: [u8; 32],
+        expires_at: Option<u64>,
+    },
+    None,
+}
+
+/// Remove one grant and its permission-registry entry in one generation.
+fn consume_grant(
+    store: &VaultStore,
+    caller_fingerprint: [u8; 32],
+    target_digest: [u8; 32],
+    grant_permission: GrantPermission,
+    now: u64,
+    provenance: &Provenance,
+) -> VaultResult<()> {
+    let mut registry = load_permission_registry(store, now)?;
+    registry.permissions.retain(|stored| {
+        let consumed = stored.caller_fingerprint == caller_fingerprint
+            && stored.target_digest == target_digest
+            && stored.grant_permission == grant_permission;
+        !consumed && !is_expired(&stored.permission, now)
+    });
+    write_registry(
+        store,
+        &registry,
+        vec![DocumentOperation::Delete {
+            address: grant_address(caller_fingerprint, target_digest, grant_permission)?,
+        }],
+        provenance,
+        now,
+    )
+}
+
+fn find_grant(
+    store: &VaultStore,
+    caller: &CallerIdentity,
+    requirement: GrantRequirement<'_>,
+    now: u64,
+) -> VaultResult<FoundGrant> {
     let GrantRequirement {
         scope,
         namespace,
@@ -648,17 +758,29 @@ pub(super) fn require_grant_until(
         &addresses,
         now,
     )?;
+    let mut single_use = FoundGrant::None;
     for (target_digest, bytes) in targets.into_iter().zip(records) {
         let Some(bytes) = bytes else {
             continue;
         };
         let grant: AccessGrant = serde_json::from_slice(&bytes)
             .map_err(|error| VaultError::Protocol(error.to_string()))?;
-        if grant_satisfies(&grant, caller_fingerprint, target_digest, permission, now) {
-            return Ok(grant.expires_at);
+        if !grant_satisfies(&grant, caller_fingerprint, target_digest, permission, now) {
+            continue;
+        }
+        if !grant.single_use {
+            return Ok(FoundGrant::Reusable {
+                expires_at: grant.expires_at,
+            });
+        }
+        if matches!(single_use, FoundGrant::None) {
+            single_use = FoundGrant::SingleUse {
+                target_digest,
+                expires_at: grant.expires_at,
+            };
         }
     }
-    Err(VaultError::AuthorizationRequired)
+    Ok(single_use)
 }
 
 fn grant_satisfies(
@@ -843,6 +965,7 @@ mod scope_tests {
             state: PermissionState::Granted {
                 granted_at: 1,
                 expires_at: None,
+                single_use: false,
             },
         };
         let target = GrantTarget::Project {

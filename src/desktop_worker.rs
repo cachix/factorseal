@@ -31,7 +31,9 @@ pub enum Operation {
     /// Authenticate and sign approvals without opening or serving the database.
     SignPermissions {
         group: UnlockGroup,
-        requests: Vec<(String, [u8; 32], Option<u64>)>,
+        /// Permission ID, challenge, duration, and whether it is a
+        /// single-use approval.
+        requests: Vec<(String, [u8; 32], Option<u64>, bool)>,
     },
     Initialize {
         policy: UnlockPolicy,

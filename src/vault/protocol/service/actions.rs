@@ -8,7 +8,7 @@ use crate::vault::{
     VaultError, VaultResult, VaultStore,
 };
 
-use super::super::grant::{GrantRequirement, require_grant_until};
+use super::super::grant::{GrantRequirement, require_grant_consuming, require_grant_until};
 use super::super::{
     CallerIdentity, GrantPermission, PermissionPrincipal, VaultAction, VaultMutation,
     VaultResponseBody, WireSecret, WireSecretAddress,
@@ -280,8 +280,24 @@ impl ActionContext<'_> {
     ) -> VaultResult<VaultResponseBody> {
         let address = SecretAddress::secret_spec(address.clone())?;
         let namespace = project.as_bytes();
-        self.require_project(project, Some(&address), GrantPermission::Put)?;
         validate_evict_at(evict_at, self.clock.wall())?;
+        // Spends a single-use write permission, so nothing that can still
+        // reject the write may come after it.
+        require_grant_consuming(
+            self.store,
+            self.caller,
+            GrantRequirement {
+                scope: self.scope,
+                namespace: Some(namespace),
+                address: Some(&address),
+                project: Some(project),
+                base_dir: self.base_dir,
+                permission: GrantPermission::Put,
+            },
+            self.clock.wall(),
+            self.provenance,
+        )
+        .and_then(|deadline| self.accept_deadline(deadline))?;
         self.store.put_at(
             self.scope,
             namespace,

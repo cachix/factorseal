@@ -3,14 +3,51 @@ use super::*;
 use factorseal::{SecretServiceAccessContext, SecretServiceAccessRequest};
 use std::collections::BTreeMap;
 
+/// How long the popup ignores approval after it appears or its requests
+/// change, so a click or Enter meant for another window cannot approve.
+const ARM_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[derive(Default)]
 struct AccessWindow(Option<(AnyWindowHandle, gpui::Entity<AccessView>)>, bool);
 impl Global for AccessWindow {}
+
+/// Pending permissions the user denied while the vault was sealed. The vault
+/// keeps pending permissions across a seal, so they are denied once it is
+/// unsealed again instead of coming back.
+#[derive(Default)]
+struct DeferredDenials(Vec<String>);
+impl Global for DeferredDenials {}
 
 struct InputEditor {
     value: gpui::Entity<SecretInputState>,
     initialized: bool,
     focused: bool,
+}
+
+/// The popup can take keyboard focus while the user is typing in another app,
+/// even while it stays hidden behind that app. Its fields take no focus and
+/// nothing is approved until the user clicks inside it, and approval waits
+/// [`ARM_DELAY`] after the popup appears or its requests change.
+struct InputGuard {
+    armed: bool,
+    changed_at: std::time::Instant,
+}
+
+impl InputGuard {
+    fn new() -> Self {
+        Self {
+            armed: false,
+            changed_at: std::time::Instant::now(),
+        }
+    }
+
+    fn changed(&mut self) {
+        self.changed_at = std::time::Instant::now();
+    }
+
+    fn allows_approval(&self) -> bool {
+        self.armed && self.changed_at.elapsed() >= ARM_DELAY
+    }
 }
 
 #[derive(Default)]
@@ -30,78 +67,48 @@ struct AccessView {
     reviewed_grants: Vec<factorseal::Permission>,
     approving: bool,
     reviewing: bool,
-    duration: Option<u64>,
+    // The person's pick; `None` until they click one. See `grant_choice`.
+    choice: Option<GrantChoice>,
     details: RequestDetails,
     password: gpui::Entity<SecretInputState>,
     group: Option<factorseal::UnlockGroup>,
     error: Option<String>,
+    guard: InputGuard,
     _submit: Subscription,
     _secret_submit: Subscription,
+    _activation: Subscription,
 }
 
 pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App) {
     cx.set_global(AccessWindow::default());
+    cx.set_global(DeferredDenials::default());
     cx.spawn(async move |cx| {
         loop {
             smol::Timer::after(std::time::Duration::from_millis(500)).await;
             let state = cx.update(|cx| {
-                let snapshot = &cx.global::<DesktopWindow>().snapshot;
-                match snapshot {
-                    Snapshot::Unsealed { metadata, .. } => Some((
-                        Arc::clone(&cx.global::<RuntimeGlobal>().0),
-                        metadata.clone(),
-                    )),
-                    _ => None,
-                }
+                let metadata = match &cx.global::<DesktopWindow>().snapshot {
+                    Snapshot::Unsealed { metadata, .. } => metadata.clone(),
+                    _ => return None,
+                };
+                Some((
+                    Arc::clone(&cx.global::<RuntimeGlobal>().0),
+                    metadata,
+                    std::mem::take(&mut cx.global_mut::<DeferredDenials>().0),
+                ))
             });
-            let Some((runtime, metadata)) = state else {
+            let Some((runtime, metadata, denials)) = state else {
                 continue;
             };
-            if let Ok(permissions) =
-                smol::unblock(move || runtime.load_permissions(&metadata)).await
+            // Deny before loading, so a denied permission is not reopened.
+            if let Ok(permissions) = smol::unblock(move || {
+                for id in denials {
+                    let _ = runtime.deny_permission(&metadata, id);
+                }
+                runtime.load_permissions(&metadata)
+            })
+            .await
             {
-                cx.update(|cx| {
-                    if !cx.global::<DesktopStatus>().unsealed {
-                        return;
-                    }
-                    if let Snapshot::Unsealed { contents, .. } =
-                        &mut cx.global_mut::<DesktopWindow>().snapshot
-                    {
-                        contents.permissions.clone_from(&permissions);
-                        contents.permissions_loading = false;
-                    }
-                    let holder = Arc::clone(&cx.global::<DesktopWindow>().view);
-                    if let Ok(holder) = holder.lock()
-                        && let Some(view) = holder.as_ref()
-                    {
-                        view.update(cx, |view, cx| {
-                            if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot
-                                && contents.permissions != permissions
-                            {
-                                contents.permissions.clone_from(&permissions);
-                                contents.permissions_loading = false;
-                                cx.notify();
-                            }
-                        });
-                    }
-                    let pending: Vec<_> = permissions
-                        .into_iter()
-                        .filter(|permission| {
-                            matches!(
-                                permission.state,
-                                factorseal::PermissionState::Pending { .. }
-                            )
-                        })
-                        .collect();
-                    if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
-                        view.update(cx, |view, cx| {
-                            view.grants = pending;
-                            cx.notify();
-                        });
-                    } else if !pending.is_empty() {
-                        open(AccessEvent::Permissions(pending), cx);
-                    }
-                });
+                cx.update(|cx| apply_permissions(permissions, cx));
             }
         }
     })
@@ -141,6 +148,49 @@ pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App
     .detach();
 }
 
+/// Show freshly polled permissions in the main window and the popup, opening
+/// the popup when a permission is pending.
+fn apply_permissions(permissions: Vec<factorseal::Permission>, cx: &mut App) {
+    if !cx.global::<DesktopStatus>().unsealed {
+        return;
+    }
+    if let Snapshot::Unsealed { contents, .. } = &mut cx.global_mut::<DesktopWindow>().snapshot {
+        contents.permissions.clone_from(&permissions);
+        contents.permissions_loading = false;
+    }
+    let holder = Arc::clone(&cx.global::<DesktopWindow>().view);
+    if let Ok(holder) = holder.lock()
+        && let Some(view) = holder.as_ref()
+    {
+        view.update(cx, |view, cx| {
+            if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot
+                && contents.permissions != permissions
+            {
+                contents.permissions.clone_from(&permissions);
+                contents.permissions_loading = false;
+                cx.notify();
+            }
+        });
+    }
+    let pending: Vec<_> = permissions
+        .into_iter()
+        .filter(|permission| {
+            matches!(
+                permission.state,
+                factorseal::PermissionState::Pending { .. }
+            )
+        })
+        .collect();
+    if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
+        view.update(cx, |view, cx| {
+            view.set_pending(pending);
+            cx.notify();
+        });
+    } else if !pending.is_empty() {
+        open(AccessEvent::Permissions(pending), cx);
+    }
+}
+
 pub(super) fn is_open(cx: &App) -> bool {
     cx.try_global::<AccessWindow>()
         .is_some_and(|state| state.0.is_some())
@@ -157,9 +207,15 @@ fn close(cx: &mut App) {
                 Arc::clone(&view.runtime),
                 view.snapshot.metadata().cloned(),
                 std::mem::take(&mut view.grants),
+                matches!(view.snapshot, Snapshot::Unsealed { .. }),
             )
         });
-        if let (runtime, Some(metadata), grants) = denial {
+        if let (_, _, grants, false) = &denial {
+            // A sealed vault cannot deny; it keeps the permissions pending.
+            cx.global_mut::<DeferredDenials>()
+                .0
+                .extend(grants.iter().map(|grant| grant.id.clone()));
+        } else if let (runtime, Some(metadata), grants, true) = denial {
             cx.spawn(async move |_| {
                 smol::unblock(move || {
                     for grant in grants {
@@ -170,7 +226,11 @@ fn close(cx: &mut App) {
             })
             .detach();
         }
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        let _ = handle.update(cx, |_, window, _| {
+            // A popup closed while behind would leave its owner flashing.
+            window_activation::attention_settled(window);
+            window.remove_window();
+        });
     }
 }
 
@@ -185,7 +245,18 @@ pub(super) fn update(snapshot: &Snapshot, cx: &mut App) {
         if matches!(view.snapshot, Snapshot::Unsealed { .. })
             && matches!(snapshot, Snapshot::Sealed { .. })
         {
-            return true;
+            // The vault keeps its pending permissions across a seal, so a
+            // popup still reviewing them stays open to unlock and continue.
+            let reviewing = !view.grants.is_empty()
+                || !view.inputs.is_empty()
+                || view
+                    .requests
+                    .iter()
+                    .any(SecretServiceAccessRequest::is_pending);
+            if !reviewing {
+                return true;
+            }
+            view.guard.changed();
         }
         view.snapshot = snapshot.clone();
         view.error = match snapshot {
@@ -233,6 +304,7 @@ fn open(event: AccessEvent, cx: &mut App) {
     if let Some((handle, view)) = cx.global::<AccessWindow>().0.clone() {
         view.update(cx, |view, cx| {
             view.add(event);
+            view.guard.changed();
             cx.notify();
         });
         let layered = cx.global::<AccessWindow>().1;
@@ -243,6 +315,9 @@ fn open(event: AccessEvent, cx: &mut App) {
                 return;
             }
             window_activation::show(window, true);
+            // Activation can be refused (Windows keeps focus with the app the
+            // user is typing in), so also flag the window in the taskbar.
+            window_activation::request_attention(window);
         });
         return;
     }
@@ -262,67 +337,7 @@ fn open(event: AccessEvent, cx: &mut App) {
             false
         });
         let view = cx.new(|cx| {
-            let password =
-                cx.new(|cx| SecretInputState::new(window, cx).placeholder("FactorSeal password"));
-            password.update(cx, |input, cx| input.focus(window, cx));
-            let submit = cx.subscribe_in(
-                &password,
-                window,
-                |view: &mut AccessView, _, event: &InputEvent, window, cx| {
-                    if matches!(
-                        event,
-                        InputEvent::PressEnter {
-                            secondary: false,
-                            ..
-                        }
-                    ) {
-                        view.allow(window, cx);
-                    }
-                },
-            );
-            let secret = cx.new(|cx| SecretInputState::new(window, cx).placeholder("Secret value"));
-            let secret_submit = cx.subscribe_in(
-                &secret,
-                window,
-                |view: &mut AccessView, _, event: &InputEvent, window, cx| {
-                    if matches!(
-                        event,
-                        InputEvent::PressEnter {
-                            secondary: false,
-                            ..
-                        }
-                    ) {
-                        view.allow(window, cx);
-                    }
-                },
-            );
-            let group = snapshot
-                .metadata()
-                .map(|metadata| metadata.preferred_unlock_group().clone());
-            let mut view = AccessView {
-                runtime: Arc::clone(&runtime),
-                snapshot: snapshot.clone(),
-                password,
-                editor: InputEditor {
-                    value: secret,
-                    initialized: false,
-                    focused: false,
-                },
-                inputs: Vec::new(),
-                group,
-                requests: Vec::new(),
-                explicit_unlock: false,
-                unlocks: Vec::new(),
-                grants: Vec::new(),
-                reviewed_grants: Vec::new(),
-                approving: false,
-                reviewing: false,
-                duration: Some(3600),
-                details: RequestDetails::default(),
-                error: None,
-                _submit: submit,
-                _secret_submit: secret_submit,
-            };
+            let mut view = AccessView::new(Arc::clone(&runtime), snapshot.clone(), window, cx);
             view.add(event.take().expect("window builder runs once"));
             view
         });
@@ -339,6 +354,13 @@ fn open(event: AccessEvent, cx: &mut App) {
     }
     match opened {
         Ok(handle) => {
+            if !layered {
+                // A new window opened behind the focused app gets no focus of
+                // its own on Windows; flag it so the request is not missed.
+                let _ = handle.update(cx, |_, window, _| {
+                    window_activation::request_attention(window);
+                });
+            }
             let state = cx.global_mut::<AccessWindow>();
             state.0 = Some((handle.into(), entity.unwrap()));
             state.1 = layered;
@@ -382,6 +404,93 @@ fn deny(cx: &mut App) {
 }
 
 impl AccessView {
+    fn new(
+        runtime: Arc<DesktopRuntime>,
+        snapshot: Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let password = cx.new(|cx| {
+            SecretInputState::new(window, cx)
+                .placeholder("FactorSeal password")
+                .accessibility_id("factorseal.access.password")
+        });
+        let submit = cx.subscribe_in(
+            &password,
+            window,
+            |view: &mut AccessView, _, event: &InputEvent, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    view.allow(window, cx);
+                }
+            },
+        );
+        let secret = cx.new(|cx| {
+            SecretInputState::new(window, cx)
+                .placeholder("Secret value")
+                .accessibility_id("factorseal.access.secret-value")
+        });
+        let secret_submit = cx.subscribe_in(
+            &secret,
+            window,
+            |view: &mut AccessView, _, event: &InputEvent, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    view.allow(window, cx);
+                }
+            },
+        );
+        // Losing the foreground before the user clicked inside would leave the
+        // request behind another app with nothing pointing at it.
+        let activation =
+            cx.observe_window_activation(window, |view: &mut AccessView, window, _| {
+                if window.is_window_active() {
+                    window_activation::attention_settled(window);
+                } else if !view.guard.armed {
+                    window_activation::deactivated_unseen(window);
+                }
+            });
+        let group = snapshot
+            .metadata()
+            .map(|metadata| metadata.preferred_unlock_group().clone());
+        AccessView {
+            runtime,
+            snapshot,
+            password,
+            editor: InputEditor {
+                value: secret,
+                initialized: false,
+                focused: false,
+            },
+            inputs: Vec::new(),
+            group,
+            requests: Vec::new(),
+            explicit_unlock: false,
+            unlocks: Vec::new(),
+            grants: Vec::new(),
+            reviewed_grants: Vec::new(),
+            approving: false,
+            reviewing: false,
+            choice: None,
+            details: RequestDetails::default(),
+            error: None,
+            guard: InputGuard::new(),
+            _submit: submit,
+            _secret_submit: secret_submit,
+            _activation: activation,
+        }
+    }
+
     fn prune_inputs(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = prune_queue(
             &mut self.inputs,
@@ -437,12 +546,13 @@ impl AccessView {
         self.password.update(cx, SecretInputState::clear);
         let runtime = Arc::clone(&self.runtime);
         let ids: Vec<_> = grants.iter().map(|grant| grant.id.clone()).collect();
-        let duration = self.duration;
+        let (duration, single_use) = grant_choice(&grants, self.choice).lifetime();
         self.approving = true;
         self.error = None;
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
-                runtime.approve_permissions(&metadata, &grants, group, password, duration)
+                runtime
+                    .approve_permissions(&metadata, &grants, group, password, duration, single_use)
             })
             .await;
             let _ = this.update(cx, |view, cx| {
@@ -469,7 +579,38 @@ impl AccessView {
         cx.notify();
     }
 
+    /// Replace the polled pending permissions, restarting the approval delay
+    /// when the set changes under the user.
+    fn set_pending(&mut self, pending: Vec<factorseal::Permission>) {
+        if self
+            .grants
+            .iter()
+            .map(|grant| &grant.id)
+            .ne(pending.iter().map(|grant| &grant.id))
+        {
+            self.guard.changed();
+        }
+        self.grants = pending;
+    }
+
+    /// Accept keyboard input once the user clicks inside the popup.
+    fn arm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.guard.armed {
+            return;
+        }
+        self.guard.armed = true;
+        // The secret editor takes focus in render once armed.
+        if self.inputs.is_empty() {
+            self.password
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
     fn allow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.guard.allows_approval() {
+            return;
+        }
         if self.approving || matches!(self.snapshot, Snapshot::Unlocking { .. }) {
             return;
         }
@@ -535,6 +676,9 @@ impl AccessView {
                 cx.notify();
                 return;
             }
+            // Unlocking does not approve pending permissions; granting them
+            // takes the password again.
+            self.password.update(cx, SecretInputState::clear);
             self.snapshot = Snapshot::Unlocking { metadata, group };
         } else if !matches!(self.snapshot, Snapshot::Unsealed { .. }) {
             return;
@@ -627,12 +771,110 @@ fn application_name(path: &std::path::Path) -> String {
         .into_owned()
 }
 
+// Who asked for a grant, as the person approving it would name it. The
+// vault's caller for a SecretSpec request is the FactorSeal provider that
+// SecretSpec started, so name SecretSpec and leave the provider to the
+// technical details.
+fn grant_requester(grant: &factorseal::Permission) -> String {
+    if is_secretspec_request(grant) {
+        "SecretSpec".to_owned()
+    } else {
+        application_name(std::path::Path::new(&grant.principal.application_id))
+    }
+}
+
+fn is_secretspec_request(grant: &factorseal::Permission) -> bool {
+    grant.scope == Some(factorseal::DocumentKind::SecretSpecProviderCache)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GrantChoice {
+    ThisWriteOnly,
+    Hour,
+    UntilRevoked,
+}
+
+impl GrantChoice {
+    // The approval's duration, and whether it is single-use.
+    fn lifetime(self) -> (Option<u64>, bool) {
+        match self {
+            Self::ThisWriteOnly => (None, true),
+            Self::Hour => (Some(3600), false),
+            Self::UntilRevoked => (None, false),
+        }
+    }
+}
+
+// The vault takes a single-use approval only for a SecretSpec write.
+fn single_write_allowed(grants: &[factorseal::Permission]) -> bool {
+    !grants.is_empty() && grants.iter().all(factorseal::Permission::allows_single_use)
+}
+
+// A plain SecretSpec write asks for no more than that write unless the
+// person picks a longer lifetime; a cache write, which SecretSpec repeats
+// whenever the entry expires, defaults to an hour (see
+// `Permission::defaults_to_single_use`). A pick of "This write only" that no
+// longer applies, because a request that is not a SecretSpec write joined
+// the popup, falls back to one hour.
+fn grant_choice(grants: &[factorseal::Permission], choice: Option<GrantChoice>) -> GrantChoice {
+    match choice {
+        Some(GrantChoice::ThisWriteOnly) if !single_write_allowed(grants) => GrantChoice::Hour,
+        Some(choice) => choice,
+        None if !grants.is_empty()
+            && grants
+                .iter()
+                .all(factorseal::Permission::defaults_to_single_use) =>
+        {
+            GrantChoice::ThisWriteOnly
+        }
+        None => GrantChoice::Hour,
+    }
+}
+
+// A SecretSpec grant binds the provider, not the program that ran
+// `secretspec`, so say who it covers in those terms.
+fn grant_scope_note(grants: &[factorseal::Permission]) -> &'static str {
+    if grants.iter().any(is_secretspec_request) {
+        "Applies only to the listed entries, folder, and operation, for any program that runs SecretSpec in that folder. Manage access on each secret."
+    } else {
+        "Applies only to the listed entries, app, folder, and operation. Manage access on each secret."
+    }
+}
+
+// Outermost launcher first, e.g. `pwsh.exe → secretspec.exe`. The chain is
+// declared by the caller (see
+// `VaultApplicationContext::declared_launch_chain`), so the label says it
+// is not verified.
+fn launch_chain_label(chain: &[String]) -> Option<String> {
+    (!chain.is_empty()).then(|| {
+        let names: Vec<_> = chain
+            .iter()
+            .rev()
+            .map(|executable| application_name(std::path::Path::new(executable)))
+            .collect();
+        format!("{} (not verified)", names.join(" → "))
+    })
+}
+
+// A labelled row, identified by its label.
 fn detail(
     label: impl Into<gpui::SharedString>,
     value: impl Into<gpui::SharedString>,
     cx: &App,
-) -> Div {
+) -> gpui::Stateful<Div> {
+    let label = label.into();
+    detail_row(label.clone(), label, value, cx)
+}
+
+// A labelled row for a label that repeats among its siblings.
+fn detail_row(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    value: impl Into<gpui::SharedString>,
+    cx: &App,
+) -> gpui::Stateful<Div> {
     h_flex()
+        .id(id)
         .items_start()
         .gap_3()
         .child(
@@ -641,9 +883,15 @@ fn detail(
                 .flex_none()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(label.into()),
+                .child(text("label", label)),
         )
-        .child(div().flex_1().min_w_0().text_sm().child(value.into()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .child(text("value", value)),
+        )
 }
 
 impl Render for AccessView {
@@ -671,7 +919,8 @@ impl Render for AccessView {
             }
             self.editor.initialized = true;
         }
-        if !self.editor.focused
+        if self.guard.armed
+            && !self.editor.focused
             && !self.inputs.is_empty()
             && matches!(self.snapshot, Snapshot::Unsealed { .. })
         {
@@ -682,6 +931,7 @@ impl Render for AccessView {
         }
         let theme = cx.theme().clone();
         let busy = self.approving || matches!(self.snapshot, Snapshot::Unlocking { .. });
+        let choice = grant_choice(&self.grants, self.choice);
         let unsealed = matches!(self.snapshot, Snapshot::Unsealed { .. });
         let metadata = self.snapshot.metadata();
         let context_project = |context: &SecretServiceAccessContext| {
@@ -741,6 +991,7 @@ impl Render for AccessView {
                 .is_some_and(|group| group.requires(factorseal::UnlockFactorKind::Password));
         let mut requests = v_flex().gap_4();
         let mut technical = v_flex().gap_4();
+        let mut card_index = 0_usize;
         if self.inputs.is_empty() {
             let mut grouped: BTreeMap<(&str, &str), (Vec<&str>, &SecretServiceAccessContext)> =
                 BTreeMap::new();
@@ -756,14 +1007,26 @@ impl Render for AccessView {
             }
             for ((project, profile), (mut secrets, context)) in grouped {
                 secrets.sort_unstable();
-                let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted).child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("Secrets"),
-                );
-                for secret in secrets {
-                    card = card.child(div().text_lg().font_semibold().child(secret.to_owned()));
+                card_index += 1;
+                let mut card = v_flex()
+                    .id(("access-request", card_index))
+                    .p_4()
+                    .gap_3()
+                    .rounded_lg()
+                    .bg(theme.muted)
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(text("heading", "Secrets")),
+                    );
+                for (index, secret) in secrets.into_iter().enumerate() {
+                    card = card.child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(text(("secret", index), secret.to_owned())),
+                    );
                 }
                 if project_title.is_none() {
                     card = card.child(detail("Project", project, cx));
@@ -790,18 +1053,35 @@ impl Render for AccessView {
                     .map(|(context, objects)| (context, Some(objects))),
             )
         {
-            let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted);
+            card_index += 1;
+            let mut card = v_flex()
+                .id(("access-request", card_index))
+                .p_4()
+                .gap_3()
+                .rounded_lg()
+                .bg(theme.muted);
+            let mut info = v_flex().id(("technical", card_index)).gap_3();
             if let Some((project, profile, secret)) = project_coordinates(context) {
                 card = card
-                    .child(div().text_lg().font_semibold().child(project.to_owned()))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(text("title", project.to_owned())),
+                    )
                     .child(detail("Secret", format!("{secret} · {profile}"), cx));
             } else if let Some(project) = context.attributes.get("project") {
-                card = card.child(div().text_lg().font_semibold().child(project.clone()));
+                card = card.child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .child(text("title", project.clone())),
+                );
                 if let Some(secret) = context.attributes.get("secret") {
                     card = card.child(detail("Secret", secret.clone(), cx));
                 }
             } else {
-                card = card.child(div().font_semibold().child("System keyring"));
+                card = card.child(div().font_semibold().child(text("title", "System keyring")));
             }
             if let Some(objects) = objects {
                 card = card.child(detail("Requested action", "Unlock system keyring", cx));
@@ -812,12 +1092,18 @@ impl Render for AccessView {
                         cx,
                     ));
                 }
-                for object in objects {
-                    card = card.child(detail("Requested item", unlock_target_label(object), cx));
+                for (index, object) in objects.iter().enumerate() {
+                    card = card.child(detail_row(
+                        ("requested-item", index),
+                        "Requested item",
+                        unlock_target_label(object),
+                        cx,
+                    ));
                 }
-                card = card.child(div().text_sm().child(
+                card = card.child(div().text_sm().child(text(
+                    "unlock-note",
                     "Item names and contents stay encrypted until unlock. Unlocking does not grant permission to read secrets.",
-                ));
+                )));
             } else if project_coordinates(context).is_none()
                 && !context.attributes.contains_key("project")
             {
@@ -830,8 +1116,7 @@ impl Render for AccessView {
             }
             if let Some(executable) = &context.executable {
                 card = card.child(detail("Requested by", application_name(executable), cx));
-                technical =
-                    technical.child(detail("Executable", executable.display().to_string(), cx));
+                info = info.child(detail("Executable", executable.display().to_string(), cx));
             }
             if context.executable.is_none() {
                 card = card.child(detail(
@@ -846,7 +1131,6 @@ impl Render for AccessView {
             }
             // Keep the requested items visible alongside the authenticated grant scope.
             requests = requests.child(card);
-            let mut info = v_flex().gap_3();
             if let Some(directory) = &context.working_directory {
                 info = info.child(detail(
                     "Working directory",
@@ -908,24 +1192,42 @@ impl Render for AccessView {
                 .collect();
             labels.sort();
             labels.dedup();
-            let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted).child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Secrets"),
-            );
+            card_index += 1;
+            let mut card = v_flex()
+                .id(("access-request", card_index))
+                .p_4()
+                .gap_3()
+                .rounded_lg()
+                .bg(theme.muted)
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(text("heading", "Secrets")),
+                );
+            let mut grant_technical = v_flex().id(("technical", card_index)).gap_4();
             if labels.is_empty() {
-                card = card.child(div().text_lg().font_semibold().child("Secret access"));
+                card = card.child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .child(text("secret", "Secret access")),
+                );
             }
-            for label in labels {
-                card = card.child(div().text_lg().font_semibold().child(label));
+            for (index, label) in labels.into_iter().enumerate() {
+                card = card.child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .child(text(("secret", index), label)),
+                );
             }
             if let Some(project) = &grant.application.project
                 && project_title.is_none()
             {
                 card = card.child(detail("Project", project.clone(), cx));
             }
-            technical = technical
+            grant_technical = grant_technical
                 .child(detail(
                     "Access via",
                     permission_access_type(grant.scope),
@@ -936,11 +1238,18 @@ impl Render for AccessView {
                     permission_operation_label(grant.operation),
                     cx,
                 ));
-            card = card.child(div().text_sm().child(format!(
-                "{} is requesting permission to {} these secrets.",
-                application_name(std::path::Path::new(&grant.principal.application_id)),
-                permission_operation_label(grant.operation).to_lowercase(),
+            let requester = grant_requester(grant);
+            card = card.child(div().text_sm().child(text(
+                "request",
+                format!(
+                    "{requester} is requesting permission to {} these secrets.",
+                    permission_operation_label(grant.operation).to_lowercase(),
+                ),
             )));
+            card = card.child(detail("Requested by", requester, cx));
+            if let Some(chain) = launch_chain_label(&grant.application.declared_launch_chain) {
+                card = card.child(detail("Launched from", chain, cx));
+            }
             for (label, value) in [
                 ("Profile", &grant.application.profile),
                 ("Folder", &grant.application.base_dir),
@@ -949,20 +1258,51 @@ impl Render for AccessView {
                     card = card.child(detail(label, value.clone(), cx));
                 }
             }
-            technical = technical.child(detail(
+            if let Some(distro) = &grant.application.declared_wsl_origin {
+                // Caller-declared, not authenticated -- see
+                // `VaultApplicationContext::declared_wsl_origin`. Shown
+                // prominently because it changes what this approval actually
+                // grants: a short-lived lease regardless of the duration
+                // chosen below, since this caller has none of the
+                // executable-identity assurance a native one has. The
+                // expiry row says so, so the duration buttons don't
+                // overstate the grant.
+                card = card
+                    .child(detail("WSL distro", distro.clone(), cx))
+                    .child(detail(
+                        "Access expires",
+                        format!(
+                            "After {} minutes, whichever duration you choose",
+                            factorseal::MAX_WSL_GRANT_SECONDS / 60
+                        ),
+                        cx,
+                    ));
+            }
+            grant_technical = grant_technical.child(detail(
                 "Executable",
-                grant.principal.application_id.clone(),
+                display_executable(&grant.principal.application_id),
                 cx,
             ));
+            if !grant.application.declared_launch_chain.is_empty() {
+                let launchers: Vec<_> = grant
+                    .application
+                    .declared_launch_chain
+                    .iter()
+                    .rev()
+                    .map(String::as_str)
+                    .collect();
+                grant_technical =
+                    grant_technical.child(detail("Launchers", launchers.join(" → "), cx));
+            }
             if let Some(reason) = &grant.application.reason {
-                technical = technical.child(detail("Request", reason.clone(), cx));
+                grant_technical = grant_technical.child(detail("Request", reason.clone(), cx));
             }
             requests = requests.child(card);
-            technical = technical.child(detail(
+            technical = technical.child(grant_technical.child(detail(
                 "Executable digest",
                 hex_digest(&grant.principal.executable_digest),
                 cx,
-            ));
+            )));
         }
         requests = requests.child(
             Button::new("access-technical-details").ghost().small()
@@ -973,9 +1313,14 @@ impl Render for AccessView {
                 })),
         ).when(self.details.expanded, |element| {
             element.child(technical).child(div().text_xs().text_color(theme.muted_foreground)
-                .child("Project labels come from the requesting app. Process identity is verified by the operating system."))
+                .child(text("technical-note", "Project labels and launchers come from the requesting app. The executable's identity is verified by the operating system, and access is granted to it.")))
         });
-        let mut groups = h_flex().gap_2().flex_wrap();
+        let mut groups = h_flex()
+            .id("unlock-group")
+            .role(gpui::Role::RadioGroup)
+            .aria_label("Unlock with")
+            .gap_2()
+            .flex_wrap();
         if let Some(metadata) = metadata {
             for (index, group) in metadata.unlock_policy().groups().iter().enumerate() {
                 let selected = self.group.as_ref() == Some(group);
@@ -983,6 +1328,8 @@ impl Render for AccessView {
                 groups = groups.child(
                     Button::new(("access-factor", index))
                         .label(group.to_string())
+                        .role(Some(gpui::Role::RadioButton))
+                        .toggled(selected)
                         .selected(selected)
                         .disabled(busy)
                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -992,42 +1339,293 @@ impl Render for AccessView {
                 );
             }
         }
-        v_flex().size_full().border_1().border_color(theme.border)
+        v_flex()
+            .size_full()
+            .border_1()
+            .border_color(theme.border)
+            .capture_any_mouse_down(cx.listener(|view, _, window, cx| view.arm(window, cx)))
             .capture_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
                     cx.defer(deny);
                 }
             }))
-            .bg(theme.background).text_color(theme.foreground).font_family(theme.font_family.clone()).text_size(theme.font_size)
-            .child(v_flex().p_6().gap_2().child(h_flex().gap_2().items_center().child(brand_mark(22., theme.foreground)).child(div().text_sm().text_color(theme.muted_foreground).child("FactorSeal")))
-                .child(div().text_xl().font_semibold().child(title)))
-            .child(div().id("access-request-details").flex_1().min_h_0().px_6().overflow_y_scrollbar().pb_4().child(requests))
-            .child(v_flex().p_6().gap_3().border_t_1().border_color(theme.border)
-                .child(div().text_xs().text_color(theme.muted_foreground).child(if !self.inputs.is_empty() { "Saves this value once. No access grant is created." } else if self.grants.is_empty() { "Unlock your vault to continue here." } else { "Applies only to the listed entries, app, folder, and operation. Manage access on each secret." }))
-                .when(metadata.is_some_and(|metadata| metadata.unlock_policy().groups().len() > 1), |element| element.child(groups))
-                .when((!self.grants.is_empty() || !self.requests.is_empty()) && self.inputs.is_empty(), |element| element.child(field_label("Allow access for", h_flex().gap_2()
-                    .child(Button::new("grant-hour").label("1 hour").selected(self.duration == Some(3600)).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = Some(3600); cx.notify(); })))
-                    .child(Button::new("grant-persistent").label("Until revoked").selected(self.duration.is_none()).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = None; cx.notify(); }))))))
-                .when(!self.inputs.is_empty() && !busy, |element| element.child(field_label("Secret value", self.editor.value.clone())))
-                .when(needs_password && !busy, |element| element.child(field_label("Vault password", self.password.clone())))
-                .when_some(self.error.clone(), |element, error| element.child(error_banner(error, theme.danger)))
-                .when(matches!(self.snapshot, Snapshot::Uninitialized { .. }), |element| element.child(div().text_sm().child("Set up your vault in FactorSeal Desktop before allowing access.")))
-                .child(h_flex().justify_end().gap_2()
-                    .child(Button::new("deny-access").ghost().label(if self.inputs.is_empty() { "Deny" } else { "Cancel" }).disabled(self.approving).on_click(cx.listener(|_, _, _, cx| {
-                        cx.defer(|cx| {
-                            deny(cx);
-                        });
-                    })))
-                    .child(Button::new("allow-access").primary().disabled((self.reviewing && self.grants.is_empty() && self.inputs.is_empty() && unsealed) || busy || !matches!(self.snapshot, Snapshot::Sealed { .. } | Snapshot::Unsealed { .. }))
-                        .label(if self.approving { "Authorizing…" } else if busy { "Unlocking…" } else if !self.inputs.is_empty() && unsealed { "Save secret" } else if !self.grants.is_empty() { "Grant access" } else if unsealed && self.reviewing { "Checking access…" } else if unsealed { "Continue" } else { "Unlock to continue" })
-                        .on_click(cx.listener(|view, _, window, cx| view.allow(window, cx))))))
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .font_family(theme.font_family.clone())
+            .text_size(theme.font_size)
+            .child(
+                v_flex()
+                    .p_6()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(brand_mark(22., theme.foreground))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(text("brand", "FactorSeal")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_semibold()
+                            .child(text("access-title", title)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("access-request-details")
+                    .flex_1()
+                    .min_h_0()
+                    .px_6()
+                    .overflow_y_scrollbar()
+                    .pb_4()
+                    .child(requests),
+            )
+            .child(
+                v_flex()
+                    .p_6()
+                    .gap_3()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(text(
+                                "scope-note",
+                                if !self.inputs.is_empty() {
+                                    "Saves this value once. No access grant is created."
+                                } else if self.grants.is_empty() {
+                                    "Unlock your vault to continue here."
+                                } else {
+                                    grant_scope_note(&self.grants)
+                                },
+                            )),
+                    )
+                    .when(
+                        metadata
+                            .is_some_and(|metadata| metadata.unlock_policy().groups().len() > 1),
+                        |element| element.child(groups),
+                    )
+                    .when(
+                        (!self.grants.is_empty() || !self.requests.is_empty())
+                            && self.inputs.is_empty(),
+                        |element| {
+                            element.child(field_label(
+                                "Allow access for",
+                                h_flex()
+                                    .id("grant-lifetime")
+                                    .role(gpui::Role::RadioGroup)
+                                    .aria_label("Allow access for")
+                                    .gap_2()
+                                    .when(single_write_allowed(&self.grants), |row| {
+                                        row.child(
+                                            Button::new("grant-once")
+                                                .label("This write only")
+                                                .role(Some(gpui::Role::RadioButton))
+                                                .toggled(choice == GrantChoice::ThisWriteOnly)
+                                                .selected(choice == GrantChoice::ThisWriteOnly)
+                                                .disabled(busy)
+                                                .on_click(cx.listener(|view, _, _, cx| {
+                                                    view.choice = Some(GrantChoice::ThisWriteOnly);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    })
+                                    .child(
+                                        Button::new("grant-hour")
+                                            .label("1 hour")
+                                            .role(Some(gpui::Role::RadioButton))
+                                            .toggled(choice == GrantChoice::Hour)
+                                            .selected(choice == GrantChoice::Hour)
+                                            .disabled(busy)
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.choice = Some(GrantChoice::Hour);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("grant-persistent")
+                                            .label("Until revoked")
+                                            .role(Some(gpui::Role::RadioButton))
+                                            .toggled(choice == GrantChoice::UntilRevoked)
+                                            .selected(choice == GrantChoice::UntilRevoked)
+                                            .disabled(busy)
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.choice = Some(GrantChoice::UntilRevoked);
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ))
+                        },
+                    )
+                    .when(!self.inputs.is_empty() && !busy, |element| {
+                        element.child(field_label("Secret value", self.editor.value.clone()))
+                    })
+                    .when(needs_password && !busy, |element| {
+                        element.child(field_label("Vault password", self.password.clone()))
+                    })
+                    .when_some(self.error.clone(), |element, error| {
+                        element.child(error_banner(error, theme.danger))
+                    })
+                    .when(
+                        matches!(self.snapshot, Snapshot::Uninitialized { .. }),
+                        |element| {
+                            element.child(div().text_sm().child(text(
+                                "setup-note",
+                                "Set up your vault in FactorSeal Desktop before allowing access.",
+                            )))
+                        },
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("deny-access")
+                                    .ghost()
+                                    .label(if self.inputs.is_empty() {
+                                        "Deny"
+                                    } else {
+                                        "Cancel"
+                                    })
+                                    .disabled(self.approving)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.defer(|cx| {
+                                            deny(cx);
+                                        });
+                                    })),
+                            )
+                            .child(
+                                Button::new("allow-access")
+                                    .primary()
+                                    .disabled(
+                                        (self.reviewing
+                                            && self.grants.is_empty()
+                                            && self.inputs.is_empty()
+                                            && unsealed)
+                                            || busy
+                                            || !matches!(
+                                                self.snapshot,
+                                                Snapshot::Sealed { .. } | Snapshot::Unsealed { .. }
+                                            ),
+                                    )
+                                    .label(if self.approving {
+                                        "Authorizing…"
+                                    } else if busy {
+                                        "Unlocking…"
+                                    } else if !self.inputs.is_empty() && unsealed {
+                                        "Save secret"
+                                    } else if !self.grants.is_empty() && unsealed {
+                                        "Grant access"
+                                    } else if unsealed && self.reviewing {
+                                        "Checking access…"
+                                    } else if unsealed {
+                                        "Continue"
+                                    } else {
+                                        "Unlock to continue"
+                                    })
+                                    .on_click(
+                                        cx.listener(|view, _, window, cx| view.allow(window, cx)),
+                                    ),
+                            ),
+                    ),
+            )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn input_guard_needs_a_click_and_a_settled_popup() {
+        let settled = std::time::Instant::now()
+            .checked_sub(ARM_DELAY * 2)
+            .expect("monotonic clock is past the delay");
+        let mut guard = InputGuard::new();
+        assert!(!guard.allows_approval(), "opening does not arm");
+        guard.changed_at = settled;
+        assert!(
+            !guard.allows_approval(),
+            "a settled popup still needs a click"
+        );
+        guard.armed = true;
+        assert!(guard.allows_approval());
+        guard.changed();
+        assert!(!guard.allows_approval(), "new requests restart the delay");
+    }
+
+    /// Opens the popup over a vault-less snapshot with a password unlock
+    /// group, which shows the password field without a real vault.
+    fn open_popup(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<AccessView>, &mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::appearance::initialize_for_test(cx);
+        });
+        let (runtime, _) = DesktopRuntime::new(crate::runtime::RuntimeConfig {
+            root: std::env::temp_dir().join("factorseal-access-popup-test"),
+            socket: None,
+            lease: crate::runtime::LeasePolicy {
+                idle_timeout: std::time::Duration::from_mins(1),
+                maximum_lifetime: std::time::Duration::from_mins(1),
+            },
+            secret_service: false,
+        });
+        let mut popup = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view =
+                    AccessView::new(runtime, Snapshot::Uninitialized { error: None }, window, cx);
+                view.group = Some(
+                    factorseal::UnlockGroup::new([factorseal::UnlockFactorKind::Password])
+                        .expect("a password-only group is valid"),
+                );
+                view
+            });
+            popup = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        (popup.expect("the window builder ran"), cx)
+    }
+
+    fn password(view: &gpui::Entity<AccessView>, cx: &mut gpui::VisualTestContext) -> String {
+        view.read_with(cx, |view, cx| view.password.read(cx).value().to_string())
+    }
+
+    #[gpui::test]
+    fn typing_meant_for_another_app_does_not_reach_the_password(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = open_popup(cx);
+        cx.run_until_parked();
+        cx.simulate_input("typed in a terminal");
+        assert_eq!(
+            password(&view, cx),
+            "",
+            "the field takes no focus on its own"
+        );
+        assert!(view.read_with(cx, |view, _| !view.guard.armed));
+    }
+
+    #[gpui::test]
+    fn a_click_arms_the_popup_and_focuses_the_password(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = open_popup(cx);
+        cx.run_until_parked();
+        cx.simulate_click(
+            gpui::point(gpui::px(20.), gpui::px(20.)),
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_input("vault password");
+        assert!(view.read_with(cx, |view, _| view.guard.armed));
+        assert_eq!(password(&view, cx), "vault password");
+    }
+
     #[test]
     fn unlock_dialog_describes_collection_and_item_requests() {
         assert_eq!(access_title(false, false, true), "Unlock system keyring");
@@ -1041,6 +1639,110 @@ mod tests {
         }
         let item = "/org/freedesktop/secrets/collection/factorseal/item/example";
         assert_eq!(unlock_target_label(item), format!("Locked item: {item}"));
+    }
+
+    #[test]
+    fn secretspec_requests_name_secretspec_and_where_it_was_launched_from() {
+        let path = |name: &str| {
+            std::env::temp_dir()
+                .join("bin")
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let caller = factorseal::CallerIdentity::new(
+            factorseal::CallerPlatform::Windows,
+            "S-1-5-21-1",
+            path("factorseal.exe"),
+            [7; 32],
+            None,
+        )
+        .expect("a valid caller");
+        let mut grant = factorseal::Permission {
+            target: None,
+            id: "p".to_owned(),
+            scope: Some(factorseal::DocumentKind::SecretSpecProviderCache),
+            operation: factorseal::PermissionOperation::Put,
+            principal: factorseal::PermissionPrincipal::from(&caller),
+            application: factorseal::VaultApplicationContext::new(
+                Some("demo".to_owned()),
+                None,
+                None,
+                None,
+            )
+            .expect("a valid context"),
+            state: factorseal::PermissionState::Pending {
+                created_at: 1,
+                expires_at: 2,
+                challenge: [0; 32],
+                expiring_write: false,
+            },
+        };
+        assert_eq!(grant_requester(&grant), "SecretSpec");
+        assert!(
+            grant_scope_note(std::slice::from_ref(&grant))
+                .contains("any program that runs SecretSpec")
+        );
+        grant.scope = Some(factorseal::DocumentKind::LinuxSecretService);
+        assert_eq!(grant_requester(&grant), "factorseal.exe");
+        assert!(grant_scope_note(std::slice::from_ref(&grant)).contains("entries, app, folder"));
+
+        // A SecretSpec write defaults to this write only, and the pick
+        // falls back to an hour once a request that is not one joins.
+        grant.scope = Some(factorseal::DocumentKind::SecretSpecProviderCache);
+        let write = grant.clone();
+        assert_eq!(
+            grant_choice(std::slice::from_ref(&write), None),
+            GrantChoice::ThisWriteOnly
+        );
+        assert_eq!(GrantChoice::ThisWriteOnly.lifetime(), (None, true));
+        // A cache write repeats on every expiry, so it defaults to an hour,
+        // but can still be approved for one write.
+        let mut cache_write = write.clone();
+        cache_write.state = factorseal::PermissionState::Pending {
+            created_at: 1,
+            expires_at: 2,
+            challenge: [0; 32],
+            expiring_write: true,
+        };
+        assert_eq!(
+            grant_choice(std::slice::from_ref(&cache_write), None),
+            GrantChoice::Hour
+        );
+        assert!(single_write_allowed(std::slice::from_ref(&cache_write)));
+        assert_eq!(
+            grant_choice(
+                std::slice::from_ref(&cache_write),
+                Some(GrantChoice::ThisWriteOnly)
+            ),
+            GrantChoice::ThisWriteOnly
+        );
+        let mut read = write.clone();
+        read.operation = factorseal::PermissionOperation::Get;
+        assert!(!single_write_allowed(std::slice::from_ref(&read)));
+        assert_eq!(
+            grant_choice(std::slice::from_ref(&read), None),
+            GrantChoice::Hour
+        );
+        let mixed = [write.clone(), read];
+        assert_eq!(
+            grant_choice(&mixed, Some(GrantChoice::ThisWriteOnly)),
+            GrantChoice::Hour
+        );
+        assert_eq!(
+            grant_choice(
+                std::slice::from_ref(&write),
+                Some(GrantChoice::UntilRevoked)
+            ),
+            GrantChoice::UntilRevoked
+        );
+        grant.scope = Some(factorseal::DocumentKind::LinuxSecretService);
+
+        assert_eq!(launch_chain_label(&[]), None);
+        assert_eq!(
+            launch_chain_label(&[path("secretspec.exe"), path("pwsh.exe"),]).as_deref(),
+            Some("pwsh.exe → secretspec.exe (not verified)")
+        );
     }
 
     #[test]
