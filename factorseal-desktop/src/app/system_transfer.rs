@@ -47,6 +47,7 @@ impl DesktopView {
         } else {
             panel.child(
                 Button::new("system-credential-export")
+                    .icon(Glyph::Upload)
                     .label("Choose destination app…")
                     .disabled(self.transfer_busy)
                     .on_click(cx.listener(|view, _, _, cx| view.export_system_credentials(cx))),

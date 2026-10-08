@@ -59,7 +59,10 @@ use crate::runtime::{
     DesktopRuntime, PERSONAL_SECRET_NAMESPACE, RuntimeConfig, Snapshot, TransferKey,
     TransferSummary, VaultContents,
 };
-use crate::{branding, theming};
+use crate::{
+    branding::{self, Glyph},
+    theming,
+};
 use factorseal::transfer::{
     PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
     TransferFormat, read_transfer_file, write_private_file,
@@ -242,6 +245,28 @@ fn close_icon(color: Hsla) -> impl IntoElement {
         .path(branding::CLOSE_ASSET)
         .size(rems(0.875))
         .text_color(color)
+}
+
+fn personal_kind_icon(kind: PersonalSecretKind) -> gpui_component::Icon {
+    match kind {
+        PersonalSecretKind::Login => IconName::Globe.into(),
+        PersonalSecretKind::SecureNote => IconName::File.into(),
+        PersonalSecretKind::Card => Glyph::Card.into(),
+        PersonalSecretKind::Identity => IconName::CircleUser.into(),
+        PersonalSecretKind::SshKey => IconName::SquareTerminal.into(),
+        PersonalSecretKind::ApiCredential => Glyph::Key.into(),
+        PersonalSecretKind::Passport => IconName::BookOpen.into(),
+        PersonalSecretKind::BankAccount => IconName::Building2.into(),
+        PersonalSecretKind::Document => IconName::Folder.into(),
+        PersonalSecretKind::Generic => IconName::Ellipsis.into(),
+    }
+}
+
+fn personal_entry_kind(entry: &factorseal::VaultEntryMetadata) -> PersonalSecretKind {
+    PersonalSecretKind::ALL
+        .into_iter()
+        .find(|kind| entry.display_type.as_deref() == Some(kind.label()))
+        .unwrap_or_default()
 }
 
 fn error_banner(message: String, color: Hsla) -> Div {
@@ -737,6 +762,16 @@ struct DesktopView {
 }
 
 impl DesktopView {
+    fn report_from_settings(
+        &mut self,
+        _: &gpui::Entity<crate::settings_view::SettingsView>,
+        _: &crate::settings_view::ReportIssue,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.report_issue(window, cx);
+    }
+
     fn report_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.issue_report_busy {
             return;
@@ -776,9 +811,9 @@ impl DesktopView {
                 .when_some(error.get(), |dialog, error| dialog.child(error_banner(error.to_owned(), cx.theme().danger)))
                 .footer(
                     DialogFooter::new()
-                        .child(Button::new("cancel-issue-report").label("Cancel")
+                        .child(Button::new("cancel-issue-report").icon(IconName::Close).label("Cancel")
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(CancelDialog), cx)))
-                        .child(Button::new("send-issue-report").primary().label("Send report")
+                        .child(Button::new("send-issue-report").primary().icon(Glyph::Upload).label("Send report")
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(ConfirmDialog { secondary: false }), cx))),
                 )
                 .on_ok(move |_, window, cx| {
@@ -888,7 +923,7 @@ impl DesktopView {
                             .items_center()
                             .child(
                                 Button::new("report-issue")
-                                    .icon(gpui_component::Icon::default().path(branding::BUG_ASSET))
+                                    .icon(Glyph::Bug)
                                     .ghost()
                                     .small()
                                     .disabled(self.issue_report_busy)
@@ -937,6 +972,8 @@ impl DesktopView {
     ) -> Self {
         Self::poll_devices(Arc::clone(&runtime), cx);
         let settings = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        let settings_report = cx.subscribe_in(&settings, window, Self::report_from_settings);
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -1031,7 +1068,7 @@ impl DesktopView {
             system_integrations_expanded: true,
             #[cfg(target_os = "linux")]
             wifi_migration: wifi::State::default(),
-            _subscriptions: vec![password_submit, vault_search_change],
+            _subscriptions: vec![password_submit, vault_search_change, settings_report],
         }
     }
 
@@ -1853,6 +1890,8 @@ impl DesktopView {
                     .primary()
                     .large()
                     .w_full()
+                    .icon(Glyph::Key)
+                    .loading(unlocking)
                     .disabled(unlocking)
                     .label(if unlocking {
                         "Unlocking…"
@@ -2290,7 +2329,10 @@ impl DesktopView {
                             .min_w_0()
                             .gap_1()
                             .when(is_personal_secret(entry), |content| {
-                                content.flex_row().items_center().gap_2()
+                                content.flex_row().items_center().gap_2().child(
+                                    personal_kind_icon(personal_entry_kind(entry))
+                                        .text_color(theme.muted_foreground),
+                                )
                             })
                             .child(
                                 div()
@@ -2500,6 +2542,7 @@ impl DesktopView {
                         .enumerate()
                         .map(|(index, kind)| {
                             Button::new(("personal-category", index))
+                                .icon(personal_kind_icon(kind))
                                 .label(kind.label())
                                 .selected(self.personal_kind == kind)
                                 .on_click(cx.listener(move |view, _, window, cx| {
@@ -2599,6 +2642,7 @@ impl DesktopView {
                             .child(h_flex().items_start().gap_2()
                                 .child(div().flex_1().min_w_0().child(field.value.clone()))
                                 .child(Button::new(("copy-personal-draft", index)).small()
+                                    .icon(if self.copied_personal_field == Some(personal_actions::CopiedField::Draft(index)) { IconName::Check } else { IconName::Copy })
                                     .label(if self.copied_personal_field == Some(personal_actions::CopiedField::Draft(index)) { "Copied" } else { "Copy" })
                                     .disabled(field.value.read(cx).value().is_empty())
                                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -2607,6 +2651,7 @@ impl DesktopView {
                                     })))
                                 .when(personal_actions::can_generate(self.personal_kind, field), |row| {
                                     row.child(Button::new(("generate-personal-password", index)).small()
+                                        .icon(IconName::Asterisk)
                                         .label("Generate")
                                         .tooltip("Generate a 12-word BIP-39 passphrase")
                                         .on_click(cx.listener(move |view, _, window, cx| {
@@ -2618,6 +2663,7 @@ impl DesktopView {
             .when(custom, |panel| {
                 panel.child(
                     Button::new("add-personal-field")
+                        .icon(IconName::Plus)
                         .label("Add custom field")
                         .on_click(cx.listener(|view, _, window, cx| {
                             let index = view.personal_fields.len();
@@ -2644,6 +2690,7 @@ impl DesktopView {
                     .gap_2()
                     .child(
                         Button::new("cancel-personal-secret")
+                            .icon(IconName::Close)
                             .label("Cancel")
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.show_personal_panel(PersonalPanel::Overview, cx);
@@ -2652,6 +2699,7 @@ impl DesktopView {
                     .child(
                         Button::new("save-personal-secret")
                             .primary()
+                            .icon(IconName::Check)
                             .label("Save item")
                             .on_click(cx.listener(|view, _, window, cx| {
                                 view.save_personal_secret(window, cx);
@@ -2689,6 +2737,7 @@ impl DesktopView {
                 }))
                 .child(
                     Button::new("choose-transfer-key")
+                        .icon(IconName::FolderOpen)
                         .label(if is_import { "Choose private key file" } else { "Choose public key file" })
                         .disabled(self.transfer_busy)
                         .on_click(cx.listener(move |view, _, _, cx| view.choose_transfer_key_file(is_import, cx))),
@@ -2755,6 +2804,11 @@ impl DesktopView {
                         .flex_wrap()
                         .children([false, true].into_iter().map(|import| {
                             Button::new(("transfer-direction", usize::from(import)))
+                                .icon(if import {
+                                    Glyph::Upload
+                                } else {
+                                    Glyph::Download
+                                })
                                 .selected(is_import == import)
                                 .disabled(self.transfer_busy)
                                 .label(match (is_backup, import) {
@@ -2911,6 +2965,12 @@ impl DesktopView {
                             "start-secret-export"
                         })
                         .primary()
+                        .icon(if is_import {
+                            Glyph::Upload
+                        } else {
+                            Glyph::Download
+                        })
+                        .loading(self.transfer_busy)
                         .disabled(self.transfer_busy)
                         .label(if is_import {
                             "Choose file and review"
@@ -3005,6 +3065,7 @@ impl DesktopView {
                             Button::new("new-personal-secret")
                                 .small()
                                 .primary()
+                                .icon(IconName::Plus)
                                 .label("New item")
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.show_personal_panel(PersonalPanel::NewItem, cx);
@@ -3052,6 +3113,15 @@ impl DesktopView {
                         } else {
                             "Choose an item on the left to see its details."
                         }),
+                )
+                .child(
+                    Button::new("welcome-new-item")
+                        .primary()
+                        .icon(IconName::Plus)
+                        .label("New item")
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.show_personal_panel(PersonalPanel::NewItem, cx);
+                        })),
                 )
                 .child(self.render_browser(cx)),
             Some(VaultSelection::PersonalSecrets) => {
@@ -3224,6 +3294,7 @@ impl DesktopView {
                         .child(
                             Button::new("vault-devices")
                                 .small()
+                                .icon(IconName::Network)
                                 .label("Devices")
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.select_vault_item(VaultSelection::Devices, cx);
@@ -3232,6 +3303,7 @@ impl DesktopView {
                         .child(
                             Button::new("transfer-credentials")
                                 .small()
+                                .icon(Glyph::Transfer)
                                 .disabled(self.transfer_busy)
                                 .label("Transfer credentials")
                                 .on_click(cx.listener(|view, _, _, cx| {
@@ -3241,6 +3313,7 @@ impl DesktopView {
                         .child(
                             Button::new("backup-vault")
                                 .small()
+                                .icon(IconName::HardDrive)
                                 .disabled(self.transfer_busy)
                                 .label("Back up vault")
                                 .on_click(cx.listener(|view, _, _, cx| {
@@ -3333,8 +3406,10 @@ impl DesktopView {
                                 .bg(theme.muted)
                                 .rounded_tr(crate::appearance::rem_size(cx) * 0.5 - px(1.))
                                 .rounded_br(crate::appearance::rem_size(cx) * 0.5 - px(1.))
+                                .gap_2()
                                 .text_sm()
                                 .font_semibold()
+                                .child(gpui_component::Icon::new(Glyph::Lock).small())
                                 .child("Seal now")
                                 .when(*owned, |action| {
                                     action
@@ -3440,6 +3515,7 @@ impl DesktopView {
                     .primary()
                     .large()
                     .w_full()
+                    .icon(IconName::Plus)
                     .label("Create vault")
                     .on_click(cx.listener(|view, _, window, cx| view.initialize(window, cx))),
             )
@@ -3462,10 +3538,10 @@ impl DesktopView {
 
     fn render_body(&self, compact: bool, cx: &mut Context<Self>) -> Div {
         if self.settings_open {
-            return div()
-                .w_full()
-                .child(self.settings.clone())
-                .child(self.render_browser(cx));
+            let browsers = self.browser_settings(cx);
+            return self
+                .settings
+                .update(cx, |settings, cx| settings.page(browsers, cx));
         }
         let theme = cx.theme().clone();
         match &self.snapshot {
@@ -4225,6 +4301,28 @@ mod tests {
             assert_eq!(
                 super::vault_entry_details(&entry),
                 vec![("Type", kind.label().into())]
+            );
+        }
+    }
+
+    #[test]
+    fn personal_entries_resolve_their_item_type() {
+        let entry = |display_type: Option<&str>| factorseal::VaultEntryMetadata {
+            access_project: None,
+            display_name: Some("Example".into()),
+            display_type: display_type.map(Into::into),
+            updated_at: None,
+            document_kind: DocumentKind::LocalKeyring,
+            partition: super::PERSONAL_SECRET_NAMESPACE.to_vec(),
+            address: factorseal::SecretAddress::new("internal-id", None).unwrap(),
+        };
+        for kind in super::PersonalSecretKind::ALL {
+            assert_eq!(super::personal_entry_kind(&entry(Some(kind.label()))), kind);
+        }
+        for display_type in [None, Some("Unknown type")] {
+            assert_eq!(
+                super::personal_entry_kind(&entry(display_type)),
+                super::PersonalSecretKind::Generic
             );
         }
     }

@@ -38,6 +38,27 @@ impl AssetSource for Assets {
             branding::BUG_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../../assets/logo/factorseal-bug.svg"
             )))),
+            branding::LOCK_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-lock.svg"
+            )))),
+            branding::DOWNLOAD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-download.svg"
+            )))),
+            branding::UPLOAD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-upload.svg"
+            )))),
+            branding::KEY_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-key.svg"
+            )))),
+            branding::CARD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-card.svg"
+            )))),
+            branding::REFRESH_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-refresh.svg"
+            )))),
+            branding::TRANSFER_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-transfer.svg"
+            )))),
             _ => gpui_component_assets::Assets.load(path),
         }
     }
@@ -51,6 +72,13 @@ impl AssetSource for Assets {
                 branding::SEARCH_ASSET.into(),
                 branding::CLOSE_ASSET.into(),
                 branding::BUG_ASSET.into(),
+                branding::LOCK_ASSET.into(),
+                branding::DOWNLOAD_ASSET.into(),
+                branding::UPLOAD_ASSET.into(),
+                branding::KEY_ASSET.into(),
+                branding::CARD_ASSET.into(),
+                branding::REFRESH_ASSET.into(),
+                branding::TRANSFER_ASSET.into(),
             ]
             .into_iter()
             .filter(|asset: &SharedString| asset.starts_with(path)),
