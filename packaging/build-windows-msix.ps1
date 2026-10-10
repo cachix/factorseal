@@ -119,6 +119,7 @@ try {
     $verify = Join-Path $stageRoot 'verify'
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     Copy-Item -LiteralPath $factorseal, 'LICENSE', 'README.md' -Destination $stage
+    Copy-Item -LiteralPath 'assets\fonts\ibm-plex-sans\license.txt' -Destination (Join-Path $stage 'LICENSE.IBM-Plex-Sans')
     foreach ($helper in 'factorseal-desktop', 'factorseal-parser', 'factorseal-network', 'factorseal-browser') {
         Copy-Item -LiteralPath (Join-Path $metadata.target_directory "release\$helper.exe") -Destination $stage
     }

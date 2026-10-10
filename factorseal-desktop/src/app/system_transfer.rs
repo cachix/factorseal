@@ -47,6 +47,7 @@ impl DesktopView {
         } else {
             panel.child(
                 Button::new("system-credential-export")
+                    .icon(Glyph::Upload)
                     .label("Choose destination app…")
                     .disabled(self.transfer_busy)
                     .on_click(cx.listener(|view, _, _, cx| view.export_system_credentials(cx))),
@@ -152,6 +153,7 @@ impl DesktopView {
         let metadata = metadata.clone();
         let runtime = Arc::clone(&self.runtime);
         let replace = self.transfer_replace_existing;
+        self.clear_personal_detail();
         self.selected_vault_item = Some(VaultSelection::TransferCredentials);
         self.transfer_is_import = true;
         cx.spawn(async move |view, cx| {

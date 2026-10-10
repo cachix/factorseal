@@ -1186,6 +1186,7 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
             created_at: 1,
             expires_at: 99,
             challenge: [0; 32],
+            awaited: false,
         },
     };
     permission.principal.application_id = attack.to_owned();

@@ -231,143 +231,258 @@ fn discover_browsers() -> Vec<(Browser, bool)> {
         .collect()
 }
 
-impl DesktopView {
-    #[allow(clippy::too_many_lines)] // Declarative pairing, unlock, and account-selection controls.
-    pub(super) fn render_browser(&self, cx: &mut Context<Self>) -> Div {
-        let Some(global) = cx.try_global::<BrowserGlobal>() else {
-            return div();
-        };
-        let hub = Arc::clone(&global.hub);
-        let cache = global.cache.clone();
-        if !matches!(self.snapshot, Snapshot::Unsealed { owned: true, .. }) {
-            return div();
-        }
+fn browser_state(paired_count: usize, extension_installed: bool) -> String {
+    if paired_count > 0 {
+        format!(
+            "Extension paired · {paired_count} {}",
+            if paired_count == 1 {
+                "profile"
+            } else {
+                "profiles"
+            }
+        )
+    } else if extension_installed {
+        "Extension installed · Not paired".into()
+    } else {
+        "Extension not detected".into()
+    }
+}
+
+fn browser_status_visible(
+    settings_open: bool,
+    detected: Option<bool>,
+    paired_count: usize,
+) -> bool {
+    paired_count > 0 || detected.is_some_and(|extension| settings_open || extension)
+}
+
+struct Detected {
+    installed: Vec<(Browser, bool)>,
+    paired: Vec<String>,
+    labels: std::collections::HashMap<String, Browser>,
+}
+
+impl Detected {
+    fn read(global: &BrowserGlobal) -> Self {
         let installed = global
             .installed
             .lock()
             .map(|b| b.clone())
             .unwrap_or_default();
-        let (paired, labels) = hub
+        let (mut paired, labels) = global
+            .hub
             .lock()
-            .map(|h| (h.paired.clone(), h.browsers.clone()))
-            .unwrap_or_default();
-        let count = |browser| {
-            paired
-                .iter()
-                .filter(|key| labels.get(*key) == Some(&browser))
-                .count()
-        };
-        let unknown = paired.iter().any(|key| !labels.contains_key(key));
-        let mut panel = v_flex().py_3().gap_2().flex_none();
-        if self.settings_open {
-            panel = panel.child(div().font_semibold().child("Browser extensions"));
-        } else {
-            panel = panel.w_full().max_w(rems(420. / 16.));
-        }
-        for (index, browser) in Browser::ALL.into_iter().enumerate() {
-            let paired_count = count(browser);
-            let detected = installed.iter().find(|(found, _)| *found == browser);
-            if detected.is_none() && paired_count == 0 {
-                continue;
-            }
-            let extension_installed = detected.is_some_and(|(_, extension)| *extension);
-            let state = if paired_count > 0 {
-                format!(
-                    "Extension paired · {paired_count} {}",
-                    if paired_count == 1 {
-                        "profile"
-                    } else {
-                        "profiles"
-                    }
+            .map(|h| {
+                (
+                    h.paired.iter().cloned().collect::<Vec<_>>(),
+                    h.browsers.clone(),
                 )
-            } else if extension_installed {
-                "Extension installed · Not paired".into()
-            } else {
-                "Extension not detected".into()
-            };
-            panel = panel.child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .child(div().font_semibold().child(browser.name()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(state),
-                    )
-                    .when(
-                        self.settings_open && paired_count == 0 && !extension_installed,
-                        |row| {
-                            row.child(
-                                Button::new(("install-browser-extension", index))
-                                    .small()
-                                    .label("Install extension")
-                                    .on_click(move |_, _, cx| cx.open_url(browser.install_url())),
-                            )
-                        },
-                    ),
-            );
+            })
+            .unwrap_or_default();
+        paired.sort_unstable();
+        Self {
+            installed,
+            paired,
+            labels,
         }
-        if self.settings_open && unknown {
-            panel = panel.child(
-                div()
-                    .text_sm()
-                    .child("Reload existing extensions to identify their paired browsers."),
-            );
+    }
+
+    fn count(&self, browser: Browser) -> usize {
+        self.paired
+            .iter()
+            .filter(|key| self.labels.get(*key) == Some(&browser))
+            .count()
+    }
+
+    fn browsers(
+        &self,
+        settings_open: bool,
+    ) -> impl Iterator<Item = (usize, Browser, usize, bool)> + '_ {
+        Browser::ALL
+            .into_iter()
+            .enumerate()
+            .filter_map(move |(index, browser)| {
+                let paired_count = self.count(browser);
+                let detected = self
+                    .installed
+                    .iter()
+                    .find(|(found, _)| *found == browser)
+                    .map(|(_, extension)| *extension);
+                browser_status_visible(settings_open, detected, paired_count).then_some((
+                    index,
+                    browser,
+                    paired_count,
+                    detected == Some(true),
+                ))
+            })
+    }
+}
+
+impl DesktopView {
+    pub(super) fn render_browser(&self, cx: &mut Context<Self>) -> Div {
+        let Some(global) = cx.try_global::<BrowserGlobal>() else {
+            return div();
+        };
+        if !matches!(self.snapshot, Snapshot::Unsealed { owned: true, .. }) {
+            return div();
         }
-        if self.settings_open && installed.iter().any(|(browser, _)| count(*browser) == 0) {
-            panel = panel.child(div().text_sm().child(
-                "Developer preview · Install the extension, then choose Pair with Desktop.",
-            ));
+        let detected = Detected::read(global);
+        v_flex()
+            .py_3()
+            .gap_2()
+            .flex_none()
+            .w_full()
+            .max_w(rems(420. / 16.))
+            .children(detected.browsers(false).map(
+                |(_, browser, paired_count, extension_installed)| {
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(div().font_semibold().child(browser.name()))
+                        .child(
+                            div()
+                                .text_body()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(browser_state(paired_count, extension_installed)),
+                        )
+                },
+            ))
+            .child(
+                h_flex().pt_2().justify_center().child(
+                    Button::new("open-browser-settings")
+                        .small()
+                        .icon(IconName::Globe)
+                        .label("Browser extensions")
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.open_settings(cx);
+                            view.open_section(
+                                section_pages::SectionRow::Settings(
+                                    crate::settings_view::Section::Browsers,
+                                ),
+                                cx,
+                            );
+                        })),
+                ),
+            )
+    }
+
+    pub(super) fn browsers_available(&self, cx: &App) -> bool {
+        cx.try_global::<BrowserGlobal>().is_some()
+            && matches!(self.snapshot, Snapshot::Unsealed { owned: true, .. })
+    }
+
+    pub(super) fn browser_settings(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::settings_view::Browsers> {
+        use crate::settings_view::{BrowserRow, Browsers};
+        let global = cx.try_global::<BrowserGlobal>()?;
+        if !matches!(self.snapshot, Snapshot::Unsealed { owned: true, .. }) {
+            return None;
         }
-        if self.settings_open {
-            let keys = hub
-                .lock()
-                .map(|h| h.paired.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            panel = panel.child(div().font_semibold().child("Paired browser profiles"));
-            if global.registration_error.lock().is_ok_and(|failed| *failed) {
-                panel = panel.child("Browser setup failed. Check that the bridge is installed, then restart Desktop to retry.");
-            }
-            for (index, key) in keys.into_iter().enumerate() {
+        let hub = Arc::clone(&global.hub);
+        let cache = global.cache.clone();
+        let registration_failed = global.registration_error.lock().is_ok_and(|failed| *failed);
+        let detected = Detected::read(global);
+        let rows = detected
+            .browsers(true)
+            .map(
+                |(index, browser, paired_count, extension_installed)| BrowserRow {
+                    name: browser.name(),
+                    state: browser_state(paired_count, extension_installed).into(),
+                    install: (paired_count == 0 && !extension_installed).then(|| {
+                        Button::new(("install-browser-extension", index))
+                            .small()
+                            .icon(IconName::ExternalLink)
+                            .label("Install extension")
+                            .on_click(move |_, _, cx| cx.open_url(browser.install_url()))
+                            .into_any_element()
+                    }),
+                },
+            )
+            .collect();
+        let mut notes = Vec::new();
+        if detected
+            .paired
+            .iter()
+            .any(|key| !detected.labels.contains_key(key))
+        {
+            notes.push("Reload existing extensions to identify their paired browsers.");
+        }
+        if detected
+            .installed
+            .iter()
+            .any(|(browser, _)| detected.count(*browser) == 0)
+        {
+            notes.push("Developer preview · Install the extension, then choose Pair with Desktop.");
+        }
+        let paired = detected
+            .paired
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
                 let runtime = Arc::clone(&self.runtime);
                 let hub = Arc::clone(&hub);
                 let cache = cache.clone();
-                let browser = labels.get(&key).map_or("Browser", |browser| browser.name());
+                let key = key.clone();
+                let browser = detected
+                    .labels
+                    .get(&key)
+                    .map_or("Browser", |browser| browser.name());
                 let label = format!("Disconnect {browser} · {}…", &key[..key.len().min(16)]);
-                panel = panel.child(
-                    Button::new(("browser-revoke", index))
-                        .label(label)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            let runtime = Arc::clone(&runtime);
-                            let hub = Arc::clone(&hub);
-                            let key = key.clone();
-                            let cache = cache.clone();
-                            cx.spawn(async move |_, _| {
-                                let revoked = key.clone();
-                                if smol::unblock(move || {
-                                    runtime.browser_request(WorkerAction::Revoke { key })
-                                })
-                                .await
-                                .is_ok()
-                                    && let Ok(mut h) = hub.lock()
-                                {
-                                    h.revoked(&revoked);
-                                    if let Ok(bytes) = serde_json::to_vec(&h.paired) {
-                                        let _ = factorseal::transfer::write_private_file(
-                                            &cache, &bytes,
-                                        );
-                                    }
-                                }
+                Button::new(("browser-revoke", index))
+                    .small()
+                    .icon(IconName::CircleX)
+                    .label(label)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        let runtime = Arc::clone(&runtime);
+                        let hub = Arc::clone(&hub);
+                        let key = key.clone();
+                        let cache = cache.clone();
+                        cx.spawn(async move |_, _| {
+                            let revoked = key.clone();
+                            if smol::unblock(move || {
+                                runtime.browser_request(WorkerAction::Revoke { key })
                             })
-                            .detach();
-                        })),
-                );
-            }
-            return panel;
-        }
-        panel
+                            .await
+                            .is_ok()
+                                && let Ok(mut h) = hub.lock()
+                            {
+                                h.revoked(&revoked);
+                                if let Ok(bytes) = serde_json::to_vec(&h.paired) {
+                                    let _ =
+                                        factorseal::transfer::write_private_file(&cache, &bytes);
+                                }
+                            }
+                        })
+                        .detach();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        Some(Browsers {
+            rows,
+            notes,
+            error: registration_failed.then_some(
+                "Browser setup failed. Check that the bridge is installed, then restart Desktop to retry.",
+            ),
+            paired,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_lists_only_browsers_with_the_extension() {
+        assert!(!browser_status_visible(false, None, 0));
+        assert!(!browser_status_visible(false, Some(false), 0));
+        assert!(browser_status_visible(false, Some(true), 0));
+        assert!(browser_status_visible(false, None, 1));
+        assert!(browser_status_visible(true, Some(false), 0));
+        assert!(!browser_status_visible(true, None, 0));
     }
 }

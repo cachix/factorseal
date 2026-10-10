@@ -31,6 +31,7 @@ const MAX_PENDING_PER_CALLER: usize = 16;
 const APPROVAL_RATE_WINDOW: Duration = Duration::from_mins(1);
 const MAX_NEW_APPROVALS_PER_CALLER: usize = 8;
 const MAX_NEW_APPROVALS: usize = 128;
+const REQUESTER_GRACE: Duration = Duration::from_secs(2);
 
 pub(super) const PERMISSION_CONTROL_NAMESPACE: &[u8] = b"factorseal/permissions/v1";
 
@@ -58,6 +59,8 @@ struct ApprovalRecord {
     namespace: Vec<u8>,
     address: Option<crate::SecretAddress>,
     permission: GrantPermission,
+    #[serde(skip)]
+    awaited_until: Option<Instant>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -388,7 +391,7 @@ impl PendingApprovals {
             return Err(VaultError::AuthorizationRequired);
         }
         let fingerprint = candidate.caller.fingerprint();
-        if let Some(existing) = self.records.iter().find(|record| {
+        if let Some(existing) = self.records.iter_mut().find(|record| {
             record.caller.fingerprint() == fingerprint
                 && record.summary.application == candidate.application
                 && record.address == candidate.address
@@ -399,6 +402,9 @@ impl PendingApprovals {
             let PermissionState::Pending { expires_at, .. } = existing.summary.state else {
                 unreachable!("queue stores only pending records");
             };
+            existing.awaited_until = existing
+                .awaited_until
+                .max(Some(monotonic_now + REQUESTER_GRACE));
             return Ok(VaultInteractionReference {
                 id: existing.summary.id.clone(),
                 expires_at,
@@ -453,6 +459,7 @@ impl PendingApprovals {
                 created_at: now,
                 expires_at,
                 challenge,
+                awaited: false,
             },
         };
         self.records.push_back(ApprovalRecord {
@@ -462,6 +469,7 @@ impl PendingApprovals {
             namespace: candidate.namespace,
             address: candidate.address,
             permission: candidate.permission,
+            awaited_until: Some(monotonic_now + REQUESTER_GRACE),
         });
         self.recent_creations
             .push_back((monotonic_now, fingerprint));
@@ -472,14 +480,37 @@ impl PendingApprovals {
     }
 
     pub(super) fn list(&mut self, now: u64) -> (u64, Vec<Permission>) {
+        self.list_at(now, Instant::now())
+    }
+
+    fn list_at(&mut self, now: u64, monotonic_now: Instant) -> (u64, Vec<Permission>) {
         self.purge_expired(now);
         (
             self.revision,
             self.records
                 .iter()
-                .map(|record| record.summary.clone())
+                .map(|record| {
+                    let mut summary = record.summary.clone();
+                    if let PermissionState::Pending { awaited, .. } = &mut summary.state {
+                        *awaited = record
+                            .awaited_until
+                            .is_some_and(|until| until > monotonic_now);
+                    }
+                    summary
+                })
                 .collect(),
         )
+    }
+
+    pub(super) fn awaited(&mut self, caller: &CallerIdentity, id: &str, until: Instant) {
+        let fingerprint = caller.fingerprint();
+        if let Some(record) = self
+            .records
+            .iter_mut()
+            .find(|record| record.summary.id == id && record.caller.fingerprint() == fingerprint)
+        {
+            record.awaited_until = record.awaited_until.max(Some(until + REQUESTER_GRACE));
+        }
     }
 
     pub(super) fn deny(&mut self, id: &str, now: u64) -> VaultResult<()> {
@@ -659,6 +690,47 @@ mod tests {
             approvals.create_at(candidate(0, 99), 200, instant),
             Err(VaultError::ApprovalLimited)
         ));
+    }
+
+    #[test]
+    fn approvals_count_as_awaited_only_while_their_requester_waits() {
+        let awaited = |approvals: &mut PendingApprovals, at| {
+            approvals
+                .list_at(100, at)
+                .1
+                .iter()
+                .map(|permission| {
+                    matches!(
+                        permission.state,
+                        PermissionState::Pending { awaited: true, .. }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut approvals = PendingApprovals::default();
+        let start = Instant::now();
+        let first = approvals.create_at(candidate(0, 0), 100, start).unwrap();
+        assert_eq!(awaited(&mut approvals, start), [true]);
+        assert_eq!(awaited(&mut approvals, start + REQUESTER_GRACE), [false]);
+        let caller = candidate(0, 0).caller;
+        let deadline = start + Duration::from_secs(5);
+        approvals.awaited(&caller, &first.id, deadline);
+        assert_eq!(awaited(&mut approvals, deadline), [true]);
+        assert_eq!(awaited(&mut approvals, deadline + REQUESTER_GRACE), [false]);
+        approvals.awaited(
+            &candidate(1, 0).caller,
+            &first.id,
+            deadline + REQUESTER_GRACE,
+        );
+        assert_eq!(awaited(&mut approvals, deadline + REQUESTER_GRACE), [false]);
+        let later = deadline + Duration::from_mins(1);
+        let retried = approvals.create_at(candidate(0, 0), 160, later).unwrap();
+        assert_eq!(retried.id, first.id);
+        assert_eq!(awaited(&mut approvals, later), [true]);
+        let PermissionState::Pending { awaited, .. } = approvals.records[0].summary.state else {
+            panic!("pending");
+        };
+        assert!(!awaited);
     }
 
     #[test]

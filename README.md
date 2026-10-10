@@ -111,3 +111,5 @@ end-to-end SecretSpec conformance remain outstanding. See the
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+Desktop bundles IBM Plex Sans under the SIL Open Font License 1.1. See
+[its license](assets/fonts/ibm-plex-sans/license.txt).

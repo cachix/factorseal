@@ -113,9 +113,11 @@ Neither belongs in the permanent logo.
 ## Typography
 
 Use the operating system's sans-serif UI family. This keeps Desktop native and
-avoids shipping a branding font solely for appearance. Prefer medium or
-semibold weights, sentence case, short labels, and generous spacing. Use the
-system monospace family only for commands, addresses, and identifiers.
+avoids shipping a branding font solely for appearance. Desktop bundles IBM
+Plex Sans only as a fallback when the system font cannot be read or is
+missing. Prefer medium or semibold weights, sentence case, short labels, and
+generous spacing. Use the system monospace family only for commands,
+addresses, and identifiers.
 
 ## Interface language
 
