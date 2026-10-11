@@ -190,6 +190,11 @@ outside the separately built CLI key owner's dependency graph.
 
 ## Honest limitations
 
+- Desktop's website icons, on by default, send the host name of each personal
+  item's website to DuckDuckGo's icon service while the vault is unsealed.
+  The request and image decoding run in the sandboxed network helper. Turn
+  off Show website icons in Settings to keep these names on the device.
+
 - Personal documents retain per-item Automerge histories inside their signed,
   encrypted snapshots. Unlike the value-free audit log, this includes old and
   deleted secret values, and newly enrolled readers currently receive that

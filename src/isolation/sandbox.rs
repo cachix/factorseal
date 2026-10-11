@@ -10,7 +10,7 @@ pub(super) fn parser() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     return linux::parser();
     #[cfg(target_os = "macos")]
-    return macos::install(None);
+    return macos::install(false, None);
     #[cfg(windows)]
     return super::windows::verify(false);
     #[allow(unreachable_code)]
@@ -21,12 +21,12 @@ pub(super) fn parser() -> io::Result<()> {
 }
 
 #[cfg(feature = "personal-sync-network")]
-pub(super) fn network(root: &Path) -> io::Result<()> {
+pub(super) fn network(root: Option<&Path>) -> io::Result<()> {
     crate::security::disable_core_dumps()?;
     #[cfg(target_os = "linux")]
     return linux::network(root);
     #[cfg(target_os = "macos")]
-    return macos::install(Some(root));
+    return macos::install(true, root);
     #[cfg(windows)]
     {
         let _ = root;
@@ -129,14 +129,14 @@ mod linux {
     }
 
     #[cfg(feature = "personal-sync-network")]
-    pub(super) fn network(root: &Path) -> io::Result<()> {
+    pub(super) fn network(root: Option<&Path>) -> io::Result<()> {
         prepare()?;
         network_filesystem(root)?;
         network_syscalls()
     }
 
     #[cfg(feature = "personal-sync-network")]
-    fn network_filesystem(root: &Path) -> io::Result<()> {
+    fn network_filesystem(root: Option<&Path>) -> io::Result<()> {
         use landlock::{
             ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
             RulesetAttr, RulesetCreatedAttr, RulesetStatus,
@@ -148,12 +148,14 @@ mod linux {
             .map_err(io::Error::other)?
             .create()
             .map_err(io::Error::other)?;
-        rules = rules
-            .add_rule(PathBeneath::new(
-                PathFd::new(root).map_err(io::Error::other)?,
-                AccessFs::from_all(abi),
-            ))
-            .map_err(io::Error::other)?;
+        if let Some(root) = root {
+            rules = rules
+                .add_rule(PathBeneath::new(
+                    PathFd::new(root).map_err(io::Error::other)?,
+                    AccessFs::from_all(abi),
+                ))
+                .map_err(io::Error::other)?;
+        }
         for path in [
             "/usr",
             "/lib",
@@ -304,7 +306,7 @@ mod macos {
     use std::ffi::{CString, c_char};
     use std::fmt::Write as _;
 
-    pub(super) fn install(root: Option<&Path>) -> io::Result<()> {
+    pub(super) fn install(network: bool, root: Option<&Path>) -> io::Result<()> {
         close_inherited_descriptors()?;
         let mut profile = String::from(
             "(version 1)\n(deny default)\n(allow sysctl-read)\n(allow process-info* (target self))\n(allow signal (target self))\n(allow file-read* (subpath \"/System/Library\") (subpath \"/usr/lib\"))\n",
@@ -319,6 +321,8 @@ mod macos {
                 "(allow file-read* file-write* (subpath \"{escaped}\"))"
             )
             .expect("format into String");
+        }
+        if network {
             // SystemConfiguration formats network-interface display names
             // using ICU. Without its public data CFNumberFormatter creation
             // fails inside Apple's unchecked display-name implementation.
@@ -436,6 +440,12 @@ mod tests {
 
     #[cfg(feature = "personal-sync-network")]
     #[test]
+    fn icon_network_has_no_writable_files_or_local_secrets() {
+        probe("icons");
+    }
+
+    #[cfg(feature = "personal-sync-network")]
+    #[test]
     fn network_runtime_starts_under_confinement() {
         probe("runtime");
     }
@@ -480,7 +490,7 @@ mod tests {
         match mode.as_str() {
             #[cfg(feature = "personal-sync-network")]
             "runtime" => {
-                network(&spool).unwrap();
+                network(Some(&spool)).unwrap();
                 let manager = crate::desktop_worker::sync::network::Manager::open(
                     &spool,
                     std::sync::Arc::new(|_| Err("vault is sealed".into())),
@@ -489,6 +499,16 @@ mod tests {
                 assert_ne!(manager.view().endpoint, [0; 32]);
                 drop(manager);
                 return;
+            }
+            #[cfg(feature = "personal-sync-network")]
+            "icons" => {
+                network(None).unwrap();
+                assert!(std::fs::write(spool.join("icon"), b"pixels").is_err());
+                std::thread::Builder::new()
+                    .spawn(|| std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                    .unwrap()
+                    .join()
+                    .unwrap();
             }
             "parser" => {
                 parser().unwrap();
@@ -503,7 +523,7 @@ mod tests {
             #[cfg(feature = "personal-sync-network")]
             "network" => {
                 use std::time::Duration;
-                network(&spool).unwrap();
+                network(Some(&spool)).unwrap();
                 let path = spool.join("packet");
                 std::fs::write(&path, b"ciphertext").unwrap();
                 assert_eq!(std::fs::read(&path).unwrap(), b"ciphertext");

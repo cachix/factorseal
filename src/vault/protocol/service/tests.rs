@@ -809,12 +809,19 @@ fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
         PersonalFieldType::Text,
         "alice",
     ));
+    item.sections[0].fields.push(PersonalField::new(
+        "url-0",
+        "Website",
+        PersonalFieldType::Url,
+        "https://github.com/login",
+    ));
     item.kind = crate::personal::PersonalSecretKind::Login;
     let source = VaultEntryMetadata {
         access_project: None,
         display_name: Some("untrusted title".into()),
         display_type: Some("untrusted type".into()),
         display_username: Some("untrusted user".into()),
+        display_website: Some("untrusted.example.com".into()),
         updated_at: Some(u64::MAX),
         favorite: true,
         document_kind: DocumentKind::LocalKeyring,
@@ -862,6 +869,7 @@ fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
     assert_eq!(entries[0].display_name.as_deref(), Some("Renamed"));
     assert_eq!(entries[0].display_type.as_deref(), Some(item.kind.label()));
     assert_eq!(entries[0].display_username.as_deref(), Some("alice"));
+    assert_eq!(entries[0].display_website.as_deref(), Some("github.com"));
     assert_eq!(entries[0].updated_at, Some(101));
     assert!(!entries[0].favorite);
     let response = service.handle(
@@ -900,6 +908,7 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
         display_name: None,
         display_type: None,
         display_username: None,
+        display_website: None,
         updated_at: None,
         favorite: false,
         document_kind: DocumentKind::LocalKeyring,
@@ -2545,6 +2554,7 @@ fn export_obeys_record_delivery_expiry() {
         display_name: None,
         display_type: None,
         display_username: None,
+        display_website: None,
         updated_at: None,
         favorite: false,
         document_kind: DocumentKind::LocalKeyring,
