@@ -14,8 +14,8 @@ use crate::vault::{
     DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
 };
 
-// Version 16 adds reviewed browser credential saves to the manager-only boundary.
-pub(super) const PROTOCOL_VERSION: u8 = 16;
+// Version 17 adds personal-item usernames and favorites to inventory and marks awaited approvals.
+pub(super) const PROTOCOL_VERSION: u8 = 17;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -1129,9 +1129,15 @@ pub struct VaultEntryMetadata {
     /// Display-only personal item type, derived from encrypted content during inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_type: Option<String>,
+    /// Display-only personal item username, derived from encrypted content during inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_username: Option<String>,
     /// Last personal-item modification time, in Unix seconds, derived during inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
+    /// Personal-item favorite flag, derived from encrypted content during inventory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub favorite: bool,
     pub document_kind: DocumentKind,
     #[serde(with = "base64_bytes")]
     pub partition: Vec<u8>,
@@ -1284,6 +1290,8 @@ pub enum PermissionState {
         created_at: u64,
         expires_at: u64,
         challenge: [u8; 32],
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        awaited: bool,
     },
     Granted {
         granted_at: u64,
@@ -1558,7 +1566,9 @@ mod entry_access_tests {
             access_project: None,
             display_name: None,
             display_type: None,
+            display_username: None,
             updated_at: None,
+            favorite: false,
             document_kind: DocumentKind::SecretSpecProviderCache,
             partition: b"demo".to_vec(),
             address: SecretAddress::secret_spec(

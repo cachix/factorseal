@@ -276,13 +276,15 @@ ciphertext ALPN continues to reject unpaired endpoints.
 ## Desktop integration and actual status
 
 Devices is a dedicated screen beside “Your vault”. A single “Connect a device”
-flow offers Show pairing code and Paste pairing ticket, regardless of current
+flow offers Show pairing code and Paste pairing code, regardless of current
 membership. The review lists all affected devices. Pairing a device to itself is
 rejected explicitly. First-time naming defaults to the hostname and is saved in
-local Desktop preferences. Local membership count never claims peer application.
-There is no built-in camera scanner or mobile app; an external QR reader can
-supply a ticket. Pending review survives restart; capability displays clear when
-sealed. Close remains available above the scrollable pairing content.
+local Desktop preferences. This device can be renamed only until it is paired,
+because the name other devices see is fixed at pairing. Local membership count
+never claims peer application. There is no built-in camera scanner or mobile
+app. Pending review survives restart. Capability displays clear when sealed.
+A single Cancel stays available below the scrollable pairing content, also while
+a code is being created.
 
 The Desktop process owns the transport seed, public membership cache and
 256-MiB ciphertext spool. Its courier continues while the key-owning worker is

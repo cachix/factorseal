@@ -99,6 +99,10 @@ impl PairingInvitation {
     pub fn controller(&self) -> MemberId {
         self.controller
     }
+    #[must_use]
+    pub fn expires(&self) -> u64 {
+        self.expires
+    }
     pub(crate) fn check(&self, group: &VerifiedGroup, now: u64) -> VaultResult<()> {
         if now >= self.expires
             || self.expires.saturating_sub(now) > 300

@@ -38,7 +38,7 @@ pub use memory::LockedBytes;
 #[cfg(feature = "key-protection")]
 mod password;
 #[cfg(feature = "key-protection")]
-pub use password::validate_new_password;
+pub use password::{password_score, validate_new_password};
 
 #[cfg(any(feature = "transfer", feature = "personal-sync"))]
 mod files;

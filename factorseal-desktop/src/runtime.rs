@@ -99,6 +99,14 @@ pub(crate) use factorseal::transfer::import_plan::{
     ImportSummary as TransferSummary, PreparedImport,
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum UnlockStep {
+    #[default]
+    Verifying,
+    Starting,
+    Loading,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Snapshot {
     Uninitialized {
@@ -112,6 +120,7 @@ pub(crate) enum Snapshot {
     Unlocking {
         metadata: VaultMetadata,
         group: UnlockGroup,
+        step: UnlockStep,
     },
     Sealing {
         metadata: VaultMetadata,
@@ -244,17 +253,12 @@ impl DesktopRuntime {
         }
         crate::timing::begin_unlock();
         let runtime = Arc::clone(self);
-        let event_metadata = metadata.clone();
-        let event_group = group.clone();
-        let _ = self.events.try_send(Snapshot::Unlocking {
-            metadata: event_metadata,
-            group: event_group,
-        });
+        self.report_unlock_step(&metadata, &group, UnlockStep::Verifying);
         if std::thread::Builder::new()
             .name("factorseal-desktop-agent".to_owned())
             .spawn(move || {
                 crate::timing::mark_unlock("worker_started", "ok");
-                runtime.run_unsealed(metadata, group, password);
+                runtime.run_unsealed(metadata, &group, password);
             })
             .is_err()
         {
@@ -352,6 +356,19 @@ impl DesktopRuntime {
         .map_err(|error| error.to_string())?;
         match self.request_live(&metadata, &request)? {
             VaultResponseBody::Stored => self.load_live_contents(&metadata),
+            _ => Err("vault returned an unexpected personal-secret response".to_owned()),
+        }
+    }
+
+    pub(crate) fn delete_personal_secret(&self, id: &str) -> Result<VaultContents, String> {
+        let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
+        let request = VaultRequest::new(VaultAction::Delete {
+            namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
+            address: WireSecretAddress::new(id, None),
+        })
+        .map_err(|error| error.to_string())?;
+        match self.request_live(&metadata, &request)? {
+            VaultResponseBody::Deleted { .. } => self.load_live_contents(&metadata),
             _ => Err("vault returned an unexpected personal-secret response".to_owned()),
         }
     }
@@ -558,7 +575,7 @@ impl DesktopRuntime {
     fn run_unsealed(
         self: Arc<Self>,
         metadata: VaultMetadata,
-        group: UnlockGroup,
+        group: &UnlockGroup,
         password: LockedBytes,
     ) {
         let result = self.supervise_worker(&metadata, group, password);
@@ -577,31 +594,45 @@ impl DesktopRuntime {
         });
     }
 
+    fn report_unlock_step(&self, metadata: &VaultMetadata, group: &UnlockGroup, step: UnlockStep) {
+        let _ = self.events.try_send(Snapshot::Unlocking {
+            metadata: metadata.clone(),
+            group: group.clone(),
+            step,
+        });
+    }
+
     fn run_initialization(self: Arc<Self>, policy: UnlockPolicy, password: LockedBytes) {
         factorseal::diagnostics::event("desktop", "initialize_vault", "start");
         let result = (|| {
+            let unlock_password =
+                LockedBytes::from_slice(&password).map_err(|error| error.to_string())?;
             let mut worker = self.spawn_worker(
                 factorseal::desktop_worker::Operation::Initialize { policy },
                 password,
             )?;
             worker.read_ready()?;
             worker.wait()?;
-            Vault::inspect(&self.config.root).map_err(|error| error.to_string())
+            let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
+            Ok((metadata, unlock_password))
         })();
-        self.unlock_in_progress.store(false, Ordering::Release);
         factorseal::diagnostics::event(
             "desktop",
             "initialize_vault",
             if result.is_ok() { "ok" } else { "error" },
         );
-        let snapshot = match result {
-            Ok(metadata) => Snapshot::Sealed {
-                metadata,
-                error: None,
-            },
-            Err(error) => Snapshot::Error(error),
-        };
-        let _ = self.events.try_send(snapshot);
+        match result {
+            Ok((metadata, password)) => {
+                let group = metadata.preferred_unlock_group().clone();
+                crate::timing::begin_unlock();
+                self.report_unlock_step(&metadata, &group, UnlockStep::Verifying);
+                self.run_unsealed(metadata, &group, password);
+            }
+            Err(error) => {
+                self.unlock_in_progress.store(false, Ordering::Release);
+                let _ = self.events.try_send(Snapshot::Error(error));
+            }
+        }
     }
 
     fn spawn_worker(
@@ -669,15 +700,16 @@ impl DesktopRuntime {
     fn supervise_worker(
         &self,
         metadata: &VaultMetadata,
-        group: UnlockGroup,
+        group: &UnlockGroup,
         password: LockedBytes,
     ) -> Result<(), String> {
         let mut worker = crate::timing::result("desktop_startup", "spawn_worker", || {
-            self.spawn_worker(self.unlock_operation(group)?, password)
+            self.spawn_worker(self.unlock_operation(group.clone())?, password)
         })?;
         crate::timing::result("desktop_startup", "wait_worker_ready", || {
             worker.read_ready()
         })?;
+        self.report_unlock_step(metadata, group, UnlockStep::Starting);
         let (idle_deadline, absolute_deadline) =
             crate::timing::result("desktop_startup", "wait_service_ready", || {
                 let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -726,6 +758,7 @@ impl DesktopRuntime {
         drop(control_install);
         // Publish the inventory before requesting permissions. The UI starts
         // that request once it has applied this first unlocked snapshot.
+        self.report_unlock_step(metadata, group, UnlockStep::Loading);
         let client = native_client(&self.config, metadata);
         let (contents, contents_error) =
             match load_vault_entries(|action| request_contents(&client, action)) {
@@ -975,6 +1008,11 @@ fn factorseal_secret_service(collections: &[zbus::zvariant::OwnedObjectPath]) ->
 #[cfg(not(target_os = "linux"))]
 const fn secret_service_error() -> Option<String> {
     None
+}
+
+pub(crate) fn installed_cli() -> Option<PathBuf> {
+    let desktop = std::env::current_exe().ok()?;
+    cli_executable(&desktop).ok().flatten()
 }
 
 fn cli_executable(desktop: &Path) -> Result<Option<PathBuf>, String> {
@@ -1339,7 +1377,9 @@ mod tests {
             access_project: None,
             display_name: None,
             display_type: None,
+            display_username: None,
             updated_at: None,
+            favorite: false,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"alpha".to_vec(),
             address: SecretAddress::secret_spec(first).unwrap(),
@@ -1348,7 +1388,9 @@ mod tests {
             access_project: None,
             display_name: None,
             display_type: None,
+            display_username: None,
             updated_at: None,
+            favorite: false,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"beta".to_vec(),
             address: SecretAddress::secret_spec(second).unwrap(),
@@ -1388,7 +1430,9 @@ mod tests {
             access_project: None,
             display_name: None,
             display_type: None,
+            display_username: None,
             updated_at: None,
+            favorite: false,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"project".to_vec(),
             address: SecretAddress::secret_spec(

@@ -304,6 +304,7 @@ impl LiveStateGuard<'_> {
         let deadline = started
             .checked_add(timeout)
             .ok_or_else(|| VaultError::Protocol("permission wait timeout overflows".to_owned()))?;
+        self.live.approvals.awaited(caller, id, deadline);
         loop {
             if self.live.store.is_sealed() || self.live.lease.is_expired(Instant::now()) {
                 self.live.store.seal();

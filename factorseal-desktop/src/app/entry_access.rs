@@ -58,7 +58,7 @@ impl DesktopView {
     ) -> Div {
         let mut panel = v_flex()
             .gap_3()
-            .child(div().text_lg().font_semibold().child("Access"));
+            .child(div().text_heading().font_semibold().child("Access"));
         if contents.permissions_loading {
             return panel.child("Loading access…");
         }
@@ -108,11 +108,11 @@ impl DesktopView {
                     Some(PermissionTarget::Entry { .. } | PermissionTarget::ProjectEntry { .. })
                 );
                 if inherited {
-                    card = card.child(div().text_sm().text_color(cx.theme().muted_foreground).child("Revoking this grant removes its access to every entry in its scope."));
+                    card = card.child(div().text_body().text_color(cx.theme().muted_foreground).child("Revoking this grant removes its access to every entry in its scope."));
                 }
                 card = card.child(
                     Button::new(("revoke-entry-access", count))
-                        .small()
+                        .icon(IconName::CircleX)
                         .label(if inherited {
                             "Revoke inherited grant"
                         } else {

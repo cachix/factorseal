@@ -4,6 +4,112 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Show Desktop's unsealed vault as one window-height sidebar, a list column
+  and a detail pane, without the header, page title, outer card and footer
+  around them. The sidebar holds search, the secret types, Devices, Transfer
+  credentials, Back up vault and Settings, with the seal status and Seal at
+  its foot. Settings, Transfer credentials, Back up vault and Devices list
+  their sections in the same middle column as the secret types. Item fields
+  are label and value rows whose actions show on hover or keyboard focus, so
+  a whole login fits in a 720-pixel-high window.
+
+- Show one vault pane at a time in narrow Desktop windows. Below 720 px the
+  vault shows the sidebar, the list or the open item, with a Back button to
+  return.
+
+- Put Desktop text and controls on one size scale. Screens now use five text
+  sizes that follow the system or chosen text size, and inputs and the buttons
+  beside them share one height. Desktop bundles IBM Plex Sans as a fallback
+  when the system font cannot be read or is missing.
+
+- Keep Desktop readable with bundled third-party themes such as One Dark.
+  They now follow FactorSeal's own rules for borders, input fields and the
+  focus ring. Text, links and button labels keep a contrast of at least
+  4.5:1, and borders stay visible. Colors that already meet this are kept.
+
+- Remember Desktop's window size, position and last open page, and title the
+  window FactorSeal. A window saved on a display that is gone opens centered
+  at its saved size.
+
+- Make Desktop's vault setup and unlock smoother. The password field is
+  focused when the window opens, Enter creates the vault or unlocks it, and
+  a button shows or hides the password. Setup errors sit under the field they
+  belong to and clear as soon as the password changes. A new vault opens
+  right after it is created, through the same unlock steps as any other
+  unlock, and the unlock screen says which step is running.
+
+- Explain Desktop's vault errors in one plain sentence that says what to do
+  next, with Show details and Copy details for the raw text. The "Vault
+  unavailable" and create screens also offer Try again. The desktop worker
+  now checks that the vault socket folder is private before the hardware
+  unlock, so a shared folder fails at once instead of after the full unlock.
+  A lifecycle monitor error no longer repeats "invalid vault protocol
+  message:".
+
+- Search every part of the vault from Desktop's search box. Results from all
+  categories show in one list, grouped by type, with the matching text
+  highlighted. Ctrl+F (Cmd+F on macOS) jumps to the search box, the arrow keys
+  and Enter pick a result, and Escape clears the search and then leaves the
+  box. The sidebar keeps all its categories while searching.
+
+- Add keyboard shortcuts to Desktop. Ctrl+K (Cmd+K on macOS) opens a palette
+  that finds items and runs New login, Back up vault, Settings, Keyboard
+  shortcuts and Seal now. The arrow keys and Enter move through and open a
+  list, Ctrl+C and Ctrl+Shift+C copy the open login's password and username
+  outside text fields, Ctrl+L seals, Escape steps back, and Ctrl+/ shows every
+  shortcut.
+
+- Show each personal item in Desktop's list with its type icon, its name in
+  bold and its username. The item page has a large title with the icon,
+  groups the fields, shows an icon next to each field name, and hides empty
+  fields behind Add field, which also adds custom fields. Websites can be
+  opened, passwords show their strength, one-time passwords show the current
+  code with a countdown, notes show their line breaks, and the page shows
+  when the item was last modified.
+
+- Pin favorite personal items to the top of Desktop's item list with the
+  star next to an item's title. The rest of the list, search results and the
+  palette are sorted by name. Favorites are the flag items already carry, so
+  favorites from Bitwarden, 1Password and other imports show up right away.
+
+- Delete personal items from Desktop. The item page has a Delete button that
+  asks first, and a toast offers Undo right after. Every saved edit now shows
+  a Saved toast with Undo, and Ctrl+Z and Ctrl+Shift+Z undo and redo saved
+  changes on the open item, including a password replaced by Generate.
+  Editing a field shows Save and Cancel, and Escape cancels. Custom fields
+  can be removed.
+
+- Let Desktop's Generate button make a random password as well as the
+  12-word phrase, which many sites reject for its length or for missing
+  digits and symbols. Generate now opens a panel to pick Random or Words, the
+  length, digits and symbols, with a preview that stays hidden until shown
+  and a strength meter. Desktop remembers the last choice. The new vault
+  password shows the same strength meter.
+
+- Keep Desktop's Copy button the same width when it turns into Copied, and
+  show a small notice after copying that counts down to the 30-second
+  clipboard clear.
+
+- Show Desktop's choices for file type and key mode as segmented controls,
+  with the selected choice raised. Pick a new item's type from a menu with an
+  icon for each type. New items start as Login instead of Other.
+
+- Show the commands in Desktop's help steps in monospace blocks with a copy
+  button, and show each category's item count only once, in the sidebar.
+
+- Show this device first in Desktop's Devices list, with a Rename button until
+  it is paired, instead of an empty list until a second device joins. Pairing
+  opens in a sheet with a centered QR, a live countdown until the code
+  expires and a single Cancel button. The text now says pairing code
+  everywhere.
+
+- Show who is asking in Desktop's approval popup. A request from the
+  installed FactorSeal provider for SecretSpec now names SecretSpec, other
+  apps are named by their full path, and the reason passed with `--reason`
+  shows as text from the app. The popup names the profile once, scrolls the
+  technical details instead of clipping them, and says when the app stopped
+  waiting instead of closing.
+
 - Let SecretSpec 0.21 and later pass `FACTORSEAL_ROOT` and
   `FACTORSEAL_SOCKET` to the provider. Those releases start a provider with
   only a fixed base environment plus the variables its discovery claim lists,
@@ -19,8 +125,8 @@ All notable changes to FactorSeal will be documented in this file.
 
 - Keep permission requests that are waiting for review when the vault seals.
   Pending permissions are now stored in the encrypted vault, local to the
-  device, and offered again after the next unseal, even after Desktop
-  restarts. Desktop's approval popup stays open through a seal and offers to
+  device, and stay pending after the next unseal, even after Desktop
+  restarts. Desktop offers a request again when the app asks again. Desktop's approval popup stays open through a seal and offers to
   unlock; granting still takes the password again. A request denied while the
   vault is sealed is denied as soon as it is unsealed.
 

@@ -144,6 +144,7 @@ fn open(request: &Prompt, snapshot: &Snapshot, cx: &mut App) {
             layered,
             "FactorSeal — Browser access",
             "dev.factorseal.BrowserAccess",
+            px(640.),
             cx,
         )
     };
@@ -188,7 +189,11 @@ impl BrowserView {
                 // This view is bound to the reviewed session and generation;
                 // cancellation or replacement discards this consent with it.
                 self.pair_after_unlock = self.request.site == "Pair browser profile";
-                self.snapshot = Snapshot::Unlocking { metadata, group };
+                self.snapshot = Snapshot::Unlocking {
+                    metadata,
+                    group,
+                    step: UnlockStep::default(),
+                };
                 self.error = None;
             }
             Err(error) => self.error = Some(error.to_owned()),
@@ -224,7 +229,7 @@ impl Render for BrowserView {
             "Fill a login"
         };
         let mut summary = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted)
-            .child(div().text_lg().font_semibold().child(if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() }))
+            .child(div().text_heading().font_semibold().child(if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() }))
             .child(if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." });
         if let Some(username) = &self.request.save_username {
             summary = summary
@@ -234,7 +239,7 @@ impl Render for BrowserView {
         if pairing || revoking {
             summary = summary.child(
                 div()
-                    .text_sm()
+                    .text_body()
                     .child(format!("Profile key: {}…", &self.request.key[..16])),
             );
         }
@@ -255,7 +260,7 @@ impl Render for BrowserView {
         if self.details {
             requests = requests.child(
                 div()
-                    .text_xs()
+                    .text_caption()
                     .child(format!("Profile public key: {}", self.request.key)),
             );
         }
@@ -320,7 +325,7 @@ impl Render for BrowserView {
                 _ => "Saving browser authorization…",
             }
         };
-        v_flex()
+        let request = v_flex()
             .size_full()
             .track_focus(&self.focus)
             .border_1()
@@ -336,7 +341,7 @@ impl Render for BrowserView {
             .bg(theme.background)
             .text_color(theme.foreground)
             .font_family(theme.font_family.clone())
-            .text_size(theme.font_size)
+            .text_body()
             .child(
                 v_flex()
                     .p_6()
@@ -348,12 +353,12 @@ impl Render for BrowserView {
                             .child(brand_mark(22., theme.foreground))
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_body()
                                     .text_color(theme.muted_foreground)
                                     .child("FactorSeal"),
                             ),
                     )
-                    .child(div().text_xl().font_semibold().child(title)),
+                    .child(div().text_heading().font_semibold().child(title)),
             )
             .child(
                 div()
@@ -373,7 +378,7 @@ impl Render for BrowserView {
                     .border_color(theme.border)
                     .child(
                         div()
-                            .text_xs()
+                            .text_caption()
                             .text_color(theme.muted_foreground)
                             .child(status),
                     )
@@ -395,7 +400,7 @@ impl Render for BrowserView {
                         |element| {
                             element.child(
                                 div()
-                                    .text_sm()
+                                    .text_body()
                                     .child("Set up your vault in FactorSeal Desktop first."),
                             )
                         },
@@ -455,6 +460,7 @@ impl Render for BrowserView {
                                 )
                             }),
                     ),
-            )
+            );
+        crate::motion::enter("browser-request", request)
     }
 }

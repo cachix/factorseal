@@ -3,8 +3,11 @@ mod appearance;
 #[cfg(feature = "apple-credential-exchange")]
 mod apple_exchange;
 mod branding;
+mod controls;
 mod crash_reporting;
 mod instance;
+mod motion;
+mod password_generator;
 mod runtime;
 mod secret_input;
 mod settings;
@@ -38,6 +41,51 @@ impl AssetSource for Assets {
             branding::BUG_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../../assets/logo/factorseal-bug.svg"
             )))),
+            branding::LOCK_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-lock.svg"
+            )))),
+            branding::DOWNLOAD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-download.svg"
+            )))),
+            branding::UPLOAD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-upload.svg"
+            )))),
+            branding::KEY_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-key.svg"
+            )))),
+            branding::CARD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-card.svg"
+            )))),
+            branding::REFRESH_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-refresh.svg"
+            )))),
+            branding::TRANSFER_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-transfer.svg"
+            )))),
+            branding::QR_CODE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-qr-code.svg"
+            )))),
+            branding::PASTE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-paste.svg"
+            )))),
+            branding::GENERATE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-generate.svg"
+            )))),
+            branding::TRASH_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-trash.svg"
+            )))),
+            branding::TAG_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-tag.svg"
+            )))),
+            branding::CLOCK_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-clock.svg"
+            )))),
+            branding::MAIL_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-mail.svg"
+            )))),
+            branding::PHONE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-phone.svg"
+            )))),
             _ => gpui_component_assets::Assets.load(path),
         }
     }
@@ -51,6 +99,21 @@ impl AssetSource for Assets {
                 branding::SEARCH_ASSET.into(),
                 branding::CLOSE_ASSET.into(),
                 branding::BUG_ASSET.into(),
+                branding::LOCK_ASSET.into(),
+                branding::DOWNLOAD_ASSET.into(),
+                branding::UPLOAD_ASSET.into(),
+                branding::KEY_ASSET.into(),
+                branding::CARD_ASSET.into(),
+                branding::REFRESH_ASSET.into(),
+                branding::TRANSFER_ASSET.into(),
+                branding::QR_CODE_ASSET.into(),
+                branding::PASTE_ASSET.into(),
+                branding::GENERATE_ASSET.into(),
+                branding::TRASH_ASSET.into(),
+                branding::TAG_ASSET.into(),
+                branding::CLOCK_ASSET.into(),
+                branding::MAIL_ASSET.into(),
+                branding::PHONE_ASSET.into(),
             ]
             .into_iter()
             .filter(|asset: &SharedString| asset.starts_with(path)),
