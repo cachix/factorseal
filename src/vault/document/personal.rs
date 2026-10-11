@@ -14,6 +14,7 @@ pub(crate) struct PersonalSummary {
     pub(crate) title: String,
     pub(crate) kind: String,
     pub(crate) username: Option<String>,
+    pub(crate) website: Option<String>,
     pub(crate) updated_at: u64,
     pub(crate) favorite: bool,
 }
@@ -95,6 +96,7 @@ impl SecretDocument {
                     title: display_text(&item.title),
                     kind: item.kind.label().to_owned(),
                     username: item.username().map(display_text),
+                    website: item.website_host(),
                     updated_at,
                     favorite: item.favorite,
                 }))

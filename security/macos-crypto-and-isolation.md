@@ -81,6 +81,18 @@ ciphertext spool, public membership state, and narrowly scoped inherited IPC.
 It must not gain Keychain access, vault database access, a general vault grant,
 or authority to approve its own pairing requests.
 
+While the vault is unsealed and website icons are on, Desktop starts a second
+`factorseal-network` process in icon mode. It never starts the sync transport
+and has no writable directory. Desktop sends it only a website host name that
+both sides check is a public domain name. The helper itself builds
+`https://icons.duckduckgo.com/ip3/<host>.ico`, follows redirects only within
+that host, ignores proxy settings and sends a generic user agent. Each request
+has a 5 second connect and 10 second total timeout and a 64 KiB size limit.
+The helper decodes the PNG or ICO reply and returns at most 64 by 64 RGBA
+pixels, which Desktop checks again. Desktop keeps icons only in memory and
+stops the helper and forgets all icons on seal. Windows does not show website
+icons yet.
+
 Raw client request parsing happens in `factorseal-parser` before typed
 requests reach the vault service. The service remains responsible for peer
 identity, request IDs, size limits, authorization, signature checks, and all

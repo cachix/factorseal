@@ -292,6 +292,16 @@ impl PersonalSecret {
             .filter(|username| !username.is_empty())
     }
 
+    #[must_use]
+    pub fn website_host(&self) -> Option<String> {
+        self.sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .filter(|field| field.field_type == PersonalFieldType::Url && !field.concealed)
+            .filter_map(PersonalField::text)
+            .find_map(website::host)
+    }
+
     pub fn encode(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         self.validate()?;
         let bytes = serde_json::to_vec(self)
@@ -687,6 +697,24 @@ mod tests {
     }
 
     #[test]
+    fn website_host_is_the_first_public_website_field() {
+        let mut login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
+        assert_eq!(login.website_host(), None);
+        login.sections[0].fields[2].value = "http://router.local".into();
+        assert_eq!(login.website_host(), None);
+        login.sections[0].fields.push(PersonalField::new(
+            "url-1",
+            "Website",
+            PersonalFieldType::Url,
+            "https://GitHub.com/login",
+        ));
+        assert_eq!(login.website_host().as_deref(), Some("github.com"));
+        let mut note = PersonalSecret::template(PersonalSecretKind::SecureNote, "Note".into());
+        note.sections[0].fields[0].value = "github.com".into();
+        assert_eq!(note.website_host(), None);
+    }
+
+    #[test]
     fn card_templates_export_by_field_id_and_renamed_login_fields_are_not_lost() {
         let mut card = PersonalSecret::template(PersonalSecretKind::Card, "Card".into());
         card.sections[0].fields[1].value = "001234".into();
@@ -882,6 +910,7 @@ pub(crate) mod legacy_revision;
 pub mod replica;
 #[cfg(feature = "personal-sync")]
 pub mod sync;
+pub mod website;
 
 /// Legacy namespace reserved for personal items.
 pub const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";
