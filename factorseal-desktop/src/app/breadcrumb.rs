@@ -158,6 +158,7 @@ mod tests {
             display_name: Some(name.into()),
             display_type: Some("Login".into()),
             display_username: None,
+            display_website: None,
             updated_at: None,
             favorite: false,
             document_kind: kind,

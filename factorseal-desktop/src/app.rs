@@ -21,6 +21,7 @@ mod shortcuts;
 mod system_transfer;
 mod totp;
 mod vault_layout;
+mod website_icons;
 mod wifi;
 mod window_activation;
 
@@ -675,10 +676,18 @@ fn desired_window_height(snapshot: &Snapshot, cx: &App) -> gpui::Pixels {
 
 fn personal_entry_icon(
     entry: &factorseal::VaultEntryMetadata,
+    icon: Option<Arc<gpui::RenderImage>>,
     size: f32,
     theme: &gpui_component::theme::Theme,
 ) -> Div {
-    personal_icon_tile(personal_entry_kind(entry), size, theme)
+    match icon {
+        Some(icon) => icon_tile(size, theme)
+            .when(theme.is_dark(), |tile| {
+                tile.bg(theme.foreground.opacity(0.9))
+            })
+            .child(gpui::img(icon).size(rems(size / 2.))),
+        None => personal_icon_tile(personal_entry_kind(entry), size, theme),
+    }
 }
 
 fn vault_entry_label(entry: &factorseal::VaultEntryMetadata) -> (String, String) {
@@ -1415,6 +1424,7 @@ struct DesktopView {
     search_scroll: ScrollHandle,
     system_integrations_expanded: bool,
     shortcuts: shortcuts::State,
+    website_icons: website_icons::WebsiteIcons,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1641,7 +1651,10 @@ impl DesktopView {
     ) -> Self {
         Self::poll_devices(Arc::clone(&runtime), cx);
         let settings = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
-        let settings_changed = cx.observe(&settings, |_, _, cx| cx.notify());
+        let settings_changed = cx.observe(&settings, |view, _, cx| {
+            view.refresh_website_icons(cx);
+            cx.notify();
+        });
         let settings_report = cx.subscribe_in(&settings, window, Self::report_from_settings);
         let selected_group = snapshot
             .metadata()
@@ -1769,6 +1782,7 @@ impl DesktopView {
             search_cursor: 0,
             search_scroll: ScrollHandle::new(),
             shortcuts: shortcuts::State::new(window, cx),
+            website_icons: website_icons::WebsiteIcons::new(crate::runtime::open_icon_helper),
             #[cfg(target_os = "linux")]
             wifi_migration: wifi::State::default(),
             _subscriptions: vec![
@@ -2085,6 +2099,39 @@ impl DesktopView {
         }
     }
 
+    fn refresh_website_icons(&mut self, cx: &mut Context<Self>) {
+        let entries = match &self.snapshot {
+            Snapshot::Unsealed { contents, .. } => Some(contents.entries.as_slice()),
+            _ => None,
+        };
+        let enabled = crate::appearance::current(cx).website_icons;
+        let (batch, dropped) = self.website_icons.refresh(enabled, entries);
+        for image in dropped {
+            cx.defer(move |cx| cx.drop_image(image, None));
+        }
+        let Some(batch) = batch else {
+            return;
+        };
+        for host in batch.hosts {
+            let helper = Arc::clone(&batch.helper);
+            let generation = batch.generation;
+            cx.spawn(async move |view, cx| {
+                let (host, icon) = smol::unblock(move || {
+                    let icon = helper.fetch(&host);
+                    (host, icon)
+                })
+                .await;
+                let _ = view.update(cx, |view, cx| {
+                    if view.website_icons.finish(generation, &host, icon.as_ref()) {
+                        cx.notify();
+                    }
+                    view.refresh_website_icons(cx);
+                });
+            })
+            .detach();
+        }
+    }
+
     fn apply_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
         let refreshed_item = match (&snapshot, &self.selected_vault_item) {
             (Snapshot::Unsealed { contents, .. }, Some(VaultSelection::Entry(entry)))
@@ -2137,6 +2184,7 @@ impl DesktopView {
             Snapshot::Sealed { .. } | Snapshot::Uninitialized { .. }
         );
         self.snapshot = snapshot;
+        self.refresh_website_icons(cx);
         if unsealed && !was_unsealed && self.selected_vault_item.is_none() {
             self.restore_page(cx);
         }
@@ -3314,7 +3362,12 @@ impl DesktopView {
         let selection = VaultSelection::Entry(Box::new(entry.clone()));
         Self::list_row(("secret-row", index), selected, cx)
             .when(personal, |row| {
-                row.child(personal_entry_icon(entry, 2., &theme))
+                row.child(personal_entry_icon(
+                    entry,
+                    self.website_icons.icon(entry),
+                    2.,
+                    &theme,
+                ))
             })
             .child(
                 v_flex()
@@ -5183,6 +5236,7 @@ mod tests {
                 display_name: Some((*name).into()),
                 display_type: Some("Login".into()),
                 display_username: None,
+                display_website: None,
                 updated_at: None,
                 favorite: *favorite,
                 document_kind: DocumentKind::LocalKeyring,
@@ -5208,6 +5262,7 @@ mod tests {
             display_name: None,
             display_type: None,
             display_username: None,
+            display_website: None,
             updated_at: None,
             favorite: false,
             document_kind,
@@ -5269,6 +5324,7 @@ mod tests {
                 display_name: Some("Example".into()),
                 display_type: Some(kind.label().into()),
                 display_username: None,
+                display_website: None,
                 updated_at: None,
                 favorite: false,
                 document_kind: DocumentKind::LocalKeyring,
@@ -5297,6 +5353,7 @@ mod tests {
             display_name: Some("Example".into()),
             display_type: display_type.map(Into::into),
             display_username: None,
+            display_website: None,
             updated_at: None,
             favorite: false,
             document_kind: DocumentKind::LocalKeyring,
@@ -5462,6 +5519,7 @@ mod tests {
             display_name: None,
             display_type: None,
             display_username: None,
+            display_website: None,
             updated_at: None,
             favorite: false,
             document_kind: kind,
@@ -5675,6 +5733,7 @@ mod tests {
                 display_name: Some("Item".into()),
                 display_type: None,
                 display_username: None,
+                display_website: None,
                 favorite: false,
                 updated_at: None,
                 document_kind,
@@ -5752,6 +5811,7 @@ mod tests {
             display_name: Some("Mail".into()),
             display_type: Some("Login".into()),
             display_username: None,
+            display_website: None,
             favorite: false,
             updated_at,
             document_kind: DocumentKind::LocalKeyring,

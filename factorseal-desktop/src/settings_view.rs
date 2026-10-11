@@ -287,6 +287,7 @@ impl SettingsView {
             text_size: defaults.text_size,
             font: defaults.font,
             reduced_motion: defaults.reduced_motion,
+            website_icons: defaults.website_icons,
             ..settings.clone()
         }
     }
@@ -372,6 +373,7 @@ impl SettingsView {
 
     fn appearance_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
         let reduced_motion = appearance::current(cx).reduced_motion;
+        let website_icons = appearance::current(cx).website_icons;
         vec![
             Self::setting("Theme", self.select("Theme", 0), cx),
             Self::setting("UI scale", self.select("UI scale", 1), cx),
@@ -384,6 +386,17 @@ impl SettingsView {
                     "Reduced motion",
                     reduced_motion,
                     |settings, value| settings.reduced_motion = value,
+                    cx,
+                ),
+                cx,
+            ),
+            Self::setting(
+                "Show website icons",
+                Self::switch(
+                    "website-icons",
+                    "Show website icons",
+                    website_icons,
+                    |settings, value| settings.website_icons = value,
                     cx,
                 ),
                 cx,
@@ -542,6 +555,10 @@ impl SettingsView {
             Section::Appearance => v_flex()
                 .gap_3()
                 .child(Self::list(self.appearance_rows(cx), cx))
+                .child(Self::note(
+                    "Icons are fetched from DuckDuckGo by website name and kept only while the vault is unsealed.",
+                    cx,
+                ))
                 .child(h_flex().child(Self::reset_button(cx))),
             Section::Security => v_flex()
                 .gap_3()
@@ -612,6 +629,7 @@ mod tests {
             text_size: Some(18),
             font: Some("Inter".into()),
             reduced_motion: true,
+            website_icons: false,
             automatic_crash_reports: false,
             idle_seconds: 60,
             maximum_seconds: 900,

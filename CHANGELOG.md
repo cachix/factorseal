@@ -4,6 +4,12 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Show website icons in Desktop's item list, search results and item pages,
+  like Bitwarden. Desktop asks DuckDuckGo's icon service by website name
+  through the sandboxed network helper, which also decodes the image. Icons
+  stay in memory only while the vault is unsealed. Turn them off with Show
+  website icons in Settings, Appearance.
+
 - Show Desktop's unsealed vault as one window-height sidebar, a list column
   and a detail pane, without the header, page title, outer card and footer
   around them. The sidebar holds search, the secret types, Devices, Transfer
