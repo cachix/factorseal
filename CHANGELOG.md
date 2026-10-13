@@ -118,6 +118,12 @@ All notable changes to FactorSeal will be documented in this file.
 - Compress debug sections in Linux Nix release binaries with zlib. Retain source
   locations in diagnostic backtraces while reducing the bytes read to authenticate
   Desktop, the CLI, and helper executables.
+- Reclaim unused vault database space automatically after 30 seconds without
+  writes, when at least 64 MiB and half the file are unused. Preserve current
+  records and retained history, verify authenticated state before and after
+  repacking, and yield to incoming commands and sealing at engine I/O boundaries.
+  Stop writing a new generation when background sync accepts its already pinned
+  group, so unchanged polls do not grow the database or postpone cleanup.
 
 - Let SecretSpec 0.21 and later pass `FACTORSEAL_ROOT` and
   `FACTORSEAL_SOCKET` to the provider. Those releases start a provider with

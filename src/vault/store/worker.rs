@@ -32,6 +32,7 @@ use super::database::row_blob;
 use super::{HistoryPage, StorePage};
 
 mod integrity;
+mod maintenance;
 mod mutation;
 #[cfg(feature = "personal-sync")]
 mod sync;
@@ -394,15 +395,35 @@ fn run_worker(
     if ready.send(Ok(())).is_err() {
         return;
     }
+    let mut last_activity = Instant::now();
+    let mut next_space_check = last_activity;
     while !status.is_sealed() {
-        match receiver.recv_timeout(Duration::from_millis(20)) {
-            Ok(command) if !status.is_sealed() => {
-                if !execute_command(&runtime, &mut worker, command, &status) {
-                    break;
+        let command = match receiver.recv_timeout(Duration::from_millis(20)) {
+            Ok(command) => Some(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let now = Instant::now();
+                if now >= next_space_check
+                    && now.duration_since(last_activity) >= maintenance::IDLE_BEFORE_COMPACTION
+                {
+                    next_space_check = now + maintenance::SPACE_CHECK_INTERVAL;
+                    runtime.block_on(maintenance::run_idle(&worker, &receiver, &status))
+                } else {
+                    None
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
             _ => break,
+        };
+        if let Some(command) = command {
+            // Command names do not establish activity: deletes and sync
+            // operations can succeed without writing anything. Conversely,
+            // reads can expire records and advance the protected head.
+            let previous_head = worker.verified.head;
+            if status.is_sealed() || !execute_command(&runtime, &mut worker, command, &status) {
+                break;
+            }
+            if worker.verified.head != previous_head {
+                last_activity = Instant::now();
+            }
         }
     }
 }
@@ -620,7 +641,7 @@ struct StoreWorker {
 
 /// The only freshness/scheduling authority during a lease. Never reconstruct
 /// this from mutable SQL rows except during full startup verification.
-#[derive(Default)]
+#[derive(Default, Eq, PartialEq)]
 struct VerifiedStoreState {
     head: Option<[u8; 32]>,
     documents: BTreeMap<DocumentId, VerifiedDocument>,
@@ -628,7 +649,7 @@ struct VerifiedStoreState {
     retained_snapshot_bytes: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct VerifiedDocument {
     row: DocumentRow,
     snapshot_digest: [u8; 32],
