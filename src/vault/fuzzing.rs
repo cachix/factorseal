@@ -176,6 +176,11 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("transfer", b"{\"items\":[]}".to_vec()),
     ];
     seeds.extend(
+        store::fuzz_current_state_seeds()
+            .into_iter()
+            .map(|bytes| ("commit_chain", bytes)),
+    );
+    seeds.extend(
         hardwareseal::fuzz_seeds()
             .into_iter()
             .map(|bytes| ("envelope", bytes)),

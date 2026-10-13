@@ -25,7 +25,7 @@ enabled. `--dev` can reduce local build time for a smoke run.
 | document | Automerge snapshots, legacy migration, record decoding, personal entry JSON |
 | history | History JSON, record versions, sequence and partition validation |
 | envelope | Snapshot headers, AEAD rejection, root-wrapped keys, TPM/Hello envelopes and TPM response codec |
-| commit_chain | Commit JSON, transcript digest and ML-DSA signature verification |
+| commit_chain | Legacy commit and current head/manifest JSON, transcript digests and ML-DSA signature verification |
 | secret_service | DH negotiation, public-key bounds, IV and CBC/PKCS#7 parsing |
 | archive | Encrypted and plaintext archive JSON, KDF limits and base64 components |
 | transfer | Bitwarden JSON, 1Password/KeePass CSV and personal records |

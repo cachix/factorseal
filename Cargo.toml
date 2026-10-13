@@ -174,8 +174,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.20.0"
-# Force real I/O yield boundaries when testing cancelled VACUUM operations.
-turso = { version = "0.8.2", default-features = false, features = ["io_memory_yield"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = { version = "0.5.0", default-features = false, optional = true }

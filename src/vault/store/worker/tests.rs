@@ -132,7 +132,7 @@ fn watchdog_terminates_a_wedged_native_owner_without_aborting() {
     }
 }
 #[test]
-fn live_partial_rollback_is_rejected_without_compaction_blessing_it() {
+fn live_partial_rollback_is_rejected_against_the_verified_inventory() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("factorseal");
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -153,14 +153,13 @@ fn live_partial_rollback_is_rejected_without_compaction_blessing_it() {
         let old_commit = super::super::database::query_optional_blob(&worker.connection,
             "SELECT current_commit_id FROM documents", ()).await.unwrap().unwrap();
         worker.put(document_id, scope, partition, &address, b"new-value", None, &context).await.unwrap();
-        // Simulate a partial on-disk rollback with the original signed blobs.
+        // Simulate a partial on-disk rollback with the original authenticated blobs.
         worker.connection.execute("UPDATE documents SET generation=1, key_epoch=1, wrapped_dek=?1, current_commit_id=?2",
             params![old_wrapped, old_commit]).await.unwrap();
-        assert!(worker.verify_commit_chain().await.is_err());
+        assert!(worker.verify_current_state().await.is_err());
         assert!(worker.get(document_id, scope, partition, &address, TEST_NOW).await.is_err());
-        worker.verified.chain_length = MAX_RETAINED_COMMITS + 1;
-        assert!(worker.compact_if_needed().await.is_err());
-        assert!(worker.verify_commit_chain().await.is_err());
+        assert!(worker.verify_live_inventory().await.is_err());
+        assert!(worker.verify_current_state().await.is_err());
     });
     assert!(VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).is_err());
 }
@@ -551,7 +550,11 @@ fn get_many_reads_one_document_without_writing() {
             TEST_NOW,
         )
         .unwrap();
-    let commits_before = database_count(&root, "SELECT COUNT(*) FROM protected_commits");
+    let commits_before = database_count(&root, "SELECT COUNT(*) FROM document_heads");
+    let root_before = database_blobs(
+        &root,
+        "SELECT value FROM store_meta WHERE key='current-state-manifest'",
+    );
 
     let values = store
         .get_many(
@@ -566,7 +569,7 @@ fn get_many_reads_one_document_without_writing() {
     assert!(values[1].is_none());
     assert!(values[2].is_none());
     assert_eq!(
-        database_count(&root, "SELECT COUNT(*) FROM protected_commits"),
+        database_count(&root, "SELECT COUNT(*) FROM document_heads"),
         commits_before
     );
     assert!(
@@ -577,6 +580,14 @@ fn get_many_reads_one_document_without_writing() {
             .all(Option::is_none)
     );
 
+    assert_eq!(
+        root_before,
+        database_blobs(
+            &root,
+            "SELECT value FROM store_meta WHERE key='current-state-manifest'"
+        )
+    );
+
     // A plain read of the same expired record still evicts it.
     assert!(
         store
@@ -585,8 +596,15 @@ fn get_many_reads_one_document_without_writing() {
             .is_none()
     );
     assert_eq!(
-        database_count(&root, "SELECT COUNT(*) FROM protected_commits"),
-        commits_before + 1
+        database_count(&root, "SELECT COUNT(*) FROM document_heads"),
+        commits_before
+    );
+    assert_ne!(
+        root_before,
+        database_blobs(
+            &root,
+            "SELECT value FROM store_meta WHERE key='current-state-manifest'"
+        )
     );
 }
 
@@ -748,9 +766,9 @@ fn documents_belong_to_one_device_vault_and_have_distinct_wrapped_keys() {
     assert_ne!(wrapped[0], wrapped[1]);
 }
 
-/// A superseded snapshot may linger in the database until compaction. Its key
-/// must not: every generation wraps a fresh DEK and the row keeps only the
-/// current one.
+/// Every generation wraps a fresh DEK. Only the current wrapped key and
+/// snapshot remain in the live tables; old filesystem copies remain outside
+/// the scope of logical deletion.
 #[test]
 fn every_generation_rotates_the_document_key() {
     let (_directory, root, store) = store();
@@ -806,7 +824,7 @@ fn every_generation_rotates_the_document_key() {
 }
 
 #[test]
-fn protected_chain_authenticates_the_wrapped_document_key() {
+fn current_state_authenticates_the_wrapped_document_key() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
@@ -824,7 +842,10 @@ fn protected_chain_authenticates_the_wrapped_document_key() {
 
     execute_database_mutation(&root, "UPDATE documents SET wrapped_dek = X'00'");
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
-    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+    assert!(matches!(
+        reopened,
+        Err(VaultError::Signature | VaultError::InvalidData(_))
+    ));
 }
 
 #[test]
@@ -857,7 +878,10 @@ fn wrapped_document_keys_cannot_be_swapped_between_documents() {
     );
 
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
-    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+    assert!(matches!(
+        reopened,
+        Err(VaultError::Signature | VaultError::InvalidData(_))
+    ));
 }
 
 #[test]
@@ -896,7 +920,7 @@ fn encrypted_snapshots_cannot_be_swapped_between_documents() {
 }
 
 #[test]
-fn failed_persistence_rolls_back_the_entire_document_generation() {
+fn unexpected_snapshot_is_rejected_before_replacement() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
@@ -914,8 +938,7 @@ fn failed_persistence_rolls_back_the_entire_document_generation() {
         .pop()
         .unwrap();
 
-    // Force the snapshot insert to fail after the transaction has updated
-    // the document head. The update and every later insert must roll back.
+    // An uncommitted extra generation must not be silently erased by a write.
     insert_conflicting_snapshot(&root, &document_id, 2);
     assert!(matches!(
         store.put_at(
@@ -927,7 +950,7 @@ fn failed_persistence_rolls_back_the_entire_document_generation() {
             &provenance(),
             TEST_NOW,
         ),
-        Err(VaultError::Database(_))
+        Err(VaultError::Signature | VaultError::InvalidData(_))
     ));
     assert!(store.is_sealed());
     assert!(
@@ -944,7 +967,7 @@ fn failed_persistence_rolls_back_the_entire_document_generation() {
     execute_database_mutation(&root, "DELETE FROM document_snapshots WHERE generation = 2");
 
     assert_eq!(
-        database_count(&root, "SELECT COUNT(*) FROM protected_commits"),
+        database_count(&root, "SELECT COUNT(*) FROM document_heads"),
         1
     );
     assert_eq!(
@@ -978,7 +1001,10 @@ fn installation_rejects_an_unexpected_extra_vault() {
     );
 
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
-    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+    assert!(matches!(
+        reopened,
+        Err(VaultError::Signature | VaultError::InvalidData(_))
+    ));
 }
 
 #[test]
@@ -1008,7 +1034,7 @@ fn batch_mutation_commits_related_records_in_one_generation() {
         .unwrap();
     drop(store);
 
-    for table in ["documents", "document_snapshots", "protected_commits"] {
+    for table in ["documents", "document_snapshots", "document_heads"] {
         assert_eq!(
             database_count(&root, &format!("SELECT COUNT(*) FROM {table}")),
             1,
@@ -1120,7 +1146,10 @@ fn expired_records_are_swept_from_every_document_kind() {
 
     // The swept records are gone without a read evicting them, and the
     // durable one stays.
-    let commits = database_count(&root, "SELECT COUNT(*) FROM protected_commits");
+    let manifest_before = database_blobs(
+        &root,
+        "SELECT value FROM store_meta WHERE key='current-state-manifest'",
+    );
     let values = store
         .get_many(
             DocumentKind::Authorization,
@@ -1138,8 +1167,11 @@ fn expired_records_are_swept_from_every_document_kind() {
             .is_none()
     );
     assert_eq!(
-        database_count(&root, "SELECT COUNT(*) FROM protected_commits"),
-        commits
+        database_blobs(
+            &root,
+            "SELECT value FROM store_meta WHERE key='current-state-manifest'"
+        ),
+        manifest_before
     );
     let swept = store
         .list_history(
@@ -1294,7 +1326,7 @@ fn sealing_one_store_handle_invalidates_every_clone() {
 }
 
 #[test]
-fn protected_chain_detects_snapshot_tamper() {
+fn current_state_detects_snapshot_tamper() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
@@ -1320,21 +1352,21 @@ fn protected_chain_detects_snapshot_tamper() {
 }
 
 #[test]
-fn protected_chain_detects_missing_history() {
+fn current_manifest_detects_a_missing_document_head() {
     let (_directory, root, store) = store();
     put_two_generations(&store);
     drop(store);
-    execute_database_mutation(
-        &root,
-        "DELETE FROM protected_commits WHERE previous_commit_id IS NULL",
-    );
+    execute_database_mutation(&root, "DELETE FROM document_heads");
 
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
-    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+    assert!(matches!(
+        reopened,
+        Err(VaultError::Signature | VaultError::InvalidData(_))
+    ));
 }
 
 #[test]
-fn protected_chain_detects_a_missing_document_row() {
+fn current_state_detects_a_missing_document_row() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
@@ -1360,32 +1392,30 @@ fn protected_chain_detects_a_missing_document_row() {
         panic!("a missing current document must not open");
     };
     assert!(
-        message.contains("missing document"),
+        message.contains("inventory"),
         "unexpected rejection: {message}"
     );
 }
 
 #[test]
-fn protected_chain_detects_rolled_back_head() {
+fn current_state_detects_rolled_back_head() {
     let (_directory, root, store) = store();
     put_two_generations(&store);
     drop(store);
     execute_database_mutation(
         &root,
-        "UPDATE store_meta
-         SET value = (
-             SELECT previous_commit_id FROM protected_commits
-             WHERE commit_id = store_meta.value
-         )
-         WHERE key = 'current-commit-head'",
+        "UPDATE store_meta SET value=X'00' WHERE key='current-commit-head'",
     );
 
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
-    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+    assert!(matches!(
+        reopened,
+        Err(VaultError::Signature | VaultError::InvalidData(_))
+    ));
 }
 
 #[test]
-fn protected_chain_detects_a_rolled_back_document() {
+fn current_state_detects_a_rolled_back_document() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
@@ -1400,6 +1430,9 @@ fn protected_chain_detects_a_rolled_back_document() {
         )
         .unwrap();
     let first_wrapped_dek = database_blobs(&root, "SELECT wrapped_dek FROM documents")
+        .pop()
+        .unwrap();
+    let first_head_id = database_blobs(&root, "SELECT current_commit_id FROM documents")
         .pop()
         .unwrap();
     store
@@ -1425,12 +1458,10 @@ fn protected_chain_detects_a_rolled_back_document() {
                 SET generation = 1,
                     key_epoch = 1,
                     wrapped_dek = X'{}',
-                    current_commit_id = (
-                        SELECT commit_id FROM protected_commits
-                        WHERE document_id = documents.document_id AND generation = 1
-                    )
+                    current_commit_id = X'{}'
               WHERE generation = 2",
-            hex::encode(&first_wrapped_dek)
+            hex::encode(&first_wrapped_dek),
+            hex::encode(&first_head_id)
         ),
     );
 
@@ -1445,12 +1476,12 @@ fn protected_chain_detects_a_rolled_back_document() {
 }
 
 #[test]
-fn compaction_bounds_the_chain_and_keeps_every_document_readable() {
+fn updates_keep_only_current_snapshots_and_every_document_readable() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     let namespaces: [&[u8]; 2] = [b"first", b"second"];
     let mut latest = [String::new(), String::new()];
-    for generation in 0..=MAX_RETAINED_COMMITS {
+    for generation in 0..=256 {
         let index = generation % namespaces.len();
         let value = generation.to_string();
         store
@@ -1468,14 +1499,13 @@ fn compaction_bounds_the_chain_and_keeps_every_document_readable() {
     }
     drop(store);
 
-    // Compaction leaves exactly one commit and one snapshot per document,
-    // rather than one of each per write.
+    // Every write leaves one current head and snapshot per document.
     let documents = u64::try_from(namespaces.len()).unwrap();
-    for table in ["protected_commits", "document_snapshots", "documents"] {
+    for table in ["document_heads", "document_snapshots", "documents"] {
         assert_eq!(
             database_count(&root, &format!("SELECT COUNT(*) FROM {table}")),
             documents,
-            "{table} was not compacted"
+            "{table} retained superseded generations"
         );
     }
 
@@ -1498,189 +1528,10 @@ fn compaction_bounds_the_chain_and_keeps_every_document_readable() {
 }
 
 #[test]
-fn byte_compaction_preserves_current_documents_and_reopen_accounting() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join("factorseal");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let mut worker = StoreWorker::open(&root, Vault::create_for_test(&root).unwrap())
-            .await
-            .unwrap();
-        let scope = DocumentKind::SecretSpecProviderCache;
-        let address = SecretAddress::new("byte-limit", None).unwrap();
-        let partitions: [&[u8]; 2] = [b"first", b"second"];
-        let provenance = provenance();
-        let context = worker.context(&provenance, TEST_NOW);
-        for generation in 0..6 {
-            let partition = partitions[generation % 2];
-            worker
-                .put(
-                    worker.document_id(scope, partition),
-                    scope,
-                    partition,
-                    &address,
-                    generation.to_string().as_bytes(),
-                    None,
-                    &context,
-                )
-                .await
-                .unwrap();
-        }
-        assert_eq!(worker.verified.chain_length, 6);
-        let original_bytes = worker.verified.retained_snapshot_bytes;
-        // Exercise the same byte policy with small fixtures, below the count trigger.
-        worker.compact_with_byte_limit(1).await.unwrap();
-        assert_eq!(worker.verified.chain_length, 2);
-        assert!(worker.verified.retained_snapshot_bytes < original_bytes);
-        assert_eq!(
-            worker.verified.retained_snapshot_bytes,
-            query_count(
-                &worker.connection,
-                "SELECT SUM(length(envelope)) FROM document_snapshots",
-                ()
-            )
-            .await
-            .unwrap()
-        );
-        let retained_bytes = worker.verified.retained_snapshot_bytes;
-        let head = worker.verified.head;
-        // Current data above the limit must not cause compaction on every write/check.
-        worker.compact_with_byte_limit(1).await.unwrap();
-        assert_eq!(worker.verified.head, head);
-        drop(worker);
-
-        let mut worker = StoreWorker::open(&root, Vault::unseal_for_test(&root).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(worker.verified.retained_snapshot_bytes, retained_bytes);
-        assert_eq!(worker.verified.chain_length, 2);
-        for (partition, expected) in partitions.into_iter().zip([b"4", b"5"]) {
-            assert_eq!(
-                worker
-                    .get(
-                        worker.document_id(scope, partition),
-                        scope,
-                        partition,
-                        &address,
-                        TEST_NOW
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .value
-                    .as_slice(),
-                expected
-            );
-        }
-    });
-}
-
-#[test]
-fn byte_compaction_rejects_tampered_historical_snapshots() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join("factorseal");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let mut worker = StoreWorker::open(&root, Vault::create_for_test(&root).unwrap())
-            .await
-            .unwrap();
-        let scope = DocumentKind::SecretSpecProviderCache;
-        let partition = b"history";
-        let address = SecretAddress::new("byte-limit", None).unwrap();
-        let document_id = worker.document_id(scope, partition);
-        let provenance = provenance();
-        let context = worker.context(&provenance, TEST_NOW);
-        for generation in 0..4 {
-            worker
-                .put(
-                    document_id,
-                    scope,
-                    partition,
-                    &address,
-                    generation.to_string().as_bytes(),
-                    None,
-                    &context,
-                )
-                .await
-                .unwrap();
-        }
-        worker
-            .connection
-            .execute(
-                "UPDATE document_snapshots SET envelope = X'00' WHERE generation = 1",
-                (),
-            )
-            .await
-            .unwrap();
-        assert!(worker.compact_with_byte_limit(1).await.is_err());
-        assert_eq!(
-            query_count(
-                &worker.connection,
-                "SELECT COUNT(*) FROM protected_commits",
-                ()
-            )
-            .await
-            .unwrap(),
-            4
-        );
-    });
-    assert!(VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).is_err());
-}
-
-#[test]
-fn batched_verification_checks_history_beyond_the_first_batch() {
-    let (_directory, root, store) = store();
-    let address = SecretAddress::new("batch-boundary", None).unwrap();
-    for generation in 0..65 {
-        store
-            .put_at(
-                DocumentKind::SecretSpecProviderCache,
-                b"batch",
-                &address,
-                generation.to_string().as_bytes(),
-                None,
-                &provenance(),
-                TEST_NOW,
-            )
-            .unwrap();
-    }
-    drop(store);
-    let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()).unwrap();
-    assert_eq!(
-        reopened
-            .get_at(
-                DocumentKind::SecretSpecProviderCache,
-                b"batch",
-                &address,
-                TEST_NOW
-            )
-            .unwrap()
-            .unwrap()
-            .as_slice(),
-        b"64"
-    );
-    drop(reopened);
-    execute_database_mutation(
-        &root,
-        "UPDATE document_snapshots SET envelope = X'00' WHERE generation = 1",
-    );
-    assert!(matches!(
-        VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap()),
-        Err(VaultError::Signature)
-    ));
-}
-
-#[test]
-fn a_compacted_chain_still_detects_snapshot_tamper() {
+fn current_state_detects_snapshot_tamper_after_many_updates() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
-    for generation in 0..=MAX_RETAINED_COMMITS {
+    for generation in 0..=256 {
         store
             .put_at(
                 DocumentKind::SecretSpecProviderCache,
@@ -1704,7 +1555,7 @@ fn a_compacted_chain_still_detects_snapshot_tamper() {
 }
 
 #[test]
-fn protected_chain_detects_document_kind_tamper() {
+fn current_state_detects_document_kind_tamper() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
@@ -1722,11 +1573,14 @@ fn protected_chain_detects_document_kind_tamper() {
     execute_database_mutation(&root, "UPDATE documents SET document_kind = 'invalid-kind'");
 
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
-    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+    assert!(matches!(
+        reopened,
+        Err(VaultError::Signature | VaultError::InvalidData(_))
+    ));
 }
 
 #[test]
-fn protected_chain_detects_document_vault_tamper() {
+fn current_state_detects_document_vault_tamper() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
@@ -1747,11 +1601,14 @@ fn protected_chain_detects_document_vault_tamper() {
     );
 
     let reopened = VaultStore::open(&root, Vault::unseal_for_test(&root).unwrap());
-    assert!(matches!(reopened, Err(VaultError::InvalidData(_))));
+    assert!(matches!(
+        reopened,
+        Err(VaultError::Signature | VaultError::InvalidData(_))
+    ));
 }
 
 #[test]
-fn protected_chain_detects_commit_record_tamper() {
+fn current_state_detects_head_record_tamper() {
     let (_directory, root, store) = store();
     let address = SecretAddress::new("demo/default/TOKEN", None).unwrap();
     store
@@ -1778,18 +1635,18 @@ fn protected_chain_detects_commit_record_tamper() {
             .unwrap();
         let connection = database.connect().unwrap();
         let mut rows = connection
-            .query("SELECT commit_id, record FROM protected_commits", ())
+            .query("SELECT head_id, record FROM document_heads", ())
             .await
             .unwrap();
         let row = rows.next().await.unwrap().unwrap();
         let commit_id = row_blob(&row, 0).unwrap();
-        let mut record: ProtectedCommit =
+        let mut record: crate::vault::store::manifest::CurrentHead =
             serde_json::from_slice(&row_blob(&row, 1).unwrap()).unwrap();
-        record.signature[0] ^= 1;
+        record.generation += 1;
         drop(rows);
         connection
             .execute(
-                "UPDATE protected_commits SET record = ?1 WHERE commit_id = ?2",
+                "UPDATE document_heads SET record = ?1 WHERE head_id = ?2",
                 params![serde_json::to_vec(&record).unwrap(), commit_id],
             )
             .await
