@@ -4,6 +4,12 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Patch quinn-proto to 0.11.18 for three denial-of-service advisories. Review the
+  five exact-version maintenance exceptions against the current advisory database
+  and renew them until 2026-11-12 while their parent migrations remain tracked.
+  Keep vulnerability findings fatal. Preserve the Rust 1.91 atomic API while
+  allowing its compatibility alias's deprecation on newer compilers.
+
 - Compress debug sections in Linux Nix release binaries with zlib. Retain source
   locations in diagnostic backtraces while reducing the bytes read to authenticate
   Desktop, the CLI, and helper executables.

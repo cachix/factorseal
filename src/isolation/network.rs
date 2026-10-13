@@ -310,6 +310,10 @@ mod native {
             // Allocate IDs while holding the write lock so concurrent view and
             // action requests always reach the helper in sequence order.
             let mut writer = self.shared.writer.lock().map_err(err)?;
+            #[allow(
+                deprecated,
+                reason = "try_update requires Rust 1.95; core supports Rust 1.91"
+            )]
             let id = self
                 .sequence
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -467,6 +471,10 @@ mod native {
         let callback_gate = Mutex::new(());
         let host = Arc::new(move |command| {
             let _gate = callback_gate.lock().map_err(err)?;
+            #[allow(
+                deprecated,
+                reason = "try_update requires Rust 1.95; core supports Rust 1.91"
+            )]
             let id = sequence
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                     value.checked_add(1)
