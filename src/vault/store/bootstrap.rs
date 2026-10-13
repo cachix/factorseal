@@ -64,6 +64,7 @@ pub(super) async fn open_store(root: &Path, unsealed: UnsealedVault) -> VaultRes
     })?;
     let database_started = Instant::now();
     let database_result = turso::Builder::new_local(database_path)
+        .experimental_vacuum(true)
         .build()
         .await
         .map_err(database_error);

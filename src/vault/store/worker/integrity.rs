@@ -1,6 +1,7 @@
 //! Protected commit-chain verification and bounded-history compaction.
 
 use std::collections::{BTreeMap, HashSet};
+use std::time::Instant;
 
 use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Value, params};
@@ -52,8 +53,14 @@ impl StoreWorker {
         let mut visited = HashSet::new();
         let mut count = 0_usize;
         while let Some(commit_id) = current {
-            let records = self.verify_commit_batch(commit_id).await?;
-            let sizes = self.verify_batch_payloads(&records).await?;
+            let started = Instant::now();
+            let result = self.verify_commit_batch(commit_id).await;
+            crate::timing::record_result("store_chain", "commit_batch", started, &result);
+            let records = result?;
+            let started = Instant::now();
+            let result = self.verify_batch_payloads(&records).await;
+            crate::timing::record_result("store_chain", "snapshot_batch", started, &result);
+            let sizes = result?;
             for (record, snapshot_bytes) in records.into_iter().zip(sizes) {
                 count += 1;
                 if count > MAX_COMMIT_CHAIN || !visited.insert(record.commit_id) {
@@ -73,8 +80,14 @@ impl StoreWorker {
             }
         }
 
-        self.verify_protected_row_sets(count).await?;
-        self.verify_inventory(&verified).await?;
+        let started = Instant::now();
+        let result = self.verify_protected_row_sets(count).await;
+        crate::timing::record_result("store_chain", "row_sets", started, &result);
+        result?;
+        let started = Instant::now();
+        let result = self.verify_inventory(&verified).await;
+        crate::timing::record_result("store_chain", "inventory", started, &result);
+        result?;
         verified.chain_length = count;
         Ok(verified)
     }
@@ -159,7 +172,9 @@ impl StoreWorker {
             let stored_generation = from_i64(row_integer(&row, 3)?, "commit generation")?;
             let record: ProtectedCommit = serde_json::from_slice(&row_blob(&row, 4)?)
                 .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-            record.verify(stored_id, self.device.device_key_id(), &self.verifying_key)?;
+            crate::timing::result("store_chain", "commit_signature", || {
+                record.verify(stored_id, self.device.device_key_id(), &self.verifying_key)
+            })?;
             if stored_previous != record.previous_commit_id
                 || stored_document_id != record.document_id
                 || stored_generation != record.generation
@@ -212,7 +227,15 @@ impl StoreWorker {
             );
             let index = expected.remove(&key).ok_or(VaultError::Signature)?;
             let snapshot = row_blob(&row, 2)?;
-            if digest(&snapshot) != records[index].snapshot_digest {
+            let started = Instant::now();
+            let matches = digest(&snapshot) == records[index].snapshot_digest;
+            crate::timing::record(
+                "store_chain",
+                "snapshot_digest",
+                started,
+                if matches { "ok" } else { "error" },
+            );
+            if !matches {
                 return Err(VaultError::Signature);
             }
             sizes[index] = snapshot.len() as u64;
