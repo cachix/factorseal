@@ -13,6 +13,9 @@ cargo +nightly run --locked --manifest-path fuzz/Cargo.toml --bin seed-corpus --
 cargo +nightly fuzz run metadata -- -max_total_time=60 -max_len=1048576 -rss_limit_mb=2048 -timeout=10
 ```
 
+The native harness enables the `std` feature of Turso's `branches` dependency
+so its abort implementation remains compatible with current nightly compilers.
+
 Install the nightly toolchain first. The commands follow the
 [cargo-fuzz workflow](https://rust-fuzz.github.io/book/cargo-fuzz.html).
 The default address sanitizer, overflow checks and debug assertions remain
