@@ -8,6 +8,9 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+# Turso disables branches defaults. The native harness uses std, whose abort
+# implementation avoids the no_std intrinsic removed by recent Rust nightlies.
+branches = { version = "0.4.6", default-features = false, features = ["std"] }
 libfuzzer-sys = "0.4"
 factorseal = { path = "..", default-features = false, features = ["fuzzing"] }
 
