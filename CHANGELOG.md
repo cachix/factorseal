@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Compress debug sections in Linux Nix release binaries with zlib. Retain source
+  locations in diagnostic backtraces while reducing the bytes read to authenticate
+  Desktop, the CLI, and helper executables.
+
 - Let SecretSpec 0.21 and later pass `FACTORSEAL_ROOT` and
   `FACTORSEAL_SOCKET` to the provider. Those releases start a provider with
   only a fixed base environment plus the variables its discovery claim lists,

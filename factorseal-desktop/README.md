@@ -261,7 +261,9 @@ Automatic diagnostics exclude secret values, vault contents, arguments, environm
 raw error strings, thread names, and panic payloads. They do not collect memory
 dumps or redirect stderr. Backtraces may contain build-time source paths, so
 review the export before sharing it. Release builds retain line tables; packages
-must retain debug symbols for useful source locations. Descriptions entered in
+must retain debug symbols for useful source locations. Linux Nix packages compress
+the debug sections with zlib to reduce executable authentication time while
+preserving backtrace source locations. Descriptions entered in
 the issue form are sent as written and retained with queued reports for retries;
 do not include passwords or secret values. Drafts stay in memory until submitted.
 

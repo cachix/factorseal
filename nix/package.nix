@@ -39,7 +39,8 @@ rustPlatform.buildRustPackage {
 
   doCheck = false;
   strictDeps = true;
-  # Keep release line tables available for local panic backtraces.
+  # Keep release line tables for backtraces, but compress them below so caller
+  # authentication does not have to hash hundreds of megabytes of debug data.
   dontStrip = true;
 
   installPhase = ''
@@ -47,9 +48,11 @@ rustPlatform.buildRustPackage {
 
     install -Dm0755 target/${stdenv.hostPlatform.rust.rustcTarget}/release/factorseal \
       "$out/bin/factorseal"
+    ${stdenv.cc.targetPrefix}objcopy --compress-debug-sections=zlib "$out/bin/factorseal"
     for helper in factorseal-parser factorseal-network factorseal-browser; do
       install -Dm0755 target/${stdenv.hostPlatform.rust.rustcTarget}/release/$helper \
         "$out/bin/$helper"
+      ${stdenv.cc.targetPrefix}objcopy --compress-debug-sections=zlib "$out/bin/$helper"
     done
     install -Dm0755 ${../packaging/linux/factorseal-start} \
       "$out/bin/factorseal-start"
