@@ -251,6 +251,7 @@ impl DesktopView {
         let query = self.search_query(cx);
         let results = search_results(&contents.entries, &query);
         let result_count: usize = results.iter().map(|(_, entries)| entries.len()).sum();
+        let cursor = self.search_cursor.min(result_count.saturating_sub(1));
         let mut list = v_flex()
             .id("vault-search-results")
             .size_full()
@@ -263,9 +264,7 @@ impl DesktopView {
                 let selected = is_selected_entry(self.selected_vault_item.as_ref(), entry);
                 let row = self
                     .render_entry_row(entry, &query, row_index, cx)
-                    .when(row_index == self.search_cursor, |row| {
-                        row.keyboard_cursor(selected, cx)
-                    });
+                    .when(row_index == cursor, |row| row.keyboard_cursor(selected, cx));
                 list = list.child(
                     v_flex()
                         .flex_none()

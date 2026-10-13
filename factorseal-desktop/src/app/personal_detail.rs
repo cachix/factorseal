@@ -6,6 +6,7 @@ use gpui_component::progress::ProgressCircle;
 use super::personal_history::{Change, Direction, Step};
 use super::totp::{Totp, grouped, unix_now};
 use super::*;
+use crate::runtime::{ItemVersion, PersonalWriteError};
 
 pub(super) struct ChangeToast {
     pub(super) id: u64,
@@ -17,6 +18,7 @@ pub(super) struct ChangeToast {
 #[derive(Default)]
 pub(super) struct PersonalDetail {
     item: Option<PersonalSecret>,
+    version: Option<ItemVersion>,
     error: Option<String>,
     revealed: HashSet<usize>,
     added: HashSet<usize>,
@@ -66,6 +68,7 @@ impl PersonalDetail {
         self.inputs.clear();
         self.custom = None;
         self.item = None;
+        self.version = None;
         self.error = None;
         self.revealed.clear();
         self.added.clear();
@@ -73,6 +76,23 @@ impl PersonalDetail {
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.ticker = None;
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn field_inserted(&mut self, index: usize) {
+        self.added = self
+            .added
+            .iter()
+            .map(|&added| if added >= index { added + 1 } else { added })
+            .collect();
+    }
+
+    fn field_removed(&mut self, index: usize) {
+        self.added = self
+            .added
+            .iter()
+            .filter(|&&added| added != index)
+            .map(|&added| if added > index { added - 1 } else { added })
+            .collect();
     }
 }
 
@@ -94,12 +114,8 @@ fn offset_showing(
     (offset + shift).clamp(-max_offset, px(0.))
 }
 
-fn field_is_secret(field: &PersonalField) -> bool {
-    field.concealed || field.field_type.concealed()
-}
-
 fn field_text(field: &PersonalField, revealed: bool) -> String {
-    if field_is_secret(field) && !revealed {
+    if field.is_concealed() && !revealed {
         "••••••••".into()
     } else {
         field.text().map_or_else(
@@ -260,7 +276,7 @@ fn with_custom_field(
     name: &str,
     field_type: PersonalFieldType,
     value: &str,
-) -> Result<PersonalSecret, String> {
+) -> Result<(PersonalSecret, usize), String> {
     let mut updated = copied_item(item)?;
     let count = updated
         .sections
@@ -282,19 +298,27 @@ fn with_custom_field(
         name => name,
     };
     let field = PersonalField::new(id, name, field_type, value);
-    match updated
+    let section = if let Some(section) = updated
         .sections
-        .iter_mut()
-        .find(|section| section.id == "custom")
+        .iter()
+        .position(|section| section.id == "custom")
     {
-        Some(section) => section.fields.push(field),
-        None => updated.sections.push(PersonalSection {
+        updated.sections[section].fields.push(field);
+        section
+    } else {
+        updated.sections.push(PersonalSection {
             id: "custom".into(),
             label: "Custom fields".into(),
             fields: vec![field],
-        }),
-    }
-    Ok(updated)
+        });
+        updated.sections.len() - 1
+    };
+    let index = updated.sections[..=section]
+        .iter()
+        .map(|section| section.fields.len())
+        .sum::<usize>()
+        - 1;
+    Ok((updated, index))
 }
 
 fn has_section_groups(item: &PersonalSecret) -> bool {
@@ -345,6 +369,7 @@ const NAME_INDEX: usize = usize::MAX;
 const ACTIONS_WIDTH: gpui::Rems = rems(19.);
 const NARROW_ACTIONS_WIDTH: gpui::Rems = rems(7.);
 const PERSONAL_TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_secs(5);
+const ITEM_CHANGED: &str = "This item changed somewhere else, so your change was not saved.";
 
 fn copied_item(item: &PersonalSecret) -> Result<PersonalSecret, String> {
     let encoded = item.encode().map_err(|error| error.to_string())?;
@@ -391,15 +416,16 @@ fn custom_field(item: &PersonalSecret, index: usize) -> bool {
 fn without_field(item: &PersonalSecret, index: usize) -> Result<PersonalSecret, String> {
     let mut updated = copied_item(item)?;
     let mut remaining = index;
-    for section in &mut updated.sections {
-        if remaining < section.fields.len() {
-            section.fields.remove(remaining);
-            updated
-                .sections
-                .retain(|section| !section.fields.is_empty());
+    for at in 0..updated.sections.len() {
+        let fields = &mut updated.sections[at].fields;
+        if remaining < fields.len() {
+            fields.remove(remaining);
+            if fields.is_empty() {
+                updated.sections.remove(at);
+            }
             return Ok(updated);
         }
-        remaining -= section.fields.len();
+        remaining -= fields.len();
     }
     Err("This field is no longer available.".into())
 }
@@ -457,13 +483,10 @@ impl DesktopView {
                     return;
                 }
                 match result {
-                    Ok(item) => {
+                    Ok((item, version)) => {
                         view.initialize_personal_inputs(&item, cx);
                         view.personal_detail.item = Some(item);
-                        let indices: Vec<_> = view.personal_detail.inputs.keys().copied().collect();
-                        for index in indices {
-                            view.update_personal_strength(index, cx);
-                        }
+                        view.personal_detail.version = Some(version);
                         view.update_personal_ticker(cx);
                     }
                     Err(error) => view.personal_detail.error = Some(error),
@@ -759,12 +782,7 @@ impl DesktopView {
                 match with_template_field(item, id) {
                     Ok((updated, index)) => {
                         self.personal_detail.item = Some(updated);
-                        self.personal_detail.added = self
-                            .personal_detail
-                            .added
-                            .iter()
-                            .map(|added| if *added >= index { added + 1 } else { *added })
-                            .collect();
+                        self.personal_detail.field_inserted(index);
                         self.reset_personal_inputs(cx);
                         self.add_personal_field(index, window, cx);
                     }
@@ -847,23 +865,19 @@ impl DesktopView {
         let Some(item) = &self.personal_detail.item else {
             return;
         };
-        let result = with_custom_field(item, &name, field_type, &value).and_then(|updated| {
-            self.runtime
-                .put_personal_secret(&updated)
-                .map(|contents| (updated, contents))
-        });
+        let result = with_custom_field(item, &name, field_type, &value)
+            .map_err(PersonalWriteError::from)
+            .and_then(|(updated, index)| self.save_personal_item(updated).map(|()| index));
         match result {
-            Ok((updated, contents)) => {
-                if let Some(previous) = self.personal_detail.item.take() {
-                    self.personal_history.record(Change::Edit(previous));
-                }
-                self.apply_saved_personal_item(updated, contents);
+            Ok(index) => {
+                self.personal_detail.field_inserted(index);
                 self.personal_detail.custom = None;
                 self.personal_detail.error = None;
                 self.reset_personal_inputs(cx);
                 self.show_toast("Saved", Some(Direction::Undo), false, cx);
             }
-            Err(error) => {
+            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
+            Err(PersonalWriteError::Failed(error)) => {
                 if let Some(draft) = &mut self.personal_detail.custom {
                     draft.error = Some(format!("Not saved: {error}"));
                 }
@@ -989,7 +1003,7 @@ impl DesktopView {
         for field in item.sections.iter().flat_map(|section| &section.fields) {
             let value = Zeroizing::new(field_text(field, true));
             let wrapped = field.field_type == PersonalFieldType::Multiline;
-            self.add_personal_input(index, &value, field_is_secret(field), wrapped, cx);
+            self.add_personal_input(index, &value, field.is_concealed(), wrapped, cx);
             index += 1;
         }
         self.add_personal_input(
@@ -1060,8 +1074,8 @@ impl DesktopView {
             return;
         };
         let value = input.input.read(cx).value();
-        input.strength =
-            (rated && !value.is_empty()).then(|| crate::password_generator::Strength::of(&value));
+        input.strength = (rated && input.edited && !value.is_empty())
+            .then(|| crate::password_generator::Strength::of(&value));
     }
 
     fn mark_personal_field_changed(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1124,6 +1138,7 @@ impl DesktopView {
     }
 
     pub(super) fn flush_personal_changes(&mut self, cx: &mut Context<Self>) -> bool {
+        let generation = self.personal_detail.generation;
         let dirty: Vec<_> = self
             .personal_detail
             .inputs
@@ -1133,7 +1148,7 @@ impl DesktopView {
         for index in dirty {
             self.save_personal_field(index, cx);
         }
-        !self.personal_detail.has_pending_changes()
+        self.personal_detail.generation == generation && !self.personal_detail.has_pending_changes()
     }
 
     fn saved_personal_value(&self, index: usize) -> Option<Zeroizing<String>> {
@@ -1198,18 +1213,12 @@ impl DesktopView {
             cx.notify();
             return;
         }
-        let result = edited.and_then(|updated| {
-            self.runtime
-                .put_personal_secret(&updated)
-                .map(|contents| (updated, contents))
-        });
+        let result = edited
+            .map_err(PersonalWriteError::from)
+            .and_then(|updated| self.save_personal_item(updated));
         match result {
-            Ok((updated, updated_contents)) => {
-                self.apply_personal_contents(updated_contents);
-                if let Some(previous) = self.personal_detail.item.replace(updated) {
-                    self.personal_history.record(Change::Edit(previous));
-                    self.show_toast("Saved", Some(Direction::Undo), false, cx);
-                }
+            Ok(()) => {
+                self.show_toast("Saved", Some(Direction::Undo), false, cx);
                 self.update_personal_ticker(cx);
                 if let Some(input) = self.personal_detail.inputs.get_mut(&index) {
                     input.dirty = false;
@@ -1217,7 +1226,8 @@ impl DesktopView {
                 }
                 self.update_personal_strength(index, cx);
             }
-            Err(error) => {
+            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
+            Err(PersonalWriteError::Failed(error)) => {
                 if let Some(input) = self.personal_detail.inputs.get_mut(&index) {
                     input.error = Some(format!("Not saved: {error}"));
                 }
@@ -1245,26 +1255,55 @@ impl DesktopView {
         }
     }
 
-    fn apply_saved_personal_item(
-        &mut self,
-        updated: PersonalSecret,
-        updated_contents: VaultContents,
-    ) {
-        self.apply_personal_contents(updated_contents);
-        self.personal_detail.item = Some(updated);
+    fn save_personal_item(&mut self, updated: PersonalSecret) -> Result<(), PersonalWriteError> {
+        let (version, contents) = self
+            .runtime
+            .put_personal_secret(&updated, self.personal_detail.version)?;
+        self.apply_personal_contents(contents);
+        if let Some(previous) = self.personal_detail.item.replace(updated) {
+            self.personal_history.record(Change::Edit {
+                item: previous,
+                version,
+            });
+        }
+        self.personal_detail.version = Some(version);
+        Ok(())
+    }
+
+    fn show_changed_item(&mut self, contents: VaultContents, cx: &mut Context<Self>) {
+        self.apply_personal_contents(contents);
+        self.clear_personal_detail();
+        if let Some(VaultSelection::Entry(entry)) = self.selected_vault_item.clone()
+            && is_personal_secret(&entry)
+        {
+            let exists = self.unsealed_contents().is_some_and(|contents| {
+                contents
+                    .entries
+                    .iter()
+                    .any(|current| current.address == entry.address)
+            });
+            if exists {
+                self.select_vault_item(VaultSelection::Entry(entry), cx);
+            } else {
+                self.show_personal_panel(PersonalPanel::Overview, cx);
+            }
+        }
+        self.show_toast(ITEM_CHANGED, None, true, cx);
     }
 
     fn reset_personal_inputs(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.generator_target,
+            Some(generator::GeneratorTarget::Saved(_))
+        ) {
+            self.close_generator(cx);
+        }
         self.personal_detail.subscriptions.clear();
         self.personal_detail.inputs.clear();
         self.personal_detail.revealed.clear();
         if let Some(item) = self.personal_detail.item.take() {
             self.initialize_personal_inputs(&item, cx);
             self.personal_detail.item = Some(item);
-        }
-        let indices: Vec<_> = self.personal_detail.inputs.keys().copied().collect();
-        for index in indices {
-            self.update_personal_strength(index, cx);
         }
         self.update_personal_ticker(cx);
         cx.notify();
@@ -1276,9 +1315,13 @@ impl DesktopView {
         };
         let title = format!("Delete {}?", item.title);
         let view = cx.weak_entity();
+        let overlay = Rc::clone(&self.shortcuts.overlay);
+        overlay.set(true);
         window.open_dialog(cx, move |dialog, _, _| {
             let view = view.clone();
+            let overlay = Rc::clone(&overlay);
             dialog
+                .on_close(move |_, _, _| overlay.set(false))
                 .title(title.clone())
                 .width(px(420.))
                 .child(div().text_body().child("You can undo this right after."))
@@ -1317,17 +1360,24 @@ impl DesktopView {
         let Some(item) = &self.personal_detail.item else {
             return;
         };
-        match self.runtime.delete_personal_secret(&item.id) {
+        match self
+            .runtime
+            .delete_personal_secret(&item.id, self.personal_detail.version)
+        {
             Ok(updated_contents) => {
                 let item = self.personal_detail.item.take();
                 self.apply_personal_contents(updated_contents);
                 self.show_personal_panel(PersonalPanel::Overview, cx);
                 if let Some(item) = item {
-                    self.personal_history.record(Change::Delete(item));
+                    self.personal_history.record(Change::Delete {
+                        item,
+                        version: None,
+                    });
                     self.show_toast("Item deleted", Some(Direction::Undo), false, cx);
                 }
             }
-            Err(error) => {
+            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
+            Err(PersonalWriteError::Failed(error)) => {
                 self.personal_detail.error = Some(format!("Could not delete the item: {error}"));
                 cx.notify();
             }
@@ -1347,7 +1397,7 @@ impl DesktopView {
         let Some(change) = self.personal_history.take(direction) else {
             return;
         };
-        if let Change::Edit(item) = &change
+        if let Change::Edit { item, .. } = &change
             && self
                 .personal_detail
                 .item
@@ -1360,12 +1410,22 @@ impl DesktopView {
             return;
         }
         let result = match change.step(direction) {
-            Step::Put(item) => self.runtime.put_personal_secret(item),
-            Step::Remove(id) => self.runtime.delete_personal_secret(id),
+            Step::Put(item) => self
+                .runtime
+                .put_personal_secret(item, change.version())
+                .map(|(version, contents)| (Some(version), contents)),
+            Step::Remove(id) => self
+                .runtime
+                .delete_personal_secret(id, change.version())
+                .map(|contents| (None, contents)),
         };
-        let updated_contents = match result {
-            Ok(updated_contents) => updated_contents,
-            Err(error) => {
+        let (version, updated_contents) = match result {
+            Ok(result) => result,
+            Err(PersonalWriteError::Changed(contents)) => {
+                self.show_changed_item(contents, cx);
+                return;
+            }
+            Err(PersonalWriteError::Failed(error)) => {
                 self.personal_history.keep(direction, change);
                 let message = match direction {
                     Direction::Undo => format!("Could not undo: {error}"),
@@ -1378,21 +1438,30 @@ impl DesktopView {
         self.apply_personal_contents(updated_contents);
         let message = match (direction, &change) {
             (Direction::Undo, _) => "Change undone",
-            (Direction::Redo, Change::Edit(_)) => "Saved",
-            (Direction::Redo, Change::Delete(_)) => "Item deleted",
+            (Direction::Redo, Change::Edit { .. }) => "Saved",
+            (Direction::Redo, Change::Delete { .. }) => "Item deleted",
         };
         match change {
-            Change::Edit(item) => {
-                if let Some(current) = self.personal_detail.item.replace(item) {
-                    self.personal_history
-                        .applied(direction, Change::Edit(current));
+            Change::Edit { item, .. } => {
+                if let (Some(current), Some(version)) =
+                    (self.personal_detail.item.replace(item), version)
+                {
+                    self.personal_history.applied(
+                        direction,
+                        Change::Edit {
+                            item: current,
+                            version,
+                        },
+                    );
                 }
+                self.personal_detail.version = version;
+                self.personal_detail.added.clear();
                 self.reset_personal_inputs(cx);
             }
-            Change::Delete(item) => {
+            Change::Delete { item, .. } => {
                 self.follow_restored_item(&item.id, direction, cx);
                 self.personal_history
-                    .applied(direction, Change::Delete(item));
+                    .applied(direction, Change::Delete { item, version });
             }
         }
         self.show_toast(message, Some(direction.opposite()), false, cx);
@@ -1468,23 +1537,20 @@ impl DesktopView {
         let Some(item) = &self.personal_detail.item else {
             return;
         };
-        let result = without_field(item, index).and_then(|updated| {
-            self.runtime
-                .put_personal_secret(&updated)
-                .map(|contents| (updated, contents))
-        });
+        let result = without_field(item, index)
+            .map_err(PersonalWriteError::from)
+            .and_then(|updated| self.save_personal_item(updated));
         match result {
-            Ok((updated, contents)) => {
-                if let Some(previous) = self.personal_detail.item.take() {
-                    self.personal_history.record(Change::Edit(previous));
-                }
-                self.apply_saved_personal_item(updated, contents);
+            Ok(()) => {
                 self.personal_detail.error = None;
-                self.personal_detail.added.clear();
+                self.personal_detail.field_removed(index);
                 self.reset_personal_inputs(cx);
                 self.show_toast("Saved", Some(Direction::Undo), false, cx);
             }
-            Err(error) => self.personal_detail.error = Some(format!("Not saved: {error}")),
+            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
+            Err(PersonalWriteError::Failed(error)) => {
+                self.personal_detail.error = Some(format!("Not saved: {error}"));
+            }
         }
         cx.notify();
     }
@@ -1496,20 +1562,18 @@ impl DesktopView {
         let Some(item) = &self.personal_detail.item else {
             return;
         };
-        let result = favorite_item(item, !item.favorite).and_then(|updated| {
-            self.runtime
-                .put_personal_secret(&updated)
-                .map(|contents| (updated, contents))
-        });
+        let result = favorite_item(item, !item.favorite)
+            .map_err(PersonalWriteError::from)
+            .and_then(|updated| self.save_personal_item(updated));
         match result {
-            Ok((updated, contents)) => {
-                if let Some(previous) = self.personal_detail.item.take() {
-                    self.personal_history.record(Change::Edit(previous));
-                }
-                self.apply_saved_personal_item(updated, contents);
+            Ok(()) => {
                 self.personal_detail.error = None;
+                self.change_toast = None;
             }
-            Err(error) => self.personal_detail.error = Some(format!("Not saved: {error}")),
+            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
+            Err(PersonalWriteError::Failed(error)) => {
+                self.personal_detail.error = Some(format!("Not saved: {error}"));
+            }
         }
         cx.notify();
     }
@@ -1614,7 +1678,7 @@ impl DesktopView {
             .then(|| self.scroll_to_personal_value(cx));
         let show_input = code.is_none() || self.personal_detail.revealed.contains(&index);
         let actions = PersonalActions {
-            secret: field.map_or(index != NAME_INDEX, field_is_secret),
+            secret: field.map_or(index != NAME_INDEX, PersonalField::is_concealed),
             empty: value.is_empty(),
             has_code: totp.is_some(),
             removable: self
@@ -1639,7 +1703,7 @@ impl DesktopView {
             .children(scroll_to)
             .child(
                 h_flex()
-                    .w(rems(140. / 16.))
+                    .w(rems(160. / 16.))
                     .flex_none()
                     .pt(rems(6. / 16.))
                     .gap_2()
@@ -1896,6 +1960,33 @@ mod tests {
     }
 
     #[test]
+    fn removing_the_last_custom_field_keeps_other_empty_sections() {
+        let mut item = PersonalSecret::generic("Test".into(), "secret".into());
+        item.sections.push(PersonalSection {
+            id: "imported".into(),
+            label: "Imported".into(),
+            fields: Vec::new(),
+        });
+        item.sections.push(PersonalSection {
+            id: "custom".into(),
+            label: "Custom fields".into(),
+            fields: vec![PersonalField::new(
+                "custom-0",
+                "PIN",
+                PersonalFieldType::Concealed,
+                "1",
+            )],
+        });
+        let removed = without_field(&item, 1).unwrap();
+        let sections: Vec<_> = removed
+            .sections
+            .iter()
+            .map(|section| section.id.as_str())
+            .collect();
+        assert_eq!(sections, [item.sections[0].id.as_str(), "imported"]);
+    }
+
+    #[test]
     fn favoriting_preserves_everything_else() {
         let mut original = PersonalSecret::generic("Test".into(), "secret".into());
         original.tags.push("work".into());
@@ -1956,6 +2047,18 @@ mod tests {
         assert!(detail.revealed.is_empty());
         assert!(detail.added.is_empty());
         assert_ne!(detail.generation, generation);
+    }
+
+    #[test]
+    fn added_fields_keep_their_rows_when_fields_come_and_go() {
+        let mut detail = PersonalDetail::default();
+        detail.added.extend([1, 4]);
+        detail.field_inserted(4);
+        assert_eq!(detail.added, HashSet::from([1, 5]));
+        detail.field_removed(1);
+        assert_eq!(detail.added, HashSet::from([4]));
+        detail.field_removed(2);
+        assert_eq!(detail.added, HashSet::from([3]));
     }
 
     fn existing(
@@ -2055,13 +2158,15 @@ mod tests {
     #[test]
     fn custom_fields_join_the_custom_section_with_a_fresh_id() {
         let item = PersonalSecret::generic("Test".into(), "secret".into());
-        let first = with_custom_field(&item, "  ", PersonalFieldType::Text, "a").unwrap();
+        let (first, index) = with_custom_field(&item, "  ", PersonalFieldType::Text, "a").unwrap();
+        assert_eq!(index, 1);
         let custom = &first.sections[1];
         assert_eq!(custom.id, "custom");
         assert_eq!(custom.fields[0].id, "custom-0");
         assert_eq!(custom.fields[0].label, "Custom field");
-        let second =
+        let (second, index) =
             with_custom_field(&first, "PIN", PersonalFieldType::Concealed, "1234").unwrap();
+        assert_eq!(index, 2);
         assert_eq!(second.sections.len(), 2);
         let pin = &second.sections[1].fields[1];
         assert_eq!((pin.id.as_str(), pin.label.as_str()), ("custom-1", "PIN"));

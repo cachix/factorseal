@@ -1,10 +1,17 @@
 use super::*;
+use crate::runtime::ItemVersion;
 
 const LIMIT: usize = 50;
 
 pub(super) enum Change {
-    Edit(PersonalSecret),
-    Delete(PersonalSecret),
+    Edit {
+        item: PersonalSecret,
+        version: ItemVersion,
+    },
+    Delete {
+        item: PersonalSecret,
+        version: Option<ItemVersion>,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -16,8 +23,15 @@ pub(super) enum Step<'a> {
 impl Change {
     pub(super) fn step(&self, direction: Direction) -> Step<'_> {
         match (self, direction) {
-            (Self::Delete(item), Direction::Redo) => Step::Remove(&item.id),
-            (Self::Edit(item) | Self::Delete(item), _) => Step::Put(item),
+            (Self::Delete { item, .. }, Direction::Redo) => Step::Remove(&item.id),
+            (Self::Edit { item, .. } | Self::Delete { item, .. }, _) => Step::Put(item),
+        }
+    }
+
+    pub(super) const fn version(&self) -> Option<ItemVersion> {
+        match self {
+            Self::Edit { version, .. } => Some(*version),
+            Self::Delete { version, .. } => *version,
         }
     }
 }
@@ -95,22 +109,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_edit_never_removes_the_item() {
+    fn an_edit_never_removes_the_item_and_needs_the_saved_version() {
         let item = PersonalSecret::new(PersonalSecretKind::Login, "Alpha".into());
         let id = item.id.clone();
-        let change = Change::Edit(item);
+        let version = ItemVersion::of(b"saved");
+        let change = Change::Edit { item, version };
         for direction in [Direction::Undo, Direction::Redo] {
             assert!(matches!(change.step(direction), Step::Put(item) if item.id == id));
         }
+        assert_eq!(change.version(), Some(version));
     }
 
     #[test]
     fn a_delete_is_undone_by_putting_the_item_back() {
         let item = PersonalSecret::new(PersonalSecretKind::Login, "Alpha".into());
         let id = item.id.clone();
-        let change = Change::Delete(item);
+        let change = Change::Delete {
+            item,
+            version: None,
+        };
         assert!(matches!(change.step(Direction::Undo), Step::Put(item) if item.id == id));
         assert_eq!(change.step(Direction::Redo), Step::Remove(&id));
+        assert_eq!(change.version(), None);
     }
 
     #[test]

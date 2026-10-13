@@ -1,9 +1,8 @@
 //! Bounded entry approval lifecycle.
 //!
 //! Pending approvals are held in memory and written through to the vault
-//! store, so a request still waiting for review survives the vault sealing
-//! and is offered again after the next unseal. Resolved outcomes and the
-//! creation rate window stay in memory only.
+//! store, so a request still waiting for review survives the vault sealing.
+//! Resolved outcomes and the creation rate window stay in memory only.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

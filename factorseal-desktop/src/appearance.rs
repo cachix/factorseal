@@ -199,8 +199,8 @@ pub(crate) fn remember(change: impl Fn(&mut crate::settings::DesktopSettings), c
         crate::settings::save(&path, &stored)
     });
     if let Err(error) = result {
-        factorseal::diagnostics::event("desktop", "save_window_state", "error");
-        eprintln!("could not save window state: {error:#}");
+        factorseal::diagnostics::event("desktop", "save_settings", "error");
+        eprintln!("could not save settings: {error:#}");
     }
 }
 

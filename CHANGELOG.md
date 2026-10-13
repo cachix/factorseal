@@ -63,9 +63,9 @@ All notable changes to FactorSeal will be documented in this file.
   bold and its username. The item page has a large title with the icon,
   groups the fields, shows an icon next to each field name, and hides empty
   fields behind Add field, which also adds custom fields. Websites can be
-  opened, passwords show their strength, one-time passwords show the current
-  code with a countdown, notes show their line breaks, and the page shows
-  when the item was last modified.
+  opened, passwords show their strength while being changed, one-time
+  passwords show the current code with a countdown, notes show their line
+  breaks, and the page shows when the item was last modified.
 
 - Pin favorite personal items to the top of Desktop's item list with the
   star next to an item's title. The rest of the list, search results and the
@@ -103,12 +103,11 @@ All notable changes to FactorSeal will be documented in this file.
   expires and a single Cancel button. The text now says pairing code
   everywhere.
 
-- Show who is asking in Desktop's approval popup. A request from the
-  installed FactorSeal provider for SecretSpec now names SecretSpec, other
-  apps are named by their full path, and the reason passed with `--reason`
-  shows as text from the app. The popup names the profile once, scrolls the
-  technical details instead of clipping them, and says when the app stopped
-  waiting instead of closing.
+- Show who is asking in Desktop's approval popup. Apps are named by their
+  full path, and the reason passed with `--reason` shows as text from the
+  app. The popup names the profile once, scrolls the technical details
+  instead of clipping them, and says when the app stopped waiting instead of
+  closing.
 
 - Let SecretSpec 0.21 and later pass `FACTORSEAL_ROOT` and
   `FACTORSEAL_SOCKET` to the provider. Those releases start a provider with
@@ -126,9 +125,8 @@ All notable changes to FactorSeal will be documented in this file.
 - Keep permission requests that are waiting for review when the vault seals.
   Pending permissions are now stored in the encrypted vault, local to the
   device, and stay pending after the next unseal, even after Desktop
-  restarts. Desktop offers a request again when the app asks again. Desktop's approval popup stays open through a seal and offers to
-  unlock; granting still takes the password again. A request denied while the
-  vault is sealed is denied as soon as it is unsealed.
+  restarts. Desktop offers a request again when the app asks again. A request
+  denied while the vault is sealed is denied as soon as it is unsealed.
 
 - Flash Desktop's taskbar button on Windows when the approval popup loses
   the foreground before it was clicked, as when Windows gives it the focus
@@ -201,7 +199,7 @@ All notable changes to FactorSeal will be documented in this file.
   `LockedBytes`. Large archives require a sufficient OS memory-lock quota.
 
 The current formats are metadata v8, database schema v5, snapshot envelope v7,
-protected commit v6, document v3 (personal documents v5), record v2, and native protocol v14. Database
+protected commit v6, document v3 (personal documents v5), record v2, and native protocol v17. Database
 schema v3 is authenticated and migrated transactionally after unseal: current
 document heads are projected into the new record/history envelope, document
 keys are rotated, and a compact current-format commit chain is signed before

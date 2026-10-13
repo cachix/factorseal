@@ -14,7 +14,8 @@ pub(super) const CONTEXT: &str = "FactorsealDesktop";
 pub(super) const LIST_CONTEXT: &str = "FactorsealList";
 pub(super) const SIDEBAR_CONTEXT: &str = "FactorsealSidebar";
 const SIDEBAR_INPUT_CONTEXT: &str = "FactorsealSidebar > Input";
-const OUTSIDE_TEXT_CONTEXT: &str = "FactorsealDesktop && !Input && !FactorsealSecret";
+const OUTSIDE_DIALOG_CONTEXT: &str = "FactorsealDesktop && !Dialog";
+const OUTSIDE_TEXT_CONTEXT: &str = "FactorsealDesktop && !Dialog && !Input && !FactorsealSecret";
 const OUTSIDE_SECRET_CONTEXT: &str = "FactorsealDesktop && !FactorsealSecret";
 const PALETTE_KEYS: &str = "secondary-k";
 const SHORTCUTS_KEYS: &str = "secondary-/";
@@ -97,8 +98,8 @@ pub(super) fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-l", SealVault, Some(CONTEXT)),
         KeyBinding::new(SHORTCUTS_KEYS, ShowShortcuts, Some(CONTEXT)),
         KeyBinding::new("escape", GoBack, Some(OUTSIDE_SECRET_CONTEXT)),
-        KeyBinding::new("down", SelectNext, Some(CONTEXT)),
-        KeyBinding::new("up", SelectPrevious, Some(CONTEXT)),
+        KeyBinding::new("down", SelectNext, Some(OUTSIDE_DIALOG_CONTEXT)),
+        KeyBinding::new("up", SelectPrevious, Some(OUTSIDE_DIALOG_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(SIDEBAR_INPUT_CONTEXT)),
         KeyBinding::new("enter", OpenSelected, Some(LIST_CONTEXT)),
     ]);
@@ -128,7 +129,7 @@ pub(super) struct State {
     pub(super) compact: bool,
     pub(super) narrow: bool,
     reveal: Rc<Cell<bool>>,
-    overlay: Rc<Cell<bool>>,
+    pub(super) overlay: Rc<Cell<bool>>,
     list_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
     _keep_focus: Subscription,
@@ -201,7 +202,7 @@ fn back_step(
     }
 }
 
-fn step(cursor: usize, len: usize, forward: bool) -> usize {
+pub(super) fn step(cursor: usize, len: usize, forward: bool) -> usize {
     if len == 0 {
         0
     } else if forward {
@@ -619,6 +620,10 @@ impl DesktopView {
     }
 
     fn copy_field(&mut self, target: CopyTarget, cx: &mut Context<Self>) {
+        if !self.is_unsealed() {
+            cx.propagate();
+            return;
+        }
         let index = match &self.selected_vault_item {
             Some(VaultSelection::Entry(entry)) if is_personal_secret(entry) => self
                 .personal_detail
@@ -642,11 +647,9 @@ impl DesktopView {
     }
 
     fn seal_now(&mut self, _: &SealVault, _: &mut Window, cx: &mut Context<Self>) {
-        if self.unsealed_contents().is_none() {
-            cx.propagate();
-            return;
+        if self.unsealed_contents().is_some() {
+            self.seal(cx);
         }
-        self.seal(cx);
     }
 
     fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
@@ -960,7 +963,24 @@ mod tests {
             assert!(matches(&[CONTEXT, LIST_CONTEXT]));
             assert!(!matches(&[CONTEXT, "Input"]));
             assert!(!matches(&[CONTEXT, "FactorsealSecret"]));
+            assert!(!matches(&[CONTEXT, "Dialog"]));
         }
+    }
+
+    #[test]
+    fn arrow_keys_leave_open_dialogs_alone() {
+        let binding = KeyBinding::new("down", SelectNext, Some(OUTSIDE_DIALOG_CONTEXT));
+        let predicate = binding.predicate().unwrap();
+        let matches = |names: &[&str]| {
+            let contexts: Vec<_> = names
+                .iter()
+                .map(|name| gpui::KeyContext::parse(name).unwrap())
+                .collect();
+            predicate.depth_of(&contexts).is_some()
+        };
+        assert!(matches(&[CONTEXT]));
+        assert!(matches(&[CONTEXT, LIST_CONTEXT]));
+        assert!(!matches(&[CONTEXT, "Dialog"]));
     }
 
     #[test]

@@ -279,10 +279,11 @@ Devices is a dedicated screen beside “Your vault”. A single “Connect a dev
 flow offers Show pairing code and Paste pairing code, regardless of current
 membership. The review lists all affected devices. Pairing a device to itself is
 rejected explicitly. First-time naming defaults to the hostname and is saved in
-local Desktop preferences. This device can be renamed only until it is paired,
-because the name other devices see is fixed at pairing. Local membership count
-never claims peer application. There is no built-in camera scanner or mobile
-app. Pending review survives restart. Capability displays clear when sealed.
+local Desktop preferences. This device can be renamed only until a pairing code
+or request is created, because the name other devices see is fixed then. Local
+membership count never claims peer application. There is no built-in camera
+scanner or mobile app. Pending review survives restart. Capability displays
+clear when sealed.
 A single Cancel stays available below the scrollable pairing content, also while
 a code is being created.
 

@@ -7,9 +7,11 @@ use factorseal::browser::desktop::WorkerFailure;
 use factorseal::security::LockedBytes;
 use factorseal::{
     DocumentKind, MAX_LIST_PAGE_SIZE, NativeVaultClient, UnlockGroup, UnlockPolicy, Vault,
-    VaultAction, VaultArchive, VaultClient, VaultEntryMetadata, VaultMetadata, VaultRequest,
-    VaultResponseBody, WireSecret, WireSecretAddress, decrypt_vault_archive, encrypt_vault_archive,
+    VaultAction, VaultArchive, VaultClient, VaultEntryMetadata, VaultMetadata, VaultMutation,
+    VaultRequest, VaultResponseBody, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    decrypt_vault_archive, encrypt_vault_archive,
 };
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use factorseal::isolation::network::ProcessManager as SyncManager;
@@ -98,6 +100,35 @@ impl VaultContents {
 pub(crate) use factorseal::transfer::import_plan::{
     ImportSummary as TransferSummary, PreparedImport,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ItemVersion([u8; 32]);
+
+impl ItemVersion {
+    pub(crate) fn of(value: &[u8]) -> Self {
+        Self(Sha256::digest(value).into())
+    }
+}
+
+pub(crate) enum PersonalWriteError {
+    Changed(VaultContents),
+    Failed(String),
+}
+
+impl From<String> for PersonalWriteError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl std::fmt::Display for PersonalWriteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Changed(_) => formatter.write_str("the item changed somewhere else"),
+            Self::Failed(error) => formatter.write_str(error),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum UnlockStep {
@@ -325,7 +356,7 @@ impl DesktopRuntime {
         &self,
         metadata: &VaultMetadata,
         entry: &VaultEntryMetadata,
-    ) -> Result<PersonalSecret, String> {
+    ) -> Result<(PersonalSecret, ItemVersion), String> {
         if !is_personal_entry(entry) {
             return Err("This is not a personal item.".into());
         }
@@ -335,7 +366,9 @@ impl DesktopRuntime {
         .map_err(|error| error.to_string())?;
         match self.request_live(metadata, &request)? {
             VaultResponseBody::VaultEntrySecret { value, .. } => {
-                PersonalSecret::decode_current(value.expose()).map_err(|error| error.to_string())
+                let item = PersonalSecret::decode_current(value.expose())
+                    .map_err(|error| error.to_string())?;
+                Ok((item, ItemVersion::of(value.expose())))
             }
             _ => Err("Could not read the personal item.".into()),
         }
@@ -344,32 +377,59 @@ impl DesktopRuntime {
     pub(crate) fn put_personal_secret(
         &self,
         secret: &PersonalSecret,
-    ) -> Result<VaultContents, String> {
-        let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
+        expected: Option<ItemVersion>,
+    ) -> Result<(ItemVersion, VaultContents), PersonalWriteError> {
         let encoded = secret.encode().map_err(|error| error.to_string())?;
-        let request = VaultRequest::new(VaultAction::Put {
-            namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
+        let mutation = VaultMutation::Put {
             address: WireSecretAddress::new(secret.id.clone(), None),
-            value: WireSecret::new(encoded.to_vec()).map_err(|e| e.to_string())?,
+            value: WireSecret::new(encoded.to_vec()).map_err(|error| error.to_string())?,
             evict_at: None,
-        })
-        .map_err(|error| error.to_string())?;
-        match self.request_live(&metadata, &request)? {
-            VaultResponseBody::Stored => self.load_live_contents(&metadata),
-            _ => Err("vault returned an unexpected personal-secret response".to_owned()),
-        }
+        };
+        let contents = self.change_personal_secret(&secret.id, expected, mutation)?;
+        Ok((ItemVersion::of(&encoded), contents))
     }
 
-    pub(crate) fn delete_personal_secret(&self, id: &str) -> Result<VaultContents, String> {
-        let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
-        let request = VaultRequest::new(VaultAction::Delete {
-            namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
+    pub(crate) fn delete_personal_secret(
+        &self,
+        id: &str,
+        expected: Option<ItemVersion>,
+    ) -> Result<VaultContents, PersonalWriteError> {
+        let mutation = VaultMutation::Delete {
             address: WireSecretAddress::new(id, None),
+        };
+        self.change_personal_secret(id, expected, mutation)
+    }
+
+    fn change_personal_secret(
+        &self,
+        id: &str,
+        expected: Option<ItemVersion>,
+        mutation: VaultMutation,
+    ) -> Result<VaultContents, PersonalWriteError> {
+        let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
+        let request = VaultRequest::new(VaultAction::Mutate {
+            namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
+            mutations: vec![
+                VaultMutation::Check {
+                    address: WireSecretAddress::new(id, None),
+                    expected_sha256: expected.map(|version| version.0),
+                },
+                mutation,
+            ],
         })
         .map_err(|error| error.to_string())?;
-        match self.request_live(&metadata, &request)? {
-            VaultResponseBody::Deleted { .. } => self.load_live_contents(&metadata),
-            _ => Err("vault returned an unexpected personal-secret response".to_owned()),
+        let response = native_client(&self.config, &metadata)
+            .request(&request)
+            .map_err(|error| error.to_string())?;
+        match response.result {
+            Ok(VaultResponseBody::Mutated) => Ok(self.load_live_contents(&metadata)?),
+            Err(error) if error.code == VaultResponseErrorCode::Conflict => Err(
+                PersonalWriteError::Changed(self.load_live_contents(&metadata)?),
+            ),
+            Err(error) => Err(error.message.into()),
+            Ok(_) => Err("vault returned an unexpected personal-secret response"
+                .to_owned()
+                .into()),
         }
     }
 
@@ -1008,11 +1068,6 @@ fn factorseal_secret_service(collections: &[zbus::zvariant::OwnedObjectPath]) ->
 #[cfg(not(target_os = "linux"))]
 const fn secret_service_error() -> Option<String> {
     None
-}
-
-pub(crate) fn installed_cli() -> Option<PathBuf> {
-    let desktop = std::env::current_exe().ok()?;
-    cli_executable(&desktop).ok().flatten()
 }
 
 fn cli_executable(desktop: &Path) -> Result<Option<PathBuf>, String> {

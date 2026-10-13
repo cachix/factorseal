@@ -653,38 +653,16 @@ fn application_name(path: &std::path::Path) -> String {
         .into_owned()
 }
 
-fn trusted_cli() -> Option<&'static std::path::Path> {
-    static CLI: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    CLI.get_or_init(|| {
-        crate::runtime::installed_cli().and_then(|path| std::fs::canonicalize(path).ok())
-    })
-    .as_deref()
+fn requester_label(grants: &[&factorseal::Permission]) -> Option<String> {
+    single(grants.iter().map(|grant| &grant.principal))
+        .map(|principal| visible_text(&principal.application_id))
 }
 
-fn requester_label(
-    grants: &[&factorseal::Permission],
-    trusted: Option<&std::path::Path>,
-) -> Option<String> {
-    let principal = single(grants.iter().map(|grant| &grant.principal))?;
-    let provider = trusted
-        .is_some_and(|cli| std::path::Path::new(&principal.application_id) == cli)
-        && grants.iter().all(|grant| secretspec_scope(grant.scope));
-    Some(if provider {
-        "SecretSpec".to_owned()
-    } else {
-        principal.application_id.clone()
-    })
-}
-
-fn header_requester(
-    grants: &[&factorseal::Permission],
-    trusted: Option<&std::path::Path>,
-    other_requests: bool,
-) -> Option<String> {
+fn header_requester(grants: &[&factorseal::Permission], other_requests: bool) -> Option<String> {
     if other_requests {
         None
     } else {
-        requester_label(grants, trusted)
+        requester_label(grants)
     }
 }
 
@@ -719,8 +697,8 @@ fn hidden_character(character: char) -> bool {
         )
 }
 
-fn display_reason(reason: &str) -> String {
-    let visible: String = reason
+fn visible_text(text: &str) -> String {
+    let visible: String = text
         .chars()
         .filter_map(|character| {
             if character.is_whitespace() {
@@ -730,7 +708,11 @@ fn display_reason(reason: &str) -> String {
             }
         })
         .collect();
-    let words = visible.split_whitespace().collect::<Vec<_>>().join(" ");
+    visible.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn display_reason(reason: &str) -> String {
+    let words = visible_text(reason);
     if words.chars().count() > REASON_LIMIT {
         let cut: String = words.chars().take(REASON_LIMIT).collect();
         format!("{}…", cut.trim_end())
@@ -761,9 +743,9 @@ fn grant_secret_label(grant: &factorseal::Permission) -> Option<String> {
         } = address
         && grant.application.profile.as_ref() == Some(profile)
     {
-        return Some(key.clone());
+        return Some(visible_text(key));
     }
-    entry_access::entry_label(grant)
+    entry_access::entry_label(grant).map(|label| visible_text(&label))
 }
 
 fn request_summary(operation: &str, project: Option<&str>) -> String {
@@ -816,6 +798,7 @@ fn detail(
     value: impl Into<gpui::SharedString>,
     cx: &App,
 ) -> Div {
+    let (label, value) = (label.into(), value.into());
     h_flex()
         .items_start()
         .gap_3()
@@ -825,9 +808,15 @@ fn detail(
                 .flex_none()
                 .text_body()
                 .text_color(cx.theme().muted_foreground)
-                .child(label.into()),
+                .child(visible_text(&label)),
         )
-        .child(div().flex_1().min_w_0().text_body().child(value.into()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_body()
+                .child(visible_text(&value)),
+        )
 }
 
 impl Render for AccessView {
@@ -914,10 +903,9 @@ impl Render for AccessView {
             },
         );
         let pending_grants = || self.grants.iter().filter(|_| self.inputs.is_empty());
-        let trusted = trusted_cli();
         let shown_grants: Vec<_> = pending_grants().collect();
         let other_requests = !self.requests.is_empty() || !self.unlocks.is_empty();
-        let requester = header_requester(&shown_grants, trusted, other_requests).map(|name| {
+        let requester = header_requester(&shown_grants, other_requests).map(|name| {
             let operation = single(pending_grants().map(|grant| grant.operation))
                 .map_or("use", |operation| permission_operation_label(operation))
                 .to_lowercase();
@@ -962,7 +950,7 @@ impl Render for AccessView {
                         div()
                             .text_heading()
                             .font_semibold()
-                            .child(secret.to_owned()),
+                            .child(visible_text(secret)),
                     );
                 }
                 if project_title.is_none() {
@@ -1140,7 +1128,7 @@ impl Render for AccessView {
             if requester.is_none() {
                 card = card.child(div().text_body().child(format!(
                     "{} {}.",
-                    requester_label(&group, trusted).unwrap_or_default(),
+                    requester_label(&group).unwrap_or_default(),
                     request_summary(
                         &permission_operation_label(grant.operation).to_lowercase(),
                         None
@@ -1473,33 +1461,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_installed_provider_is_named_secretspec() {
-        let cli = std::path::Path::new("/nix/store/abc-factorseal/bin/factorseal");
-        let label = |grant: &factorseal::Permission| requester_label(&[grant], Some(cli));
-        let mut grant = secretspec_grant("/nix/store/abc-factorseal/bin/factorseal", None);
-        assert_eq!(label(&grant).as_deref(), Some("SecretSpec"));
-        assert_eq!(
-            requester_label(&[&grant], None).as_deref(),
-            Some("/nix/store/abc-factorseal/bin/factorseal")
-        );
-        grant.principal.application_id = "/tmp/evil/factorseal".to_owned();
-        assert_eq!(label(&grant).as_deref(), Some("/tmp/evil/factorseal"));
-        grant.principal.application_id = "/usr/bin/other-tool".to_owned();
-        assert_eq!(label(&grant).as_deref(), Some("/usr/bin/other-tool"));
-        grant.principal.application_id = cli.display().to_string();
-        grant.scope = Some(factorseal::DocumentKind::LinuxSecretService);
-        assert_eq!(label(&grant).as_deref(), Some(cli.to_str().unwrap()));
-    }
-
-    #[test]
     fn the_verified_header_only_shows_when_grants_are_all_that_is_asked() {
-        let cli = std::path::Path::new("/nix/store/abc-factorseal/bin/factorseal");
         let grant = secretspec_grant("/nix/store/abc-factorseal/bin/factorseal", None);
         assert_eq!(
-            header_requester(&[&grant], Some(cli), false).as_deref(),
-            Some("SecretSpec")
+            header_requester(&[&grant], false).as_deref(),
+            Some("/nix/store/abc-factorseal/bin/factorseal")
         );
-        assert_eq!(header_requester(&[&grant], Some(cli), true), None);
+        assert_eq!(header_requester(&[&grant], true), None);
     }
 
     #[test]
@@ -1507,14 +1475,14 @@ mod tests {
         let first = secretspec_grant("/usr/bin/tool", None);
         let mut second = secretspec_grant("/usr/bin/tool", None);
         assert_eq!(
-            requester_label(&[&first, &second], None).as_deref(),
+            requester_label(&[&first, &second]).as_deref(),
             Some("/usr/bin/tool")
         );
         second.principal.executable_digest = [1; 32];
-        assert_eq!(requester_label(&[&first, &second], None), None);
+        assert_eq!(requester_label(&[&first, &second]), None);
         second.principal = first.principal.clone();
         second.principal.application_id = "/opt/tool".to_owned();
-        assert_eq!(requester_label(&[&first, &second], None), None);
+        assert_eq!(requester_label(&[&first, &second]), None);
     }
 
     #[test]
@@ -1528,6 +1496,22 @@ mod tests {
         assert_eq!(long.chars().count(), REASON_LIMIT);
         assert!(long.ends_with("word…") || long.ends_with('…'));
         assert_eq!(quoted_reasons(&["\u{200B}".to_owned()]), None);
+    }
+
+    #[test]
+    fn app_names_paths_and_keys_lose_hidden_characters_but_not_their_end() {
+        let path = format!(
+            "/home/user/{}/tool\u{202E}\n\nFolder /trusted",
+            "a".repeat(300)
+        );
+        let visible = visible_text(&path);
+        assert!(visible.ends_with("tool Folder /trusted"));
+        assert!(!visible.contains(['\n', '\u{202E}']));
+        let grant = secretspec_grant("/usr/bin/tool\u{2066}\nSecretSpec", None);
+        assert_eq!(
+            requester_label(&[&grant]).as_deref(),
+            Some("/usr/bin/tool SecretSpec")
+        );
     }
 
     #[test]

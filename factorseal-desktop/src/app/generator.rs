@@ -179,13 +179,8 @@ impl PasswordGenerator {
         let Some((password, _)) = &self.preview else {
             return;
         };
-        let mut settings = crate::appearance::current(cx).clone();
-        if settings.generator != self.options {
-            settings.generator = self.options;
-            if let Err(error) = crate::appearance::update(settings, cx) {
-                eprintln!("could not save password generator options: {error:#}");
-            }
-        }
+        let options = self.options;
+        crate::appearance::remember(|settings| settings.generator = options, cx);
         cx.emit(UsePassword(password.clone()));
     }
 

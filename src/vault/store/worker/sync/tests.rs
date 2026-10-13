@@ -203,6 +203,94 @@ fn real_vault_edits_cross_a_locked_courier_and_apply_after_restart() {
 }
 
 #[test]
+fn a_checked_write_from_a_stale_copy_keeps_a_synced_change() {
+    use crate::vault::{
+        CallerIdentity, CallerPlatform, GrantPermission, VaultAction, VaultMutation, VaultRequest,
+        VaultResponseBody, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    };
+    use sha2::{Digest as _, Sha256};
+
+    let a = Device::new();
+    let b = Device::new();
+    let membership = group(&[&a, &b]);
+    a.configure(&membership);
+    b.configure(&membership);
+    let mut item = PersonalSecret::generic("Login".into(), "old password".into());
+    a.put(&item);
+    let created = a.prepare();
+    a.stored(&created, &membership);
+    assert_eq!(b.receive(&created), ReceiveOutcome::Applied);
+    let service = b.service();
+    let desktop = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "com.cachix.factorseal.desktop",
+        [7; 32],
+        None,
+    )
+    .unwrap();
+    service
+        .authorize_namespace(
+            &desktop,
+            PERSONAL_SECRET_NAMESPACE,
+            [GrantPermission::Get, GrantPermission::Put],
+            None,
+            10,
+        )
+        .unwrap();
+    let id = item.id.clone();
+    let address = || WireSecretAddress::new(id.clone(), None);
+    let open = || {
+        let request = VaultRequest::new(VaultAction::Get {
+            namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
+            address: address(),
+        })
+        .unwrap();
+        let Ok(VaultResponseBody::Secret { value: Some(value) }) =
+            service.handle(&desktop, request, 10).result
+        else {
+            panic!("missing item")
+        };
+        value.expose().to_vec()
+    };
+    let favorite = |opened: &[u8]| {
+        let mut favorite = PersonalSecret::decode_current(opened).unwrap();
+        favorite.favorite = true;
+        let request = VaultRequest::new(VaultAction::Mutate {
+            namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
+            mutations: vec![
+                VaultMutation::Check {
+                    address: address(),
+                    expected_sha256: Some(Sha256::digest(opened).into()),
+                },
+                VaultMutation::Put {
+                    address: address(),
+                    value: WireSecret::new(favorite.encode().unwrap().to_vec()).unwrap(),
+                    evict_at: None,
+                },
+            ],
+        })
+        .unwrap();
+        service.handle(&desktop, request, 10).result
+    };
+    let stale = open();
+    item.sections[0].fields[0].value = "new password".into();
+    a.put(&item);
+    let changed = a.prepare();
+    a.stored(&changed, &membership);
+    assert_eq!(b.receive(&changed), ReceiveOutcome::Applied);
+    assert_eq!(
+        favorite(&stale).unwrap_err().code,
+        VaultResponseErrorCode::Conflict
+    );
+    assert_eq!(b.read(&item.id).unwrap().unwrap(), item);
+    assert!(matches!(favorite(&open()), Ok(VaultResponseBody::Mutated)));
+    let saved = b.read(&item.id).unwrap().unwrap();
+    assert!(saved.favorite);
+    assert_eq!(saved.sections[0].fields[0].text(), Some("new password"));
+}
+
+#[test]
 fn concurrent_edit_delete_is_preserved_and_explicit_resolution_converges() {
     let a = Device::new();
     let mut b = Device::new();

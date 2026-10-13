@@ -219,7 +219,13 @@ impl DesktopView {
                 .as_ref()
                 .is_some_and(|request| !request.needs_merge_approval())
     }
+    fn can_cancel_pairing(&self) -> bool {
+        !self.devices_busy || self.devices.state.request.is_none() || self.pairing_approved_here()
+    }
     pub(super) fn cancel_device_pairing(&mut self, cx: &mut Context<Self>) {
+        if !self.can_cancel_pairing() {
+            return;
+        }
         let state = &self.devices.state;
         let pending = state.invitation.is_some() || state.request.is_some();
         if !self.pairing_approved_here() {
@@ -529,7 +535,7 @@ impl DesktopView {
                                 Button::new("cancel-device-pairing")
                                     .icon(IconName::Close)
                                     .label(if approved_here { "Close" } else { "Cancel" })
-                                    .disabled(busy && state.request.is_some() && !approved_here)
+                                    .disabled(!self.can_cancel_pairing())
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.cancel_device_pairing(cx);
                                     })),

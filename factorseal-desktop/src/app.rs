@@ -874,14 +874,6 @@ fn search_result_entries<'a>(
         .collect()
 }
 
-fn step_search_cursor(cursor: usize, count: usize, forward: bool) -> usize {
-    match (forward, count) {
-        (_, 0) => 0,
-        (true, _) => (cursor + 1).min(count - 1),
-        (false, _) => cursor.saturating_sub(1).min(count - 1),
-    }
-}
-
 fn highlighted_text(text: String, query: &str, color: Hsla) -> StyledText {
     let highlights = search_match_range(&text, query).map(|range| {
         (
@@ -2003,8 +1995,9 @@ impl DesktopView {
         let Snapshot::Unsealed { contents, .. } = &self.snapshot else {
             return None;
         };
-        search_result_entries(&contents.entries, &self.search_query(cx))
-            .get(self.search_cursor)
+        let results = search_result_entries(&contents.entries, &self.search_query(cx));
+        results
+            .get(self.search_cursor.min(results.len().saturating_sub(1)))
             .map(|entry| (*entry).clone())
     }
 
@@ -2016,7 +2009,7 @@ impl DesktopView {
             return false;
         }
         let count = search_result_entries(&contents.entries, &self.search_query(cx)).len();
-        self.search_cursor = step_search_cursor(self.search_cursor, count, forward);
+        self.search_cursor = shortcuts::step(self.search_cursor, count, forward);
         self.search_scroll.scroll_to_item(self.search_cursor);
         cx.notify();
         true
@@ -2631,8 +2624,8 @@ impl DesktopView {
                     value.to_string(),
                 ));
         }
-        match self.runtime.put_personal_secret(&item) {
-            Ok(updated_contents) => {
+        match self.runtime.put_personal_secret(&item, None) {
+            Ok((_, updated_contents)) => {
                 if let Snapshot::Unsealed {
                     contents,
                     contents_error,
@@ -3479,7 +3472,7 @@ impl DesktopView {
                 value: cx.new(|cx| {
                     SecretInputState::new(window, cx)
                         .multiline()
-                        .masked(field.concealed || field.field_type.concealed())
+                        .masked(field.is_concealed())
                 }),
             })
             .collect()
@@ -5566,15 +5559,6 @@ mod tests {
             search_result_names(&entries, "personal"),
             [("Personal secrets", vec!["GitHub".to_owned()])]
         );
-    }
-
-    #[test]
-    fn keeps_the_search_cursor_inside_the_results() {
-        assert_eq!(super::step_search_cursor(0, 3, true), 1);
-        assert_eq!(super::step_search_cursor(2, 3, true), 2);
-        assert_eq!(super::step_search_cursor(0, 3, false), 0);
-        assert_eq!(super::step_search_cursor(5, 3, false), 2);
-        assert_eq!(super::step_search_cursor(0, 0, true), 0);
     }
 
     #[test]

@@ -50,10 +50,11 @@ users must manually unlock Desktop before applications can look up credentials.
 Clients that explicitly request `Unlock` can still use the normal prompt flow.
 
 Desktop secret-entry fields use bounded locked, guarded buffers, omit undo/copy
-history, and send only masked text to the renderer. Submitting, leaving a secret
-view, or sealing clears the inputs. Clipboard, native input methods, the
-password strength check, crypto libraries, and operating-system internals can
-still hold copies; this is not a claim of comprehensive memory erasure.
+history, and send only masked text to the renderer until the value is revealed.
+Submitting, leaving a secret view, or sealing clears the inputs. Clipboard,
+native input methods, the password strength check, crypto libraries, and
+operating-system internals can still hold copies; this is not a claim of
+comprehensive memory erasure.
 
 Every unlock group is hardware-bound. Factors inside a group are AND
 requirements and independently wrapped groups are OR alternatives. Password
