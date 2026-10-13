@@ -10,15 +10,16 @@ All notable changes to FactorSeal will be documented in this file.
   Keep vulnerability findings fatal. Preserve the Rust 1.91 atomic API while
   allowing its compatibility alias's deprecation on newer compilers.
 
+- Keep one current encrypted snapshot per document in Turso and authenticate the
+  complete current inventory with one device-signed manifest. Replace snapshots,
+  document heads, and the manifest atomically; unlock verifies only current state.
+  Authenticate every retained legacy generation before migrating to schema v6.
+  Repack once during migration when at least 64 MiB and half the file are unused,
+  with authenticated retry state if interrupted. Preserve encrypted change and
+  personal replication histories. Unchanged pairing commands no longer write.
 - Compress debug sections in Linux Nix release binaries with zlib. Retain source
   locations in diagnostic backtraces while reducing the bytes read to authenticate
   Desktop, the CLI, and helper executables.
-- Reclaim unused vault database space automatically after 30 seconds without
-  writes, when at least 64 MiB and half the file are unused. Preserve current
-  records and retained history, verify authenticated state before and after
-  repacking, and yield to incoming commands and sealing at engine I/O boundaries.
-  Stop writing a new generation when background sync accepts its already pinned
-  group, so unchanged polls do not grow the database or postpone cleanup.
 
 - Let SecretSpec 0.21 and later pass `FACTORSEAL_ROOT` and
   `FACTORSEAL_SOCKET` to the provider. Those releases start a provider with
@@ -110,12 +111,14 @@ All notable changes to FactorSeal will be documented in this file.
   `WireSecret::new` is now fallible and request/response `encode` returns
   `LockedBytes`. Large archives require a sufficient OS memory-lock quota.
 
-The current formats are metadata v8, database schema v5, snapshot envelope v7,
-protected commit v6, document v3 (personal documents v5), record v2, and native protocol v14. Database
-schema v3 is authenticated and migrated transactionally after unseal: current
-document heads are projected into the new record/history envelope, document
-keys are rotated, and a compact current-format commit chain is signed before
-the schema version advances. Unknown formats are rejected and never deleted.
+The current formats are metadata v8, database schema v6, snapshot envelope v7,
+current-state manifest v6, document v3 (personal documents v5), record v2, and
+native protocol v14. Database schemas v3 and v5 are authenticated and migrated
+transactionally after unseal. The v3 conversion projects current document heads
+into the record/history envelope and rotates document keys. The v5 conversion
+verifies the complete legacy protected-commit v6 chain and its retained snapshots
+before replacing it with current heads and a signed manifest. Unknown formats
+are rejected and never deleted.
 
 - Fix keyring backup/restore with atomic metadata/value imports and v1 archive
   conversion; new archives use v2. Export from live inventory and reject a

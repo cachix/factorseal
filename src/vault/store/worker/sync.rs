@@ -119,6 +119,10 @@ impl StoreWorker {
                     .map(SyncReply::Group);
             }
             SyncCommand::Pairing(command) => {
+                let state_before = zeroize::Zeroizing::new(
+                    serde_json::to_vec(&state)
+                        .map_err(|error| VaultError::InvalidData(error.to_string()))?,
+                );
                 // The courier offers its current group on every poll. Validate
                 // that offer normally, but do not create another generation
                 // when the already pinned group is unchanged.
@@ -143,7 +147,11 @@ impl StoreWorker {
                 )?;
                 let previous = state.membership.as_ref().map(Membership::digest);
                 let reply = pairing::handle(&mut state, &identity, command, unix_time()?)?;
-                if unchanged_group {
+                let state_after = zeroize::Zeroizing::new(
+                    serde_json::to_vec(&state)
+                        .map_err(|error| VaultError::InvalidData(error.to_string()))?,
+                );
+                if unchanged_group || state_before == state_after {
                     return Ok(reply);
                 }
                 if previous != state.membership.as_ref().map(Membership::digest) {
