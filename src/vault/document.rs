@@ -1141,7 +1141,7 @@ mod tests {
         assert_eq!(count, 2);
         record(&mut log, cleared, &context(&provenance, 3));
         assert!(document.clear().unwrap().is_none());
-        assert!(document.addresses().unwrap().is_empty());
+        assert_eq!(document.addresses().unwrap().len(), 0);
 
         let history = log.entries();
         assert_eq!(history.len(), 4);

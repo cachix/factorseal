@@ -64,7 +64,7 @@ fn three_devices_exchange_identical_ciphertext_through_a_keyless_courier() {
     let id = spool.put(packet.as_bytes(), &group).unwrap();
     assert_eq!(spool.put(packet.as_bytes(), &group).unwrap(), id);
     assert_eq!(spool.inventory(None, 128).unwrap(), vec![id]);
-    assert!(spool.inventory(Some(id), 128).unwrap().is_empty());
+    assert_eq!(spool.inventory(Some(id), 128).unwrap().len(), 0);
     assert!(CiphertextSpool::open(&path, 4 * MAX_PACKET_BYTES as u64).is_err());
     drop(spool);
     let spool = CiphertextSpool::open(&path, 4 * MAX_PACKET_BYTES as u64).unwrap();
@@ -200,7 +200,7 @@ fn orphan_tempfiles_consume_quota_but_never_appear_in_inventory() {
     let path = directory.path().join("spool");
     let mut spool = CiphertextSpool::open(&path, packet.as_bytes().len() as u64).unwrap();
     std::fs::write(path.join(".tmp-orphan"), b"unfinished write").unwrap();
-    assert!(spool.inventory(None, 128).unwrap().is_empty());
+    assert_eq!(spool.inventory(None, 128).unwrap().len(), 0);
     assert!(spool.put(packet.as_bytes(), &group).is_err());
 }
 

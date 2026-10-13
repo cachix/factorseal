@@ -1183,7 +1183,7 @@ fn revoking_an_expired_permission_cleans_the_registry() {
     revoke_permission(store, "prm_short", 160, &provenance).unwrap();
     assert!(revoke_permission(store, "prm_short", 161, &provenance).is_err());
     revoke_permission(store, "prm_long", 162, &provenance).unwrap();
-    assert!(list_granted_permissions(store, 162).unwrap().is_empty());
+    assert_eq!(list_granted_permissions(store, 162).unwrap().len(), 0);
 }
 
 #[test]
@@ -1333,7 +1333,7 @@ fn project_history_is_paginated_value_free_and_separately_authorized() {
     else {
         panic!("expected an empty filtered page");
     };
-    assert!(entries.is_empty());
+    assert_eq!(entries.len(), 0);
 
     // The writer sees its own entries in full, and a permission manager sees
     // every principal, as it does through `ListPermissions`.
@@ -1869,7 +1869,7 @@ fn pending_approval_survives_sealing_and_is_approved_after_unseal() {
 
     // A granted request is no longer pending after the next seal either.
     let service = reopen_after_seal(&directory, service, now + 60);
-    assert!(pending_ids(&service, &manager, now + 61).is_empty());
+    assert_eq!(pending_ids(&service, &manager, now + 61).len(), 0);
 }
 
 #[test]
@@ -1915,7 +1915,10 @@ fn denied_and_expired_approvals_do_not_return_after_unseal() {
 
     // Unsealed again after the request's seven-day lifetime.
     let service = reopen_after_seal(&directory, service, kept.expires_at + 1);
-    assert!(pending_ids(&service, &manager, kept.expires_at + 2).is_empty());
+    assert_eq!(
+        pending_ids(&service, &manager, kept.expires_at + 2).len(),
+        0
+    );
 }
 
 #[test]

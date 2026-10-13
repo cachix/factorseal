@@ -383,7 +383,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(document.addresses().unwrap().is_empty());
+        assert_eq!(document.addresses().unwrap().len(), 0);
         assert!(
             document.personal_replicas().unwrap().replicas.is_empty(),
             "rejected batches must roll back the outbox too"

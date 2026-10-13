@@ -4199,7 +4199,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some(30), Some(20), Some(10), None]
         );
-        assert!(super::personal_entries_by_modified(&entries, "absent").is_empty());
+        assert_eq!(
+            super::personal_entries_by_modified(&entries, "absent").len(),
+            0
+        );
     }
 
     #[test]

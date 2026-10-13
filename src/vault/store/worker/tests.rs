@@ -693,7 +693,7 @@ fn history_survives_reopen_with_provenance_and_pages_newest_first() {
     let absent = store
         .list_history(DocumentKind::LocalKeyring, b"missing", None, None, 8)
         .unwrap();
-    assert!(absent.items.is_empty());
+    assert_eq!(absent.items.len(), 0);
 }
 
 #[test]
@@ -1174,14 +1174,15 @@ fn project_listing_purges_expired_entries_and_hides_empty_projects() {
         .unwrap();
 
     assert_eq!(store.list_projects(None, 1, 49).unwrap().items, ["demo"]);
-    assert!(
+    assert_eq!(
         store
             .list_project_addresses("demo", None, 1, 50)
             .unwrap()
             .items
-            .is_empty()
+            .len(),
+        0
     );
-    assert!(store.list_projects(None, 1, 50).unwrap().items.is_empty());
+    assert_eq!(store.list_projects(None, 1, 50).unwrap().items.len(), 0);
 }
 
 #[test]
