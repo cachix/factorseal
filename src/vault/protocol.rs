@@ -14,8 +14,9 @@ pub use lease::UnsealLeasePolicy;
 pub use service::{GrantAuthorization, GrantAuthorizationTarget, VaultService};
 pub use wire::{
     CallerIdentity, CallerPlatform, MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE,
-    MAX_PERMISSION_WAIT_MS, Permission, PermissionChange, PermissionOperation, PermissionPrincipal,
-    PermissionState, PermissionTarget, PermissionWaitStatus, RequestId, VaultAction,
+    MAX_PERMISSION_WAIT_MS, MAX_WSL_GRANT_SECONDS, Permission, PermissionChange,
+    PermissionOperation, PermissionPrincipal, PermissionState, PermissionTarget,
+    PermissionWaitStatus, RequestId, SINGLE_USE_GRANT_SECONDS, VaultAction,
     VaultApplicationContext, VaultClient, VaultEntryImportStatus, VaultEntryMetadata,
     VaultInteractionReference, VaultMutation, VaultRequest, VaultResponse, VaultResponseBody,
     VaultResponseError, VaultResponseErrorCode, WireSecret, WireSecretAddress,

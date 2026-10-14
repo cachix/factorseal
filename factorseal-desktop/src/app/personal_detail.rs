@@ -133,6 +133,8 @@ impl DesktopView {
                 .child(
                     div()
                         .id("personal-item-breadcrumb")
+                        .role(gpui::Role::Link)
+                        .aria_label("Personal secrets")
                         .cursor_pointer()
                         .hover(|style| style.text_color(theme.muted_foreground))
                         .child("Personal secrets")
@@ -344,6 +346,7 @@ impl DesktopView {
         self.copy_personal_value(value, personal_actions::CopiedField::Saved(index), cx);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_personal_value(
         &self,
         index: usize,
@@ -355,7 +358,10 @@ impl DesktopView {
         let Some(input) = self.personal_detail.inputs.get(&index) else {
             return div();
         };
-        let value = div().flex_1().min_w_0().child(input.input.clone());
+        let value = named_group(("personal-value", index), label.to_owned())
+            .flex_1()
+            .min_w_0()
+            .child(input.input.clone());
         v_flex()
             .gap_2()
             .p_3()
