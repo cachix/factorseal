@@ -57,3 +57,7 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
+
+[build-dependencies]
+# The application icon of the Windows executable (build.rs).
+embed-resource = "3.0.11"

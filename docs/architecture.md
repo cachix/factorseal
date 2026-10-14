@@ -298,7 +298,8 @@ standard SecretSpec service path also supplies the project, profile, and secret
 name. These project labels are caller-provided; they are not a verified project
 identity. Unlocking and grant approval stay in one popup, reusing the secure
 password entry. The signed grant binds the authenticated executable, project,
-folder, and operation, either for one hour or until revoked. Keyring requests
+folder, and operation, either for one hour or until revoked (requests relayed
+from WSL2 are capped at five minutes; see [WSL2 broker](#wsl2-broker)). Keyring requests
 use the nearest `secretspec.toml` ancestor of the OS-reported working directory
 (or that directory itself); SecretSpec IPC supplies its canonical project folder. Grants appear in Access
 Grants and are checked again for each secret operation. SecretSpec IPC uses the
@@ -315,6 +316,26 @@ timeout. Clients that explicitly call `Unlock` use the normal prompt flow.
 Do not run another provider that owns that bus name, such as GNOME Keyring or
 oo7, at the same time. macOS Keychain and Windows Credential Manager remain
 separate platform interfaces.
+
+### WSL2 broker
+
+Linux processes inside WSL2 cannot open the vault's Windows named pipe. The
+experimental `factorseal-wsl-broker.exe` runs on the Windows side through WSL2
+interop and connects to the pipe like any other Windows client. Transport
+authentication is unchanged, so it identifies the broker's SID and executable
+digest, not the Linux process that invoked it. Every WSL2 caller therefore
+shares a single identity, the broker's.
+
+The broker tags each request with the invoking distro's name. This name is
+caller-declared: approval prompts show it as “Relayed from WSL distro”, but it
+never authenticates anything and does not change the caller's identity.
+
+Because the vault cannot tell WSL2 callers apart, a grant approved for a
+WSL2-relayed request expires after five minutes (`MAX_WSL_GRANT_SECONDS`). The
+cap applies whatever duration is chosen at approval, including “until revoked”.
+The stored grant and the permission record shown in Desktop both carry the capped
+expiry, so neither overstates how long access lasts. The broker currently
+relays SecretSpec provider-cache reads only.
 
 ## Vault lifecycle
 

@@ -1292,6 +1292,19 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
     })
     .and_then(|()| writeln!(output, "  reason: {reason}"))
     .and_then(|()| {
+        if let Some(distro) = approval.application.declared_wsl_origin.as_deref() {
+            // Caller-declared, not authenticated -- see
+            // `VaultApplicationContext::declared_wsl_origin`. Surfaced here so a
+            // human approving via the CLI sees the same context the Desktop UI
+            // shows: this is a short-lived lease regardless of duration
+            // requested, since a relayed WSL caller has none of the
+            // executable-identity assurance a native one has.
+            writeln!(output, "  relayed from WSL distro: {}", PromptText(distro))
+        } else {
+            Ok(())
+        }
+    })
+    .and_then(|()| {
         if let Some(duration) = approval.application.requested_permission_duration_seconds {
             writeln!(
                 output,
