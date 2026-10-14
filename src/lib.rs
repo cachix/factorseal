@@ -70,9 +70,9 @@ pub use vault::{
 
 #[cfg(feature = "vault-client")]
 pub use vault::{
-    MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, Permission,
-    PermissionChange, PermissionOperation, PermissionPrincipal, PermissionState, PermissionTarget,
-    PermissionWaitStatus, VaultAction, VaultApplicationContext, VaultClient,
+    MAX_HISTORY_PAGE_SIZE, MAX_LIST_PAGE_SIZE, MAX_PERMISSION_WAIT_MS, MAX_WSL_GRANT_SECONDS,
+    Permission, PermissionChange, PermissionOperation, PermissionPrincipal, PermissionState,
+    PermissionTarget, PermissionWaitStatus, VaultAction, VaultApplicationContext, VaultClient,
     VaultEntryImportStatus, VaultEntryMetadata, VaultInteractionReference, VaultMutation,
     VaultRequest, VaultResponse, VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
     WireSecret, WireSecretAddress, read_permission_pages,
@@ -105,9 +105,12 @@ pub use vault::{
 };
 #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 pub use vault::{
-    SECRET_SERVICE_NAMESPACE, SecretServiceAccessContext, SecretServiceAccessRequest,
-    SecretServiceHost, SecretServiceInputRequest, SecretServicePrompter, WifiMigrationEntry,
+    SECRET_SERVICE_NAMESPACE, SecretServiceHost, SecretServicePrompter, WifiMigrationEntry,
     WifiMigrationReport,
+};
+#[cfg(feature = "secret-service-host")]
+pub use vault::{
+    SecretServiceAccessContext, SecretServiceAccessRequest, SecretServiceInputRequest,
 };
 
 #[cfg(all(feature = "vault-client", target_os = "macos"))]

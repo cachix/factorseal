@@ -14,12 +14,18 @@ use crate::vault::{
     DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
 };
 
+// Version 12 adds revision-bound permission pages and logical keyring transfers.
 // Version 16 adds reviewed browser credential saves to the manager-only boundary.
-pub(super) const PROTOCOL_VERSION: u8 = 16;
+// Version 17 adds the caller-declared WSL origin hint on VaultApplicationContext.
+pub(super) const PROTOCOL_VERSION: u8 = 17;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
 pub const MAX_PERMISSION_WAIT_MS: u64 = 5_000;
+/// Maximum lifetime for a grant created from a WSL-relayed request,
+/// regardless of the duration requested or approved. See
+/// [`VaultApplicationContext::declared_wsl_origin`].
+pub const MAX_WSL_GRANT_SECONDS: u64 = 300;
 /// Maximum number of metadata-only entries returned by one list request.
 ///
 /// Eight complete native SecretSpec addresses still fit below the one-MiB
@@ -319,6 +325,16 @@ pub struct VaultApplicationContext {
     /// display context until the user chooses and signs the actual duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_permission_duration_seconds: Option<u64>,
+    /// Caller-declared WSL distro name for a request relayed through the
+    /// interop broker. Never authenticates anything and never affects the
+    /// caller's fingerprint: transport authentication still resolves the
+    /// broker's own SID and executable digest exactly as any other Windows
+    /// client. It is display context for the approval prompt, and it caps
+    /// the lifetime of any grant approved for such a request at
+    /// `MAX_WSL_GRANT_SECONDS`, since it carries no equivalent of the
+    /// executable-identity hint a native caller gets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_wsl_origin: Option<String>,
 }
 
 impl VaultApplicationContext {
@@ -334,6 +350,7 @@ impl VaultApplicationContext {
             base_dir,
             reason,
             requested_permission_duration_seconds: None,
+            declared_wsl_origin: None,
         };
         context.validate()?;
         Ok(context)
@@ -344,6 +361,12 @@ impl VaultApplicationContext {
         duration: Option<u64>,
     ) -> VaultResult<Self> {
         self.requested_permission_duration_seconds = duration;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_declared_wsl_origin(mut self, distro: Option<String>) -> VaultResult<Self> {
+        self.declared_wsl_origin = distro;
         self.validate()?;
         Ok(self)
     }
@@ -389,6 +412,15 @@ impl VaultApplicationContext {
         if self.requested_permission_duration_seconds == Some(0) {
             return Err(VaultError::Protocol(
                 "requested permission duration must be positive".to_owned(),
+            ));
+        }
+        if self
+            .declared_wsl_origin
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > MAX_APPLICATION_COMPONENT_BYTES)
+        {
+            return Err(VaultError::Protocol(
+                "declared WSL origin is empty or too long".to_owned(),
             ));
         }
         Ok(())

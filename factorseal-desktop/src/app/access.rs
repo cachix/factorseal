@@ -3,14 +3,51 @@ use super::*;
 use factorseal::{SecretServiceAccessContext, SecretServiceAccessRequest};
 use std::collections::BTreeMap;
 
+/// How long the popup ignores approval after it appears or its requests
+/// change, so a click or Enter meant for another window cannot approve.
+const ARM_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[derive(Default)]
 struct AccessWindow(Option<(AnyWindowHandle, gpui::Entity<AccessView>)>, bool);
 impl Global for AccessWindow {}
+
+/// Pending permissions the user denied while the vault was sealed. The vault
+/// keeps pending permissions across a seal, so they are denied once it is
+/// unsealed again instead of coming back.
+#[derive(Default)]
+struct DeferredDenials(Vec<String>);
+impl Global for DeferredDenials {}
 
 struct InputEditor {
     value: gpui::Entity<SecretInputState>,
     initialized: bool,
     focused: bool,
+}
+
+/// The popup can take keyboard focus while the user is typing in another app,
+/// even while it stays hidden behind that app. Its fields take no focus and
+/// nothing is approved until the user clicks inside it, and approval waits
+/// [`ARM_DELAY`] after the popup appears or its requests change.
+struct InputGuard {
+    armed: bool,
+    changed_at: std::time::Instant,
+}
+
+impl InputGuard {
+    fn new() -> Self {
+        Self {
+            armed: false,
+            changed_at: std::time::Instant::now(),
+        }
+    }
+
+    fn changed(&mut self) {
+        self.changed_at = std::time::Instant::now();
+    }
+
+    fn allows_approval(&self) -> bool {
+        self.armed && self.changed_at.elapsed() >= ARM_DELAY
+    }
 }
 
 #[derive(Default)]
@@ -35,73 +72,42 @@ struct AccessView {
     password: gpui::Entity<SecretInputState>,
     group: Option<factorseal::UnlockGroup>,
     error: Option<String>,
+    guard: InputGuard,
     _submit: Subscription,
     _secret_submit: Subscription,
+    _activation: Subscription,
 }
 
 pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App) {
     cx.set_global(AccessWindow::default());
+    cx.set_global(DeferredDenials::default());
     cx.spawn(async move |cx| {
         loop {
             smol::Timer::after(std::time::Duration::from_millis(500)).await;
             let state = cx.update(|cx| {
-                let snapshot = &cx.global::<DesktopWindow>().snapshot;
-                match snapshot {
-                    Snapshot::Unsealed { metadata, .. } => Some((
-                        Arc::clone(&cx.global::<RuntimeGlobal>().0),
-                        metadata.clone(),
-                    )),
-                    _ => None,
-                }
+                let metadata = match &cx.global::<DesktopWindow>().snapshot {
+                    Snapshot::Unsealed { metadata, .. } => metadata.clone(),
+                    _ => return None,
+                };
+                Some((
+                    Arc::clone(&cx.global::<RuntimeGlobal>().0),
+                    metadata,
+                    std::mem::take(&mut cx.global_mut::<DeferredDenials>().0),
+                ))
             });
-            let Some((runtime, metadata)) = state else {
+            let Some((runtime, metadata, denials)) = state else {
                 continue;
             };
-            if let Ok(permissions) =
-                smol::unblock(move || runtime.load_permissions(&metadata)).await
+            // Deny before loading, so a denied permission is not reopened.
+            if let Ok(permissions) = smol::unblock(move || {
+                for id in denials {
+                    let _ = runtime.deny_permission(&metadata, id);
+                }
+                runtime.load_permissions(&metadata)
+            })
+            .await
             {
-                cx.update(|cx| {
-                    if !cx.global::<DesktopStatus>().unsealed {
-                        return;
-                    }
-                    if let Snapshot::Unsealed { contents, .. } =
-                        &mut cx.global_mut::<DesktopWindow>().snapshot
-                    {
-                        contents.permissions.clone_from(&permissions);
-                        contents.permissions_loading = false;
-                    }
-                    let holder = Arc::clone(&cx.global::<DesktopWindow>().view);
-                    if let Ok(holder) = holder.lock()
-                        && let Some(view) = holder.as_ref()
-                    {
-                        view.update(cx, |view, cx| {
-                            if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot
-                                && contents.permissions != permissions
-                            {
-                                contents.permissions.clone_from(&permissions);
-                                contents.permissions_loading = false;
-                                cx.notify();
-                            }
-                        });
-                    }
-                    let pending: Vec<_> = permissions
-                        .into_iter()
-                        .filter(|permission| {
-                            matches!(
-                                permission.state,
-                                factorseal::PermissionState::Pending { .. }
-                            )
-                        })
-                        .collect();
-                    if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
-                        view.update(cx, |view, cx| {
-                            view.grants = pending;
-                            cx.notify();
-                        });
-                    } else if !pending.is_empty() {
-                        open(AccessEvent::Permissions(pending), cx);
-                    }
-                });
+                cx.update(|cx| apply_permissions(permissions, cx));
             }
         }
     })
@@ -141,6 +147,49 @@ pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App
     .detach();
 }
 
+/// Show freshly polled permissions in the main window and the popup, opening
+/// the popup when a permission is pending.
+fn apply_permissions(permissions: Vec<factorseal::Permission>, cx: &mut App) {
+    if !cx.global::<DesktopStatus>().unsealed {
+        return;
+    }
+    if let Snapshot::Unsealed { contents, .. } = &mut cx.global_mut::<DesktopWindow>().snapshot {
+        contents.permissions.clone_from(&permissions);
+        contents.permissions_loading = false;
+    }
+    let holder = Arc::clone(&cx.global::<DesktopWindow>().view);
+    if let Ok(holder) = holder.lock()
+        && let Some(view) = holder.as_ref()
+    {
+        view.update(cx, |view, cx| {
+            if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot
+                && contents.permissions != permissions
+            {
+                contents.permissions.clone_from(&permissions);
+                contents.permissions_loading = false;
+                cx.notify();
+            }
+        });
+    }
+    let pending: Vec<_> = permissions
+        .into_iter()
+        .filter(|permission| {
+            matches!(
+                permission.state,
+                factorseal::PermissionState::Pending { .. }
+            )
+        })
+        .collect();
+    if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
+        view.update(cx, |view, cx| {
+            view.set_pending(pending);
+            cx.notify();
+        });
+    } else if !pending.is_empty() {
+        open(AccessEvent::Permissions(pending), cx);
+    }
+}
+
 pub(super) fn is_open(cx: &App) -> bool {
     cx.try_global::<AccessWindow>()
         .is_some_and(|state| state.0.is_some())
@@ -157,9 +206,15 @@ fn close(cx: &mut App) {
                 Arc::clone(&view.runtime),
                 view.snapshot.metadata().cloned(),
                 std::mem::take(&mut view.grants),
+                matches!(view.snapshot, Snapshot::Unsealed { .. }),
             )
         });
-        if let (runtime, Some(metadata), grants) = denial {
+        if let (_, _, grants, false) = &denial {
+            // A sealed vault cannot deny; it keeps the permissions pending.
+            cx.global_mut::<DeferredDenials>()
+                .0
+                .extend(grants.iter().map(|grant| grant.id.clone()));
+        } else if let (runtime, Some(metadata), grants, true) = denial {
             cx.spawn(async move |_| {
                 smol::unblock(move || {
                     for grant in grants {
@@ -170,7 +225,11 @@ fn close(cx: &mut App) {
             })
             .detach();
         }
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        let _ = handle.update(cx, |_, window, _| {
+            // A popup closed while behind would leave its owner flashing.
+            window_activation::attention_settled(window);
+            window.remove_window();
+        });
     }
 }
 
@@ -185,7 +244,18 @@ pub(super) fn update(snapshot: &Snapshot, cx: &mut App) {
         if matches!(view.snapshot, Snapshot::Unsealed { .. })
             && matches!(snapshot, Snapshot::Sealed { .. })
         {
-            return true;
+            // The vault keeps its pending permissions across a seal, so a
+            // popup still reviewing them stays open to unlock and continue.
+            let reviewing = !view.grants.is_empty()
+                || !view.inputs.is_empty()
+                || view
+                    .requests
+                    .iter()
+                    .any(SecretServiceAccessRequest::is_pending);
+            if !reviewing {
+                return true;
+            }
+            view.guard.changed();
         }
         view.snapshot = snapshot.clone();
         view.error = match snapshot {
@@ -233,6 +303,7 @@ fn open(event: AccessEvent, cx: &mut App) {
     if let Some((handle, view)) = cx.global::<AccessWindow>().0.clone() {
         view.update(cx, |view, cx| {
             view.add(event);
+            view.guard.changed();
             cx.notify();
         });
         let layered = cx.global::<AccessWindow>().1;
@@ -243,6 +314,9 @@ fn open(event: AccessEvent, cx: &mut App) {
                 return;
             }
             window_activation::show(window, true);
+            // Activation can be refused (Windows keeps focus with the app the
+            // user is typing in), so also flag the window in the taskbar.
+            window_activation::request_attention(window);
         });
         return;
     }
@@ -262,67 +336,7 @@ fn open(event: AccessEvent, cx: &mut App) {
             false
         });
         let view = cx.new(|cx| {
-            let password =
-                cx.new(|cx| SecretInputState::new(window, cx).placeholder("FactorSeal password"));
-            password.update(cx, |input, cx| input.focus(window, cx));
-            let submit = cx.subscribe_in(
-                &password,
-                window,
-                |view: &mut AccessView, _, event: &InputEvent, window, cx| {
-                    if matches!(
-                        event,
-                        InputEvent::PressEnter {
-                            secondary: false,
-                            ..
-                        }
-                    ) {
-                        view.allow(window, cx);
-                    }
-                },
-            );
-            let secret = cx.new(|cx| SecretInputState::new(window, cx).placeholder("Secret value"));
-            let secret_submit = cx.subscribe_in(
-                &secret,
-                window,
-                |view: &mut AccessView, _, event: &InputEvent, window, cx| {
-                    if matches!(
-                        event,
-                        InputEvent::PressEnter {
-                            secondary: false,
-                            ..
-                        }
-                    ) {
-                        view.allow(window, cx);
-                    }
-                },
-            );
-            let group = snapshot
-                .metadata()
-                .map(|metadata| metadata.preferred_unlock_group().clone());
-            let mut view = AccessView {
-                runtime: Arc::clone(&runtime),
-                snapshot: snapshot.clone(),
-                password,
-                editor: InputEditor {
-                    value: secret,
-                    initialized: false,
-                    focused: false,
-                },
-                inputs: Vec::new(),
-                group,
-                requests: Vec::new(),
-                explicit_unlock: false,
-                unlocks: Vec::new(),
-                grants: Vec::new(),
-                reviewed_grants: Vec::new(),
-                approving: false,
-                reviewing: false,
-                duration: Some(3600),
-                details: RequestDetails::default(),
-                error: None,
-                _submit: submit,
-                _secret_submit: secret_submit,
-            };
+            let mut view = AccessView::new(Arc::clone(&runtime), snapshot.clone(), window, cx);
             view.add(event.take().expect("window builder runs once"));
             view
         });
@@ -339,6 +353,13 @@ fn open(event: AccessEvent, cx: &mut App) {
     }
     match opened {
         Ok(handle) => {
+            if !layered {
+                // A new window opened behind the focused app gets no focus of
+                // its own on Windows; flag it so the request is not missed.
+                let _ = handle.update(cx, |_, window, _| {
+                    window_activation::request_attention(window);
+                });
+            }
             let state = cx.global_mut::<AccessWindow>();
             state.0 = Some((handle.into(), entity.unwrap()));
             state.1 = layered;
@@ -382,6 +403,93 @@ fn deny(cx: &mut App) {
 }
 
 impl AccessView {
+    fn new(
+        runtime: Arc<DesktopRuntime>,
+        snapshot: Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let password = cx.new(|cx| {
+            SecretInputState::new(window, cx)
+                .placeholder("FactorSeal password")
+                .accessibility_id("factorseal.access.password")
+        });
+        let submit = cx.subscribe_in(
+            &password,
+            window,
+            |view: &mut AccessView, _, event: &InputEvent, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    view.allow(window, cx);
+                }
+            },
+        );
+        let secret = cx.new(|cx| {
+            SecretInputState::new(window, cx)
+                .placeholder("Secret value")
+                .accessibility_id("factorseal.access.secret-value")
+        });
+        let secret_submit = cx.subscribe_in(
+            &secret,
+            window,
+            |view: &mut AccessView, _, event: &InputEvent, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    view.allow(window, cx);
+                }
+            },
+        );
+        // Losing the foreground before the user clicked inside would leave the
+        // request behind another app with nothing pointing at it.
+        let activation =
+            cx.observe_window_activation(window, |view: &mut AccessView, window, _| {
+                if window.is_window_active() {
+                    window_activation::attention_settled(window);
+                } else if !view.guard.armed {
+                    window_activation::deactivated_unseen(window);
+                }
+            });
+        let group = snapshot
+            .metadata()
+            .map(|metadata| metadata.preferred_unlock_group().clone());
+        AccessView {
+            runtime,
+            snapshot,
+            password,
+            editor: InputEditor {
+                value: secret,
+                initialized: false,
+                focused: false,
+            },
+            inputs: Vec::new(),
+            group,
+            requests: Vec::new(),
+            explicit_unlock: false,
+            unlocks: Vec::new(),
+            grants: Vec::new(),
+            reviewed_grants: Vec::new(),
+            approving: false,
+            reviewing: false,
+            duration: Some(3600),
+            details: RequestDetails::default(),
+            error: None,
+            guard: InputGuard::new(),
+            _submit: submit,
+            _secret_submit: secret_submit,
+            _activation: activation,
+        }
+    }
+
     fn prune_inputs(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = prune_queue(
             &mut self.inputs,
@@ -469,7 +577,38 @@ impl AccessView {
         cx.notify();
     }
 
+    /// Replace the polled pending permissions, restarting the approval delay
+    /// when the set changes under the user.
+    fn set_pending(&mut self, pending: Vec<factorseal::Permission>) {
+        if self
+            .grants
+            .iter()
+            .map(|grant| &grant.id)
+            .ne(pending.iter().map(|grant| &grant.id))
+        {
+            self.guard.changed();
+        }
+        self.grants = pending;
+    }
+
+    /// Accept keyboard input once the user clicks inside the popup.
+    fn arm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.guard.armed {
+            return;
+        }
+        self.guard.armed = true;
+        // The secret editor takes focus in render once armed.
+        if self.inputs.is_empty() {
+            self.password
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
     fn allow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.guard.allows_approval() {
+            return;
+        }
         if self.approving || matches!(self.snapshot, Snapshot::Unlocking { .. }) {
             return;
         }
@@ -535,6 +674,9 @@ impl AccessView {
                 cx.notify();
                 return;
             }
+            // Unlocking does not approve pending permissions; granting them
+            // takes the password again.
+            self.password.update(cx, SecretInputState::clear);
             self.snapshot = Snapshot::Unlocking { metadata, group };
         } else if !matches!(self.snapshot, Snapshot::Unsealed { .. }) {
             return;
@@ -671,7 +813,8 @@ impl Render for AccessView {
             }
             self.editor.initialized = true;
         }
-        if !self.editor.focused
+        if self.guard.armed
+            && !self.editor.focused
             && !self.inputs.is_empty()
             && matches!(self.snapshot, Snapshot::Unsealed { .. })
         {
@@ -949,6 +1092,31 @@ impl Render for AccessView {
                     card = card.child(detail(label, value.clone(), cx));
                 }
             }
+            if let Some(distro) = &grant.application.declared_wsl_origin {
+                // Caller-declared, not authenticated -- see
+                // `VaultApplicationContext::declared_wsl_origin`. Shown
+                // prominently because it changes what this approval actually
+                // grants: a short-lived lease regardless of the duration
+                // chosen below, since this caller has none of the
+                // executable-identity assurance a native one has. The
+                // expiry row says so, so the duration buttons don't
+                // overstate the grant.
+                card = card
+                    .child(detail("WSL distro", distro.clone(), cx))
+                    .child(detail(
+                        "Access expires",
+                        format!(
+                            "After {} minutes, whichever duration you choose",
+                            factorseal::MAX_WSL_GRANT_SECONDS / 60
+                        ),
+                        cx,
+                    ));
+            }
+            card = card.child(detail(
+                "Requested by",
+                application_name(std::path::Path::new(&grant.principal.application_id)),
+                cx,
+            ));
             technical = technical.child(detail(
                 "Executable",
                 grant.principal.application_id.clone(),
@@ -993,6 +1161,7 @@ impl Render for AccessView {
             }
         }
         v_flex().size_full().border_1().border_color(theme.border)
+            .capture_any_mouse_down(cx.listener(|view, _, window, cx| view.arm(window, cx)))
             .capture_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
@@ -1020,7 +1189,7 @@ impl Render for AccessView {
                         });
                     })))
                     .child(Button::new("allow-access").primary().disabled((self.reviewing && self.grants.is_empty() && self.inputs.is_empty() && unsealed) || busy || !matches!(self.snapshot, Snapshot::Sealed { .. } | Snapshot::Unsealed { .. }))
-                        .label(if self.approving { "Authorizing…" } else if busy { "Unlocking…" } else if !self.inputs.is_empty() && unsealed { "Save secret" } else if !self.grants.is_empty() { "Grant access" } else if unsealed && self.reviewing { "Checking access…" } else if unsealed { "Continue" } else { "Unlock to continue" })
+                        .label(if self.approving { "Authorizing…" } else if busy { "Unlocking…" } else if !self.inputs.is_empty() && unsealed { "Save secret" } else if !self.grants.is_empty() && unsealed { "Grant access" } else if unsealed && self.reviewing { "Checking access…" } else if unsealed { "Continue" } else { "Unlock to continue" })
                         .on_click(cx.listener(|view, _, window, cx| view.allow(window, cx))))))
     }
 }
@@ -1028,6 +1197,89 @@ impl Render for AccessView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn input_guard_needs_a_click_and_a_settled_popup() {
+        let settled = std::time::Instant::now()
+            .checked_sub(ARM_DELAY * 2)
+            .expect("monotonic clock is past the delay");
+        let mut guard = InputGuard::new();
+        assert!(!guard.allows_approval(), "opening does not arm");
+        guard.changed_at = settled;
+        assert!(
+            !guard.allows_approval(),
+            "a settled popup still needs a click"
+        );
+        guard.armed = true;
+        assert!(guard.allows_approval());
+        guard.changed();
+        assert!(!guard.allows_approval(), "new requests restart the delay");
+    }
+
+    /// Opens the popup over a vault-less snapshot with a password unlock
+    /// group, which shows the password field without a real vault.
+    fn open_popup(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<AccessView>, &mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::appearance::initialize_for_test(cx);
+        });
+        let (runtime, _) = DesktopRuntime::new(crate::runtime::RuntimeConfig {
+            root: std::env::temp_dir().join("factorseal-access-popup-test"),
+            socket: None,
+            lease: crate::runtime::LeasePolicy {
+                idle_timeout: std::time::Duration::from_mins(1),
+                maximum_lifetime: std::time::Duration::from_mins(1),
+            },
+            secret_service: false,
+        });
+        let mut popup = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view =
+                    AccessView::new(runtime, Snapshot::Uninitialized { error: None }, window, cx);
+                view.group = Some(
+                    factorseal::UnlockGroup::new([factorseal::UnlockFactorKind::Password])
+                        .expect("a password-only group is valid"),
+                );
+                view
+            });
+            popup = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        (popup.expect("the window builder ran"), cx)
+    }
+
+    fn password(view: &gpui::Entity<AccessView>, cx: &mut gpui::VisualTestContext) -> String {
+        view.read_with(cx, |view, cx| view.password.read(cx).value().to_string())
+    }
+
+    #[gpui::test]
+    fn typing_meant_for_another_app_does_not_reach_the_password(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = open_popup(cx);
+        cx.run_until_parked();
+        cx.simulate_input("typed in a terminal");
+        assert_eq!(
+            password(&view, cx),
+            "",
+            "the field takes no focus on its own"
+        );
+        assert!(view.read_with(cx, |view, _| !view.guard.armed));
+    }
+
+    #[gpui::test]
+    fn a_click_arms_the_popup_and_focuses_the_password(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = open_popup(cx);
+        cx.run_until_parked();
+        cx.simulate_click(
+            gpui::point(gpui::px(20.), gpui::px(20.)),
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_input("vault password");
+        assert!(view.read_with(cx, |view, _| view.guard.armed));
+        assert_eq!(password(&view, cx), "vault password");
+    }
+
     #[test]
     fn unlock_dialog_describes_collection_and_item_requests() {
         assert_eq!(access_title(false, false, true), "Unlock system keyring");
