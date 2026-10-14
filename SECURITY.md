@@ -237,7 +237,14 @@ outside the separately built CLI key owner's dependency graph.
   disposable, project-partitioned `secretspec-provider-cache` document kind
   through the native `VaultClient`. The
   endpoint executable—not the SecretSpec CLI or embedding application—is the
-  authenticated vault principal. Its IPC dependency is still pinned to an
+  authenticated vault principal. A grant therefore binds the provider
+  executable, the project and folder SecretSpec declares, and the secret; any
+  program that runs `secretspec` in that folder while the grant lasts is
+  covered by it. The provider reports the executables that launched it
+  (`secretspec` and the program that ran it) to the approval prompt, which
+  shows them as not verified: they are read from the process table, where a
+  process ID can be reused and a Windows process can be given any parent, so
+  they never scope or authenticate a grant. Its IPC dependency is still pinned to an
   unpublished Git revision. For the default vault root, `init` publishes the
   user's provider claim and the agent refreshes it at startup; installed
   end-to-end conformance remains required on every target.

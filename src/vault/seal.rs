@@ -229,7 +229,27 @@ impl UnsealedVault {
         challenge: &[u8; 32],
         duration_seconds: Option<u64>,
     ) -> VaultResult<Vec<u8>> {
+        self.sign_permission_approval(id, challenge, duration_seconds, false)
+    }
+
+    /// Sign one permission challenge, optionally as a single-use approval:
+    /// a write permission that the vault spends on the first write it
+    /// authorizes (see `VaultAction::ApprovePermission`). A single-use
+    /// approval takes no duration.
+    #[cfg(feature = "vault-store")]
+    pub fn sign_permission_approval(
+        &self,
+        id: &str,
+        challenge: &[u8; 32],
+        duration_seconds: Option<u64>,
+        single_use: bool,
+    ) -> VaultResult<Vec<u8>> {
         use super::signature::SigningProvider as _;
+        if single_use && duration_seconds.is_some() {
+            return Err(VaultError::Protocol(
+                "a single-use approval takes no duration".to_owned(),
+            ));
+        }
         let signer = self
             .secrets
             .signer(self.public.installation_id(), self.public.device_vault_id())?;
@@ -237,6 +257,7 @@ impl UnsealedVault {
             id,
             challenge,
             duration_seconds,
+            single_use,
         ))
     }
 

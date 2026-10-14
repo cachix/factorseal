@@ -68,9 +68,9 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
                 drop(password);
                 requests
                     .iter()
-                    .map(|(id, challenge, duration)| {
+                    .map(|(id, challenge, duration, single_use)| {
                         unsealed
-                            .sign_permission_challenge(id, challenge, *duration)
+                            .sign_permission_approval(id, challenge, *duration, *single_use)
                             .map_err(Into::into)
                     })
                     .collect()
