@@ -2,6 +2,7 @@ use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     git_revision();
+    app_icon();
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
@@ -99,4 +100,20 @@ fn git_revision() {
         .filter(|revision| revision.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .unwrap_or_default();
     println!("cargo:rustc-env=FACTORSEAL_GIT_REVISION={revision}");
+}
+
+/// Gives the executable the application icon on Windows, which Explorer, the
+/// taskbar and Alt+Tab show, and GPUI loads for its windows (icon 1).
+fn app_icon() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    println!("cargo:rerun-if-changed=../assets/logo/factorseal-app-icon.ico");
+    embed_resource::compile_for(
+        "../assets/logo/factorseal-app-icon.rc",
+        ["factorseal-desktop"],
+        embed_resource::ParamsIncludeDirs(["../assets/logo"]),
+    )
+    .manifest_required()
+    .expect("embedding the application icon");
 }
