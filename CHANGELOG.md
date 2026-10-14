@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Focus the unlock password field when opening or selecting a sealed Desktop
+  window without changing typed input. Also focus it when choosing a password
+  unlock group.
+
 - Patch quinn-proto to 0.11.18 for three denial-of-service advisories. Review the
   five exact-version maintenance exceptions against the current advisory database
   and renew them until 2026-11-12 while their parent migrations remain tracked.

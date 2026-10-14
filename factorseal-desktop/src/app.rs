@@ -984,6 +984,7 @@ impl DesktopView {
                 }
             },
         );
+        let window_activation = Self::observe_unlock_focus(window, cx);
         Self {
             settings_open: false,
             issue_report_busy: false,
@@ -1031,7 +1032,7 @@ impl DesktopView {
             system_integrations_expanded: true,
             #[cfg(target_os = "linux")]
             wifi_migration: wifi::State::default(),
-            _subscriptions: vec![password_submit, vault_search_change],
+            _subscriptions: vec![password_submit, vault_search_change, window_activation],
         }
     }
 
@@ -1651,12 +1652,36 @@ impl DesktopView {
     fn choose_group(
         &mut self,
         group: factorseal::UnlockGroup,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.clear_secret_inputs(cx);
         self.selected_group = Some(group);
+        self.focus_unlock_password(window, cx);
         cx.notify();
+    }
+
+    fn observe_unlock_focus(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.defer_in(window, Self::focus_unlock_password);
+        cx.observe_window_activation(window, Self::focus_unlock_password)
+    }
+
+    fn focus_unlock_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.is_window_active() || self.settings_open || self.issue_description.is_some() {
+            return;
+        }
+        let Snapshot::Sealed { metadata, .. } = &self.snapshot else {
+            return;
+        };
+        if self
+            .selected_group
+            .as_ref()
+            .unwrap_or(metadata.preferred_unlock_group())
+            .requires(factorseal::UnlockFactorKind::Password)
+        {
+            self.password
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
     }
 
     fn unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
