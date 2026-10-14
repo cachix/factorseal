@@ -174,18 +174,23 @@ pub(crate) fn permission_payload(
     id: &str,
     challenge: &[u8; 32],
     duration_seconds: Option<u64>,
+    single_use: bool,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(PERMISSION_SIGNATURE_DOMAIN.len() + 8 + id.len() + 32 + 9);
     payload.extend_from_slice(PERMISSION_SIGNATURE_DOMAIN);
     payload.extend_from_slice(&(id.len() as u64).to_be_bytes());
     payload.extend_from_slice(id.as_bytes());
     payload.extend_from_slice(challenge);
-    match duration_seconds {
-        Some(duration) => {
+    // Tags 0 and 1 predate single-use approvals, so their payloads are
+    // unchanged. A single-use approval carries no duration: the vault sets
+    // how long it waits for the one write.
+    match (single_use, duration_seconds) {
+        (true, _) => payload.push(2),
+        (false, Some(duration)) => {
             payload.push(1);
             payload.extend_from_slice(&duration.to_be_bytes());
         }
-        None => payload.push(0),
+        (false, None) => payload.push(0),
     }
     payload
 }
