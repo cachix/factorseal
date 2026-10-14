@@ -2077,6 +2077,129 @@ fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
 }
 
 #[test]
+fn approval_wait_wakes_when_a_grant_expires_without_another_request() {
+    let (directory, service) = service(100, UnsealLeasePolicy::default());
+    let manager = permission_manager();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    let interaction = service
+        .handle(&caller(), cache_request("demo"), 100)
+        .result
+        .unwrap_err()
+        .interaction
+        .unwrap();
+    let VaultResponseBody::Permissions { permissions, .. } = service
+        .handle(
+            &manager,
+            VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+            100,
+        )
+        .result
+        .unwrap()
+    else {
+        panic!("expected pending permission")
+    };
+    let PermissionState::Pending { challenge, .. } = permissions[0].state else {
+        panic!("expected pending permission")
+    };
+    let signature = Vault::unseal_for_test(&directory.path().join("factorseal"))
+        .unwrap()
+        .sign_permission_challenge(&interaction.id, &challenge, Some(60))
+        .unwrap();
+    service
+        .handle(
+            &manager,
+            VaultRequest::new(VaultAction::ApprovePermission {
+                id: interaction.id.clone(),
+                signature,
+                duration_seconds: Some(60),
+            })
+            .unwrap(),
+            100,
+        )
+        .result
+        .unwrap();
+    let (before, permissions) = crate::read_permission_pages(
+        |action| {
+            service
+                .handle(&manager, VaultRequest::new(action)?, 100)
+                .result
+                .map_err(|error| VaultError::Protocol(error.message))
+        },
+        None,
+    )
+    .unwrap();
+    let PermissionState::Granted {
+        expires_at: Some(expiry),
+        ..
+    } = permissions[0].state
+    else {
+        panic!("expected expiring grant")
+    };
+    let started = Instant::now();
+    let response = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::WaitPermissions {
+            after_revision: before,
+            timeout_ms: super::super::MAX_PERMISSION_WAIT_MS,
+        })
+        .unwrap(),
+        expiry - 1,
+    );
+    let VaultResponseBody::Permissions {
+        revision,
+        permissions,
+        ..
+    } = response.result.unwrap()
+    else {
+        panic!("unexpected permission response")
+    };
+    assert_ne!(revision, before);
+    assert!(
+        permissions
+            .iter()
+            .all(|permission| permission.id != interaction.id)
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn approval_wait_wakes_on_seal_without_waiting_for_its_timeout() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let service = std::sync::Arc::new(service);
+    let manager = caller();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    let (revision, _) = crate::read_permission_pages(
+        |action| {
+            service
+                .handle(&manager, VaultRequest::new(action)?, 100)
+                .result
+                .map_err(|error| VaultError::Protocol(error.message))
+        },
+        None,
+    )
+    .unwrap();
+    let started = Instant::now();
+    let waiter_service = std::sync::Arc::clone(&service);
+    let waiter = std::thread::spawn(move || {
+        waiter_service.handle(
+            &manager,
+            VaultRequest::new(VaultAction::WaitPermissions {
+                after_revision: revision,
+                timeout_ms: super::super::MAX_PERMISSION_WAIT_MS,
+            })
+            .unwrap(),
+            100,
+        )
+    });
+    service.seal().unwrap();
+    assert_eq!(
+        waiter.join().unwrap().result.unwrap_err().code,
+        VaultResponseErrorCode::Sealed
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
 fn direct_service_requests_obey_the_wire_size_bound() {
     let (_directory, service) = service(100, UnsealLeasePolicy::default());
     let request = VaultRequest::new(VaultAction::Put {

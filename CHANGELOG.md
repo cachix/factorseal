@@ -115,6 +115,10 @@ All notable changes to FactorSeal will be documented in this file.
   Keep vulnerability findings fatal. Preserve the Rust 1.91 atomic API while
   allowing its compatibility alias's deprecation on newer compilers.
 
+- Wait for permission revisions in Desktop instead of reloading the encrypted
+  permission inventory twice per second. Wake for permission expiry and discard
+  results superseded by a seal, unlock, or refresh.
+
 - Keep one current encrypted snapshot per document in Turso and authenticate the
   complete current inventory with one device-signed manifest. Replace snapshots,
   document heads, and the manifest atomically; unlock verifies only current state.
@@ -122,6 +126,7 @@ All notable changes to FactorSeal will be documented in this file.
   Repack once during migration when at least 64 MiB and half the file are unused,
   with authenticated retry state if interrupted. Preserve encrypted change and
   personal replication histories. Unchanged pairing commands no longer write.
+
 - Compress debug sections in Linux Nix release binaries with zlib. Retain source
   locations in diagnostic backtraces while reducing the bytes read to authenticate
   Desktop, the CLI, and helper executables.
