@@ -28,12 +28,12 @@ and item identities, and timestamps. No vault or signing credentials are used.
 The runner also generates a native FactorSeal login with the Rust exporter,
 passes its reviewed metadata projection through Apple's SDK, and checks the
 result with both Rust readers. Additional tests cover unsupported versions,
-metadata loss, locked imports, cancellation, and late SDK replies after sealing. For only the Swift tests, run `swift test --package-path platform/apple`.
+metadata loss, locked imports, cancellation, and late SDK replies after sealing. For only the Swift tests, run `swift test --package-path platform/macos/credential-exchange`.
 
 The **Apple credential exchange** GitHub Actions workflow runs this command on
 `macos-26` for relevant pull requests and pushes to `main`; it also supports
 manual dispatch. Logs, toolchain information, and the synthetic JSON output are
-saved under `platform/apple/.build/credential-exchange-results/run.*` and
+saved under `platform/macos/credential-exchange/.build/credential-exchange-results/run.*` and
 uploaded as `apple-credential-exchange-results` for 14 days in CI. A successful
 job proves SDK and schema compatibility; it does not exercise Apple's picker,
 code signing, Secure Enclave policy, or a live password manager.
@@ -54,21 +54,18 @@ requires macOS 26. Ordinary CLI packages retain their macOS 11 deployment target
 
 The experimental packaging CI job verifies nested signatures, capabilities,
 version and bundle identifiers, native bridge symbols, and loading the real Rust
-executable with its Swift library. Its ad-hoc signature is for packaging checks;
+executable with its Swift library. Without a team, the package is for build tests;
 it cannot establish acceptance of live system transfer.
 
-For a Team-signed experimental package, supply:
-
-- `FACTORSEAL_MACOS_SIGNING_IDENTITY`: the selected signing identity.
-- `FACTORSEAL_MACOS_PROVISIONING_PROFILE`: the containing app profile for `dev.factorseal`.
-- `FACTORSEAL_MACOS_EXTENSION_PROVISIONING_PROFILE`: the extension profile for `dev.factorseal.credentials`.
-
-Both profiles must authorize the credential-provider entitlement and the selected
-certificate, belong to the same team, and use the same application identifier
-prefix. The extension has its own application identity and sandbox entitlement;
-it receives no vault Keychain access group. The containing app and its CLI worker
-retain the app's protected Keychain access. Profiles are validated before signing
-nested bundles, followed by the outer app.
+For a Team-signed experimental package, build the `Factorseal Credential
+Exchange` scheme in Xcode with your team selected, or run
+`FACTORSEAL_MACOS_DEVELOPMENT_TEAM=TEAMID FACTORSEAL_APPLE_EXCHANGE=1
+packaging/build-unix.sh macos`. Xcode provisions the containing app
+(`dev.factorseal`) and the extension (`dev.factorseal.credentials`) from the
+entitlements files in `packaging/macos`. The extension has its own application
+identity and sandbox entitlement; it receives no vault Keychain access group.
+The containing app and its CLI worker retain the app's protected Keychain
+access.
 
 ## Transfer behavior
 
@@ -93,7 +90,7 @@ returns a failure instead of pretending passwords or passkeys are supported.
 There is no new credential file, URL scheme, shared vault directory, or secret
 command-line argument in this bridge.
 
-The [live Apple Passwords acceptance procedure](../../acceptance/apple-credential-exchange.md)
+The [live Apple Passwords acceptance procedure](../../../acceptance/apple-credential-exchange.md)
 is still required on a properly provisioned build before enabling this in ordinary
 packages. CI does not prove picker discovery, live transfer, or successful website
 login. It does not provide passkey authentication or attachment transport.

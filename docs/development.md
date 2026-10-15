@@ -25,9 +25,13 @@ $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo fmt --all -- --check
 ```
 
+The macOS app bundle comes from `packaging/macos/Factorseal.xcodeproj`. Xcode
+runs `cargo build` through `packaging/macos/cargo-build.sh` and then assembles
+and signs the bundle. See [packaging](../packaging/README.md#macos-builds).
+
 For Apple credential-exchange SDK and Rust interoperability checks on macOS 26+
 with Xcode 26+, run `bash scripts/test-apple-exchange.sh`. See the
-[Apple test setup](../platform/apple/README.md) for CI artifacts and the separate
+[Apple test setup](../platform/macos/credential-exchange/README.md) for CI artifacts and the separate
 signed-app acceptance procedure.
 
 The feature split is intentional:

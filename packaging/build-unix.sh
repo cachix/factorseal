@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -eu
 
 platform=${1:-}
@@ -18,33 +18,19 @@ if [ "$host" != "$platform" ]; then
     exit 2
 fi
 
-signing_identity=
-provisioning_profile=
 exchange=${FACTORSEAL_APPLE_EXCHANGE:-0}
 case $exchange in 0|1) ;; *) echo "FACTORSEAL_APPLE_EXCHANGE must be 0 or 1" >&2; exit 2 ;; esac
 [ "$exchange" = 0 ] || [ "$platform" = macos ] || { echo "Apple exchange requires macOS" >&2; exit 2; }
 build_profile=${FACTORSEAL_BUILD_PROFILE:-release}
-case $build_profile in release) profile_dir=release ;; dev) profile_dir=debug ;; *) echo "FACTORSEAL_BUILD_PROFILE must be release or dev" >&2; exit 2 ;; esac
-if [ "$platform" = macos ]; then
-    signing_identity=${FACTORSEAL_MACOS_SIGNING_IDENTITY:-}
-    provisioning_profile=${FACTORSEAL_MACOS_PROVISIONING_PROFILE:-}
-    if [ -n "$signing_identity" ] && [ -z "$provisioning_profile" ]; then
-        echo "FACTORSEAL_MACOS_PROVISIONING_PROFILE is required when FACTORSEAL_MACOS_SIGNING_IDENTITY is set" >&2
-        exit 2
-    fi
-    if [ -n "$provisioning_profile" ] && [ -z "$signing_identity" ]; then
-        echo "FACTORSEAL_MACOS_SIGNING_IDENTITY is required when FACTORSEAL_MACOS_PROVISIONING_PROFILE is set" >&2
-        exit 2
-    fi
-    if [ -n "$provisioning_profile" ]; then
-        [ -f "$provisioning_profile" ] || {
-            echo "macOS provisioning profile does not exist: $provisioning_profile" >&2
-            exit 2
-        }
-    else
-        signing_identity=-
-    fi
-fi
+case $build_profile in
+    release) profile_dir=release; configuration=Release ;;
+    dev) profile_dir=debug; configuration=Debug ;;
+    *) echo "FACTORSEAL_BUILD_PROFILE must be release or dev" >&2; exit 2 ;;
+esac
+# Xcode signs macOS builds. A development team enables automatic provisioning;
+# without one, the package is only for build tests.
+development_team=${FACTORSEAL_MACOS_DEVELOPMENT_TEAM:-}
+FACTORSEAL_BUILD_NUMBER=${FACTORSEAL_BUILD_NUMBER:-1}
 
 # Where README.md tells a Linux user to install the Factorseal binary. The systemd
 # unit's ExecStart is generated from this, so the two cannot drift apart.
@@ -55,36 +41,12 @@ archive="factorseal-${version}-${platform}-$(uname -m)"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 
-if [ "$platform" = macos ]; then
-    # The SDK controls available declarations; the deployment target separately
-    # controls the oldest runnable macOS. Build cleanly so stale metadata cannot
-    # survive a target change.
-    macos_deployment_target=11.0
-    if [ "$exchange" = 1 ]; then
-        macos_deployment_target=26.0
-        FACTORSEAL_APPLE_BRIDGE_DIR="$stage/apple-bridge"
-        export FACTORSEAL_APPLE_BRIDGE_DIR
-    fi
-    MACOSX_DEPLOYMENT_TARGET=$macos_deployment_target
-    CARGO_TARGET_DIR="$stage/cargo-target"
-    export MACOSX_DEPLOYMENT_TARGET CARGO_TARGET_DIR
-fi
-
-cargo build --locked --profile "$build_profile" --no-default-features \
-    --features vault,cli,hardware,personal-sync-network,browser \
-    --bin factorseal --bin factorseal-parser --bin factorseal-network --bin factorseal-browser
-if [ "$platform" = macos ]; then
-    if [ "$exchange" = 1 ]; then
-        cargo build --locked --profile "$build_profile" -p factorseal-desktop --features apple-credential-exchange
-    else
-        cargo build --locked --profile "$build_profile" -p factorseal-desktop
-    fi
-fi
-target_dir=$(cargo metadata --locked --no-deps --format-version 1 |
-    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
-if [ -z "$target_dir" ]; then
-    echo "could not determine Cargo target directory" >&2
-    exit 1
+if [ "$platform" = linux ]; then
+    cargo build --locked --profile "$build_profile" \
+        --bin factorseal --bin factorseal-parser --bin factorseal-network --bin factorseal-browser
+    target_dir=$(cargo metadata --locked --no-deps --format-version 1 |
+        sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+    [ -n "$target_dir" ] || { echo "could not determine Cargo target directory" >&2; exit 1; }
 fi
 
 mkdir -p "$output_dir" "$stage/$archive"
@@ -108,37 +70,29 @@ if [ "$platform" = linux ]; then
         "$stage/$archive/bin/factorseal" \
         "$stage/$archive/bin/factorseal-start"
 else
-    app="$stage/$archive/Factorseal.app/Contents"
-    mkdir -p "$app/MacOS" "$app/Resources" "$stage/$archive/Library/LaunchAgents"
-    cp "$target_dir/$profile_dir/factorseal" "$app/MacOS/"
-    cp "$target_dir/$profile_dir/factorseal-desktop" "$app/MacOS/"
-    cp "$target_dir/$profile_dir/factorseal-parser" "$target_dir/$profile_dir/factorseal-network" "$target_dir/$profile_dir/factorseal-browser" "$app/MacOS/"
-    cp packaging/macos/factorseal-askpass "$app/Resources/"
-    sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Info.plist"
-    cp packaging/macos/dev.factorseal.plist "$stage/$archive/Library/LaunchAgents/"
-    chmod 0755 "$app/MacOS/factorseal" "$app/Resources/factorseal-askpass"
+    app="$stage/$archive/Factorseal.app"
+    scheme=Factorseal
     if [ "$exchange" = 1 ]; then
-        mkdir -p "$app/Frameworks"
-        cp "$FACTORSEAL_APPLE_BRIDGE_DIR/libFactorSealAppleBridge.dylib" "$app/Frameworks/"
-        /usr/libexec/PlistBuddy -c 'Add :LSMinimumSystemVersion string 26.0' "$app/Info.plist"
-        /usr/libexec/PlistBuddy -c 'Add :FactorSealExperimentalCredentialExchange bool true' "$app/Info.plist"
-        /usr/libexec/PlistBuddy -c 'Add :NSUserActivityTypes array' "$app/Info.plist"
-        activity_type=$(xcrun swift -e 'import AuthenticationServices; print(ASCredentialExchangeActivity)')
-        /usr/libexec/PlistBuddy -c "Add :NSUserActivityTypes:0 string $activity_type" "$app/Info.plist"
-        sh packaging/macos/build-credential-extension.sh "${app%/Contents}"
+        scheme='Factorseal Credential Exchange'
+        configuration="${configuration}CredentialExchange"
     fi
-
-    sh packaging/macos/prepare-app.sh \
-        "${app%/Contents}" \
-        "$macos_deployment_target"
-    if [ -n "$provisioning_profile" ]; then
-        sh packaging/macos/sign-app.sh \
-            "${app%/Contents}" \
-            "$signing_identity" \
-            "$provisioning_profile" \
-            "${FACTORSEAL_MACOS_EXTENSION_PROVISIONING_PROFILE:-}"
+    set -- /usr/bin/xcodebuild -project packaging/macos/Factorseal.xcodeproj -scheme "$scheme" \
+        -configuration "$configuration" -derivedDataPath "$stage/DerivedData" \
+        MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$FACTORSEAL_BUILD_NUMBER"
+    if [ -n "$development_team" ]; then
+        set -- "$@" DEVELOPMENT_TEAM="$development_team" -allowProvisioningUpdates
     else
-        sh packaging/macos/sign-app.sh "${app%/Contents}" -
+        # Build tests omit team entitlements and retain the runtime policy.
+        set -- "$@" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= \
+            CODE_SIGN_ENTITLEMENTS="$PWD/packaging/macos/FactorsealBuildTest.entitlements"
+    fi
+    "$@" build
+    /usr/bin/ditto "$stage/DerivedData/Build/Products/$configuration/Factorseal.app" "$app"
+    mkdir -p "$stage/$archive/Library/LaunchAgents"
+    cp packaging/macos/dev.factorseal.plist "$stage/$archive/Library/LaunchAgents/"
+    if [ -z "$development_team" ]; then
+        echo "Created $app for build tests only."
+        echo "This app cannot use Factorseal's protected macOS Keychain storage or pass physical acceptance."
     fi
 fi
 

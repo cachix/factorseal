@@ -114,7 +114,7 @@ section order, folders, and archive flags; opaque credentials keep their source
 structure. Empty accounts with metadata are rejected because the current vault
 has no standalone account record in which to retain them.
 
-The [Apple adapter](../platform/apple/README.md) contains a macOS 26 in-memory
+The [Apple adapter](../platform/macos/credential-exchange/README.md) contains a macOS 26 in-memory
 transport and SDK compatibility tests. It is not integrated into the desktop
 application or signed package. Apple Passwords acceptance and provider-extension
 signing remain prerequisites for enabling system transfer.

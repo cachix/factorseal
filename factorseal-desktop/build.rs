@@ -1,27 +1,31 @@
 use std::{env, path::PathBuf, process::Command};
 
-fn main() {
+fn main() -> std::io::Result<()> {
     git_revision();
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+        println!("cargo:rerun-if-env-changed=FACTORSEAL_BUILD_NUMBER");
+        let build_number = env::var("FACTORSEAL_BUILD_NUMBER").unwrap_or_else(|_| "1".into());
+        println!("cargo:rustc-env=FACTORSEAL_BUILD_NUMBER={build_number}");
     }
     println!("cargo:rerun-if-env-changed=FACTORSEAL_APPLE_BRIDGE_DIR");
-    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
-    println!("cargo:rerun-if-changed=../platform/apple/Package.swift");
-    println!("cargo:rerun-if-changed=../platform/apple/Sources");
+    println!("cargo:rerun-if-env-changed=SDKROOT");
+    println!("cargo:rerun-if-changed=../platform/macos/credential-exchange/Package.swift");
+    println!("cargo:rerun-if-changed=../platform/macos/credential-exchange/Sources");
     if env::var_os("CARGO_FEATURE_APPLE_CREDENTIAL_EXCHANGE").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
     {
-        return;
+        return Ok(());
     }
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
     let scratch = out.join("apple");
-    let status = Command::new("xcrun")
+    let status = Command::new("swift")
         .args([
-            "swift",
             "build",
+            // Allow SwiftPM to build inside the Nix sandbox.
+            "--disable-sandbox",
             "--package-path",
-            "../platform/apple",
+            "../platform/macos/credential-exchange",
             "--scratch-path",
         ])
         .arg(&scratch)
@@ -33,37 +37,20 @@ fn main() {
             "-Xswiftc",
             "-warnings-as-errors",
         ])
-        .status()
-        .expect("Apple credential exchange requires full Xcode 26+");
-    assert!(
-        status.success(),
-        "building the Apple credential exchange bridge failed"
-    );
-    let output = Command::new("xcrun")
-        .args([
-            "swift",
-            "build",
-            "--package-path",
-            "../platform/apple",
-            "--scratch-path",
-        ])
-        .arg(&scratch)
-        .args(["-c", "release", "--show-bin-path"])
-        .output()
-        .expect("locate Swift build output");
-    assert!(output.status.success(), "locating the Swift bridge failed");
-    let bin = String::from_utf8(output.stdout).expect("Swift build path is UTF-8");
-    let bin = bin.trim();
+        .status()?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    let bin = scratch.join("release");
     if let Some(destination) = env::var_os("FACTORSEAL_APPLE_BRIDGE_DIR") {
         let destination = PathBuf::from(destination);
-        std::fs::create_dir_all(&destination).expect("create bridge staging directory");
+        std::fs::create_dir_all(&destination)?;
         std::fs::copy(
-            PathBuf::from(bin).join("libFactorSealAppleBridge.dylib"),
+            bin.join("libFactorSealAppleBridge.dylib"),
             destination.join("libFactorSealAppleBridge.dylib"),
-        )
-        .expect("stage Apple bridge");
+        )?;
     }
-    println!("cargo:rustc-link-search=native={bin}");
+    println!("cargo:rustc-link-search=native={}", bin.display());
     println!("cargo:rustc-link-lib=dylib=FactorSealAppleBridge");
     println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
     // Cargo tests run outside an app bundle. Release packages use only the
@@ -71,8 +58,9 @@ fn main() {
     if env::var("PROFILE").as_deref() == Ok("debug")
         && env::var_os("FACTORSEAL_APPLE_BRIDGE_DIR").is_none()
     {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{bin}");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", bin.display());
     }
+    Ok(())
 }
 
 fn git_output(args: &[&str]) -> Option<String> {

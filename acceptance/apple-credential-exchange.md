@@ -1,8 +1,8 @@
 # Apple Passwords credential exchange acceptance
 
 **Current status: experimental extension and desktop integration; live acceptance NOT RUN.**
-Build with `FACTORSEAL_APPLE_EXCHANGE=1` and both app/extension provisioning
-profiles as described in [the Apple adapter guide](../platform/apple/README.md).
+Build the `Factorseal Credential Exchange` scheme with a development team as
+described in [the Apple adapter guide](../platform/macos/credential-exchange/README.md).
 The SDK and package CI checks do not exercise the live system picker.
 Do not record a file transfer or SDK test as a passing system-transfer result.
 
