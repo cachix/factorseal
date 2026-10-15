@@ -454,7 +454,7 @@ mod tests {
 
         let mut sink = Vec::new();
         assert!(write_frame(&mut sink, b"frame", budget).is_err());
-        assert!(sink.is_empty());
+        assert_eq!(sink, [] as [u8; 0]);
     }
 
     /// The Windows arm above must not have turned a closed reader into a

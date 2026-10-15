@@ -204,7 +204,10 @@ mod tests {
     fn every_creation_template_round_trips() {
         for kind in K::ALL {
             let item = new_item_template(kind);
-            assert!(!item.sections.is_empty());
+            assert_ne!(
+                item.sections,
+                [] as [factorseal::personal::PersonalSection; 0]
+            );
             assert_eq!(
                 item,
                 PersonalSecret::decode_current(&item.encode().unwrap()).unwrap()
