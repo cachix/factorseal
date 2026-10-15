@@ -62,6 +62,10 @@ impl LinuxVaultOptions {
             install_secret_service: true,
         }
     }
+
+    pub fn validate(&self) -> VaultResult<()> {
+        validate_socket_options("Linux", &self.socket_path, self.poll_interval)
+    }
 }
 
 /// Serve the shared vault protocol through a same-user Unix socket.
@@ -105,7 +109,7 @@ pub fn serve_linux_vault_with_ready(
     lifecycle_monitor: Option<&LinuxVaultLifecycle>,
     ready: impl FnOnce() -> VaultResult<()>,
 ) -> VaultResult<()> {
-    validate_socket_options("Linux", &options.socket_path, options.poll_interval)?;
+    options.validate()?;
     if options.install_lifecycle_monitor {
         service.enable_emergency_exit();
     }
@@ -191,7 +195,7 @@ impl LinuxVaultLifecycle {
                 {
                     Ok(runtime) => runtime,
                     Err(error) => {
-                        let _ = ready_sender.send(Err(error.to_string()));
+                        let _ = ready_sender.send(Err(VaultError::Protocol(error.to_string())));
                         return;
                     }
                 };
@@ -205,7 +209,7 @@ impl LinuxVaultLifecycle {
                                 monitor
                             }
                             Err(error) => {
-                                let _ = ready_sender.send(Err(error.to_string()));
+                                let _ = ready_sender.send(Err(error));
                                 return;
                             }
                         };
@@ -222,12 +226,9 @@ impl LinuxVaultLifecycle {
             .map_err(|error| {
                 VaultError::Protocol(format!("could not start Linux lifecycle monitor: {error}"))
             })?;
-        ready_receiver
-            .recv()
-            .map_err(|_| {
-                VaultError::Protocol("Linux lifecycle monitor stopped during startup".to_owned())
-            })?
-            .map_err(VaultError::Protocol)?;
+        ready_receiver.recv().map_err(|_| {
+            VaultError::Protocol("Linux lifecycle monitor stopped during startup".to_owned())
+        })??;
         Ok(Self {
             signal,
             stopping,

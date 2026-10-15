@@ -94,7 +94,10 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "Graphical host for the FactorSeal hardware-backed vault";
     homepage = "https://github.com/domenkozar/factorseal";
-    license = lib.licenses.asl20;
+    license = with lib.licenses; [
+      asl20
+      ofl
+    ];
     mainProgram = "factorseal-desktop";
     platforms = lib.platforms.linux;
   };

@@ -1,10 +1,16 @@
 //! Shared presentation for security approval windows.
 use super::{App, Bounds, WindowBounds, WindowOptions, px, size};
 
-pub(super) fn options(layered: bool, title: &str, app_id: &str, cx: &App) -> WindowOptions {
+pub(super) fn options(
+    layered: bool,
+    title: &str,
+    app_id: &str,
+    height: gpui::Pixels,
+    cx: &App,
+) -> WindowOptions {
     #[cfg(target_os = "linux")]
     use gpui::layer_shell::{KeyboardInteractivity, Layer, LayerShellOptions};
-    let bounds = Bounds::centered(None, size(px(500.), px(640.)), cx);
+    let bounds = Bounds::centered(None, size(px(500.), height), cx);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(420.), px(420.))),

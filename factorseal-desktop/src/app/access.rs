@@ -16,8 +16,10 @@ struct InputEditor {
 #[derive(Default)]
 struct RequestDetails {
     expanded: bool,
+    scroll: gpui::ScrollHandle,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct AccessView {
     runtime: Arc<DesktopRuntime>,
     snapshot: Snapshot,
@@ -32,6 +34,7 @@ struct AccessView {
     reviewing: bool,
     duration: Option<u64>,
     details: RequestDetails,
+    expired: bool,
     password: gpui::Entity<SecretInputState>,
     group: Option<factorseal::UnlockGroup>,
     error: Option<String>,
@@ -84,23 +87,7 @@ pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App
                             }
                         });
                     }
-                    let pending: Vec<_> = permissions
-                        .into_iter()
-                        .filter(|permission| {
-                            matches!(
-                                permission.state,
-                                factorseal::PermissionState::Pending { .. }
-                            )
-                        })
-                        .collect();
-                    if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
-                        view.update(cx, |view, cx| {
-                            view.grants = pending;
-                            cx.notify();
-                        });
-                    } else if !pending.is_empty() {
-                        open(AccessEvent::Permissions(pending), cx);
-                    }
+                    show_pending(&permissions, cx);
                 });
             }
         }
@@ -124,6 +111,7 @@ pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App
                             && !view.explicit_unlock
                             && !view.approving
                             && !view.reviewing
+                            && !view.expired
                     });
                     if expired {
                         close(cx);
@@ -139,6 +127,29 @@ pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App
         }
     })
     .detach();
+}
+
+fn show_pending(permissions: &[factorseal::Permission], cx: &mut App) {
+    let pending: Vec<_> = permissions
+        .iter()
+        .filter(|permission| awaited(permission))
+        .cloned()
+        .collect();
+    if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
+        view.update(cx, |view, cx| {
+            let expired = !view.approving
+                && pending.is_empty()
+                && (view.expired || stopped_waiting(&view.grants, permissions));
+            if expired && !view.expired {
+                view.password.update(cx, SecretInputState::clear);
+            }
+            view.expired = expired;
+            view.grants = pending;
+            cx.notify();
+        });
+    } else if !pending.is_empty() {
+        open(AccessEvent::Permissions(pending), cx);
+    }
 }
 
 pub(super) fn is_open(cx: &App) -> bool {
@@ -199,6 +210,7 @@ pub(super) fn update(snapshot: &Snapshot, cx: &mut App) {
             && view.inputs.is_empty()
             && !view.approving
             && !view.reviewing
+            && !view.expired
             && !view
                 .requests
                 .iter()
@@ -317,8 +329,9 @@ fn open(event: AccessEvent, cx: &mut App) {
                 reviewed_grants: Vec::new(),
                 approving: false,
                 reviewing: false,
-                duration: Some(3600),
+                duration: HOUR_GRANT,
                 details: RequestDetails::default(),
+                expired: false,
                 error: None,
                 _submit: submit,
                 _secret_submit: secret_submit,
@@ -352,6 +365,7 @@ fn window_options(layered: bool, cx: &App) -> WindowOptions {
         layered,
         "FactorSeal — Secret access",
         "dev.factorseal.Access",
+        crate::appearance::rem_size(cx) * 37.,
         cx,
     )
 }
@@ -406,6 +420,7 @@ impl AccessView {
                 self.unlocks.push((context, objects));
             }
             AccessEvent::Permissions(grants) => {
+                self.expired = false;
                 for grant in grants {
                     if !self.grants.iter().any(|existing| existing.id == grant.id) {
                         self.grants.push(grant);
@@ -535,7 +550,11 @@ impl AccessView {
                 cx.notify();
                 return;
             }
-            self.snapshot = Snapshot::Unlocking { metadata, group };
+            self.snapshot = Snapshot::Unlocking {
+                metadata,
+                group,
+                step: UnlockStep::default(),
+            };
         } else if !matches!(self.snapshot, Snapshot::Unsealed { .. }) {
             return;
         }
@@ -598,6 +617,13 @@ fn project_coordinates(context: &SecretServiceAccessContext) -> Option<(&str, &s
         .then_some((project, profile, secret))
 }
 
+fn context_project(context: &SecretServiceAccessContext) -> Option<String> {
+    project_coordinates(context)
+        .map(|(project, _, _)| project)
+        .or_else(|| context.attributes.get("project").map(String::as_str))
+        .map(display_reason)
+}
+
 fn access_title(has_input: bool, has_grants: bool, explicit_unlock: bool) -> &'static str {
     if has_input {
         "Save a secret"
@@ -627,11 +653,152 @@ fn application_name(path: &std::path::Path) -> String {
         .into_owned()
 }
 
+fn requester_label(grants: &[&factorseal::Permission]) -> Option<String> {
+    single(grants.iter().map(|grant| &grant.principal))
+        .map(|principal| visible_text(&principal.application_id))
+}
+
+fn header_requester(grants: &[&factorseal::Permission], other_requests: bool) -> Option<String> {
+    if other_requests {
+        None
+    } else {
+        requester_label(grants)
+    }
+}
+
+const REASON_LIMIT: usize = 200;
+
+fn hidden_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
+fn visible_text(text: &str) -> String {
+    let visible: String = text
+        .chars()
+        .filter_map(|character| {
+            if character.is_whitespace() {
+                Some(' ')
+            } else {
+                (!hidden_character(character)).then_some(character)
+            }
+        })
+        .collect();
+    visible.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn display_reason(reason: &str) -> String {
+    let words = visible_text(reason);
+    if words.chars().count() > REASON_LIMIT {
+        let cut: String = words.chars().take(REASON_LIMIT).collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        words
+    }
+}
+
+const HOUR_GRANT: Option<u64> = Some(3600);
+
+const fn secretspec_scope(scope: Option<factorseal::DocumentKind>) -> bool {
+    matches!(
+        scope,
+        Some(
+            factorseal::DocumentKind::SecretSpecProviderCache
+                | factorseal::DocumentKind::SecretSpecProject
+        )
+    )
+}
+
+fn grant_secret_label(grant: &factorseal::Permission) -> Option<String> {
+    if let Some(
+        factorseal::PermissionTarget::Entry { address, .. }
+        | factorseal::PermissionTarget::ProjectEntry { address, .. },
+    ) = grant.target.as_deref()
+        && let factorseal::SecretAddress::SecretSpec {
+            address: factorseal::SecretSpecAddress::Convention { profile, key, .. },
+        } = address
+        && grant.application.profile.as_ref() == Some(profile)
+    {
+        return Some(visible_text(key));
+    }
+    entry_access::entry_label(grant).map(|label| visible_text(&label))
+}
+
+fn request_summary(operation: &str, project: Option<&str>) -> String {
+    project.map_or_else(
+        || format!("wants to {operation} secrets"),
+        |project| format!("wants to {operation} secrets for {project}"),
+    )
+}
+
+fn quoted_reasons(reasons: &[String]) -> Option<String> {
+    let quoted: Vec<_> = reasons
+        .iter()
+        .map(|reason| display_reason(reason))
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| format!("“{reason}”"))
+        .collect();
+    (!quoted.is_empty()).then(|| quoted.join(" "))
+}
+
+const fn awaited(permission: &factorseal::Permission) -> bool {
+    matches!(
+        permission.state,
+        factorseal::PermissionState::Pending { awaited: true, .. }
+    )
+}
+
+fn stopped_waiting(
+    shown: &[factorseal::Permission],
+    permissions: &[factorseal::Permission],
+) -> bool {
+    shown.iter().any(|grant| {
+        permissions.iter().any(|permission| {
+            permission.id == grant.id
+                && matches!(
+                    permission.state,
+                    factorseal::PermissionState::Pending { awaited: false, .. }
+                )
+        })
+    })
+}
+
+fn single<T: PartialEq>(values: impl IntoIterator<Item = T>) -> Option<T> {
+    let mut values = values.into_iter();
+    let first = values.next()?;
+    values.all(|value| value == first).then_some(first)
+}
+
 fn detail(
     label: impl Into<gpui::SharedString>,
     value: impl Into<gpui::SharedString>,
     cx: &App,
 ) -> Div {
+    let (label, value) = (label.into(), value.into());
     h_flex()
         .items_start()
         .gap_3()
@@ -639,11 +806,17 @@ fn detail(
             div()
                 .w(px(105.))
                 .flex_none()
-                .text_sm()
+                .text_body()
                 .text_color(cx.theme().muted_foreground)
-                .child(label.into()),
+                .child(visible_text(&label)),
         )
-        .child(div().flex_1().min_w_0().text_sm().child(value.into()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_body()
+                .child(visible_text(&value)),
+        )
 }
 
 impl Render for AccessView {
@@ -684,11 +857,6 @@ impl Render for AccessView {
         let busy = self.approving || matches!(self.snapshot, Snapshot::Unlocking { .. });
         let unsealed = matches!(self.snapshot, Snapshot::Unsealed { .. });
         let metadata = self.snapshot.metadata();
-        let context_project = |context: &SecretServiceAccessContext| {
-            project_coordinates(context)
-                .map(|(project, _, _)| project.to_owned())
-                .or_else(|| context.attributes.get("project").cloned())
-        };
         let mut projects: Vec<_> = if self.inputs.is_empty() {
             self.requests
                 .iter()
@@ -696,7 +864,7 @@ impl Render for AccessView {
                 .chain(
                     self.grants
                         .iter()
-                        .map(|grant| grant.application.project.clone()),
+                        .map(|grant| grant.application.project.as_deref().map(display_reason)),
                 )
                 .chain(
                     self.unlocks
@@ -734,6 +902,21 @@ impl Render for AccessView {
                 }
             },
         );
+        let pending_grants = || self.grants.iter().filter(|_| self.inputs.is_empty());
+        let shown_grants: Vec<_> = pending_grants().collect();
+        let other_requests = !self.requests.is_empty() || !self.unlocks.is_empty();
+        let requester = header_requester(&shown_grants, other_requests).map(|name| {
+            let operation = single(pending_grants().map(|grant| grant.operation))
+                .map_or("use", |operation| permission_operation_label(operation))
+                .to_lowercase();
+            (name, request_summary(&operation, project_title.as_deref()))
+        });
+        let mut reasons: Vec<_> = pending_grants()
+            .filter(|grant| secretspec_scope(grant.scope))
+            .filter_map(|grant| grant.application.reason.clone())
+            .collect();
+        reasons.sort();
+        reasons.dedup();
         let needs_password = (!unsealed || !self.grants.is_empty())
             && self
                 .group
@@ -758,17 +941,22 @@ impl Render for AccessView {
                 secrets.sort_unstable();
                 let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted).child(
                     div()
-                        .text_sm()
+                        .text_body()
                         .text_color(theme.muted_foreground)
                         .child("Secrets"),
                 );
                 for secret in secrets {
-                    card = card.child(div().text_lg().font_semibold().child(secret.to_owned()));
+                    card = card.child(
+                        div()
+                            .text_heading()
+                            .font_semibold()
+                            .child(visible_text(secret)),
+                    );
                 }
                 if project_title.is_none() {
-                    card = card.child(detail("Project", project, cx));
+                    card = card.child(detail("Project", display_reason(project), cx));
                 }
-                card = card.child(detail("Profile", profile, cx));
+                card = card.child(detail("Profile", display_reason(profile), cx));
                 if let Some(folder) = context.attributes.get("base_dir") {
                     card = card.child(detail("Folder", folder.clone(), cx));
                 }
@@ -793,10 +981,24 @@ impl Render for AccessView {
             let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted);
             if let Some((project, profile, secret)) = project_coordinates(context) {
                 card = card
-                    .child(div().text_lg().font_semibold().child(project.to_owned()))
-                    .child(detail("Secret", format!("{secret} · {profile}"), cx));
+                    .child(
+                        div()
+                            .text_heading()
+                            .font_semibold()
+                            .child(display_reason(project)),
+                    )
+                    .child(detail(
+                        "Secret",
+                        format!("{secret} · {}", display_reason(profile)),
+                        cx,
+                    ));
             } else if let Some(project) = context.attributes.get("project") {
-                card = card.child(div().text_lg().font_semibold().child(project.clone()));
+                card = card.child(
+                    div()
+                        .text_heading()
+                        .font_semibold()
+                        .child(display_reason(project)),
+                );
                 if let Some(secret) = context.attributes.get("secret") {
                     card = card.child(detail("Secret", secret.clone(), cx));
                 }
@@ -815,7 +1017,7 @@ impl Render for AccessView {
                 for object in objects {
                     card = card.child(detail("Requested item", unlock_target_label(object), cx));
                 }
-                card = card.child(div().text_sm().child(
+                card = card.child(div().text_body().child(
                     "Item names and contents stay encrypted until unlock. Unlocking does not grant permission to read secrets.",
                 ));
             } else if project_coordinates(context).is_none()
@@ -891,39 +1093,26 @@ impl Render for AccessView {
             let grant = group[0];
             let mut labels: Vec<_> = group
                 .iter()
-                .filter_map(|grant| {
-                    if let Some(
-                        factorseal::PermissionTarget::Entry { address, .. }
-                        | factorseal::PermissionTarget::ProjectEntry { address, .. },
-                    ) = grant.target.as_deref()
-                        && let factorseal::SecretAddress::SecretSpec { address } = address
-                    {
-                        let (name, profile) = secret_spec_address_label(address);
-                        if grant.application.profile.as_ref() == Some(&profile) {
-                            return Some(name);
-                        }
-                    }
-                    entry_access::entry_label(grant)
-                })
+                .filter_map(|grant| grant_secret_label(grant))
                 .collect();
             labels.sort();
             labels.dedup();
             let mut card = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted).child(
                 div()
-                    .text_sm()
+                    .text_body()
                     .text_color(theme.muted_foreground)
                     .child("Secrets"),
             );
             if labels.is_empty() {
-                card = card.child(div().text_lg().font_semibold().child("Secret access"));
+                card = card.child(div().text_heading().font_semibold().child("Secret access"));
             }
             for label in labels {
-                card = card.child(div().text_lg().font_semibold().child(label));
+                card = card.child(div().text_heading().font_semibold().child(label));
             }
             if let Some(project) = &grant.application.project
                 && project_title.is_none()
             {
-                card = card.child(detail("Project", project.clone(), cx));
+                card = card.child(detail("Project", display_reason(project), cx));
             }
             technical = technical
                 .child(detail(
@@ -936,17 +1125,25 @@ impl Render for AccessView {
                     permission_operation_label(grant.operation),
                     cx,
                 ));
-            card = card.child(div().text_sm().child(format!(
-                "{} is requesting permission to {} these secrets.",
-                application_name(std::path::Path::new(&grant.principal.application_id)),
-                permission_operation_label(grant.operation).to_lowercase(),
-            )));
+            if requester.is_none() {
+                card = card.child(div().text_body().child(format!(
+                    "{} {}.",
+                    requester_label(&group).unwrap_or_default(),
+                    request_summary(
+                        &permission_operation_label(grant.operation).to_lowercase(),
+                        None
+                    ),
+                )));
+            }
             for (label, value) in [
-                ("Profile", &grant.application.profile),
-                ("Folder", &grant.application.base_dir),
+                (
+                    "Profile",
+                    grant.application.profile.as_deref().map(display_reason),
+                ),
+                ("Folder", grant.application.base_dir.clone()),
             ] {
                 if let Some(value) = value {
-                    card = card.child(detail(label, value.clone(), cx));
+                    card = card.child(detail(label, value, cx));
                 }
             }
             technical = technical.child(detail(
@@ -955,7 +1152,7 @@ impl Render for AccessView {
                 cx,
             ));
             if let Some(reason) = &grant.application.reason {
-                technical = technical.child(detail("Request", reason.clone(), cx));
+                technical = technical.child(detail("Request", display_reason(reason), cx));
             }
             requests = requests.child(card);
             technical = technical.child(detail(
@@ -964,17 +1161,120 @@ impl Render for AccessView {
                 cx,
             ));
         }
-        requests = requests.child(
-            Button::new("access-technical-details").ghost().small()
-                .label(if self.details.expanded { "Hide technical details −" } else { "Technical details +" })
-                .on_click(cx.listener(|view, _, _, cx| {
-                    view.details.expanded = !view.details.expanded;
-                    cx.notify();
-                })),
-        ).when(self.details.expanded, |element| {
-            element.child(technical).child(div().text_xs().text_color(theme.muted_foreground)
-                .child("Project labels come from the requesting app. Process identity is verified by the operating system."))
-        });
+        requests = requests
+            .child(
+                Button::new("access-technical-details")
+                    .ghost()
+                    .small()
+                    .label(if self.details.expanded {
+                        "Hide technical details −"
+                    } else {
+                        "Technical details +"
+                    })
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.details.expanded = !view.details.expanded;
+                        if view.details.expanded {
+                            view.details.scroll.scroll_to_bottom();
+                        }
+                        cx.notify();
+                    })),
+            )
+            .when(self.details.expanded, |element| {
+                element.child(
+                    technical
+                        .p_4()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border)
+                        .child(div().text_caption().text_color(theme.muted_foreground).child(
+                            "Project labels come from the requesting app. Process identity is verified by the operating system.",
+                        )),
+                )
+            });
+        let header = match &requester {
+            Some((name, summary)) => v_flex()
+                .gap_3()
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .child(
+                            div()
+                                .size_10()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_lg()
+                                .bg(theme.muted)
+                                .child(
+                                    gpui_component::Icon::new(IconName::SquareTerminal)
+                                        .size_5()
+                                        .text_color(theme.foreground),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .child(div().text_heading().font_semibold().child(name.clone()))
+                                .child(
+                                    div()
+                                        .text_body()
+                                        .text_color(theme.muted_foreground)
+                                        .child(summary.clone()),
+                                ),
+                        ),
+                )
+                .when_some(quoted_reasons(&reasons), |element, reasons| {
+                    element.child(
+                        v_flex()
+                            .gap_1()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .text_caption()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Reason given by the app"),
+                            )
+                            .child(
+                                div()
+                                    .text_body()
+                                    .italic()
+                                    .line_clamp(3)
+                                    .text_ellipsis()
+                                    .child(reasons),
+                            ),
+                    )
+                }),
+            None => div().text_heading().font_semibold().child(title),
+        };
+        let expired = self.expired
+            && self.grants.is_empty()
+            && self.requests.is_empty()
+            && self.inputs.is_empty();
+        let header = if expired {
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_heading()
+                        .font_semibold()
+                        .child("This request expired"),
+                )
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(theme.muted_foreground)
+                        .child("The app stopped waiting. Run it again to ask for access."),
+                )
+        } else {
+            header
+        };
+
         let mut groups = h_flex().gap_2().flex_wrap();
         if let Some(metadata) = metadata {
             for (index, group) in metadata.unlock_policy().groups().iter().enumerate() {
@@ -992,28 +1292,30 @@ impl Render for AccessView {
                 );
             }
         }
-        v_flex().size_full().border_1().border_color(theme.border)
+        crate::motion::enter("access-request", v_flex().size_full().border_1().border_color(theme.border)
             .capture_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
                     cx.defer(deny);
                 }
             }))
-            .bg(theme.background).text_color(theme.foreground).font_family(theme.font_family.clone()).text_size(theme.font_size)
-            .child(v_flex().p_6().gap_2().child(h_flex().gap_2().items_center().child(brand_mark(22., theme.foreground)).child(div().text_sm().text_color(theme.muted_foreground).child("FactorSeal")))
-                .child(div().text_xl().font_semibold().child(title)))
-            .child(div().id("access-request-details").flex_1().min_h_0().px_6().overflow_y_scrollbar().pb_4().child(requests))
-            .child(v_flex().p_6().gap_3().border_t_1().border_color(theme.border)
-                .child(div().text_xs().text_color(theme.muted_foreground).child(if !self.inputs.is_empty() { "Saves this value once. No access grant is created." } else if self.grants.is_empty() { "Unlock your vault to continue here." } else { "Applies only to the listed entries, app, folder, and operation. Manage access on each secret." }))
+            .bg(theme.background).text_color(theme.foreground).font_family(theme.font_family.clone()).text_body()
+            .child(v_flex().p_6().gap_2().child(h_flex().gap_2().items_center().child(brand_mark(22., theme.foreground)).child(div().text_body().text_color(theme.muted_foreground).child("FactorSeal")))
+                .child(header))
+            .child(div().flex_1().min_h_0().relative()
+                .when(!expired, |details| details.child(div().id("access-request-details").size_full().px_6().pb_4().overflow_y_scroll().track_scroll(&self.details.scroll).child(requests))
+                .vertical_scrollbar(&self.details.scroll)))
+            .when(!expired, |window| window.child(v_flex().p_6().gap_3().border_t_1().border_color(theme.border)
+                .child(div().text_caption().text_color(theme.muted_foreground).child(if !self.inputs.is_empty() { "Saves this value once. No access grant is created." } else if self.grants.is_empty() { "Unlock your vault to continue here." } else { "Applies only to the listed entries, app, folder, and operation. Manage access on each secret." }))
                 .when(metadata.is_some_and(|metadata| metadata.unlock_policy().groups().len() > 1), |element| element.child(groups))
                 .when((!self.grants.is_empty() || !self.requests.is_empty()) && self.inputs.is_empty(), |element| element.child(field_label("Allow access for", h_flex().gap_2()
-                    .child(Button::new("grant-hour").label("1 hour").selected(self.duration == Some(3600)).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = Some(3600); cx.notify(); })))
+                    .child(Button::new("grant-hour").label("1 hour").selected(self.duration == HOUR_GRANT).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = HOUR_GRANT; cx.notify(); })))
                     .child(Button::new("grant-persistent").label("Until revoked").selected(self.duration.is_none()).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = None; cx.notify(); }))))))
                 .when(!self.inputs.is_empty() && !busy, |element| element.child(field_label("Secret value", self.editor.value.clone())))
                 .when(needs_password && !busy, |element| element.child(field_label("Vault password", self.password.clone())))
                 .when_some(self.error.clone(), |element, error| element.child(error_banner(error, theme.danger)))
-                .when(matches!(self.snapshot, Snapshot::Uninitialized { .. }), |element| element.child(div().text_sm().child("Set up your vault in FactorSeal Desktop before allowing access.")))
-                .child(h_flex().justify_end().gap_2()
+                .when(matches!(self.snapshot, Snapshot::Uninitialized { .. }), |element| element.child(div().text_body().child("Set up your vault in FactorSeal Desktop before allowing access.")))
+                .child(h_flex().items_center().justify_end().gap_2()
                     .child(Button::new("deny-access").ghost().label(if self.inputs.is_empty() { "Deny" } else { "Cancel" }).disabled(self.approving).on_click(cx.listener(|_, _, _, cx| {
                         cx.defer(|cx| {
                             deny(cx);
@@ -1021,7 +1323,9 @@ impl Render for AccessView {
                     })))
                     .child(Button::new("allow-access").primary().disabled((self.reviewing && self.grants.is_empty() && self.inputs.is_empty() && unsealed) || busy || !matches!(self.snapshot, Snapshot::Sealed { .. } | Snapshot::Unsealed { .. }))
                         .label(if self.approving { "Authorizing…" } else if busy { "Unlocking…" } else if !self.inputs.is_empty() && unsealed { "Save secret" } else if !self.grants.is_empty() { "Grant access" } else if unsealed && self.reviewing { "Checking access…" } else if unsealed { "Continue" } else { "Unlock to continue" })
-                        .on_click(cx.listener(|view, _, window, cx| view.allow(window, cx))))))
+                        .on_click(cx.listener(|view, _, window, cx| view.allow(window, cx)))))))
+            .when(expired, |window| window.child(h_flex().p_6().justify_end().border_t_1().border_color(theme.border)
+                .child(Button::new("close-expired-access").primary().label("Close").on_click(|_, _, cx| cx.defer(close))))))
     }
 }
 
@@ -1099,5 +1403,175 @@ mod tests {
                 .insert("service".to_owned(), service.to_owned());
             assert_eq!(project_coordinates(&context), expected);
         }
+    }
+
+    #[test]
+    fn project_names_from_apps_lose_hidden_characters() {
+        let mut context = SecretServiceAccessContext::default();
+        context.attributes.insert(
+            "service".to_owned(),
+            "secretspec/demo\u{202E}ppa/default/TOKEN".to_owned(),
+        );
+        assert_eq!(context_project(&context).as_deref(), Some("demoppa"));
+        context.attributes.clear();
+        context
+            .attributes
+            .insert("project".to_owned(), "my\u{200B}  \tapp".to_owned());
+        assert_eq!(context_project(&context).as_deref(), Some("my app"));
+    }
+
+    fn secretspec_grant(executable: &str, profile: Option<&str>) -> factorseal::Permission {
+        factorseal::Permission {
+            target: Some(Box::new(factorseal::PermissionTarget::ProjectEntry {
+                namespace: b"demo-app".to_vec(),
+                address: factorseal::SecretAddress::SecretSpec {
+                    address: factorseal::SecretSpecAddress::Convention {
+                        project: "demo-app".to_owned(),
+                        profile: "default".to_owned(),
+                        key: "DATABASE_URL".to_owned(),
+                    },
+                },
+                project: "demo-app".to_owned(),
+                base_dir: None,
+            })),
+            id: "grant".to_owned(),
+            scope: Some(factorseal::DocumentKind::SecretSpecProviderCache),
+            operation: factorseal::PermissionOperation::Get,
+            principal: factorseal::PermissionPrincipal {
+                platform: factorseal::CallerPlatform::Linux,
+                user_id: "uid:1000".to_owned(),
+                application_id: executable.to_owned(),
+                executable_digest: [0; 32],
+                signer_id: None,
+            },
+            application: factorseal::VaultApplicationContext::new(
+                Some("demo-app".to_owned()),
+                profile.map(str::to_owned),
+                None,
+                Some("Run migrations".to_owned()),
+            )
+            .unwrap(),
+            state: factorseal::PermissionState::Pending {
+                created_at: 1,
+                expires_at: 2,
+                challenge: [0; 32],
+                awaited: false,
+            },
+        }
+    }
+
+    #[test]
+    fn the_verified_header_only_shows_when_grants_are_all_that_is_asked() {
+        let grant = secretspec_grant("/nix/store/abc-factorseal/bin/factorseal", None);
+        assert_eq!(
+            header_requester(&[&grant], false).as_deref(),
+            Some("/nix/store/abc-factorseal/bin/factorseal")
+        );
+        assert_eq!(header_requester(&[&grant], true), None);
+    }
+
+    #[test]
+    fn requests_from_different_executables_get_no_shared_name() {
+        let first = secretspec_grant("/usr/bin/tool", None);
+        let mut second = secretspec_grant("/usr/bin/tool", None);
+        assert_eq!(
+            requester_label(&[&first, &second]).as_deref(),
+            Some("/usr/bin/tool")
+        );
+        second.principal.executable_digest = [1; 32];
+        assert_eq!(requester_label(&[&first, &second]), None);
+        second.principal = first.principal.clone();
+        second.principal.application_id = "/opt/tool".to_owned();
+        assert_eq!(requester_label(&[&first, &second]), None);
+    }
+
+    #[test]
+    fn app_reasons_lose_hidden_characters_and_stay_short() {
+        assert_eq!(
+            display_reason("Run\u{202E}gnp.exe\u{200B} db\u{0007}\t\nmigrations"),
+            "Rungnp.exe db migrations"
+        );
+        assert_eq!(display_reason("\u{2066}\u{FEFF}\u{E0041}"), "");
+        let long = display_reason(&"word ".repeat(100));
+        assert_eq!(long.chars().count(), REASON_LIMIT);
+        assert!(long.ends_with("word…") || long.ends_with('…'));
+        assert_eq!(quoted_reasons(&["\u{200B}".to_owned()]), None);
+    }
+
+    #[test]
+    fn app_names_paths_and_keys_lose_hidden_characters_but_not_their_end() {
+        let path = format!(
+            "/home/user/{}/tool\u{202E}\n\nFolder /trusted",
+            "a".repeat(300)
+        );
+        let visible = visible_text(&path);
+        assert!(visible.ends_with("tool Folder /trusted"));
+        assert!(!visible.contains(['\n', '\u{202E}']));
+        let grant = secretspec_grant("/usr/bin/tool\u{2066}\nSecretSpec", None);
+        assert_eq!(
+            requester_label(&[&grant]).as_deref(),
+            Some("/usr/bin/tool SecretSpec")
+        );
+    }
+
+    #[test]
+    fn a_shown_request_expires_when_its_app_stops_waiting() {
+        let mut waiting = secretspec_grant("/usr/bin/tool", None);
+        waiting.state = factorseal::PermissionState::Pending {
+            created_at: 1,
+            expires_at: 300,
+            challenge: [0; 32],
+            awaited: true,
+        };
+        assert!(awaited(&waiting));
+        let mut given_up = waiting.clone();
+        given_up.state = factorseal::PermissionState::Pending {
+            created_at: 1,
+            expires_at: 300,
+            challenge: [0; 32],
+            awaited: false,
+        };
+        assert!(!awaited(&given_up));
+        let shown = std::slice::from_ref(&waiting);
+        assert!(stopped_waiting(shown, std::slice::from_ref(&given_up)));
+        assert!(!stopped_waiting(shown, std::slice::from_ref(&waiting)));
+        assert!(!stopped_waiting(shown, &[]));
+    }
+
+    #[test]
+    fn approval_shows_the_profile_once() {
+        assert_eq!(
+            grant_secret_label(&secretspec_grant("factorseal", Some("default"))).as_deref(),
+            Some("DATABASE_URL")
+        );
+        assert_eq!(
+            grant_secret_label(&secretspec_grant("factorseal", Some("production"))).as_deref(),
+            Some("DATABASE_URL · Profile: default")
+        );
+    }
+
+    #[test]
+    fn approval_summary_names_the_project_when_there_is_one() {
+        assert_eq!(
+            request_summary("read", Some("demo-app")),
+            "wants to read secrets for demo-app"
+        );
+        assert_eq!(request_summary("write", None), "wants to write secrets");
+        assert_eq!(single(["a", "a"]), Some("a"));
+        assert_eq!(single(["a", "b"]), None);
+        assert_eq!(single(Vec::<&str>::new()), None);
+    }
+
+    #[test]
+    fn approval_reason_stays_on_one_flowing_line() {
+        assert_eq!(quoted_reasons(&[]), None);
+        assert_eq!(
+            quoted_reasons(&["Run\n\n  database\tmigrations\n".to_owned()]).as_deref(),
+            Some("“Run database migrations”")
+        );
+        assert_eq!(
+            quoted_reasons(&["Deploy".to_owned(), "Seed".to_owned()]).as_deref(),
+            Some("“Deploy” “Seed”")
+        );
     }
 }

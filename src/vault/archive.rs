@@ -57,7 +57,9 @@ impl VaultArchive {
         for entry in &mut entries {
             entry.metadata.display_name = None;
             entry.metadata.display_type = None;
+            entry.metadata.display_username = None;
             entry.metadata.updated_at = None;
+            entry.metadata.favorite = false;
         }
         Self {
             format: FORMAT.to_owned(),
@@ -435,7 +437,9 @@ mod tests {
                     access_project: None,
                     display_name: None,
                     display_type: None,
+                    display_username: None,
                     updated_at: None,
+                    favorite: false,
                     document_kind: DocumentKind::LocalKeyring,
                     partition: b"factorseal/personal-secrets/v1".to_vec(),
                     address: SecretAddress::new("example", None).unwrap(),
@@ -505,7 +509,9 @@ mod tests {
             access_project: None,
             display_name: None,
             display_type: None,
+            display_username: None,
             updated_at: None,
+            favorite: false,
             document_kind: DocumentKind::LinuxSecretService,
             partition: NAMESPACE.to_vec(),
             address,

@@ -19,9 +19,9 @@ pub(super) fn new_item_template(kind: K) -> PersonalSecret {
                 "account",
                 "Login",
                 &[
-                    ("url-0", "Website", T::Url),
                     ("username", "Username", T::Text),
                     ("password", "Password", T::Concealed),
+                    ("url-0", "Website", T::Url),
                     ("totp", "One-time password", T::Totp),
                 ],
             ),
