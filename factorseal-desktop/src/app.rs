@@ -1,3 +1,4 @@
+use self::shortcuts::OpenSettings;
 use crate::secret_input::SecretInputState;
 #[cfg(target_os = "linux")]
 mod access;
@@ -4304,6 +4305,21 @@ fn open_desktop(_: &OpenDesktop, cx: &mut App) {
     cx.defer(show_desktop);
 }
 
+fn open_settings(_: &OpenSettings, cx: &mut App) {
+    cx.defer(|cx| {
+        show_desktop(cx);
+        let view = cx
+            .global::<DesktopWindow>()
+            .view
+            .lock()
+            .ok()
+            .and_then(|view| view.clone());
+        if let Some(view) = view {
+            view.update(cx, DesktopView::open_settings);
+        }
+    });
+}
+
 fn close_desktop(_: &CloseDesktop, cx: &mut App) {
     cx.defer(hide_desktop);
 }
@@ -4514,29 +4530,13 @@ fn tray_label() -> String {
 
 fn tray_menu(cx: &mut App) -> Vec<MenuItem> {
     let status = cx.global::<DesktopStatus>();
-    let window_visible = cx.global::<DesktopWindow>().visible;
-    let desktop_label = if window_visible {
-        "Close Desktop"
-    } else if status.unsealed {
-        "Open Desktop"
-    } else {
-        "Unseal"
-    };
-    let mut items = vec![
-        MenuItem::action(tray_label(), OpenDesktop).disabled(true),
+    vec![
+        MenuItem::action("Open FactorSeal", OpenDesktop),
         MenuItem::separator(),
-    ];
-    items.push(if window_visible {
-        MenuItem::action(desktop_label, CloseDesktop)
-    } else {
-        MenuItem::action(desktop_label, OpenDesktop)
-    });
-    if status.unsealed {
-        items.push(MenuItem::action("Seal", SealVault));
-    }
-    items.push(MenuItem::separator());
-    items.push(MenuItem::action("Quit", Quit));
-    items
+        MenuItem::action("Seal", SealVault).disabled(!status.unsealed),
+        MenuItem::action("Settings…", OpenSettings),
+        MenuItem::action("Quit", Quit),
+    ]
 }
 
 fn refresh_tray(cx: &mut App) {
@@ -4550,14 +4550,27 @@ fn refresh_tray(cx: &mut App) {
 }
 
 fn factorseal_icon(dark_background: bool, cx: &App) -> gpui_tray::Result<Icon> {
-    // Generated from the same optical master as the Linux symbolic icons.
-    let bytes: &[u8] = if dark_background {
-        include_bytes!("../../assets/logo/factorseal-tray-paper.png")
-    } else {
-        include_bytes!("../../assets/logo/factorseal-tray-ink.png")
+    #[cfg(target_os = "macos")]
+    let image = {
+        let _ = dark_background;
+        let svg = include_str!("../../assets/logo/factorseal-mark-micro.svg")
+            .replace("<svg ", "<svg width=\"18\" height=\"18\" ")
+            .replace("currentColor", "#000000");
+        gpui::Image::from_bytes(gpui::ImageFormat::Svg, svg.into_bytes())
     };
-    let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes.to_vec());
-    Icon::from_gpui(&image, cx).build()
+    #[cfg(not(target_os = "macos"))]
+    let image = {
+        let bytes: &[u8] = if dark_background {
+            include_bytes!("../../assets/logo/factorseal-tray-paper.png")
+        } else {
+            include_bytes!("../../assets/logo/factorseal-tray-ink.png")
+        };
+        gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes.to_vec())
+    };
+    let icon = Icon::from_gpui(&image, cx);
+    #[cfg(target_os = "macos")]
+    let icon = icon.scale_factor(2.0).template(true);
+    icon.build()
 }
 
 fn install_tray(cx: &mut App) {
@@ -4565,7 +4578,6 @@ fn install_tray(cx: &mut App) {
     let tray = factorseal_icon(dark_background, cx).and_then(|icon| {
         Tray::builder()
             .icon(icon)
-            .title(tray_label())
             .tooltip(tray_label())
             .on_activate(ToggleDesktop)
             .menu(tray_menu)
@@ -4660,6 +4672,7 @@ pub(crate) fn setup(
     theming::initialize(cx);
     crate::appearance::use_launch_lease(config.lease, cx);
     cx.on_action(open_desktop);
+    cx.on_action(open_settings);
     cx.on_action(close_desktop);
     cx.on_action(toggle_desktop);
     cx.on_action(seal_vault);

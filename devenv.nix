@@ -21,6 +21,7 @@
     vulkan-loader
     yyjson # Upstream SecretSpec IPC conformance runner's C transport fixtures.
   ] ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+    pkgs.imagemagick
     pkgs.swift
     pkgs.swiftpm
   ];
