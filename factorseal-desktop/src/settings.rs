@@ -113,6 +113,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preferences_do_not_use_the_default_vault_root() {
+        let dirs = directories::ProjectDirs::from("dev", "Factorseal", "Factorseal").unwrap();
+        assert!(
+            !path()
+                .unwrap()
+                .starts_with(factorseal::paths::default_vault_root(&dirs))
+        );
+    }
+
+    #[test]
     fn all_existing_theme_ids_remain_compatible() {
         for choice in Choice::all() {
             let directory = tempfile::tempdir().unwrap();

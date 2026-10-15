@@ -21,6 +21,31 @@ fn write_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
     crate::security::write_private_file(path, bytes)
 }
+
+fn config_path(dirs: &directories::ProjectDirs) -> PathBuf {
+    dirs.config_dir().join("browser-host.json")
+}
+
+/// Read the current registration.
+pub fn load_config(dirs: &directories::ProjectDirs) -> io::Result<Option<Config>> {
+    read_config(&config_path(dirs))
+}
+
+fn read_config(path: &Path) -> io::Result<Option<Config>> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_config(dirs: &directories::ProjectDirs, config: &Config) -> io::Result<()> {
+    std::fs::create_dir_all(dirs.config_dir())?;
+    write_changed(&config_path(dirs), &serde_json::to_vec(config)?)
+}
+
 /// Refresh the native host registration and Desktop launch paths at startup.
 pub fn configure(
     root: &Path,
@@ -30,14 +55,13 @@ pub fn configure(
 ) -> io::Result<()> {
     let dirs = directories::ProjectDirs::from("dev", "Factorseal", "Factorseal")
         .ok_or_else(|| io::Error::other("no user data directory"))?;
-    std::fs::create_dir_all(dirs.config_dir())?;
-    write_changed(
-        &dirs.config_dir().join("browser-host.json"),
-        &serde_json::to_vec(&Config {
+    write_config(
+        &dirs,
+        &Config {
             root: std::path::absolute(root)?,
             desktop: Some(desktop.to_path_buf()),
             desktop_identity: Some(desktop_identity.to_path_buf()),
-        })?,
+        },
     )?;
     let mut failure = None;
     for browser in ["firefox", "chrome", "chromium", "edge"] {
@@ -129,14 +153,13 @@ pub fn install(
         }
     }
     if let Some(root) = root {
-        std::fs::create_dir_all(dirs.config_dir())?;
-        write_changed(
-            &dirs.config_dir().join("browser-host.json"),
-            &serde_json::to_vec(&Config {
+        write_config(
+            dirs,
+            &Config {
                 root: std::path::absolute(root)?,
                 desktop: None,
                 desktop_identity: None,
-            })?,
+            },
         )?;
     }
     Ok(())
@@ -156,6 +179,26 @@ fn write_manifest(path: &Path, bridge: &Path, id: &str, firefox: bool) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_does_not_use_the_default_vault_root() {
+        let dirs = directories::ProjectDirs::from("dev", "Factorseal", "Factorseal").unwrap();
+        assert!(!config_path(&dirs).starts_with(crate::paths::default_vault_root(&dirs)));
+    }
+
+    #[test]
+    fn registration_reads_config_and_rejects_invalid_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("browser-host.json");
+        assert!(read_config(&path).unwrap().is_none());
+        std::fs::write(&path, br#"{"root":"current-vault"}"#).unwrap();
+        assert_eq!(
+            read_config(&path).unwrap().unwrap().root,
+            Path::new("current-vault")
+        );
+        std::fs::write(&path, b"invalid json").unwrap();
+        assert!(read_config(&path).is_err());
+    }
 
     #[test]
     fn registration_is_stable_and_refreshes_moved_executables() {

@@ -1,6 +1,6 @@
 //! Native messaging host and per-user browser registration.
 use clap::Parser;
-use factorseal::browser::registration::{self, Config};
+use factorseal::browser::registration;
 use factorseal::browser::{self, Request, Response, transport};
 use std::{io, path::PathBuf};
 #[derive(Parser)]
@@ -39,14 +39,9 @@ fn run() -> io::Result<()> {
             &std::env::current_exe()?,
         );
     }
-    let config = dirs.config_dir().join("browser-host.json");
-    let config = if config.is_file() {
-        Some(serde_json::from_slice::<Config>(&std::fs::read(config)?).map_err(io::Error::other)?)
-    } else {
-        None
-    };
+    let config = registration::load_config(&dirs)?;
     let root = config.as_ref().map_or_else(
-        || dirs.data_local_dir().to_path_buf(),
+        || factorseal::paths::default_vault_root(&dirs),
         |config| config.root.clone(),
     );
     // A long-running browser can retain environment variables from an older

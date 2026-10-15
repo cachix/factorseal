@@ -18,6 +18,8 @@ pub mod desktop_worker;
 pub mod diagnostics;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod error;
+#[cfg(any(feature = "cli", feature = "browser", feature = "diagnostics"))]
+pub mod paths;
 pub mod security;
 
 #[cfg(feature = "fuzzing")]

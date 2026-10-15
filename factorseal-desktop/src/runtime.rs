@@ -1063,7 +1063,7 @@ fn unix_time() -> Result<u64, String> {
 
 pub(crate) fn default_root() -> Result<PathBuf, String> {
     directories::ProjectDirs::from("dev", "Factorseal", "Factorseal")
-        .map(|directories| directories.data_local_dir().to_owned())
+        .map(|dirs| factorseal::paths::default_vault_root(&dirs))
         .ok_or_else(|| "could not determine the platform user-data directory".to_owned())
 }
 

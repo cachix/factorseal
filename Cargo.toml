@@ -20,7 +20,7 @@ exclude = ["fuzz"]
 [features]
 fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "personal-sync", "dep:secret-service-protocol", "hardwareseal/fuzzing"]
 default = ["vault", "cli", "hardware", "secretspec-provider", "personal-sync-network", "browser"]
-browser = ["vault", "dep:ed25519-dalek", "dep:url"]
+browser = ["vault", "dep:directories", "dep:ed25519-dalek", "dep:url"]
 vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token"]
 vault-store = [
     "personal",

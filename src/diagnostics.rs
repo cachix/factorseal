@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn default_diagnostics_do_not_create_the_vault_root() {
         let dirs = directories::ProjectDirs::from("dev", "Factorseal", "Factorseal").unwrap();
-        assert!(!default_directory(&dirs).starts_with(dirs.data_local_dir()));
+        assert!(!default_directory(&dirs).starts_with(crate::paths::default_vault_root(&dirs)));
     }
 
     #[test]

@@ -31,10 +31,9 @@ struct ProviderClaim<'a> {
 }
 
 pub(super) fn publish_for_default_root(root: &Path) -> Result<(), CliError> {
-    let default_root = ProjectDirs::from("dev", "Factorseal", "Factorseal")
-        .ok_or(CliError::NoDefaultRoot)?
-        .data_local_dir()
-        .to_owned();
+    let dirs =
+        ProjectDirs::from("dev", "Factorseal", "Factorseal").ok_or(CliError::NoDefaultRoot)?;
+    let default_root = factorseal::paths::default_vault_root(&dirs);
     if root != default_root {
         return Ok(());
     }

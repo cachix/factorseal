@@ -1772,7 +1772,7 @@ pub(super) fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError>
     }
     let directories =
         ProjectDirs::from("dev", "Factorseal", "Factorseal").ok_or(CliError::NoDefaultRoot)?;
-    Ok(directories.data_local_dir().to_owned())
+    Ok(factorseal::paths::default_vault_root(&directories))
 }
 
 pub(super) fn unix_time() -> Result<u64, VaultError> {
