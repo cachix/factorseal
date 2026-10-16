@@ -747,6 +747,9 @@ mod tests {
                     Err(error) => panic!("mock accept failed: {error}"),
                 }
             };
+            // Windows inherits the listener's nonblocking mode on accepted sockets.
+            // The request reader below uses blocking reads with a timeout.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();

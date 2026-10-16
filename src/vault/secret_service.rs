@@ -1116,7 +1116,10 @@ mod tests {
             assert_eq!(shared.invoke_prompt("late").unwrap(), Some(dismissed));
             assert!(shared.invoke_prompt("early").is_err());
             assert!(shared.invoke_prompt("late").is_err());
-            assert!(shared.take_prompts(dismissed).unwrap().is_empty());
+            assert_eq!(
+                shared.take_prompts(dismissed).unwrap(),
+                Vec::<String>::new()
+            );
         }
     }
 
@@ -1610,7 +1613,7 @@ mod tests {
         assert_eq!(updated.attributes, attributes);
         agent.delete_item(&item.id).unwrap();
         assert!(agent.store.get(secret_item(&item.id)).unwrap().is_none());
-        assert!(agent.all_items().unwrap().is_empty());
+        assert_eq!(agent.all_items().unwrap(), Vec::new());
         let index: Index = serde_json::from_slice(
             &agent
                 .store
@@ -1619,7 +1622,7 @@ mod tests {
                 .expect("index is retained"),
         )
         .unwrap();
-        assert!(index.items.is_empty());
+        assert_eq!(index.items, Vec::new());
     }
 
     #[test]
@@ -1861,8 +1864,8 @@ mod tests {
                 .unwrap();
             };
             let ((service_result, collection_result), ()) = tokio::join!(searches, unlock);
-            assert!(service_result.unwrap().0.is_empty());
-            assert!(collection_result.unwrap().is_empty());
+            assert_eq!(service_result.unwrap().0, Vec::<OwnedObjectPath>::new());
+            assert_eq!(collection_result.unwrap(), Vec::<OwnedObjectPath>::new());
             assert!(requested.try_recv().is_err());
         });
     }
@@ -2222,7 +2225,7 @@ mod tests {
             ];
             let (unlocked, path): (Vec<OwnedObjectPath>, OwnedObjectPath) =
                 service.call("Unlock", &(objects.clone(),)).await.unwrap();
-            assert!(unlocked.is_empty());
+            assert_eq!(unlocked, Vec::<OwnedObjectPath>::new());
             // A different connection invoking Prompt must not replace the original requester.
             let invoker = Connection::session().await.unwrap();
             let prompt = Proxy::new(&invoker, BUS_NAME, path, "org.freedesktop.Secret.Prompt")
@@ -2255,7 +2258,7 @@ mod tests {
             .call("Unlock", &(vec![object_path(COLLECTION_PATH).unwrap()],))
             .await
             .unwrap();
-        assert!(unlocked.is_empty());
+        assert_eq!(unlocked, Vec::<OwnedObjectPath>::new());
         assert!(prompt.as_str().starts_with(PROMPT_PREFIX));
         Proxy::new(client, BUS_NAME, prompt, "org.freedesktop.Secret.Prompt")
             .await
@@ -2313,12 +2316,12 @@ mod tests {
             .await
             .unwrap();
             assert!(collection.get_property::<bool>("Locked").await.unwrap());
-            assert!(
+            assert_eq!(
                 collection
                     .get_property::<Vec<OwnedObjectPath>>("Items")
                     .await
-                    .unwrap()
-                    .is_empty()
+                    .unwrap(),
+                Vec::<OwnedObjectPath>::new()
             );
             let alias: OwnedObjectPath = service
                 .call("ReadAlias", &("default",))
@@ -2688,7 +2691,7 @@ mod tests {
             unix_time(),
         );
         assert!(response.result.is_err());
-        assert!(target.all_items().unwrap().is_empty());
+        assert_eq!(target.all_items().unwrap(), Vec::new());
         assert!(
             target
                 .store
@@ -2755,7 +2758,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(paths.len(), 1);
-            assert!(locked.is_empty());
+            assert_eq!(locked, Vec::<OwnedObjectPath>::new());
             let input = OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
             let (_, session): (OwnedValue, OwnedObjectPath) =
                 proxy.call("OpenSession", &("plain", input)).await.unwrap();

@@ -166,7 +166,7 @@ uuid = { version = "1.0", features = ["v4"], optional = true }
 zeroize = "1.8.1"
 # Shared integration/factorseal-cxf branch for upstream PRs #153 and #154.
 credential-exchange-format = { git = "https://github.com/domenkozar/credential-exchange", rev = "886ff4641b86da458d467185532b8b8e222f6060", features = ["zeroize", "preserve-unknown"], optional = true }
-zip = { version = "8.6", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "9.0", default-features = false, features = ["deflate"], optional = true }
 zxcvbn = { version = "3.1.1", optional = true }
 
 [target.'cfg(unix)'.dependencies]

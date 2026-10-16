@@ -8,6 +8,9 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+# Turso disables branches' defaults; its no_std abort uses an intrinsic removed
+# from nightly. Use std::process::abort for these hosted fuzz binaries.
+branches = { version = "0.4.6", default-features = false, features = ["std"] }
 libfuzzer-sys = "0.4"
 factorseal = { path = "..", default-features = false, features = ["fuzzing"] }
 

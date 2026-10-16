@@ -796,7 +796,7 @@ mod tests {
         let identity = caller_identity(&left, &CallerIdentityCache::default()).unwrap();
         assert_eq!(identity.platform(), CallerPlatform::Linux);
         assert_eq!(identity.user_id(), format!("uid:{}", getuid().as_raw()));
-        assert!(!identity.application_id().is_empty());
+        assert_ne!(identity.application_id(), "");
         assert_ne!(identity.executable_digest(), &[0; 32]);
     }
 

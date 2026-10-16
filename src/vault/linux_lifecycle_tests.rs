@@ -37,7 +37,7 @@ impl Manager {
     }
 
     fn get_session(&self, id: &str) -> OwnedObjectPath {
-        assert!(!id.is_empty());
+        assert_ne!(id, "");
         self.sessions.lock().unwrap().first().map_or_else(
             || SESSION_PATH.try_into().unwrap(),
             |session| session.4.clone(),

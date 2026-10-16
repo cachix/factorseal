@@ -1049,7 +1049,7 @@ mod tests {
             reviewed_pending(&["reviewed"], &["reviewed", "new"]),
             vec!["reviewed"]
         );
-        assert!(reviewed_pending(&["expired"], &["new"]).is_empty());
+        assert_eq!(reviewed_pending(&["expired"], &["new"]), Vec::<&str>::new());
     }
 
     #[test]

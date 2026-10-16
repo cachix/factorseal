@@ -12,7 +12,7 @@ pub(super) fn import(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
     let mut total = 0_u64;
     for index in 0..archive.len() {
         let file = archive.by_index(index)?;
-        if !names.insert(file.name().to_owned()) {
+        if !names.insert(file.name()?.into_owned()) {
             bail!("1PUX contains duplicate file names");
         }
         total = total
@@ -64,13 +64,13 @@ pub(super) fn import(bytes: &[u8]) -> anyhow::Result<Vec<PersonalSecret>> {
     // Source item metadata retains their document IDs for association.
     for index in 0..archive.len() {
         let file = archive.by_index(index)?;
-        if file.is_dir() || matches!(file.name(), "export.attributes" | "export.data") {
+        let name = file.name()?.into_owned();
+        if file.is_dir() || matches!(name.as_str(), "export.attributes" | "export.data") {
             continue;
         }
-        if !file.name().starts_with("files/") {
+        if !name.starts_with("files/") {
             bail!("1PUX contains an unsupported archive entry");
         }
-        let name = file.name().to_owned();
         drop(file);
         let content = read_file(&mut archive, &name)?;
         let mut item = PersonalSecret::new(
