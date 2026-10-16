@@ -558,6 +558,7 @@ impl DesktopRuntime {
         })
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn watch_permissions(
         &self,
         metadata: &VaultMetadata,
