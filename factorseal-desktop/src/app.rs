@@ -984,7 +984,12 @@ impl DesktopView {
                 }
             },
         );
-        Self {
+        let window_activation = cx.observe_window_activation(window, |view, window, cx| {
+            if window.is_window_active() {
+                view.focus_unlock_password(window, cx);
+            }
+        });
+        let view = Self {
             settings_open: false,
             issue_report_busy: false,
             issue_report_notice: None,
@@ -1031,7 +1036,27 @@ impl DesktopView {
             system_integrations_expanded: true,
             #[cfg(target_os = "linux")]
             wifi_migration: wifi::State::default(),
-            _subscriptions: vec![password_submit, vault_search_change],
+            _subscriptions: vec![password_submit, vault_search_change, window_activation],
+        };
+        view.focus_unlock_password(window, cx);
+        view
+    }
+
+    fn focus_unlock_password(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            return;
+        }
+        let Snapshot::Sealed { metadata, .. } = &self.snapshot else {
+            return;
+        };
+        if self
+            .selected_group
+            .as_ref()
+            .unwrap_or(metadata.preferred_unlock_group())
+            .requires(factorseal::UnlockFactorKind::Password)
+        {
+            self.password
+                .update(cx, |input, cx| input.focus(window, cx));
         }
     }
 
@@ -1803,19 +1828,16 @@ impl DesktopView {
         };
         let password_field = if unlocking {
             // Preserve the form's height without leaving an editable secret field.
-            field_label(
-                "Password",
-                div()
-                    .w_full()
-                    .h(px(40.))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.muted),
-            )
-            .opacity(0.5)
+            div()
+                .w_full()
+                .h(px(40.))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.muted)
+                .opacity(0.5)
         } else {
-            field_label("Password", self.password.clone())
+            div().w_full().child(self.password.clone())
         };
 
         vault_card(&theme)
