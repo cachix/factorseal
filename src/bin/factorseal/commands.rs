@@ -958,24 +958,35 @@ fn desktop_executable() -> Result<PathBuf, CliError> {
 
     let current =
         std::env::current_exe().map_err(|error| CliError::DesktopLaunch(error.to_string()))?;
+    if let Some(executable) = installed_desktop_executable(&current) {
+        return Ok(executable);
+    }
+    Err(CliError::DesktopLaunch(format!(
+        "Factorseal Desktop is not installed beside {}; install Factorseal Desktop or set {DESKTOP_EXECUTABLE_ENV}",
+        current.display()
+    )))
+}
+
+pub(super) fn installed_desktop_executable(current: &Path) -> Option<PathBuf> {
     let name = if cfg!(windows) {
         "factorseal-desktop.exe"
     } else {
         "factorseal-desktop"
     };
-    let sibling = current
-        .parent()
-        .ok_or_else(|| {
-            CliError::DesktopLaunch("the Factorseal executable has no parent directory".to_owned())
-        })?
-        .join(name);
+    let directory = current.parent()?;
+    let sibling = directory.join(name);
     if sibling.is_file() {
-        return Ok(sibling);
+        return Some(sibling);
     }
-    Err(CliError::DesktopLaunch(format!(
-        "{name} is not installed beside {}; install Factorseal Desktop or set {DESKTOP_EXECUTABLE_ENV}",
-        current.display()
-    )))
+    #[cfg(target_os = "macos")]
+    if directory.ends_with("Contents/Helpers/FactorsealWorker.app/Contents/MacOS") {
+        // current_exe resolves the CLI alias into its provisioned worker bundle.
+        let desktop = directory.ancestors().nth(4)?.join("MacOS").join(name);
+        if desktop.is_file() {
+            return Some(desktop);
+        }
+    }
+    None
 }
 
 pub(super) fn wait_for_initialization(root: &Path, poll_interval: Duration) {

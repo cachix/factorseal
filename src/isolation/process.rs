@@ -22,17 +22,28 @@ pub(super) use std::os::unix::net::UnixStream as Channel;
 
 /// Helpers are installed beside their host executable. Cargo test binaries
 /// live one directory below the helpers built by `cargo build --bins`.
+/// A provisioned macOS vault worker lives in a nested bundle below the app.
 pub fn helper_executable(host: &Path, name: &str) -> io::Result<PathBuf> {
     if !matches!(name, "factorseal-parser" | "factorseal-network") {
         return Err(io::Error::other("unknown helper"));
     }
     let mut directory = host
         .parent()
-        .ok_or_else(|| io::Error::other("host has no directory"))?;
+        .ok_or_else(|| io::Error::other("host has no directory"))?
+        .to_path_buf();
     if directory.file_name().is_some_and(|name| name == "deps") {
         directory = directory
             .parent()
-            .ok_or_else(|| io::Error::other("invalid build directory"))?;
+            .ok_or_else(|| io::Error::other("invalid build directory"))?
+            .to_path_buf();
+    }
+    #[cfg(target_os = "macos")]
+    if directory.ends_with("Contents/Helpers/FactorsealWorker.app/Contents/MacOS") {
+        directory = directory
+            .ancestors()
+            .nth(4)
+            .ok_or_else(|| io::Error::other("invalid worker bundle"))?
+            .join("MacOS");
     }
     let name = if cfg!(windows) {
         format!("{name}.exe")

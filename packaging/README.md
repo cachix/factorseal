@@ -13,8 +13,9 @@ artifact is ready to release:
   interactive session-agent helper, and one-command physical acceptance runner;
 - `build-unix.sh macos` creates a Desktop app tarball and an unsigned `.pkg`.
   Opening `Factorseal.app` launches Desktop; its login launcher starts Desktop
-  in the background. The app is
-  signed locally unless an Apple identity and profile are supplied;
+  in the background. Xcode builds and signs the app. Set
+  `FACTORSEAL_MACOS_DEVELOPMENT_TEAM` to enable team signing.
+  Without a team, the package is only for build tests;
 - `build-windows.ps1` creates a ZIP containing Desktop, the CLI and helper
   executables, the askpass helper, Scheduled Task installer, and one-command
   physical acceptance runner;
@@ -128,19 +129,6 @@ installed from a private Store flight. After installation, open Factorseal from
 the Start menu to initialize and unlock the vault in Desktop. The CLI is also
 available from a fresh terminal as `factorseal`. The Store package does not
 configure automatic login startup.
-
-For physical macOS testing, provide an Apple Development identity and a
-matching profile for `dev.factorseal`:
-
-```console
-FACTORSEAL_MACOS_SIGNING_IDENTITY='Apple Development: You (TEAMID)' \
-FACTORSEAL_MACOS_PROVISIONING_PROFILE=/private/path/Factorseal.provisionprofile \
-devenv shell -- packaging/build-unix.sh macos
-```
-
-Set both variables or neither. Without them, the app cannot use Factorseal's
-protected Keychain storage or pass physical acceptance. Release distribution
-also requires signing the `.pkg` and notarization.
 
 ## Obtaining a password factor
 

@@ -909,3 +909,45 @@ fn approval_grant_duration_uses_app_default_and_accepts_overrides() {
     let mut closed = std::io::Cursor::new(Vec::<u8>::new());
     assert!(read_grant_duration(&mut closed, &mut Vec::new(), None).is_err());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn provisioned_worker_finds_installed_executables() -> std::io::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    let contents = directory
+        .path()
+        .canonicalize()?
+        .join("Factorseal.app/Contents");
+    let executables = contents.join("MacOS");
+    let worker_directory = contents.join("Helpers/FactorsealWorker.app/Contents/MacOS");
+    fs::create_dir_all(&executables)?;
+    fs::create_dir_all(&worker_directory)?;
+    let worker = worker_directory.join("factorseal");
+    fs::write(&worker, b"worker")?;
+    let cli = executables.join("factorseal");
+    symlink(&worker, &cli)?;
+    let current = cli.canonicalize()?;
+
+    assert_eq!(commands::installed_desktop_executable(&current), None);
+    let desktop = executables.join("factorseal-desktop");
+    fs::write(&desktop, b"desktop")?;
+    assert_eq!(
+        commands::installed_desktop_executable(&current),
+        Some(desktop)
+    );
+
+    for name in ["factorseal-parser", "factorseal-network"] {
+        let missing = factorseal::isolation::helper_executable(&current, name)
+            .expect_err("helper is not installed yet");
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        let helper = executables.join(name);
+        fs::write(&helper, b"helper")?;
+        assert_eq!(
+            factorseal::isolation::helper_executable(&current, name)?,
+            helper
+        );
+    }
+    Ok(())
+}

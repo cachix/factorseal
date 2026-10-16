@@ -708,7 +708,10 @@ mod tests {
         for kind in PersonalSecretKind::ALL {
             let item = PersonalSecret::template(kind, kind.label().into());
             assert!(ids.insert(item.id.clone()));
-            assert!(!item.sections[0].fields.is_empty());
+            assert_ne!(
+                item.sections[0].fields,
+                [] as [crate::personal::PersonalField; 0]
+            );
             assert_eq!(
                 item,
                 PersonalSecret::decode("", &item.encode().unwrap()).unwrap()

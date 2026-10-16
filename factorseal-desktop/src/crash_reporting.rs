@@ -667,7 +667,7 @@ mod tests {
             |_| true,
         )
         .unwrap();
-        assert!(state.sent.is_empty());
+        assert_eq!(state.sent, [] as [std::string::String; 0]);
         let mut restarted = DeliveryState::load(&path, &config.dsn.to_string()).unwrap();
         assert!(restarted.next_attempt_ms > now_ms());
         assert_eq!(restarted.first_enabled_ms, state.first_enabled_ms);
@@ -723,7 +723,7 @@ mod tests {
             |_| false,
         )
         .unwrap();
-        assert!(state.sent.is_empty());
+        assert_eq!(state.sent, [] as [std::string::String; 0]);
     }
 
     fn mock_server(response: impl Into<String>) -> (Dsn, std::thread::JoinHandle<Vec<u8>>) {
@@ -898,7 +898,10 @@ mod tests {
         let received = sentry::Envelope::from_slice(&request[body_start..]).unwrap();
         let event = received.event().unwrap();
         assert_eq!(event.message.as_deref(), Some("User-reported issue"));
-        assert!(event.exception.values.is_empty());
+        assert_eq!(
+            event.exception.values,
+            [] as [sentry::protocol::Exception; 0]
+        );
         assert_eq!(event.tags["report_kind"], "user_report");
         assert_eq!(
             event.extra["issue_description"],

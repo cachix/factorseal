@@ -28,7 +28,7 @@ command -v cargo >/dev/null || { echo "Install the repository's Rust toolchain f
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
-results_root="$repo_root/platform/apple/.build/credential-exchange-results"
+results_root="$repo_root/platform/macos/credential-exchange/.build/credential-exchange-results"
 mkdir -p "$results_root"
 results_dir=$(mktemp -d "$results_root/run.XXXXXX")
 export FACTORSEAL_TEST_APPLE_CXF_OUTPUT="$results_dir/apple-roundtrip.json"
@@ -52,7 +52,7 @@ cargo test --locked --no-default-features --features transfer --lib \
     transfer::cxf::tests::native_fields_round_trip_through_typed_cxf_model -- --exact \
     2>&1 | tee "$results_dir/rust-native-fixture.log"
 [[ -s $FACTORSEAL_TEST_APPLE_NATIVE_CXF ]]
-xcrun swift test --package-path platform/apple -Xswiftc -warnings-as-errors 2>&1 | tee "$results_dir/swift-tests.log"
+xcrun swift test --package-path platform/macos/credential-exchange -Xswiftc -warnings-as-errors 2>&1 | tee "$results_dir/swift-tests.log"
 if [[ ! -s $FACTORSEAL_TEST_APPLE_CXF_OUTPUT ]]; then
     echo "Swift did not produce the required synthetic CXF roundtrip artifact." >&2
     exit 1

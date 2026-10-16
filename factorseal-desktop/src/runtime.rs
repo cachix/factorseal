@@ -1378,7 +1378,7 @@ mod tests {
 
         assert!(responses.is_empty());
         assert_eq!(contents.entries, vec![first, second]);
-        assert!(contents.permissions.is_empty());
+        assert_eq!(contents.permissions, [] as [factorseal::Permission; 0]);
         assert!(!contents.permissions_loading);
     }
 
@@ -1409,7 +1409,7 @@ mod tests {
         .unwrap();
         assert_eq!(contents.entries, vec![entry.clone()]);
         assert!(contents.permissions_loading);
-        assert!(contents.permissions.is_empty());
+        assert_eq!(contents.permissions, [] as [factorseal::Permission; 0]);
 
         // An unsuccessful follow-up must leave the visible inventory intact.
         contents.complete_permissions(Err("permission request failed".to_owned()));

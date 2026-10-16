@@ -1,7 +1,7 @@
 use super::*;
 
 const APPLE_FIXTURE: &[u8] = include_bytes!(
-    "../../../platform/apple/Tests/FactorSealCredentialExchangeTests/Fixtures/login-totp.json"
+    "../../../platform/macos/credential-exchange/Tests/FactorSealCredentialExchangeTests/Fixtures/login-totp.json"
 );
 
 fn assert_json_preserved(source: &Value, result: &Value, allow_extra_array_items: bool) {

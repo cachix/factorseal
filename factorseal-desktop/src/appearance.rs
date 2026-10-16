@@ -263,7 +263,7 @@ mod tests {
             .collect();
         assert_eq!(ids, expected.map(serde_json::Value::from));
         for entry in &CATALOG.themes {
-            assert!(!entry.label.trim().is_empty());
+            assert_ne!(entry.label.trim(), "");
             let builtin = matches!(entry.id, Choice::FactorSeal | Choice::System);
             assert_eq!(entry.preset.is_none(), builtin);
             assert_eq!(entry.mode.is_none(), builtin);
