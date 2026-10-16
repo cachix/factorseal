@@ -10,6 +10,7 @@ use super::{
 
 mod bootstrap;
 mod chain;
+mod manifest;
 
 #[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_commit(bytes: &[u8]) {
@@ -25,6 +26,12 @@ pub(crate) fn fuzz_commit(bytes: &[u8]) {
     });
     if let Ok(commit) = serde_json::from_slice::<chain::ProtectedCommit>(bytes) {
         let _ = commit.verify(commit.commit_id, *id, key);
+    }
+    if let Ok(head) = serde_json::from_slice::<manifest::CurrentHead>(bytes) {
+        let _ = head.verify(head.head_id);
+    }
+    if let Ok(manifest) = serde_json::from_slice::<manifest::StateManifest>(bytes) {
+        let _ = manifest.verify(super::VaultId::from_bytes([0; 16]), *id, key);
     }
 }
 
@@ -50,6 +57,38 @@ pub(crate) fn fuzz_commit_seed() -> Vec<u8> {
         .unwrap(),
     )
     .unwrap()
+}
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_current_state_seeds() -> Vec<Vec<u8>> {
+    let public_key = super::signature::public_key_for_seed(&[0; 32]);
+    let vault = super::VaultId::from_bytes([0; 16]);
+    let device = super::DeviceKeyId::for_public_key(&public_key);
+    let document = super::DocumentId::from_bytes([0; 32]);
+    let head = manifest::CurrentHead::new(chain::CommitContents {
+        previous_commit_id: None,
+        vault_id: vault,
+        document_id: document,
+        scope: super::DocumentKind::LocalKeyring,
+        generation: 1,
+        key_epoch: 1,
+        wrapped_key_digest: [0; 32],
+        snapshot_digest: [0; 32],
+        next_eviction: None,
+        device_key_id: device,
+    });
+    let manifest = manifest::StateManifest::new(
+        vault,
+        device,
+        1,
+        manifest::inventory_digest([(&document, &head.head_id)]),
+        false,
+        &super::signature::SoftwareSigner(&[0; 32]),
+    )
+    .unwrap();
+    vec![
+        serde_json::to_vec(&head).unwrap(),
+        serde_json::to_vec(&manifest).unwrap(),
+    ]
 }
 mod database;
 mod migration;

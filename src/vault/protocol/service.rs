@@ -628,15 +628,6 @@ fn permission_manager_deadline(
     )
 }
 
-#[cfg(feature = "vault-store")]
-fn require_permission_manager(
-    state: &LiveStateGuard<'_>,
-    caller: &CallerIdentity,
-    now: u64,
-) -> VaultResult<()> {
-    permission_manager_deadline(state, caller, now).map(|_| ())
-}
-
 fn require_live_manager(
     state: &LiveStateGuard<'_>,
     caller: &CallerIdentity,

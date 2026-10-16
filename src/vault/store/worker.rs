@@ -33,6 +33,7 @@ use super::{HistoryPage, StorePage};
 
 mod integrity;
 mod mutation;
+mod state;
 #[cfg(feature = "personal-sync")]
 mod sync;
 #[cfg(feature = "personal-sync")]
@@ -40,13 +41,6 @@ pub(crate) use sync::{PairingCommand, SyncCommand, SyncReply};
 
 const COMMAND_QUEUE: usize = 64;
 const MAX_COMMIT_CHAIN: usize = 1_000_000;
-/// Chain length that triggers compaction. Every mutation appends a whole
-/// encrypted document snapshot plus one signed commit, and startup verifies
-/// the whole chain, so an unpruned history grows both the database and unseal
-/// latency without bound in the number of writes.
-const MAX_RETAINED_COMMITS: usize = 256;
-/// Also bound retained ciphertext when a small number of writes are large.
-const MAX_RETAINED_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 /// Provenance recorded when the store removes a record on its own because
 /// its eviction deadline passed.
 const EXPIRY: Provenance = Provenance::service(ServiceReason::Expiry);
@@ -620,15 +614,14 @@ struct StoreWorker {
 
 /// The only freshness/scheduling authority during a lease. Never reconstruct
 /// this from mutable SQL rows except during full startup verification.
-#[derive(Default)]
+#[derive(Default, Eq, PartialEq)]
 struct VerifiedStoreState {
     head: Option<[u8; 32]>,
     documents: BTreeMap<DocumentId, VerifiedDocument>,
-    chain_length: usize,
-    retained_snapshot_bytes: u64,
+    manifest_digest: Option<[u8; 32]>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct VerifiedDocument {
     row: DocumentRow,
     snapshot_digest: [u8; 32],
@@ -636,7 +629,7 @@ struct VerifiedDocument {
 }
 
 impl VerifiedDocument {
-    fn new(commit: &ProtectedCommit, snapshot_bytes: u64) -> Self {
+    fn from_legacy(commit: &ProtectedCommit, snapshot_bytes: u64) -> Self {
         Self {
             row: DocumentRow {
                 vault_id: commit.vault_id,
@@ -728,15 +721,15 @@ impl StoreWorker {
             verified: VerifiedStoreState::default(),
             verifying_key,
         };
-        let chain_started = Instant::now();
-        let chain_result = worker.verify_commit_chain().await;
-        crate::timing::record(
+        let verification_started = Instant::now();
+        let state_result = worker.initialize_current_state().await;
+        crate::timing::record_result(
             "store_open",
-            "verify_commit_chain",
-            chain_started,
-            if chain_result.is_ok() { "ok" } else { "error" },
+            "verify_current_state",
+            verification_started,
+            &state_result,
         );
-        worker.verified = chain_result?;
+        state_result?;
         let purge_started = Instant::now();
         let purge_result = worker.purge_expired(unix_time()?).await;
         crate::timing::record(
@@ -747,21 +740,6 @@ impl StoreWorker {
         );
         purge_result?;
         Box::pin(worker.migrate_personal_document()).await?;
-        // A database written before compaction existed still carries its whole
-        // history; shrink it once here so the next unseal is fast.
-        let compact_started = Instant::now();
-        let compact_result = worker.compact_if_needed().await;
-        crate::timing::record(
-            "store_open",
-            "compact_if_needed",
-            compact_started,
-            if compact_result.is_ok() {
-                "ok"
-            } else {
-                "error"
-            },
-        );
-        compact_result?;
         Ok(worker)
     }
 
