@@ -1,0 +1,27 @@
+[workspace]
+
+[package]
+name = "wsl2-hyperv-socket-bridge-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "windows-listener"
+path = "src/bin/windows_listener.rs"
+
+[[bin]]
+name = "wsl-client"
+path = "src/bin/wsl_client.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = "0.5"
+
+[lints.rust]
+unsafe_code = "deny"
