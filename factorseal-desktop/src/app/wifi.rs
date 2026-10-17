@@ -26,7 +26,7 @@ impl DesktopView {
             let theme = cx.theme();
             let mut content = v_flex().gap_3()
                 .child("Move saved passwords from NetworkManager and your current keyring into FactorSeal. Use this when FactorSeal is your only Wi-Fi secret agent. Existing connections stay active; one-time passwords are left unchanged.")
-                .child(Button::new("migrate-wifi-passwords")
+                .child(button("migrate-wifi-passwords")
                     .primary()
                     .icon(Glyph::Transfer)
                     .loading(self.wifi_migration.busy)

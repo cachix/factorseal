@@ -128,17 +128,22 @@ impl ChangeSources {
     }
 }
 
-const UI_FONTS: [&[u8]; 2] = [
+const UI_FONTS: [&[u8]; 3] = [
     include_bytes!("../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"),
     include_bytes!("../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf"),
+    include_bytes!("../../assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf"),
 ];
 
 #[cfg(target_os = "linux")]
-const UI_FONT_FAMILY: &str = "IBM Plex Sans";
+pub(crate) const UI_FONT_FAMILY: &str = "IBM Plex Sans";
+
+#[cfg(target_os = "linux")]
+pub(crate) const MONO_FONT_FAMILY: &str = "IBM Plex Mono";
 
 #[cfg(target_os = "linux")]
 pub(crate) fn installed_or_bundled_font(
     family: gpui::SharedString,
+    bundled: &'static str,
     cx: &App,
 ) -> gpui::SharedString {
     let text_system = cx.text_system();
@@ -149,7 +154,7 @@ pub(crate) fn installed_or_bundled_font(
     {
         family
     } else {
-        UI_FONT_FAMILY.into()
+        bundled.into()
     }
 }
 
@@ -798,6 +803,9 @@ pub(crate) fn map_app_tokens(theme: &mut gpui_component::theme::Theme) {
 }
 
 pub(crate) fn sync_component_colors(theme: &mut gpui_component::theme::Theme) {
+    use gpui::ColorExt as _;
+
+    theme.transparent = theme.secondary_hover.opacity(0.);
     theme.tab = theme.background;
     theme.tab_foreground = theme.muted_foreground;
     theme.tab_active = theme.popover;

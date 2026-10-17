@@ -12,8 +12,7 @@ use crate::password_generator::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GeneratorTarget {
-    Draft(usize),
-    Saved(usize),
+    Field(usize),
 }
 
 #[derive(Default)]
@@ -75,6 +74,8 @@ pub(super) fn strength_meter(strength: Strength, cx: &App) -> impl IntoElement {
         .items_center()
         .child(h_flex().flex_1().gap_1().children((0..3).map(|level| {
             div()
+                .id(("strength-level", level))
+                .transitions(|transitions| transitions.bg(crate::motion::change()))
                 .flex_1()
                 .h_1()
                 .rounded_full()
@@ -245,7 +246,7 @@ impl Render for PasswordGenerator {
             (Style::Words, "generator-words", "Words"),
         ] {
             styles = styles.child(
-                Button::new(id)
+                button(id)
                     .label(label)
                     .selected(self.options.style == style)
                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -284,7 +285,7 @@ impl Render for PasswordGenerator {
                             }),
                     )
                     .child(
-                        Button::new("reveal-generated-password")
+                        button("reveal-generated-password")
                             .ghost()
                             .icon(if self.revealed {
                                 IconName::EyeOff
@@ -301,7 +302,7 @@ impl Render for PasswordGenerator {
                             })),
                     )
                     .child(
-                        Button::new("regenerate-password")
+                        button("regenerate-password")
                             .ghost()
                             .icon(IconName::Redo)
                             .tooltip("Generate another")
@@ -335,7 +336,7 @@ impl Render for PasswordGenerator {
             )
             .child(
                 h_flex().justify_end().child(
-                    Button::new("use-generated-password")
+                    button("use-generated-password")
                         .primary()
                         .label("Use password")
                         .disabled(self.preview.is_none())
@@ -353,15 +354,8 @@ impl DesktopView {
         style: impl FnOnce(Button) -> Button,
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
-        let (button, tooltip) = match target {
-            GeneratorTarget::Draft(index) => {
-                (("generate-personal-password", index), "Generate a password")
-            }
-            GeneratorTarget::Saved(index) => (
-                ("generate-saved-passphrase", index),
-                "Generate a password. Save it with Enter or by leaving the field.",
-            ),
-        };
+        let GeneratorTarget::Field(key) = target;
+        let (id, tooltip) = (("generate-field-password", key), "Generate a password");
         let open = self.generator_target == Some(target);
         let panel = open
             .then(|| self.generator_anchor.row.get())
@@ -389,7 +383,7 @@ impl DesktopView {
                     }))
             })
             .child(style(
-                Button::new(button)
+                button(id)
                     .icon(Glyph::Generate)
                     .when(!icon_only, |button| button.label("Generate"))
                     .tooltip(tooltip)
@@ -409,7 +403,7 @@ impl DesktopView {
     }
 
     fn render_generator_panel(&self, cx: &Context<Self>) -> impl IntoElement {
-        div().py_1().child(
+        crate::motion::enter("password-generator-panel", div().relative().py_1()).child(
             div()
                 .id("password-generator")
                 .occlude()
@@ -461,22 +455,8 @@ impl DesktopView {
     ) {
         let target = self.generator_target;
         self.close_generator(cx);
-        match target {
-            Some(GeneratorTarget::Draft(index)) => {
-                if let Some(field) = self.personal_fields.get(index)
-                    && personal_actions::can_generate(self.personal_kind, field)
-                {
-                    field
-                        .value
-                        .update(cx, |input, cx| input.set_value(password, window, cx));
-                    self.personal_error = None;
-                    self.copied_personal_field = None;
-                }
-            }
-            Some(GeneratorTarget::Saved(index)) => {
-                self.use_generated_saved_value(index, password, window, cx);
-            }
-            None => {}
+        if let Some(GeneratorTarget::Field(key)) = target {
+            self.use_generated_editor_value(key, password, window, cx);
         }
         cx.notify();
     }

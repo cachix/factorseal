@@ -8,6 +8,7 @@ mod devices;
 mod entry_access;
 mod error_notice;
 mod generator;
+mod item_editor;
 #[cfg(target_os = "linux")]
 mod niri;
 mod personal_actions;
@@ -49,7 +50,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Root, Selectable as _, Side, Sizable as _, Size,
     StyledExt as _, WindowExt as _,
-    button::{Button, ButtonCustomVariant, ButtonVariants as _},
+    button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     clipboard::Clipboard,
     dialog::{Cancel as CancelDialog, Confirm as ConfirmDialog, DialogFooter},
@@ -65,7 +66,7 @@ use gpui_tray::{Icon, Tray};
 use zeroize::Zeroizing;
 
 use crate::appearance::TypeScale as _;
-use crate::controls::ClickStyle as _;
+use crate::controls::{ClickStyle as _, button};
 use crate::runtime::{
     DesktopRuntime, PERSONAL_SECRET_NAMESPACE, RuntimeConfig, Snapshot, TransferKey,
     TransferSummary, UnlockStep, VaultContents,
@@ -314,7 +315,7 @@ fn segmented<T: Copy + PartialEq + 'static>(
                 .map(|(index, (value, label))| {
                     let on_select = on_select.clone();
                     let chosen = value == selected;
-                    Button::new((id, index))
+                    button((id, index))
                         .ghost()
                         .label(label)
                         .selected(chosen)
@@ -398,12 +399,6 @@ fn personal_field_icon(id: &str, field_type: &PersonalFieldType) -> gpui_compone
     }
 }
 
-fn field_name_icon(icon: gpui_component::Icon, cx: &App) -> Div {
-    div()
-        .flex_none()
-        .child(icon.size(rems(1.)).text_color(cx.theme().muted_foreground))
-}
-
 const CUSTOM_FIELD_KINDS: [PersonalFieldType; 9] = [
     PersonalFieldType::Concealed,
     PersonalFieldType::Text,
@@ -423,11 +418,12 @@ fn field_kind_picker(
 ) -> impl IntoElement {
     let selected = selected.clone();
     let pick = Rc::new(pick);
-    Button::new(id)
-        .icon(personal_field_icon("", &selected))
-        .label(selected.label())
-        .dropdown_caret(true)
+    button(id)
+        .ghost()
+        .xsmall()
+        .icon(IconName::ChevronDown)
         .dropdown_menu(move |mut menu, _, _| {
+            menu = menu.check_side(Side::Right);
             for kind in CUSTOM_FIELD_KINDS {
                 let pick = Rc::clone(&pick);
                 let picked = kind.clone();
@@ -450,14 +446,17 @@ fn personal_entry_kind(entry: &factorseal::VaultEntryMetadata) -> PersonalSecret
 }
 
 fn error_banner(message: String, color: Hsla) -> Div {
-    div()
-        .w_full()
-        .px_4()
-        .py_3()
-        .rounded_lg()
-        .bg(color.opacity(0.1))
-        .text_color(color)
-        .child(message)
+    div().w_full().child(crate::motion::enter(
+        gpui::ElementId::Name(message.clone().into()),
+        div()
+            .w_full()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .bg(color.opacity(0.1))
+            .text_color(color)
+            .child(message),
+    ))
 }
 
 fn field_message(message: String, color: Hsla) -> Div {
@@ -741,10 +740,10 @@ fn wifi_credential_label(field: Option<&str>) -> &str {
 }
 
 fn category_badge(integration_error: bool, count: usize) -> String {
-    if integration_error {
-        format!("! {count}")
-    } else {
-        count.to_string()
+    match (integration_error, count) {
+        (true, 0) => "!".to_owned(),
+        (true, count) => format!("! {count}"),
+        (false, count) => count.to_string(),
     }
 }
 
@@ -1319,21 +1318,23 @@ fn list_selection(selection: Option<&VaultSelection>) -> Option<VaultSelection> 
     }
 }
 
+fn entry_element_id(
+    prefix: &'static str,
+    entry: &factorseal::VaultEntryMetadata,
+) -> gpui::ElementId {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    entry.partition.hash(&mut hasher);
+    entry.address.hash(&mut hasher);
+    (prefix, hasher.finish()).into()
+}
+
 fn is_selected_entry(
     selection: Option<&VaultSelection>,
     entry: &factorseal::VaultEntryMetadata,
 ) -> bool {
     matches!(selection, Some(VaultSelection::Entry(selected))
         if selected.address == entry.address && selected.partition == entry.partition)
-}
-
-struct PersonalDraftField {
-    section: String,
-    section_label: String,
-    id: String,
-    label: gpui::Entity<InputState>,
-    field_type: PersonalFieldType,
-    value: gpui::Entity<SecretInputState>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1352,9 +1353,11 @@ struct DesktopView {
     password: gpui::Entity<SecretInputState>,
     password_confirmation: gpui::Entity<SecretInputState>,
     vault_search: gpui::Entity<InputState>,
-    personal_name: gpui::Entity<InputState>,
-    personal_kind: PersonalSecretKind,
-    personal_fields: Vec<PersonalDraftField>,
+    item_name: gpui::Entity<InputState>,
+    item_editor: Option<item_editor::Editor>,
+    item_leave: item_editor::Leave,
+    navigation: vault_layout::Navigation,
+    opening: u64,
     archive_passphrase: gpui::Entity<SecretInputState>,
     archive_passphrase_confirmation: gpui::Entity<SecretInputState>,
     setup_method: SetupMethod,
@@ -1365,7 +1368,6 @@ struct DesktopView {
     open_item_before_seal: Option<String>,
     vault_sidebar_scroll: ScrollHandle,
     personal_panel: PersonalPanel,
-    personal_error: Option<String>,
     personal_detail: personal_detail::PersonalDetail,
     personal_history: personal_history::History<personal_history::Change>,
     personal_toast: u64,
@@ -1378,6 +1380,7 @@ struct DesktopView {
     password_strength: Option<crate::password_generator::Strength>,
     password_rating: Option<Task<()>>,
     clipboard_notice: Option<u64>,
+    clipboard_notice_leaving: bool,
     error_details_open: bool,
     error_details_copied: bool,
     devices: factorseal::desktop_worker::sync::network::View,
@@ -1444,6 +1447,7 @@ impl DesktopView {
             dialog
                 .title("Report an issue")
                 .width(px(560.))
+                .close_button(false)
                 .overlay_closable(false)
                 .child(
                     v_flex()
@@ -1461,9 +1465,9 @@ impl DesktopView {
                 .when_some(error.get(), |dialog, error| dialog.child(error_banner(error.to_owned(), cx.theme().danger)))
                 .footer(
                     DialogFooter::new()
-                        .child(Button::new("cancel-issue-report").icon(IconName::Close).label("Cancel")
+                        .child(button("cancel-issue-report").icon(IconName::Close).label("Cancel")
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(CancelDialog), cx)))
-                        .child(Button::new("send-issue-report").primary().icon(Glyph::Upload).label("Send report")
+                        .child(button("send-issue-report").primary().icon(Glyph::Upload).label("Send report")
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(ConfirmDialog { secondary: false }), cx))),
                 )
                 .on_ok(move |_, window, cx| {
@@ -1591,7 +1595,7 @@ impl DesktopView {
     }
 
     fn render_report_issue_button(&self, cx: &mut Context<Self>) -> Button {
-        Button::new("report-issue")
+        button("report-issue")
             .icon(gpui_component::Icon::default().path(branding::BUG_ASSET))
             .ghost()
             .small()
@@ -1643,12 +1647,7 @@ impl DesktopView {
         let password_confirmation =
             cx.new(|cx| SecretInputState::new(window, cx).placeholder("Confirm password"));
         let vault_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search secrets"));
-        let personal_name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Name")
-                .clean_on_escape()
-        });
-        let personal_fields = Self::personal_draft(PersonalSecretKind::Login, window, cx);
+        let item_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
         let archive_passphrase =
             cx.new(|cx| SecretInputState::new(window, cx).placeholder("Archive passphrase"));
         let archive_passphrase_confirmation = cx
@@ -1711,9 +1710,11 @@ impl DesktopView {
             password,
             password_confirmation,
             vault_search,
-            personal_name,
-            personal_kind: PersonalSecretKind::Login,
-            personal_fields,
+            item_name,
+            item_editor: None,
+            item_leave: item_editor::Leave::default(),
+            navigation: vault_layout::Navigation::default(),
+            opening: 0,
             archive_passphrase,
             archive_passphrase_confirmation,
             setup_method: SetupMethod::default(),
@@ -1724,7 +1725,6 @@ impl DesktopView {
             open_item_before_seal: None,
             vault_sidebar_scroll: ScrollHandle::new(),
             personal_panel: PersonalPanel::Overview,
-            personal_error: None,
             personal_detail: personal_detail::PersonalDetail::default(),
             personal_history: personal_history::History::default(),
             personal_toast: 0,
@@ -1737,6 +1737,7 @@ impl DesktopView {
             password_strength: None,
             password_rating: None,
             clipboard_notice: None,
+            clipboard_notice_leaving: false,
             error_details_open: false,
             error_details_copied: false,
             devices: factorseal::desktop_worker::sync::network::View::default(),
@@ -1954,7 +1955,7 @@ impl DesktopView {
             .gap_2()
             .child(div().flex_1().child(input.clone()))
             .child(
-                Button::new(id)
+                button(id)
                     .ghost()
                     .flex_none()
                     .icon(if revealed {
@@ -1972,7 +1973,7 @@ impl DesktopView {
     }
 
     fn on_vault_search_changed(&mut self, cx: &mut Context<Self>) {
-        if !self.flush_personal_changes(cx) {
+        if !self.leave_item_editor(Self::on_vault_search_changed, cx) {
             return;
         }
         self.shortcuts.cursor = 0;
@@ -2066,6 +2067,7 @@ impl DesktopView {
     }
 
     fn clear_secret_inputs(&mut self, cx: &mut Context<Self>) {
+        self.opening = self.opening.wrapping_add(1);
         self.clear_personal_detail();
         self.copied_personal_field = None;
         self.close_generator(cx);
@@ -2080,9 +2082,8 @@ impl DesktopView {
         ] {
             input.update(cx, SecretInputState::clear);
         }
-        for field in &self.personal_fields {
-            field.value.update(cx, SecretInputState::clear);
-        }
+        self.item_editor = None;
+        self.item_leave = item_editor::Leave::default();
     }
 
     fn apply_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
@@ -2164,9 +2165,19 @@ impl DesktopView {
         {
             return;
         }
-        if !self.flush_personal_changes(cx) {
+        let retry = selection.clone();
+        if !self.leave_item_editor(move |view, cx| view.select_vault_item(retry, cx), cx) {
             return;
         }
+        match selection {
+            VaultSelection::Entry(entry) if is_personal_secret(&entry) => {
+                self.open_personal_entry(*entry, cx);
+            }
+            selection => self.show_vault_item(selection, cx),
+        }
+    }
+
+    fn show_vault_item(&mut self, selection: VaultSelection, cx: &mut Context<Self>) {
         self.clear_secret_inputs(cx);
         if matches!(
             selection,
@@ -2185,13 +2196,8 @@ impl DesktopView {
         }
         self.settings_open = false;
         self.section_opened = false;
-        self.selected_vault_item = Some(selection.clone());
+        self.selected_vault_item = Some(selection);
         self.remember_page(cx);
-        if let VaultSelection::Entry(entry) = selection
-            && is_personal_secret(&entry)
-        {
-            self.load_personal_item(*entry, cx);
-        }
         cx.notify();
     }
 
@@ -2203,7 +2209,7 @@ impl DesktopView {
     }
 
     fn show_vault_browser(&mut self, cx: &mut Context<Self>) {
-        if !self.flush_personal_changes(cx) {
+        if !self.leave_item_editor(Self::show_vault_browser, cx) {
             return;
         }
         self.clear_secret_inputs(cx);
@@ -2236,7 +2242,7 @@ impl DesktopView {
     }
 
     fn select_transfer_format(&mut self, format: TransferFormat, cx: &mut Context<Self>) {
-        if !self.flush_personal_changes(cx) {
+        if !self.leave_item_editor(move |view, cx| view.select_transfer_format(format, cx), cx) {
             return;
         }
         if self.transfer_busy {
@@ -2253,7 +2259,10 @@ impl DesktopView {
     fn select_transfer_direction(&mut self, is_import: bool, cx: &mut Context<Self>) {
         if self.transfer_busy
             || is_import == self.transfer_is_import
-            || !self.flush_personal_changes(cx)
+            || !self.leave_item_editor(
+                move |view, cx| view.select_transfer_direction(is_import, cx),
+                cx,
+            )
         {
             return;
         }
@@ -2551,13 +2560,12 @@ impl DesktopView {
     }
 
     fn show_personal_panel(&mut self, panel: PersonalPanel, cx: &mut Context<Self>) {
-        if !self.flush_personal_changes(cx) {
+        if !self.leave_item_editor(move |view, cx| view.show_personal_panel(panel, cx), cx) {
             return;
         }
         self.clear_secret_inputs(cx);
         self.personal_panel = panel;
         self.settings_open = false;
-        self.personal_error = None;
         self.selected_vault_item = Some(VaultSelection::PersonalSecrets);
         self.remember_page(cx);
         cx.notify();
@@ -2568,110 +2576,6 @@ impl DesktopView {
         if self.selected_vault_item == Some(VaultSelection::TransferCredentials) {
             self.select_transfer_direction(true, cx);
         }
-    }
-
-    fn save_personal_secret(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.personal_name.read(cx).value().trim().to_owned();
-        if self
-            .personal_fields
-            .iter()
-            .any(|field| field.value.read(cx).allocation_failed())
-        {
-            self.personal_error = Some(
-                "A field could not allocate secure memory. Re-enter that value before saving."
-                    .into(),
-            );
-            cx.notify();
-            return;
-        }
-        if name.is_empty() {
-            self.personal_error = Some("Give this secret a name.".to_owned());
-            cx.notify();
-            return;
-        }
-        if self
-            .personal_fields
-            .iter()
-            .all(|field| field.value.read(cx).value().is_empty())
-        {
-            self.personal_error = Some("Enter at least one field value.".to_owned());
-            cx.notify();
-            return;
-        }
-        let mut item = PersonalSecret::new(self.personal_kind, name);
-        for field in &self.personal_fields {
-            if field.section == "notes" {
-                let value = field.value.read(cx).value();
-                if !value.is_empty() {
-                    item.notes = Some(value.to_string());
-                }
-                continue;
-            }
-            if !item
-                .sections
-                .iter()
-                .any(|section| section.id == field.section)
-            {
-                item.sections.push(PersonalSection {
-                    id: field.section.clone(),
-                    label: field.section_label.clone(),
-                    fields: Vec::new(),
-                });
-            }
-            let value = field.value.read(cx).value();
-            item.sections
-                .iter_mut()
-                .find(|section| section.id == field.section)
-                .unwrap()
-                .fields
-                .push(PersonalField::new(
-                    field.id.clone(),
-                    field.label.read(cx).value().to_string(),
-                    field.field_type.clone(),
-                    value.to_string(),
-                ));
-        }
-        match self.runtime.put_personal_secret(&item, None) {
-            Ok((_, updated_contents)) => {
-                if let Snapshot::Unsealed {
-                    contents,
-                    contents_error,
-                    ..
-                } = &mut self.snapshot
-                {
-                    *contents = updated_contents;
-                    *contents_error = None;
-                }
-                self.reset_personal_draft(window, cx);
-                self.personal_panel = PersonalPanel::Overview;
-                self.personal_error = None;
-                let saved = self.unsealed_contents().and_then(|contents| {
-                    contents
-                        .entries
-                        .iter()
-                        .find(|entry| personal_item_id(entry) == Some(item.id.as_str()))
-                        .cloned()
-                });
-                match saved {
-                    Some(entry) => {
-                        self.select_vault_item(VaultSelection::Entry(Box::new(entry)), cx);
-                    }
-                    None => self.selected_vault_item = Some(VaultSelection::PersonalSecrets),
-                }
-                cx.notify();
-            }
-            Err(error) => {
-                self.personal_error = Some(format!("Could not save the secret: {error}"));
-                cx.notify();
-            }
-        }
-    }
-
-    fn reset_personal_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.personal_kind = PersonalSecretKind::Login;
-        self.personal_fields = Self::personal_draft(PersonalSecretKind::Login, window, cx);
-        self.personal_name
-            .update(cx, |name, cx| name.set_value("", window, cx));
     }
 
     fn toggle_system_integrations(&mut self, cx: &mut Context<Self>) {
@@ -2737,7 +2641,7 @@ impl DesktopView {
     }
 
     fn seal(&mut self, cx: &mut Context<Self>) {
-        self.flush_personal_changes(cx);
+        self.save_item_editor_on_exit(cx);
         let Snapshot::Unsealed {
             metadata,
             idle_deadline,
@@ -2806,7 +2710,7 @@ impl DesktopView {
             let selected = self.selected_group.as_ref() == Some(group);
             let chosen = group.clone();
             choices = choices.child(
-                Button::new(("unlock-group", index))
+                button(("unlock-group", index))
                     .label(group.to_string())
                     .selected(selected)
                     .disabled(unlocking)
@@ -2878,7 +2782,7 @@ impl DesktopView {
                 element.child(self.render_error_notice(error, false, cx))
             })
             .child(
-                Button::new("unlock-vault")
+                button("unlock-vault")
                     .primary()
                     .large()
                     .w_full()
@@ -2922,6 +2826,7 @@ impl DesktopView {
                     .min_w(rems(24. / 16.))
                     .px_2()
                     .py(rems(2. / 16.))
+                    .text_center()
                     .rounded_full()
                     .bg(if category_selected {
                         theme.primary_foreground.opacity(0.16)
@@ -2993,7 +2898,6 @@ impl DesktopView {
         let theme = cx.theme().clone();
         let expanded = self.system_integrations_expanded;
         v_flex()
-            .gap_1()
             .child(
                 h_flex()
                     .id("system-integrations-toggle")
@@ -3008,42 +2912,61 @@ impl DesktopView {
                     .font_semibold()
                     .text_color(theme.muted_foreground)
                     .child("System integrations")
-                    .child(
-                        gpui_component::Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .small(),
-                    )
+                    .child(gpui::AnimationExt::with_animation(
+                        gpui_component::Icon::new(IconName::ChevronRight).small(),
+                        ("system-integrations-chevron", u64::from(expanded)),
+                        gpui::Animation::new(std::time::Duration::from_millis(160))
+                            .with_easing(gpui_component::animation::ease_out_cubic),
+                        move |icon, delta| {
+                            let turn = if expanded { delta } else { 1. - delta };
+                            icon.rotate(gpui::radians(std::f32::consts::FRAC_PI_2 * turn))
+                        },
+                    ))
                     .on_click(cx.listener(|view, _, _, cx| {
                         view.toggle_system_integrations(cx);
                     })),
             )
-            .when(expanded, |section| {
-                section
-                    .child(self.render_sidebar_section(
-                        contents,
-                        factorseal::DocumentKind::NetworkManagerWifi,
-                        "Wi-Fi passwords",
-                        4,
-                        cx,
-                    ))
-                    .child(self.render_sidebar_section(
-                        contents,
-                        factorseal::DocumentKind::LinuxSecretService,
-                        "System keyring",
-                        2,
-                        cx,
-                    ))
-                    .child(self.render_sidebar_section(
-                        contents,
-                        factorseal::DocumentKind::LocalKeyring,
-                        "Application keyrings",
-                        3,
-                        cx,
-                    ))
-            })
+            .child(
+                div()
+                    .id("system-integrations-items")
+                    .overflow_hidden()
+                    .transitions(|transitions| transitions.h(crate::motion::change()))
+                    .map(|items| {
+                        if expanded {
+                            items.h_auto()
+                        } else {
+                            items.h_0()
+                        }
+                    })
+                    .when(expanded, |items| {
+                        items.child(
+                            v_flex()
+                                .gap_1()
+                                .pt_1()
+                                .child(self.render_sidebar_section(
+                                    contents,
+                                    factorseal::DocumentKind::NetworkManagerWifi,
+                                    "Wi-Fi passwords",
+                                    4,
+                                    cx,
+                                ))
+                                .child(self.render_sidebar_section(
+                                    contents,
+                                    factorseal::DocumentKind::LinuxSecretService,
+                                    "System keyring",
+                                    2,
+                                    cx,
+                                ))
+                                .child(self.render_sidebar_section(
+                                    contents,
+                                    factorseal::DocumentKind::LocalKeyring,
+                                    "Application keyrings",
+                                    3,
+                                    cx,
+                                )),
+                        )
+                    }),
+            )
     }
 
     fn render_vault_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3223,7 +3146,7 @@ impl DesktopView {
             .gap_2()
             .pt_1()
             .child(
-                Button::new("empty-vault-new-item")
+                button("empty-vault-new-item")
                     .primary()
                     .icon(IconName::Plus)
                     .label("New item")
@@ -3232,7 +3155,7 @@ impl DesktopView {
                     })),
             )
             .child(
-                Button::new("empty-vault-import")
+                button("empty-vault-import")
                     .disabled(self.transfer_busy)
                     .icon(Glyph::Upload)
                     .label("Import credentials")
@@ -3274,7 +3197,7 @@ impl DesktopView {
             .key_context(shortcuts::LIST_CONTEXT);
         for (index, entry) in entries.iter().enumerate() {
             let selected = is_selected_entry(self.selected_vault_item.as_ref(), entry);
-            rows = rows.child(self.render_entry_row(entry, query, index, cx).when(
+            rows = rows.child(self.render_entry_row(entry, query, cx).when(
                 highlighted == Some(index),
                 |row| {
                     row.keyboard_cursor(selected, cx)
@@ -3292,7 +3215,6 @@ impl DesktopView {
         &self,
         entry: &factorseal::VaultEntryMetadata,
         query: &str,
-        index: usize,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
         let theme = cx.theme().clone();
@@ -3306,7 +3228,7 @@ impl DesktopView {
             detail
         };
         let selection = VaultSelection::Entry(Box::new(entry.clone()));
-        Self::list_row(("secret-row", index), selected, cx)
+        Self::list_row(entry_element_id("secret-row", entry), selected, cx)
             .when(personal, |row| {
                 row.child(personal_entry_icon(entry, 2., &theme))
             })
@@ -3449,339 +3371,6 @@ impl DesktopView {
             })
     }
 
-    fn personal_draft(
-        kind: PersonalSecretKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<PersonalDraftField> {
-        let template = personal_templates::new_item_template(kind);
-        template
-            .sections
-            .iter()
-            .flat_map(|section| {
-                section
-                    .fields
-                    .iter()
-                    .map(|field| (section.id.clone(), section.label.clone(), field))
-            })
-            .map(|(section, section_label, field)| PersonalDraftField {
-                section,
-                section_label,
-                id: field.id.clone(),
-                field_type: field.field_type.clone(),
-                label: cx.new(|cx| InputState::new(window, cx).default_value(field.label.clone())),
-                value: cx.new(|cx| {
-                    SecretInputState::new(window, cx)
-                        .multiline()
-                        .masked(field.is_concealed())
-                }),
-            })
-            .collect()
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn render_personal_new_item(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
-        let custom = self.personal_kind == PersonalSecretKind::Generic;
-        let input_background = theming::input_background(cx);
-        let input_hover = theme.muted_foreground;
-        let locked = self
-            .personal_fields
-            .iter()
-            .any(|field| !field.value.read(cx).value().is_empty());
-        v_flex()
-            .gap_4()
-            .child(
-                field_label(
-                    "Item type",
-                    h_flex().child(
-                        h_flex()
-                            .id("personal-category-field")
-                            .rounded(theme.radius)
-                            .border_1()
-                            .border_color(theme.input)
-                            .bg(input_background)
-                            .when(locked, |field| field.opacity(0.5))
-                            .when(!locked, |field| {
-                                field.hover(|style| style.border_color(input_hover))
-                            })
-                            .child(
-                                Button::new("personal-category")
-                                    .custom(ButtonCustomVariant::new(cx))
-                                    .icon(personal_kind_icon(self.personal_kind))
-                                    .label(self.personal_kind.label())
-                                    .dropdown_caret(true)
-                                    .disabled(locked)
-                                    .dropdown_menu({
-                                        let view = cx.entity().downgrade();
-                                        let selected = self.personal_kind;
-                                        move |mut menu, _, _| {
-                                            menu = menu.check_side(Side::Right);
-                                            for kind in PersonalSecretKind::ALL {
-                                                let view = view.clone();
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(kind.label())
-                                                        .icon(personal_kind_icon(kind))
-                                                        .checked(kind == selected)
-                                                        .on_click(move |_, window, cx| {
-                                                            let _ = view.update(cx, |view, cx| {
-                                                                // Switching templates is disabled while any values have been entered.
-                                                                view.personal_kind = kind;
-                                                                view.personal_fields =
-                                                                    Self::personal_draft(
-                                                                        kind, window, cx,
-                                                                    );
-                                                                cx.notify();
-                                                            });
-                                                        }),
-                                                );
-                                            }
-                                            menu
-                                        }
-                                    }),
-                            ),
-                    ),
-                )
-                .when(locked, |field| {
-                    field.child(
-                        div()
-                            .text_caption()
-                            .text_color(theme.muted_foreground)
-                            .child("Clear the fields to change the type."),
-                    )
-                }),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .text_body()
-                            .font_medium()
-                            .child(field_name_icon(Glyph::Tag.into(), cx))
-                            .child("Name"),
-                    )
-                    .child(controls::hover_field(
-                        "personal-name-field",
-                        Input::new(&self.personal_name).bg(theming::input_background(cx)),
-                    )),
-            )
-            .children(
-                self.personal_fields
-                    .iter()
-                    .enumerate()
-                    .map(|(index, field)| {
-                        v_flex()
-                            .gap_2()
-                            .when(
-                                field.section != "notes"
-                                    && field.section_label != self.personal_kind.label()
-                                    && (index == 0
-                                        || self.personal_fields[index - 1].section
-                                            != field.section),
-                                |row| {
-                                    row.child(
-                                        div()
-                                            .pt_2()
-                                            .font_semibold()
-                                            .child(field.section_label.clone()),
-                                    )
-                                },
-                            )
-                            .when(!custom, |row| {
-                                row.child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .text_body()
-                                        .child(field_name_icon(
-                                            personal_field_icon(&field.id, &field.field_type),
-                                            cx,
-                                        ))
-                                        .child(field.label.read(cx).value().to_string()),
-                                )
-                            })
-                            .when(custom, |row| {
-                                row.child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(controls::hover_field(
-                                            ("personal-field-label", index),
-                                            Input::new(&field.label)
-                                                .bg(theming::input_background(cx)),
-                                        ))
-                                        .child(field_kind_picker(
-                                            ("personal-field-type", index),
-                                            &field.field_type,
-                                            {
-                                                let view = cx.entity().downgrade();
-                                                move |kind, cx| {
-                                                    let _ = view.update(cx, |view, cx| {
-                                                        if view.personal_kind
-                                                            == PersonalSecretKind::Generic
-                                                            && let Some(field) =
-                                                                view.personal_fields.get_mut(index)
-                                                        {
-                                                            field.value.update(cx, |input, cx| {
-                                                                input.set_masked(
-                                                                    kind.concealed(),
-                                                                    cx,
-                                                                );
-                                                            });
-                                                            field.field_type = kind;
-                                                            cx.notify();
-                                                        }
-                                                    });
-                                                }
-                                            },
-                                        ))
-                                        .when(field.section == "custom", |row| {
-                                            row.child(
-                                                Button::new(("remove-personal-draft-field", index))
-                                                    .ghost()
-                                                    .flex_none()
-                                                    .icon(IconName::Delete)
-                                                    .tooltip("Remove field")
-                                                    .on_click(cx.listener(
-                                                        move |view, _, _, cx| {
-                                                            if index < view.personal_fields.len() {
-                                                                view.personal_fields.remove(index);
-                                                                view.close_generator(cx);
-                                                                cx.notify();
-                                                            }
-                                                        },
-                                                    )),
-                                            )
-                                        }),
-                                )
-                            })
-                            .child({
-                                let empty = field.value.read(cx).value().is_empty();
-                                let secret = field.field_type.concealed();
-                                let masked = field.value.read(cx).is_masked();
-                                let copied = self.copied_personal_field
-                                    == Some(personal_actions::CopiedField::Draft(index));
-                                h_flex()
-                                    .items_start()
-                                    .gap_2()
-                                    .child(div().flex_1().min_w_0().child(field.value.clone()))
-                                    .when(!empty, |row| {
-                                        row.child(
-                                            Button::new(("copy-personal-draft", index))
-                                                .flex_none()
-                                                .w(personal_actions::COPY_BUTTON_WIDTH)
-                                                .icon(if copied {
-                                                    IconName::Check
-                                                } else {
-                                                    IconName::Copy
-                                                })
-                                                .label(if copied { "Copied" } else { "Copy" })
-                                                .on_click(cx.listener(move |view, _, _, cx| {
-                                                    let value = view.personal_fields[index]
-                                                        .value
-                                                        .read(cx)
-                                                        .value()
-                                                        .to_string();
-                                                    view.copy_personal_value(
-                                                        value,
-                                                        personal_actions::CopiedField::Draft(index),
-                                                        cx,
-                                                    );
-                                                })),
-                                        )
-                                    })
-                                    .when(
-                                        personal_actions::can_generate(self.personal_kind, field),
-                                        |row| {
-                                            row.children(self.render_generator(
-                                                generator::GeneratorTarget::Draft(index),
-                                                false,
-                                                |button| button,
-                                                cx,
-                                            ))
-                                        },
-                                    )
-                                    .when(secret && !empty, |row| {
-                                        row.child(
-                                            Button::new(("reveal-personal-draft", index))
-                                                .flex_none()
-                                                .icon(if masked {
-                                                    IconName::Eye
-                                                } else {
-                                                    IconName::EyeOff
-                                                })
-                                                .label(if masked { "Reveal" } else { "Hide" })
-                                                .on_click(cx.listener(move |view, _, _, cx| {
-                                                    if let Some(field) =
-                                                        view.personal_fields.get(index)
-                                                    {
-                                                        field.value.update(cx, |input, cx| {
-                                                            let masked = input.is_masked();
-                                                            input.set_masked(!masked, cx);
-                                                        });
-                                                    }
-                                                })),
-                                        )
-                                    })
-                            })
-                    }),
-            )
-            .when(custom, |panel| {
-                panel.child(
-                    Button::new("add-personal-field")
-                        .icon(IconName::Plus)
-                        .label("Add custom field")
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            let id = (0..=view.personal_fields.len())
-                                .map(|number| format!("custom-{number}"))
-                                .find(|id| {
-                                    !view.personal_fields.iter().any(|field| field.id == *id)
-                                })
-                                .unwrap_or_default();
-                            view.personal_fields.push(PersonalDraftField {
-                                section: "custom".into(),
-                                section_label: "Custom fields".into(),
-                                id,
-                                label: cx.new(|cx| {
-                                    InputState::new(window, cx).default_value("Custom field")
-                                }),
-                                field_type: PersonalFieldType::Concealed,
-                                value: cx.new(|cx| SecretInputState::new(window, cx).multiline()),
-                            });
-                            cx.notify();
-                        })),
-                )
-            })
-            .when_some(self.personal_error.clone(), |panel, error| {
-                panel.child(error_banner(error, theme.danger))
-            })
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(
-                        Button::new("cancel-personal-secret")
-                            .icon(IconName::Close)
-                            .label("Cancel")
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.show_personal_panel(PersonalPanel::Overview, cx);
-                                view.reset_personal_draft(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("save-personal-secret")
-                            .primary()
-                            .icon(IconName::Check)
-                            .label("Save item")
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.save_personal_secret(window, cx);
-                            })),
-                    ),
-            )
-    }
-
     fn render_cxf_key_options(&self, is_import: bool, cx: &mut Context<Self>) -> Div {
         let mut panel = v_flex().gap_3().child(segmented(
             "transfer-key-mode",
@@ -3805,7 +3394,7 @@ impl DesktopView {
                     "Choose the recipient's public age post-quantum key. Only the matching private key can decrypt this export. Compatible with age 1.3 and later."
                 }))
                 .child(
-                    Button::new("choose-transfer-key")
+                    button("choose-transfer-key")
                         .icon(IconName::FolderOpen)
                         .label(if is_import { "Choose private key file" } else { "Choose public key file" })
                         .disabled(self.transfer_busy)
@@ -4014,7 +3603,7 @@ impl DesktopView {
                         )
                     })
                     .child(
-                        Button::new(if is_import {
+                        button(if is_import {
                             "start-secret-import"
                         } else {
                             "start-secret-export"
@@ -4046,29 +3635,7 @@ impl DesktopView {
     }
 
     fn render_personal_secrets_detail(&self, cx: &mut Context<Self>) -> Div {
-        v_flex()
-            .size_full()
-            .min_h_0()
-            .overflow_hidden()
-            .gap_4()
-            .pt_6()
-            .child(
-                div()
-                    .flex_none()
-                    .px_6()
-                    .text_heading()
-                    .font_semibold()
-                    .child("New item"),
-            )
-            .child(
-                div()
-                    .id("personal-new-item-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(self.render_personal_new_item(cx).flex_none().px_6().pb_6())
-                    .overflow_y_scrollbar(),
-            )
+        self.render_new_item_page(cx)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -4134,7 +3701,7 @@ impl DesktopView {
                         welcome.child(self.render_empty_vault_actions(cx))
                     } else {
                         welcome.child(
-                            Button::new("welcome-new-item")
+                            button("welcome-new-item")
                                 .primary()
                                 .icon(IconName::Plus)
                                 .label("New item")
@@ -4250,7 +3817,7 @@ impl DesktopView {
         let has_multiple_methods = available.len() > 1;
         for (index, method) in available.into_iter().enumerate() {
             methods = methods.child(
-                Button::new(("setup-method", index))
+                button(("setup-method", index))
                     .label(method.label())
                     .selected(self.setup_method == method)
                     .on_click(cx.listener(move |view, _, window, cx| {
@@ -4319,7 +3886,7 @@ impl DesktopView {
             })
             .children(runtime_notice)
             .child(
-                Button::new("initialize-vault")
+                button("initialize-vault")
                     .primary()
                     .large()
                     .w_full()
@@ -4329,20 +3896,20 @@ impl DesktopView {
     }
 
     fn render_settings_button(cx: &mut Context<Self>) -> Button {
-        Button::new("open-settings")
+        button("open-settings")
             .icon(gpui_component::Icon::new(IconName::Settings).text_color(cx.theme().foreground))
             .label("Settings")
             .on_click(cx.listener(|view, _, _, cx| view.open_settings(cx)))
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.leave_item_editor(Self::open_settings, cx) {
+            return;
+        }
         if let Some(VaultSelection::Entry(entry)) = &self.selected_vault_item
             && is_personal_secret(entry)
         {
             self.show_personal_panel(PersonalPanel::Overview, cx);
-        }
-        if self.personal_detail.has_pending_changes() {
-            return;
         }
         if !self.settings_open {
             self.section_opened = false;
@@ -4497,6 +4064,9 @@ impl DesktopView {
 
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_new_item_editor(window, cx);
+        self.animate_item_editor(window, cx);
+        self.open_leave_dialog(window, cx);
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let notification_layer = Root::render_notification_layer(window, cx);
         window.set_rem_size(crate::appearance::rem_size(cx));
@@ -4523,6 +4093,10 @@ impl Render for DesktopView {
         self.shortcuts.compact = compact;
         self.shortcuts.narrow = window.viewport_size().width < px(1200.) * scale;
         self.shortcuts.list_focused = self.shortcuts.list.is_focused(window);
+        if matches!(self.snapshot, Snapshot::Unsealed { .. }) {
+            let (page, depth) = self.navigation_page(compact, single_pane, cx);
+            self.navigation.visit(page, depth);
+        }
         let device_pairing = self
             .visible_pairing()
             .map(|screen| self.render_device_pairing(screen, cx));
@@ -4555,7 +4129,10 @@ impl Render for DesktopView {
             .children(self.render_notices(cx))
             .children(device_pairing)
             .when(window.has_active_dialog(cx), |root| {
-                root.child(div().absolute().inset_0().bg(theme.overlay))
+                root.child(crate::motion::fade(
+                    "dialog-scrim",
+                    div().absolute().inset_0().bg(theme.overlay),
+                ))
             })
             .children(dialog_layer)
             .children(notification_layer)
@@ -4764,7 +4341,7 @@ fn flush_desktop_personal_changes(cx: &mut App) {
         && let Some(view) = holder.as_ref()
     {
         view.update(cx, |view, cx| {
-            view.flush_personal_changes(cx);
+            view.save_item_editor_on_exit(cx);
         });
     }
 }
@@ -5431,6 +5008,7 @@ mod tests {
     fn category_badge_keeps_the_count_next_to_an_error() {
         assert_eq!(category_badge(false, 3), "3");
         assert_eq!(category_badge(true, 3), "! 3");
+        assert_eq!(category_badge(true, 0), "!");
     }
 
     #[test]

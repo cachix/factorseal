@@ -76,7 +76,7 @@ impl DesktopView {
         }
     }
 
-    fn selected_section(&self, cx: &App) -> Option<SectionRow> {
+    pub(super) fn selected_section(&self, cx: &App) -> Option<SectionRow> {
         if self.settings_open {
             let section = self.settings.read(cx).section(self.browsers_available(cx));
             return Some(SectionRow::Settings(section));
@@ -183,6 +183,13 @@ impl DesktopView {
                             .child(row.icon().size(rems(1.)).text_color(theme.foreground)),
                     )
                     .child(list_row_text(title, detail, &theme))
+                    .when(self.shortcuts.compact, |row| {
+                        row.child(
+                            gpui_component::Icon::new(IconName::ChevronRight)
+                                .flex_none()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
                     .when(highlighted == Some(index), |row| {
                         row.keyboard_cursor(current, cx)
                             .child(self.reveal_when_moved(index == 0))
@@ -287,7 +294,7 @@ impl DesktopView {
             .child(Self::section_title(title))
             .when(rename, |title| {
                 title.child(
-                    Button::new("rename-device")
+                    button("rename-device")
                         .ghost()
                         .flex_none()
                         .label("Rename")
@@ -327,7 +334,14 @@ impl DesktopView {
                     .h_full()
                     .border_r_1()
                     .border_color(theme.border)
-                    .child(self.render_section_list(cx)),
+                    .child(crate::motion::enter(
+                        if self.settings_open {
+                            "section-list-settings".to_owned()
+                        } else {
+                            format!("section-list-{:?}", self.selected_vault_item)
+                        },
+                        self.render_section_list(cx),
+                    )),
             )
             .child(
                 div()

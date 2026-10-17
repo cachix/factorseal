@@ -86,6 +86,15 @@ impl AssetSource for Assets {
             branding::PHONE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../../assets/logo/factorseal-phone.svg"
             )))),
+            branding::PENCIL_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-pencil.svg"
+            )))),
+            branding::GRIP_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-grip.svg"
+            )))),
+            branding::KEYBOARD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-keyboard.svg"
+            )))),
             _ => gpui_component_assets::Assets.load(path),
         }
     }
@@ -114,6 +123,9 @@ impl AssetSource for Assets {
                 branding::CLOCK_ASSET.into(),
                 branding::MAIL_ASSET.into(),
                 branding::PHONE_ASSET.into(),
+                branding::PENCIL_ASSET.into(),
+                branding::GRIP_ASSET.into(),
+                branding::KEYBOARD_ASSET.into(),
             ]
             .into_iter()
             .filter(|asset: &SharedString| asset.starts_with(path)),

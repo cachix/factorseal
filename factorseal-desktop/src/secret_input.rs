@@ -160,8 +160,10 @@ pub(crate) struct SecretInputState {
     secret: SecretBuffer,
     masked: bool,
     plain: bool,
+    bare: bool,
     read_only: bool,
     submit_on_enter: bool,
+    newline_on_enter: bool,
     blur_subscription: Option<gpui::Subscription>,
     focus: FocusHandle,
     placeholder: SharedString,
@@ -170,7 +172,6 @@ pub(crate) struct SecretInputState {
     reversed: bool,
     last_layout: Option<(gpui::ShapedLine, Point<Pixels>)>,
     wrap: bool,
-    rows: usize,
     last_wrapped: Option<(Vec<WrappedLine>, Point<Pixels>, Pixels)>,
 }
 pub(crate) struct CancelEdit;
@@ -206,6 +207,10 @@ impl SecretInputState {
         self.wrap = true;
         self
     }
+    pub(crate) fn newline_on_enter(mut self) -> Self {
+        self.newline_on_enter = true;
+        self
+    }
     pub(crate) fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::empty(cx)
     }
@@ -214,8 +219,10 @@ impl SecretInputState {
             secret: SecretBuffer::default(),
             masked: true,
             plain: false,
+            bare: false,
             read_only: false,
             submit_on_enter: false,
+            newline_on_enter: false,
             blur_subscription: None,
             focus: cx.focus_handle().tab_stop(true),
             placeholder: "".into(),
@@ -224,7 +231,6 @@ impl SecretInputState {
             reversed: false,
             last_layout: None,
             wrap: false,
-            rows: 1,
             last_wrapped: None,
         }
     }
@@ -244,6 +250,10 @@ impl SecretInputState {
     }
     pub(crate) fn plain(mut self) -> Self {
         self.plain = true;
+        self
+    }
+    pub(crate) fn bare(mut self) -> Self {
+        self.bare = true;
         self
     }
     pub(crate) fn placeholder(mut self, value: &'static str) -> Self {
@@ -330,7 +340,10 @@ impl SecretInputState {
                 window.blur(cx);
             }
             "escape" => self.clear(cx),
-            "enter" if self.secret.multiline && (!self.submit_on_enter || modifiers.shift) => {
+            "enter"
+                if self.secret.multiline
+                    && (!self.submit_on_enter || self.newline_on_enter || modifiers.shift) =>
+            {
                 let range = self.selection.clone();
                 if self.secret.replace(range.clone(), "\n") {
                     self.selection = range.start + 1..range.start + 1;
@@ -535,10 +548,13 @@ impl Render for SecretInputState {
             .w_full()
             .text_body()
             .rounded_md()
-            .bg(crate::theming::input_background(cx))
-            .when(!self.read_only, |this| {
+            .when(!self.bare, |this| {
+                this.bg(crate::theming::input_background(cx))
+            })
+            .when(!self.read_only && !self.bare, |this| {
                 text_field(this, self.focus.is_focused(window), window, cx)
             })
+            .when(!self.read_only && self.bare, gpui::Styled::cursor_text)
             .when(self.plain && !self.focus.is_focused(window), |input| {
                 input
                     .border_color(gpui::transparent_black())
@@ -567,13 +583,7 @@ impl Render for SecretInputState {
                     .px_3()
                     .py(rems(6. / 16.))
                     .overflow_hidden()
-                    .child(Self::wrapped_canvas(
-                        text,
-                        color,
-                        self.rows,
-                        line_height,
-                        entity,
-                    )),
+                    .child(Self::wrapped_canvas(text, color, line_height, entity)),
             )
         } else {
             input.h_8().child(
@@ -676,11 +686,11 @@ impl SecretInputState {
     fn wrapped_canvas(
         text: SharedString,
         color: gpui::Hsla,
-        rows: usize,
         line_height: Pixels,
         entity: gpui::Entity<Self>,
     ) -> impl IntoElement {
-        canvas(
+        let sizer = div().w_full().opacity(0.).child(text.clone());
+        let canvas = canvas(
             move |bounds, window, _| {
                 let style = window.text_style();
                 let run = TextRun {
@@ -755,22 +765,19 @@ impl SecretInputState {
                         cx,
                     );
                 }
-                let measured = lines
-                    .iter()
-                    .map(|line| line.wrap_boundaries().len() + 1)
-                    .sum::<usize>()
-                    .max(1);
-                entity.update(cx, |input, cx| {
+                entity.update(cx, |input, _| {
                     input.last_wrapped = Some((lines, bounds.origin, line_height));
-                    if input.rows != measured {
-                        input.rows = measured;
-                        cx.notify();
-                    }
                 });
             },
         )
-        .w_full()
-        .h(line_height * rows)
+        .absolute()
+        .inset_0();
+        div()
+            .relative()
+            .w_full()
+            .line_height(line_height)
+            .child(sizer)
+            .child(canvas)
     }
 }
 

@@ -1163,7 +1163,7 @@ impl Render for AccessView {
         }
         requests = requests
             .child(
-                Button::new("access-technical-details")
+                button("access-technical-details")
                     .ghost()
                     .small()
                     .label(if self.details.expanded {
@@ -1281,7 +1281,7 @@ impl Render for AccessView {
                 let selected = self.group.as_ref() == Some(group);
                 let group = group.clone();
                 groups = groups.child(
-                    Button::new(("access-factor", index))
+                    button(("access-factor", index))
                         .label(group.to_string())
                         .selected(selected)
                         .disabled(busy)
@@ -1309,23 +1309,23 @@ impl Render for AccessView {
                 .child(div().text_caption().text_color(theme.muted_foreground).child(if !self.inputs.is_empty() { "Saves this value once. No access grant is created." } else if self.grants.is_empty() { "Unlock your vault to continue here." } else { "Applies only to the listed entries, app, folder, and operation. Manage access on each secret." }))
                 .when(metadata.is_some_and(|metadata| metadata.unlock_policy().groups().len() > 1), |element| element.child(groups))
                 .when((!self.grants.is_empty() || !self.requests.is_empty()) && self.inputs.is_empty(), |element| element.child(field_label("Allow access for", h_flex().gap_2()
-                    .child(Button::new("grant-hour").label("1 hour").selected(self.duration == HOUR_GRANT).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = HOUR_GRANT; cx.notify(); })))
-                    .child(Button::new("grant-persistent").label("Until revoked").selected(self.duration.is_none()).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = None; cx.notify(); }))))))
+                    .child(button("grant-hour").label("1 hour").selected(self.duration == HOUR_GRANT).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = HOUR_GRANT; cx.notify(); })))
+                    .child(button("grant-persistent").label("Until revoked").selected(self.duration.is_none()).disabled(busy).on_click(cx.listener(|view, _, _, cx| { view.duration = None; cx.notify(); }))))))
                 .when(!self.inputs.is_empty() && !busy, |element| element.child(field_label("Secret value", self.editor.value.clone())))
                 .when(needs_password && !busy, |element| element.child(field_label("Vault password", self.password.clone())))
                 .when_some(self.error.clone(), |element, error| element.child(error_banner(error, theme.danger)))
                 .when(matches!(self.snapshot, Snapshot::Uninitialized { .. }), |element| element.child(div().text_body().child("Set up your vault in FactorSeal Desktop before allowing access.")))
                 .child(h_flex().items_center().justify_end().gap_2()
-                    .child(Button::new("deny-access").ghost().label(if self.inputs.is_empty() { "Deny" } else { "Cancel" }).disabled(self.approving).on_click(cx.listener(|_, _, _, cx| {
+                    .child(button("deny-access").ghost().label(if self.inputs.is_empty() { "Deny" } else { "Cancel" }).disabled(self.approving).on_click(cx.listener(|_, _, _, cx| {
                         cx.defer(|cx| {
                             deny(cx);
                         });
                     })))
-                    .child(Button::new("allow-access").primary().disabled((self.reviewing && self.grants.is_empty() && self.inputs.is_empty() && unsealed) || busy || !matches!(self.snapshot, Snapshot::Sealed { .. } | Snapshot::Unsealed { .. }))
+                    .child(button("allow-access").primary().disabled((self.reviewing && self.grants.is_empty() && self.inputs.is_empty() && unsealed) || busy || !matches!(self.snapshot, Snapshot::Sealed { .. } | Snapshot::Unsealed { .. }))
                         .label(if self.approving { "Authorizing…" } else if busy { "Unlocking…" } else if !self.inputs.is_empty() && unsealed { "Save secret" } else if !self.grants.is_empty() { "Grant access" } else if unsealed && self.reviewing { "Checking access…" } else if unsealed { "Continue" } else { "Unlock to continue" })
                         .on_click(cx.listener(|view, _, window, cx| view.allow(window, cx)))))))
             .when(expired, |window| window.child(h_flex().p_6().justify_end().border_t_1().border_color(theme.border)
-                .child(Button::new("close-expired-access").primary().label("Close").on_click(|_, _, cx| cx.defer(close))))))
+                .child(button("close-expired-access").primary().label("Close").on_click(|_, _, cx| cx.defer(close))))))
     }
 }
 

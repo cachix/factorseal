@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use gpui::{Pixels, ScrollHandle, canvas, point};
+use gpui::{Pixels, ScrollHandle, point};
 use gpui_component::progress::ProgressCircle;
 
+use super::item_editor::{Draft, EditStart};
 use super::personal_history::{Change, Direction, Step};
 use super::totp::{Totp, grouped, unix_now};
 use super::*;
@@ -13,6 +14,7 @@ pub(super) struct ChangeToast {
     pub(super) message: gpui::SharedString,
     pub(super) undo: Option<Direction>,
     pub(super) error: bool,
+    pub(super) leaving: bool,
 }
 
 #[derive(Default)]
@@ -21,31 +23,11 @@ pub(super) struct PersonalDetail {
     version: Option<ItemVersion>,
     error: Option<String>,
     revealed: HashSet<usize>,
-    added: HashSet<usize>,
-    scrolling_to: Option<usize>,
     scroll: ScrollHandle,
     generation: u64,
-    inputs: HashMap<usize, PersonalValueInput>,
-    custom: Option<CustomFieldDraft>,
-    subscriptions: Vec<Subscription>,
+    inputs: HashMap<usize, gpui::Entity<SecretInputState>>,
     ticker: Option<Task<()>>,
-}
-
-struct CustomFieldDraft {
-    name: gpui::Entity<InputState>,
-    field_type: PersonalFieldType,
-    value: gpui::Entity<SecretInputState>,
-    error: Option<String>,
-    _subscriptions: [Subscription; 2],
-}
-
-struct PersonalValueInput {
-    input: gpui::Entity<SecretInputState>,
-    edited: bool,
-    dirty: bool,
-    error: Option<String>,
-    strength: Option<crate::password_generator::Strength>,
-    rating: Option<Task<()>>,
+    loaded_at: Option<std::time::Instant>,
 }
 
 impl PersonalDetail {
@@ -53,50 +35,42 @@ impl PersonalDetail {
         self.item.as_ref()
     }
 
-    pub(super) fn has_value(&self, index: usize, cx: &App) -> bool {
-        self.inputs
-            .get(&index)
-            .is_some_and(|input| !input.input.read(cx).value().is_empty())
+    pub(super) fn revealed(&self) -> &HashSet<usize> {
+        &self.revealed
     }
 
-    pub(super) fn has_pending_changes(&self) -> bool {
-        self.inputs.values().any(|input| input.dirty)
+    pub(super) fn scroll_handle(&self) -> ScrollHandle {
+        self.scroll.clone()
+    }
+
+    pub(super) fn clear_error(&mut self) {
+        self.error = None;
+    }
+
+    pub(super) fn has_value(&self, index: usize) -> bool {
+        self.item.as_ref().is_some_and(|item| {
+            item.sections
+                .iter()
+                .flat_map(|section| &section.fields)
+                .nth(index)
+                .is_some_and(|field| !field_is_empty(field))
+        })
     }
 
     pub(super) fn clear(&mut self) {
-        self.subscriptions.clear();
         self.inputs.clear();
-        self.custom = None;
         self.item = None;
         self.version = None;
         self.error = None;
         self.revealed.clear();
-        self.added.clear();
-        self.scrolling_to = None;
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.ticker = None;
+        self.loaded_at = None;
         self.generation = self.generation.wrapping_add(1);
-    }
-
-    fn field_inserted(&mut self, index: usize) {
-        self.added = self
-            .added
-            .iter()
-            .map(|&added| if added >= index { added + 1 } else { added })
-            .collect();
-    }
-
-    fn field_removed(&mut self, index: usize) {
-        self.added = self
-            .added
-            .iter()
-            .filter(|&&added| added != index)
-            .map(|&added| if added > index { added - 1 } else { added })
-            .collect();
     }
 }
 
-fn offset_showing(
+pub(super) fn offset_showing(
     offset: Pixels,
     max_offset: Pixels,
     viewport: Bounds<Pixels>,
@@ -125,206 +99,14 @@ fn field_text(field: &PersonalField, revealed: bool) -> String {
     }
 }
 
-fn field_is_empty(field: &PersonalField) -> bool {
+pub(super) fn field_is_empty(field: &PersonalField) -> bool {
     field.value.is_null() || field.text().is_some_and(str::is_empty)
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum AddTarget {
-    Existing(usize),
-    Template(String),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct AddableField {
-    label: String,
-    id: String,
-    field_type: PersonalFieldType,
-    target: AddTarget,
-}
-
-fn template_fields(kind: PersonalSecretKind) -> Vec<(String, String, PersonalField)> {
-    let mut template = personal_templates::new_item_template(kind);
-    template
-        .sections
-        .iter_mut()
-        .filter(|section| section.id != "notes")
-        .flat_map(|section| {
-            let (id, label) = (section.id.clone(), section.label.clone());
-            std::mem::take(&mut section.fields)
-                .into_iter()
-                .map(move |field| (id.clone(), label.clone(), field))
-        })
-        .collect()
-}
-
-fn addable_fields(item: &PersonalSecret) -> Vec<AddableField> {
-    let fields: Vec<_> = item
-        .sections
-        .iter()
-        .flat_map(|section| &section.fields)
-        .collect();
-    let template = template_fields(item.kind);
-    let rank = |id: &str| {
-        template
-            .iter()
-            .position(|(_, _, field)| field.id == id)
-            .unwrap_or(usize::MAX)
-    };
-    let mut addable: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .filter(|(_, field)| field_is_empty(field))
-        .map(|(index, field)| AddableField {
-            label: field.label.clone(),
-            id: field.id.clone(),
-            field_type: field.field_type.clone(),
-            target: AddTarget::Existing(index),
-        })
-        .chain(
-            template
-                .iter()
-                .filter(|(_, _, candidate)| !fields.iter().any(|field| field.id == candidate.id))
-                .map(|(_, _, field)| AddableField {
-                    label: field.label.clone(),
-                    id: field.id.clone(),
-                    field_type: field.field_type.clone(),
-                    target: AddTarget::Template(field.id.clone()),
-                }),
-        )
-        .collect();
-    addable.sort_by_key(|field| rank(&field.id));
-    addable.extend(
-        item.notes
-            .as_deref()
-            .is_none_or(str::is_empty)
-            .then(|| AddableField {
-                label: "Notes".to_owned(),
-                id: "notes".to_owned(),
-                field_type: PersonalFieldType::Multiline,
-                target: AddTarget::Existing(fields.len()),
-            }),
-    );
-    addable
-}
-
-fn with_template_field(item: &PersonalSecret, id: &str) -> Result<(PersonalSecret, usize), String> {
-    let template = template_fields(item.kind);
-    let rank = |id: &str| template.iter().position(|(_, _, field)| field.id == id);
-    let section_rank = |id: &str| template.iter().position(|(section, _, _)| section == id);
-    let missing = || "This field is no longer available.".to_owned();
-    let target = rank(id).ok_or_else(missing)?;
-    let (section_id, section_label, field) = &template[target];
-    let mut updated = copied_item(item)?;
-    if updated
-        .sections
-        .iter()
-        .flat_map(|section| &section.fields)
-        .any(|existing| existing.id == field.id)
-    {
-        return Err(missing());
-    }
-    let section = if let Some(section) = updated
-        .sections
-        .iter()
-        .position(|section| section.id == *section_id)
-    {
-        section
-    } else {
-        let after = section_rank(section_id);
-        let at = updated
-            .sections
-            .iter()
-            .position(|section| {
-                section_rank(&section.id) > after || section_rank(&section.id).is_none()
-            })
-            .unwrap_or(updated.sections.len());
-        updated.sections.insert(
-            at,
-            PersonalSection {
-                id: section_id.clone(),
-                label: section_label.clone(),
-                fields: Vec::new(),
-            },
-        );
-        at
-    };
-    let fields = &mut updated.sections[section].fields;
-    let at = fields
-        .iter()
-        .position(|existing| rank(&existing.id).is_none_or(|existing| existing > target))
-        .unwrap_or(fields.len());
-    fields.insert(
-        at,
-        PersonalField::new(
-            field.id.clone(),
-            field.label.clone(),
-            field.field_type.clone(),
-            "",
-        ),
-    );
-    let index = updated.sections[..section]
-        .iter()
-        .map(|section| section.fields.len())
-        .sum::<usize>()
-        + at;
-    Ok((updated, index))
-}
-
-fn with_custom_field(
-    item: &PersonalSecret,
-    name: &str,
-    field_type: PersonalFieldType,
-    value: &str,
-) -> Result<(PersonalSecret, usize), String> {
-    let mut updated = copied_item(item)?;
-    let count = updated
-        .sections
-        .iter()
-        .map(|section| section.fields.len())
-        .sum::<usize>();
-    let id = (0..=count)
-        .map(|number| format!("custom-{number}"))
-        .find(|id| {
-            !updated
-                .sections
-                .iter()
-                .flat_map(|section| &section.fields)
-                .any(|field| field.id == *id)
-        })
-        .unwrap_or_default();
-    let name = match name.trim() {
-        "" => "Custom field",
-        name => name,
-    };
-    let field = PersonalField::new(id, name, field_type, value);
-    let section = if let Some(section) = updated
-        .sections
-        .iter()
-        .position(|section| section.id == "custom")
-    {
-        updated.sections[section].fields.push(field);
-        section
-    } else {
-        updated.sections.push(PersonalSection {
-            id: "custom".into(),
-            label: "Custom fields".into(),
-            fields: vec![field],
-        });
-        updated.sections.len() - 1
-    };
-    let index = updated.sections[..=section]
-        .iter()
-        .map(|section| section.fields.len())
-        .sum::<usize>()
-        - 1;
-    Ok((updated, index))
 }
 
 fn has_section_groups(item: &PersonalSecret) -> bool {
     item.sections
         .iter()
-        .filter(|section| !section.fields.is_empty())
+        .filter(|section| section.fields.iter().any(|field| !field_is_empty(field)))
         .count()
         > 1
 }
@@ -365,69 +147,15 @@ fn modified_text(updated_at: u64, zone: &jiff::tz::TimeZone) -> Option<String> {
     ))
 }
 
-const NAME_INDEX: usize = usize::MAX;
-const ACTIONS_WIDTH: gpui::Rems = rems(19.);
-const NARROW_ACTIONS_WIDTH: gpui::Rems = rems(7.);
+pub(super) const CONTENT_WIDTH: gpui::Rems = rems(48.);
+const OPEN_PATIENCE: std::time::Duration = std::time::Duration::from_millis(150);
 const PERSONAL_TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_secs(5);
-const ITEM_CHANGED: &str = "This item changed somewhere else, so your change was not saved.";
+pub(super) const ITEM_CHANGED: &str =
+    "This item changed somewhere else, so your change was not saved.";
 
-fn copied_item(item: &PersonalSecret) -> Result<PersonalSecret, String> {
+pub(super) fn copied_item(item: &PersonalSecret) -> Result<PersonalSecret, String> {
     let encoded = item.encode().map_err(|error| error.to_string())?;
     PersonalSecret::decode_current(&encoded).map_err(|error| error.to_string())
-}
-
-fn edited_item(item: &PersonalSecret, index: usize, value: &str) -> Result<PersonalSecret, String> {
-    let mut updated = copied_item(item)?;
-    if index == NAME_INDEX {
-        if value.trim().is_empty() {
-            return Err("Give this item a name.".into());
-        }
-        value.trim().clone_into(&mut updated.title);
-    } else {
-        let mut fields: Vec<_> = updated
-            .sections
-            .iter_mut()
-            .flat_map(|section| &mut section.fields)
-            .collect();
-        if let Some(field) = fields.get_mut(index) {
-            field.value = if field.value.is_string() {
-                serde_json::Value::String(value.to_owned())
-            } else {
-                serde_json::from_str(value)
-                    .map_err(|_| "Enter valid JSON for this structured field.".to_owned())?
-            };
-        } else if index == fields.len() {
-            updated.notes = (!value.is_empty()).then(|| value.to_owned());
-        } else {
-            return Err("This field is no longer available.".into());
-        }
-    }
-    Ok(updated)
-}
-
-fn custom_field(item: &PersonalSecret, index: usize) -> bool {
-    item.sections
-        .iter()
-        .flat_map(|section| section.fields.iter().map(move |_| section.id.as_str()))
-        .nth(index)
-        == Some("custom")
-}
-
-fn without_field(item: &PersonalSecret, index: usize) -> Result<PersonalSecret, String> {
-    let mut updated = copied_item(item)?;
-    let mut remaining = index;
-    for at in 0..updated.sections.len() {
-        let fields = &mut updated.sections[at].fields;
-        if remaining < fields.len() {
-            fields.remove(remaining);
-            if fields.is_empty() {
-                updated.sections.remove(at);
-            }
-            return Ok(updated);
-        }
-        remaining -= fields.len();
-    }
-    Err("This field is no longer available.".into())
 }
 
 fn favorite_item(item: &PersonalSecret, favorite: bool) -> Result<PersonalSecret, String> {
@@ -461,6 +189,74 @@ fn reopen_after<'a>(
 }
 
 impl DesktopView {
+    pub(super) fn open_personal_entry(
+        &mut self,
+        entry: factorseal::VaultEntryMetadata,
+        cx: &mut Context<Self>,
+    ) {
+        let showing = self.personal_detail.item.is_some()
+            && matches!(
+                &self.selected_vault_item,
+                Some(VaultSelection::Entry(current)) if current.address == entry.address
+            );
+        if showing {
+            self.selected_vault_item = Some(VaultSelection::Entry(Box::new(entry.clone())));
+            self.remember_page(cx);
+            self.load_personal_item(entry, cx);
+            cx.notify();
+            return;
+        }
+        let Snapshot::Unsealed { metadata, .. } = &self.snapshot else {
+            return;
+        };
+        let metadata = metadata.clone();
+        self.follow_opened_entry(&entry.address, cx);
+        self.opening = self.opening.wrapping_add(1);
+        let ticket = self.opening;
+        let runtime = Arc::clone(&self.runtime);
+        let read_entry = entry.clone();
+        cx.spawn(async move |view, cx| {
+            let mut read =
+                smol::unblock(move || runtime.read_personal_item(&metadata, &read_entry));
+            let early = smol::future::or(async { Some((&mut read).await) }, async {
+                smol::Timer::after(OPEN_PATIENCE).await;
+                None
+            })
+            .await;
+            let landed = early.is_some();
+            let opened = view.update(cx, |view, cx| {
+                (view.opening == ticket && view.is_unsealed()).then(|| {
+                    view.show_vault_item(VaultSelection::Entry(Box::new(entry)), cx);
+                    if let Some(result) = early {
+                        view.land_personal_item(result, false, cx);
+                    }
+                    view.personal_detail.generation
+                })
+            });
+            let (Ok(Some(generation)), false) = (opened, landed) else {
+                return;
+            };
+            let result = read.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.personal_detail.generation == generation && view.is_unsealed() {
+                    view.land_personal_item(result, true, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn open_saved_personal_item(
+        &mut self,
+        entry: factorseal::VaultEntryMetadata,
+        item: PersonalSecret,
+        version: ItemVersion,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_vault_item(VaultSelection::Entry(Box::new(entry)), cx);
+        self.land_personal_item(Ok((item, version)), false, cx);
+    }
+
     pub(super) fn load_personal_item(
         &mut self,
         entry: factorseal::VaultEntryMetadata,
@@ -477,33 +273,44 @@ impl DesktopView {
             let result = smol::unblock(move || runtime.read_personal_item(&metadata, &entry)).await;
             let _ = view.update(cx, |view, cx| {
                 // Navigation or sealing invalidates an in-flight read.
-                if view.personal_detail.generation != generation
-                    || !matches!(view.snapshot, Snapshot::Unsealed { .. })
-                {
-                    return;
+                if view.personal_detail.generation == generation && view.is_unsealed() {
+                    view.land_personal_item(result, false, cx);
                 }
-                match result {
-                    Ok((item, version)) => {
-                        view.initialize_personal_inputs(&item, cx);
-                        view.personal_detail.item = Some(item);
-                        view.personal_detail.version = Some(version);
-                        view.update_personal_ticker(cx);
-                    }
-                    Err(error) => view.personal_detail.error = Some(error),
-                }
-                cx.notify();
             });
         })
         .detach();
     }
 
-    fn update_personal_ticker(&mut self, cx: &mut Context<Self>) {
-        if !self
+    fn land_personal_item(
+        &mut self,
+        result: Result<(PersonalSecret, ItemVersion), String>,
+        fade: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok((item, version)) => {
+                if fade && self.personal_detail.item.is_none() {
+                    self.personal_detail.loaded_at = Some(std::time::Instant::now());
+                }
+                self.personal_detail.inputs.clear();
+                self.initialize_personal_inputs(&item, cx);
+                self.personal_detail.item = Some(item);
+                self.personal_detail.version = Some(version);
+                self.update_personal_ticker(cx);
+            }
+            Err(error) => self.personal_detail.error = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn update_personal_ticker(&mut self, cx: &mut Context<Self>) {
+        let ticking = self
             .personal_detail
             .item
             .as_ref()
             .is_some_and(has_one_time_code)
-        {
+            || self.editor_has_code(cx);
+        if !ticking {
             self.personal_detail.ticker = None;
             return;
         }
@@ -550,6 +357,24 @@ impl DesktopView {
             .vertical_scrollbar(scroll)
     }
 
+    pub(super) fn render_new_item_page(&self, cx: &mut Context<Self>) -> Div {
+        let scroll = &self.personal_detail.scroll;
+        div()
+            .size_full()
+            .relative()
+            .child(
+                div()
+                    .id("personal-new-item-scroll")
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(scroll)
+                    .child(self.render_new_item(cx).flex_none()),
+            )
+            .vertical_scrollbar(scroll)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn render_personal_item_content(
         &self,
@@ -558,144 +383,174 @@ impl DesktopView {
     ) -> Div {
         let theme = cx.theme().clone();
         let (title, kind) = vault_entry_label(entry);
-        let mut panel = v_flex().w_full().gap_4().p_6().child(
-            h_flex()
-                .items_center()
-                .gap_4()
-                .child(personal_entry_icon(entry, 56. / 16., &theme))
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .gap_1()
-                        .child(
-                            h_flex()
-                                .min_w_0()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .text_title()
-                                        .font_semibold()
-                                        .truncate()
-                                        .child(title),
-                                )
-                                .when_some(self.personal_detail.item.as_ref(), |row, item| {
-                                    row.child(
-                                        Button::new("toggle-personal-favorite")
-                                            .ghost()
-                                            .flex_none()
-                                            .icon(if item.favorite {
-                                                IconName::StarFill
-                                            } else {
-                                                IconName::Star
-                                            })
-                                            .tooltip(if item.favorite {
-                                                "Remove from favorites"
-                                            } else {
-                                                "Add to favorites"
-                                            })
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.toggle_personal_favorite(cx);
-                                            })),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_body()
-                                .text_color(theme.muted_foreground)
-                                .child(kind),
-                        ),
-                )
-                .when(self.personal_detail.item.is_some(), |header| {
-                    header.child(
-                        Button::new("delete-personal-item")
-                            .flex_none()
-                            .ml_auto()
-                            .icon(Glyph::Trash)
-                            .label("Delete")
+        let editing = self.editing_item();
+        let actions = if editing {
+            Some(Self::render_editor_buttons(cx))
+        } else {
+            self.personal_detail.item.as_ref().map(|_| {
+                h_flex()
+                    .flex_none()
+                    .ml_auto()
+                    .gap_2()
+                    .child(
+                        button("edit-personal-item")
+                            .icon(Glyph::Pencil)
+                            .label("Edit")
                             .on_click(cx.listener(|view, _, window, cx| {
-                                view.confirm_delete_personal_item(window, cx);
+                                view.begin_edit(EditStart::Top, window, cx);
                             })),
                     )
-                }),
-        );
+                    .child(Self::render_personal_more(cx))
+            })
+        };
+        let mut panel = v_flex()
+            .w_full()
+            .max_w(CONTENT_WIDTH)
+            .mx_auto()
+            .gap_6()
+            .p_6()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_5()
+                    .child(personal_entry_icon(entry, 56. / 16., &theme))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap_2()
+                                    .map(|row| {
+                                        if editing {
+                                            row.child(self.render_editor_title(cx))
+                                        } else {
+                                            row.child(
+                                                div()
+                                                    .min_w_0()
+                                                    .text_title()
+                                                    .font_semibold()
+                                                    .truncate()
+                                                    .child(title),
+                                            )
+                                        }
+                                    })
+                                    .when_some(
+                                        self.personal_detail.item.as_ref().filter(|_| !editing),
+                                        |row, item| {
+                                            row.child(
+                                                button("toggle-personal-favorite")
+                                                    .ghost()
+                                                    .flex_none()
+                                                    .icon(if item.favorite {
+                                                        IconName::StarFill
+                                                    } else {
+                                                        IconName::Star
+                                                    })
+                                                    .tooltip(if item.favorite {
+                                                        "Remove from favorites"
+                                                    } else {
+                                                        "Add to favorites"
+                                                    })
+                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                        view.toggle_personal_favorite(cx);
+                                                    })),
+                                            )
+                                        },
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_body()
+                                    .text_color(theme.muted_foreground)
+                                    .child(kind),
+                            ),
+                    )
+                    .children(actions.map(|actions| {
+                        crate::motion::fade(
+                            if editing {
+                                "item-edit-actions"
+                            } else {
+                                "item-view-actions"
+                            },
+                            actions,
+                        )
+                    })),
+            );
         if let Some(error) = &self.personal_detail.error {
             panel = panel.child(error_banner(error.clone(), theme.danger));
         }
         let Some(item) = &self.personal_detail.item else {
-            return panel.child(
+            return panel.child(crate::motion::after_a_moment(
+                ("personal-item-loading", self.personal_detail.generation),
                 h_flex()
                     .gap_2()
                     .child(Spinner::new().small())
                     .child("Loading item…"),
-            );
+            ));
         };
-        let hidden: Vec<_> = addable_fields(item)
-            .into_iter()
-            .filter(|field| match field.target {
-                AddTarget::Existing(index) => !self.personal_field_visible(index),
-                AddTarget::Template(_) => true,
-            })
-            .collect();
+        if editing {
+            return panel.child(self.render_item_editor(cx));
+        }
         let grouped = has_section_groups(item);
-        let mut fields = v_flex().w_full().child(self.render_personal_value(
-            NAME_INDEX,
-            "Name",
-            Glyph::Tag.into(),
-            None,
-            cx,
-        ));
+        let mut fields = v_flex().w_full().gap_4();
         let mut index = 0;
         for section in &item.sections {
             let mut rows = Vec::new();
             for field in &section.fields {
-                if self.personal_field_visible(index) {
-                    rows.push(self.render_personal_value(
-                        index,
-                        &field.label,
-                        personal_field_icon(&field.id, &field.field_type),
-                        Some(field),
-                        cx,
-                    ));
+                if !field_is_empty(field) {
+                    rows.push(self.render_personal_value(index, &field.label, Some(field), cx));
                 }
                 index += 1;
             }
-            if let Some(heading) = section_heading(item, section).filter(|_| grouped)
-                && !rows.is_empty()
-            {
-                fields = fields.child(
-                    div()
-                        .pt_5()
-                        .pb_1()
-                        .text_body()
-                        .font_semibold()
-                        .text_color(theme.muted_foreground)
-                        .child(heading.to_owned()),
-                );
+            if !rows.is_empty() {
+                let heading = section_heading(item, section)
+                    .filter(|_| grouped)
+                    .map(|heading| heading.to_owned().into());
+                fields = fields.child(item_editor::field_group(heading, rows, cx));
             }
-            fields = fields.children(rows);
         }
-        if self.personal_field_visible(index) {
-            fields = fields.child(self.render_personal_value(
-                index,
-                "Notes",
-                IconName::File.into(),
+        if item.notes.as_deref().is_some_and(|notes| !notes.is_empty()) {
+            fields = fields.child(item_editor::field_group(
                 None,
+                [self.render_personal_value(index, "Notes", None, cx)],
                 cx,
             ));
         }
-        panel = panel
-            .child(fields.children(self.render_custom_field_draft(cx)))
-            .child(h_flex().child(Self::render_add_field(hidden, cx)));
+        panel = panel.child(
+            v_flex()
+                .w_full()
+                .gap_4()
+                .map(|panel| {
+                    let fresh = self
+                        .personal_detail
+                        .loaded_at
+                        .is_some_and(|loaded| loaded.elapsed() < crate::motion::SETTLE);
+                    if fresh {
+                        panel.child(crate::motion::fade(
+                            ("personal-item-fields", self.personal_detail.generation),
+                            fields,
+                        ))
+                    } else {
+                        panel.child(fields)
+                    }
+                })
+                .child(h_flex().child(Self::render_editor_add_field(
+                    Draft::from_item(item, |_| ()).addable(),
+                    cx,
+                ))),
+        );
         if let Some(modified) = entry
             .updated_at
             .and_then(|updated_at| modified_text(updated_at, &jiff::tz::TimeZone::system()))
         {
             panel = panel.child(
                 div()
-                    .text_body()
+                    .px_1()
+                    .text_caption()
                     .text_color(theme.muted_foreground)
                     .child(modified),
             );
@@ -703,316 +558,16 @@ impl DesktopView {
         panel
     }
 
-    fn personal_field_visible(&self, index: usize) -> bool {
-        let Some(item) = &self.personal_detail.item else {
-            return false;
-        };
-        let filled = item
-            .sections
-            .iter()
-            .flat_map(|section| &section.fields)
-            .nth(index)
-            .map_or_else(
-                || item.notes.as_deref().is_some_and(|notes| !notes.is_empty()),
-                |field| !field_is_empty(field),
-            );
-        filled
-            || self.personal_detail.added.contains(&index)
-            || self
-                .personal_detail
-                .inputs
-                .get(&index)
-                .is_some_and(|input| input.edited)
-    }
-
-    fn render_add_field(
-        hidden: Vec<AddableField>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let view = cx.entity().downgrade();
-        Button::new("add-personal-field")
-            .ghost()
-            .icon(IconName::Plus)
-            .label("Add field")
-            .dropdown_menu(move |mut menu, _, _| {
-                for field in &hidden {
-                    let view = view.clone();
-                    let target = field.target.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(field.label.clone())
-                            .icon(personal_field_icon(&field.id, &field.field_type))
-                            .on_click(move |_, window, cx| {
-                                let _ = view.update(cx, |view, cx| {
-                                    view.add_hidden_field(&target, window, cx);
-                                });
-                            }),
-                    );
-                }
-                if !hidden.is_empty() {
-                    menu = menu.separator();
-                }
-                let view = view.clone();
-                menu.item(
-                    PopupMenuItem::new("Custom field")
-                        .icon(IconName::Plus)
-                        .on_click(move |_, window, cx| {
-                            let _ = view.update(cx, |view, cx| {
-                                view.add_custom_field(window, cx);
-                            });
-                        }),
-                )
-            })
-    }
-
-    fn add_hidden_field(
-        &mut self,
-        target: &AddTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match target {
-            AddTarget::Existing(index) => self.add_personal_field(*index, window, cx),
-            AddTarget::Template(id) => {
-                if !self.flush_personal_changes(cx) {
-                    return;
-                }
-                let Some(item) = &self.personal_detail.item else {
-                    return;
-                };
-                match with_template_field(item, id) {
-                    Ok((updated, index)) => {
-                        self.personal_detail.item = Some(updated);
-                        self.personal_detail.field_inserted(index);
-                        self.reset_personal_inputs(cx);
-                        self.add_personal_field(index, window, cx);
-                    }
-                    Err(error) => {
-                        self.personal_detail.error = Some(format!("Not saved: {error}"));
-                        cx.notify();
-                    }
-                }
-            }
-        }
-    }
-
-    fn add_custom_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.personal_detail.custom.is_none() {
-            let name = cx.new(|cx| InputState::new(window, cx).default_value("Custom field"));
-            let value = cx.new(|cx| {
-                SecretInputState::from_value("", PersonalFieldType::Concealed.concealed(), cx)
-                    .placeholder("Add a value")
-            });
-            let subscriptions = [
-                cx.subscribe(&value, |view, _, event: &InputEvent, cx| {
-                    if matches!(
-                        event,
-                        InputEvent::PressEnter {
-                            secondary: false,
-                            shift: false,
-                        }
-                    ) {
-                        view.save_custom_field(cx);
-                    }
-                }),
-                cx.subscribe(
-                    &value,
-                    |view, _, _: &crate::secret_input::CancelEdit, cx| {
-                        view.cancel_custom_field(cx);
-                    },
-                ),
-            ];
-            self.personal_detail.custom = Some(CustomFieldDraft {
-                name,
-                field_type: PersonalFieldType::Concealed,
-                value,
-                error: None,
-                _subscriptions: subscriptions,
-            });
-        }
-        if let Some(draft) = &self.personal_detail.custom {
-            draft.name.update(cx, |name, cx| {
-                name.focus(window, cx);
-                name.select_all(window, cx);
-            });
-        }
-        cx.notify();
-    }
-
-    pub(super) fn cancel_custom_field(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.personal_detail.custom.take().is_some();
-        if open {
-            cx.notify();
-        }
-        open
-    }
-
-    fn save_custom_field(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.snapshot, Snapshot::Unsealed { .. }) {
-            return;
-        }
-        let Some(draft) = &self.personal_detail.custom else {
-            return;
-        };
-        let value = draft.value.read(cx).value();
-        if value.is_empty() {
-            return;
-        }
-        let name = draft.name.read(cx).value();
-        let field_type = draft.field_type.clone();
-        if !self.flush_personal_changes(cx) {
-            return;
-        }
-        let Some(item) = &self.personal_detail.item else {
-            return;
-        };
-        let result = with_custom_field(item, &name, field_type, &value)
-            .map_err(PersonalWriteError::from)
-            .and_then(|(updated, index)| self.save_personal_item(updated).map(|()| index));
-        match result {
-            Ok(index) => {
-                self.personal_detail.field_inserted(index);
-                self.personal_detail.custom = None;
-                self.personal_detail.error = None;
-                self.reset_personal_inputs(cx);
-                self.show_toast("Saved", Some(Direction::Undo), false, cx);
-            }
-            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
-            Err(PersonalWriteError::Failed(error)) => {
-                if let Some(draft) = &mut self.personal_detail.custom {
-                    draft.error = Some(format!("Not saved: {error}"));
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    fn set_custom_field_kind(&mut self, kind: PersonalFieldType, cx: &mut Context<Self>) {
-        if let Some(draft) = &mut self.personal_detail.custom {
-            draft
-                .value
-                .update(cx, |value, cx| value.set_masked(kind.concealed(), cx));
-            draft.field_type = kind;
-            cx.notify();
-        }
-    }
-
-    fn render_custom_field_draft(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let draft = self.personal_detail.custom.as_ref()?;
-        let theme = cx.theme();
-        let view = cx.entity().downgrade();
-        let empty = draft.value.read(cx).value().is_empty();
-        Some(
-            v_flex()
-                .w_full()
-                .gap_2()
-                .py_2()
-                .border_b_1()
-                .border_color(theme.border)
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().flex_1().min_w_0().child(controls::hover_field(
-                            "custom-field-name",
-                            Input::new(&draft.name).bg(theming::input_background(cx)),
-                        )))
-                        .child(field_kind_picker(
-                            "custom-field-kind",
-                            &draft.field_type,
-                            move |kind, cx| {
-                                let _ = view.update(cx, |view, cx| {
-                                    view.set_custom_field_kind(kind, cx);
-                                });
-                            },
-                        )),
-                )
-                .child(draft.value.clone())
-                .when_some(draft.error.clone(), |row, error| {
-                    row.child(
-                        div()
-                            .px_3()
-                            .text_caption()
-                            .text_color(theme.danger)
-                            .child(error),
-                    )
-                })
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("save-custom-field")
-                                .primary()
-                                .small()
-                                .icon(IconName::Check)
-                                .label("Save")
-                                .disabled(empty)
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.save_custom_field(cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("cancel-custom-field")
-                                .ghost()
-                                .small()
-                                .icon(IconName::Close)
-                                .label("Cancel")
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.cancel_custom_field(cx);
-                                })),
-                        ),
-                ),
-        )
-    }
-
-    fn add_personal_field(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.personal_detail.added.insert(index);
-        self.personal_detail.scrolling_to = Some(index);
-        if let Some(input) = self.personal_detail.inputs.get(&index) {
-            input.input.update(cx, |input, cx| input.focus(window, cx));
-        }
-        cx.notify();
-    }
-
-    fn scroll_to_personal_value(&self, cx: &mut Context<Self>) -> Div {
-        let scroll = self.personal_detail.scroll.clone();
-        let view = cx.entity().downgrade();
-        div().absolute().inset_0().child(
-            canvas(
-                |_, _, _| {},
-                move |bounds, (), window, cx| {
-                    let offset = scroll.offset();
-                    let target = offset_showing(
-                        offset.y,
-                        scroll.max_offset().y,
-                        scroll.bounds(),
-                        bounds.dilate(px(16.)),
-                    );
-                    if target != offset.y {
-                        scroll.set_offset(point(offset.x, target));
-                        window.refresh();
-                    }
-                    let _ = view.update(cx, |view, _| view.personal_detail.scrolling_to = None);
-                },
-            )
-            .size_full(),
-        )
-    }
-
     fn initialize_personal_inputs(&mut self, item: &PersonalSecret, cx: &mut Context<Self>) {
-        self.add_personal_input(NAME_INDEX, &item.title, false, false, cx);
         let mut index = 0;
         for field in item.sections.iter().flat_map(|section| &section.fields) {
             let value = Zeroizing::new(field_text(field, true));
-            let wrapped = field.field_type == PersonalFieldType::Multiline;
-            self.add_personal_input(index, &value, field.is_concealed(), wrapped, cx);
+            let masked = field.is_concealed() && !self.personal_detail.revealed.contains(&index);
+            self.add_personal_input(index, &value, masked, cx);
             index += 1;
         }
-        self.add_personal_input(
-            index,
-            item.notes.as_deref().unwrap_or_default(),
-            true,
-            true,
-            cx,
-        );
+        let masked = !self.personal_detail.revealed.contains(&index);
+        self.add_personal_input(index, item.notes.as_deref().unwrap_or_default(), masked, cx);
     }
 
     fn add_personal_input(
@@ -1020,142 +575,18 @@ impl DesktopView {
         index: usize,
         value: &str,
         masked: bool,
-        wrapped: bool,
         cx: &mut Context<Self>,
     ) {
         let input = cx.new(|cx| {
-            let input = SecretInputState::from_value(value, masked, cx)
-                .plain()
-                .placeholder("Add a value");
-            if wrapped { input.wrapped() } else { input }
+            let mut input = SecretInputState::read_only(cx).masked(masked);
+            input.replace(value, cx);
+            input
         });
-        let subscription =
-            cx.subscribe(&input, move |view, _, event: &InputEvent, cx| match event {
-                InputEvent::Change => view.mark_personal_field_changed(index, cx),
-                InputEvent::Blur
-                | InputEvent::PressEnter {
-                    secondary: false,
-                    shift: false,
-                } => view.save_personal_field(index, cx),
-                _ => {}
-            });
-        self.personal_detail.subscriptions.push(subscription);
-        self.personal_detail.subscriptions.push(cx.subscribe(
-            &input,
-            move |view, _, _: &crate::secret_input::CancelEdit, cx| {
-                view.cancel_personal_field(index, cx);
-            },
-        ));
-        self.personal_detail.inputs.insert(
-            index,
-            PersonalValueInput {
-                input,
-                edited: false,
-                dirty: false,
-                error: None,
-                strength: None,
-                rating: None,
-            },
-        );
-    }
-
-    fn rates_strength(&self, index: usize) -> bool {
-        self.can_generate_saved_field(index)
-            && self
-                .personal_detail
-                .item
-                .as_ref()
-                .is_some_and(|item| !custom_field(item, index))
-    }
-
-    fn update_personal_strength(&mut self, index: usize, cx: &mut Context<Self>) {
-        let rated = self.rates_strength(index);
-        let Some(input) = self.personal_detail.inputs.get_mut(&index) else {
-            return;
-        };
-        let value = input.input.read(cx).value();
-        input.strength = (rated && input.edited && !value.is_empty())
-            .then(|| crate::password_generator::Strength::of(&value));
-    }
-
-    fn mark_personal_field_changed(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(input) = self.personal_detail.inputs.get_mut(&index) else {
-            return;
-        };
-        input.edited = true;
-        input.dirty = true;
-        input.error = None;
-        self.copied_personal_field = None;
-        if self.rates_strength(index) {
-            self.rate_personal_field_later(index, cx);
-        }
-        cx.notify();
-    }
-
-    fn rate_personal_field_later(&mut self, index: usize, cx: &mut Context<Self>) {
-        let rating = cx.spawn(async move |view, cx| {
-            smol::Timer::after(crate::password_generator::RATING_PAUSE).await;
-            let _ = view.update(cx, |view, cx| {
-                view.update_personal_strength(index, cx);
-                cx.notify();
-            });
-        });
-        if let Some(input) = self.personal_detail.inputs.get_mut(&index) {
-            input.rating = Some(rating);
-        }
-    }
-
-    fn can_generate_saved_field(&self, index: usize) -> bool {
-        self.personal_detail.item.as_ref().is_some_and(|item| {
-            item.sections
-                .iter()
-                .flat_map(|section| &section.fields)
-                .nth(index)
-                .is_some_and(|field| {
-                    personal_actions::can_generate_value(item.kind, &field.field_type, &field.id)
-                })
-        })
-    }
-
-    pub(super) fn use_generated_saved_value(
-        &mut self,
-        index: usize,
-        password: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.can_generate_saved_field(index) {
-            return;
-        }
-        let Some(input) = self.personal_detail.inputs.get(&index) else {
-            return;
-        };
-        input.input.update(cx, |input, cx| {
-            input.set_value(password, window, cx);
-            input.focus(window, cx);
-        });
-        self.mark_personal_field_changed(index, cx);
-    }
-
-    pub(super) fn flush_personal_changes(&mut self, cx: &mut Context<Self>) -> bool {
-        let generation = self.personal_detail.generation;
-        let dirty: Vec<_> = self
-            .personal_detail
-            .inputs
-            .iter()
-            .filter_map(|(index, input)| input.dirty.then_some(*index))
-            .collect();
-        for index in dirty {
-            self.save_personal_field(index, cx);
-        }
-        self.personal_detail.generation == generation && !self.personal_detail.has_pending_changes()
+        self.personal_detail.inputs.insert(index, input);
     }
 
     fn saved_personal_value(&self, index: usize) -> Option<Zeroizing<String>> {
         let item = self.personal_detail.item.as_ref()?;
-        if index == NAME_INDEX {
-            return Some(Zeroizing::new(item.title.clone()));
-        }
         let fields: Vec<_> = item
             .sections
             .iter()
@@ -1167,76 +598,7 @@ impl DesktopView {
         }))
     }
 
-    fn cancel_personal_field(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(value) = self.saved_personal_value(index) else {
-            return;
-        };
-        let Some(input) = self.personal_detail.inputs.get_mut(&index) else {
-            return;
-        };
-        input
-            .input
-            .update(cx, |input, cx| input.replace(&value, cx));
-        input.dirty = false;
-        input.edited = false;
-        input.error = None;
-        if value.is_empty() {
-            self.personal_detail.added.remove(&index);
-        }
-        self.update_personal_strength(index, cx);
-        cx.notify();
-    }
-
-    fn save_personal_field(&mut self, index: usize, cx: &mut Context<Self>) {
-        if !matches!(self.snapshot, Snapshot::Unsealed { .. }) {
-            return;
-        }
-        let Some(input) = self.personal_detail.inputs.get(&index) else {
-            return;
-        };
-        if !input.dirty {
-            return;
-        }
-        let Some(item) = &self.personal_detail.item else {
-            return;
-        };
-        let edited = if input.input.read(cx).allocation_failed() {
-            Err("Could not allocate secure memory. Re-enter the value.".into())
-        } else {
-            edited_item(item, index, &input.input.read(cx).value())
-        };
-        if edited.as_ref().is_ok_and(|updated| updated == item) {
-            if let Some(input) = self.personal_detail.inputs.get_mut(&index) {
-                input.dirty = false;
-                input.error = None;
-            }
-            cx.notify();
-            return;
-        }
-        let result = edited
-            .map_err(PersonalWriteError::from)
-            .and_then(|updated| self.save_personal_item(updated));
-        match result {
-            Ok(()) => {
-                self.show_toast("Saved", Some(Direction::Undo), false, cx);
-                self.update_personal_ticker(cx);
-                if let Some(input) = self.personal_detail.inputs.get_mut(&index) {
-                    input.dirty = false;
-                    input.error = None;
-                }
-                self.update_personal_strength(index, cx);
-            }
-            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
-            Err(PersonalWriteError::Failed(error)) => {
-                if let Some(input) = self.personal_detail.inputs.get_mut(&index) {
-                    input.error = Some(format!("Not saved: {error}"));
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    fn apply_personal_contents(&mut self, updated_contents: VaultContents) {
+    pub(super) fn apply_personal_contents(&mut self, updated_contents: VaultContents) {
         if let Some(entry) = updated_contents
             .entries
             .iter()
@@ -1255,7 +617,10 @@ impl DesktopView {
         }
     }
 
-    fn save_personal_item(&mut self, updated: PersonalSecret) -> Result<(), PersonalWriteError> {
+    pub(super) fn save_personal_item(
+        &mut self,
+        updated: PersonalSecret,
+    ) -> Result<(), PersonalWriteError> {
         let (version, contents) = self
             .runtime
             .put_personal_secret(&updated, self.personal_detail.version)?;
@@ -1272,7 +637,7 @@ impl DesktopView {
 
     fn show_changed_item(&mut self, contents: VaultContents, cx: &mut Context<Self>) {
         self.apply_personal_contents(contents);
-        self.clear_personal_detail();
+        self.personal_history.clear();
         if let Some(VaultSelection::Entry(entry)) = self.selected_vault_item.clone()
             && is_personal_secret(&entry)
         {
@@ -1285,20 +650,14 @@ impl DesktopView {
             if exists {
                 self.select_vault_item(VaultSelection::Entry(entry), cx);
             } else {
+                self.clear_personal_detail();
                 self.show_personal_panel(PersonalPanel::Overview, cx);
             }
         }
         self.show_toast(ITEM_CHANGED, None, true, cx);
     }
 
-    fn reset_personal_inputs(&mut self, cx: &mut Context<Self>) {
-        if matches!(
-            self.generator_target,
-            Some(generator::GeneratorTarget::Saved(_))
-        ) {
-            self.close_generator(cx);
-        }
-        self.personal_detail.subscriptions.clear();
+    pub(super) fn reset_personal_inputs(&mut self, cx: &mut Context<Self>) {
         self.personal_detail.inputs.clear();
         self.personal_detail.revealed.clear();
         if let Some(item) = self.personal_detail.item.take() {
@@ -1324,19 +683,22 @@ impl DesktopView {
                 .on_close(move |_, _, _| overlay.set(false))
                 .title(title.clone())
                 .width(px(420.))
+                .close_button(false)
                 .child(div().text_body().child("You can undo this right after."))
                 .footer(
                     DialogFooter::new()
                         .child(
-                            Button::new("cancel-delete-personal-item")
+                            button("cancel-delete-personal-item")
+                                .icon(IconName::Close)
                                 .label("Cancel")
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(CancelDialog), cx);
                                 }),
                         )
                         .child(
-                            Button::new("confirm-delete-personal-item")
+                            button("confirm-delete-personal-item")
                                 .danger()
+                                .icon(Glyph::Trash)
                                 .label("Delete")
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(
@@ -1354,7 +716,7 @@ impl DesktopView {
     }
 
     fn delete_personal_item(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.snapshot, Snapshot::Unsealed { .. }) || !self.flush_personal_changes(cx) {
+        if !matches!(self.snapshot, Snapshot::Unsealed { .. }) || self.item_editor.is_some() {
             return;
         }
         let Some(item) = &self.personal_detail.item else {
@@ -1385,13 +747,10 @@ impl DesktopView {
     }
 
     pub(super) fn step_personal_history(&mut self, direction: Direction, cx: &mut Context<Self>) {
-        if self.settings_open || !matches!(self.snapshot, Snapshot::Unsealed { .. }) {
-            return;
-        }
-        if self.personal_detail.has_pending_changes() {
-            if direction == Direction::Undo {
-                self.reset_personal_inputs(cx);
-            }
+        if self.settings_open
+            || !matches!(self.snapshot, Snapshot::Unsealed { .. })
+            || self.item_editor.is_some()
+        {
             return;
         }
         let Some(change) = self.personal_history.take(direction) else {
@@ -1455,11 +814,12 @@ impl DesktopView {
                     );
                 }
                 self.personal_detail.version = version;
-                self.personal_detail.added.clear();
                 self.reset_personal_inputs(cx);
             }
             Change::Delete { item, .. } => {
-                self.follow_restored_item(&item.id, direction, cx);
+                let restored =
+                    version.and_then(|version| Some((copied_item(&item).ok()?, version)));
+                self.follow_restored_item(&item.id, direction, restored, cx);
                 self.personal_history
                     .applied(direction, Change::Delete { item, version });
             }
@@ -1468,7 +828,13 @@ impl DesktopView {
         cx.notify();
     }
 
-    fn follow_restored_item(&mut self, id: &str, direction: Direction, cx: &mut Context<Self>) {
+    fn follow_restored_item(
+        &mut self,
+        id: &str,
+        direction: Direction,
+        restored: Option<(PersonalSecret, ItemVersion)>,
+        cx: &mut Context<Self>,
+    ) {
         let open = matches!(&self.selected_vault_item, Some(VaultSelection::Entry(entry))
             if personal_item_id(entry) == Some(id));
         let entries = self
@@ -1483,6 +849,9 @@ impl DesktopView {
         match target {
             Some(VaultSelection::PersonalSecrets) => {
                 self.show_personal_panel(PersonalPanel::Overview, cx);
+            }
+            Some(VaultSelection::Entry(entry)) if let Some((item, version)) = restored => {
+                self.open_saved_personal_item(*entry, item, version, cx);
             }
             Some(selection) => self.select_vault_item(selection, cx),
             None => {}
@@ -1504,59 +873,29 @@ impl DesktopView {
             message: message.into(),
             undo,
             error,
+            leaving: false,
         });
         cx.spawn(async move |view, cx| {
             smol::Timer::after(PERSONAL_TOAST_LIFETIME).await;
-            let _ = view.update(cx, |view, cx| {
-                if view
-                    .change_toast
-                    .as_ref()
-                    .is_some_and(|toast| toast.id == id)
-                {
-                    view.change_toast = None;
-                    cx.notify();
-                }
-            });
+            let _ = view.update(cx, |view, cx| view.dismiss_change_toast(id, cx));
         })
         .detach();
         cx.notify();
     }
 
     pub(super) fn copy_saved_personal_field(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(input) = self.personal_detail.inputs.get(&index) else {
+        let Some(value) = self.saved_personal_value(index) else {
             return;
         };
-        let value = input.input.read(cx).value().to_string();
-        self.copy_personal_value(value, personal_actions::CopiedField::Saved(index), cx);
-    }
-
-    fn remove_personal_field(&mut self, index: usize, cx: &mut Context<Self>) {
-        if !matches!(self.snapshot, Snapshot::Unsealed { .. }) || !self.flush_personal_changes(cx) {
-            return;
-        }
-        let Some(item) = &self.personal_detail.item else {
-            return;
-        };
-        let result = without_field(item, index)
-            .map_err(PersonalWriteError::from)
-            .and_then(|updated| self.save_personal_item(updated));
-        match result {
-            Ok(()) => {
-                self.personal_detail.error = None;
-                self.personal_detail.field_removed(index);
-                self.reset_personal_inputs(cx);
-                self.show_toast("Saved", Some(Direction::Undo), false, cx);
-            }
-            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
-            Err(PersonalWriteError::Failed(error)) => {
-                self.personal_detail.error = Some(format!("Not saved: {error}"));
-            }
-        }
-        cx.notify();
+        self.copy_personal_value(
+            value.to_string(),
+            personal_actions::CopiedField::Saved(index),
+            cx,
+        );
     }
 
     fn toggle_personal_favorite(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.snapshot, Snapshot::Unsealed { .. }) {
+        if !matches!(self.snapshot, Snapshot::Unsealed { .. }) || self.item_editor.is_some() {
             return;
         }
         let Some(item) = &self.personal_detail.item else {
@@ -1579,10 +918,10 @@ impl DesktopView {
     }
 
     fn copy_personal_code(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(input) = self.personal_detail.inputs.get(&index) else {
+        let Some(value) = self.saved_personal_value(index) else {
             return;
         };
-        let Some(totp) = Totp::parse(&input.input.read(cx).value()) else {
+        let Some(totp) = Totp::parse(&value) else {
             return;
         };
         let code = totp.code(unix_now()).to_string();
@@ -1595,14 +934,12 @@ impl DesktopView {
         }
         let masked = !self.personal_detail.revealed.contains(&index);
         if let Some(input) = self.personal_detail.inputs.get(&index) {
-            input
-                .input
-                .update(cx, |input, cx| input.set_masked(masked, cx));
+            input.update(cx, |input, cx| input.set_masked(masked, cx));
         }
         cx.notify();
     }
 
-    fn render_personal_code(index: usize, totp: &Totp, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_personal_code(index: usize, totp: &Totp, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let now = unix_now();
         let remaining = totp.remaining(now);
@@ -1617,7 +954,7 @@ impl DesktopView {
                 div()
                     .text_heading()
                     .font_semibold()
-                    .font_family("monospace")
+                    .font_family(theme.mono_font_family.clone())
                     .child(grouped(&totp.code(now))),
             )
             .child(
@@ -1638,7 +975,7 @@ impl DesktopView {
             )
     }
 
-    fn render_personal_strength(
+    pub(super) fn render_personal_strength(
         strength: crate::password_generator::Strength,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -1648,20 +985,18 @@ impl DesktopView {
             .child(generator::strength_meter(strength, cx))
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_personal_value(
         &self,
         index: usize,
         label: &str,
-        icon: gpui_component::Icon,
         field: Option<&PersonalField>,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> gpui::AnyElement {
         let Some(input) = self.personal_detail.inputs.get(&index) else {
-            return div();
+            return div().into_any_element();
         };
+        let value = self.saved_personal_value(index).unwrap_or_default();
         let field_type = field.map(|field| &field.field_type);
-        let value = input.input.read(cx).value();
         let website = (field_type == Some(&PersonalFieldType::Url))
             .then(|| website_url(&value))
             .flatten();
@@ -1671,111 +1006,61 @@ impl DesktopView {
         let code = totp
             .as_ref()
             .map(|totp| Self::render_personal_code(index, totp, cx));
-        let strength = input
-            .strength
-            .map(|strength| Self::render_personal_strength(strength, cx));
-        let scroll_to = (self.personal_detail.scrolling_to == Some(index))
-            .then(|| self.scroll_to_personal_value(cx));
-        let show_input = code.is_none() || self.personal_detail.revealed.contains(&index);
+        let show_input = code.is_none();
         let actions = PersonalActions {
-            secret: field.map_or(index != NAME_INDEX, PersonalField::is_concealed),
+            secret: field.is_none_or(PersonalField::is_concealed),
             empty: value.is_empty(),
             has_code: totp.is_some(),
-            removable: self
-                .personal_detail
-                .item
-                .as_ref()
-                .is_some_and(|item| custom_field(item, index)),
             website,
         };
-        let theme = cx.theme();
+        let muted = cx.theme().muted_foreground;
+        let icon = field.map_or_else(
+            || IconName::File.into(),
+            |field| personal_field_icon(&field.id, &field.field_type),
+        );
         let group: gpui::SharedString = format!("personal-field-{index}").into();
-        h_flex()
+        let edit_on_double_click =
+            cx.listener(move |view, event: &gpui::MouseDownEvent, window, cx| {
+                if event.click_count == 2 {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    view.begin_edit(EditStart::Field(index), window, cx);
+                }
+            });
+        item_editor::field_row(("personal-field", index), false, cx)
             .group(group.clone())
-            .relative()
-            .w_full()
-            .flex_wrap()
-            .items_start()
-            .gap_x_4()
-            .py_1()
-            .border_b_1()
-            .border_color(theme.border)
-            .children(scroll_to)
+            .on_mouse_down(gpui::MouseButton::Left, edit_on_double_click)
+            .child(item_editor::field_label(
+                icon.size(rems(1.)).text_color(muted),
+                div().min_w_0().truncate().child(label.to_owned()),
+                muted,
+            ))
             .child(
-                h_flex()
-                    .w(rems(160. / 16.))
-                    .flex_none()
-                    .pt(rems(6. / 16.))
-                    .gap_2()
-                    .text_body()
-                    .text_color(theme.muted_foreground)
-                    .child(field_name_icon(icon, cx))
-                    .child(div().min_w_0().child(label.to_owned())),
+                item_editor::field_value()
+                    .children(code)
+                    .when(show_input, |value| value.child(input.clone())),
             )
-            .child(
-                h_flex()
-                    .flex_grow(1.)
-                    .flex_basis(rems(360. / 16.))
-                    .min_w_0()
-                    .items_start()
-                    .gap_4()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .children(code)
-                            .when(show_input, |value| value.child(input.input.clone()))
-                            .children(strength)
-                            .when_some(input.error.clone(), |value, error| {
-                                value.child(
-                                    div()
-                                        .px_3()
-                                        .text_caption()
-                                        .text_color(theme.danger)
-                                        .child(error),
-                                )
-                            })
-                            .when(input.dirty, |value| {
-                                value.child(
-                                    h_flex()
-                                        .px_3()
-                                        .py_1()
-                                        .gap_2()
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                                            window.prevent_default();
-                                        })
-                                        .child(
-                                            Button::new(("save-personal-field", index))
-                                                .primary()
-                                                .small()
-                                                .icon(IconName::Check)
-                                                .label("Save")
-                                                .on_click(cx.listener(move |view, _, _, cx| {
-                                                    view.save_personal_field(index, cx);
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new(("cancel-personal-field", index))
-                                                .ghost()
-                                                .small()
-                                                .icon(IconName::Close)
-                                                .label("Cancel")
-                                                .on_click(cx.listener(
-                                                    move |view, _, window, cx| {
-                                                        view.cancel_personal_field(index, cx);
-                                                        window.blur(cx);
-                                                    },
-                                                )),
-                                        ),
-                                )
-                            }),
-                    )
-                    .child(self.render_personal_actions(index, actions, &group, cx)),
-            )
+            .child(self.render_personal_actions(index, actions, &group, cx))
+            .into_any_element()
     }
 
-    #[allow(clippy::too_many_lines)]
+    fn render_personal_more(cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        button("personal-item-more")
+            .ghost()
+            .icon(IconName::Ellipsis)
+            .dropdown_menu(move |menu, _, _| {
+                let view = view.clone();
+                menu.item(PopupMenuItem::new("Delete").icon(Glyph::Trash).on_click(
+                    move |_, window, cx| {
+                        let _ = view.update(cx, |view, cx| {
+                            view.confirm_delete_personal_item(window, cx);
+                        });
+                    },
+                ))
+            })
+    }
+
     fn render_personal_actions(
         &self,
         index: usize,
@@ -1783,17 +1068,16 @@ impl DesktopView {
         group: &gpui::SharedString,
         cx: &mut Context<Self>,
     ) -> Div {
-        let Some(input) = self.personal_detail.inputs.get(&index) else {
-            return div();
-        };
         let copied =
             self.copied_personal_field == Some(personal_actions::CopiedField::Saved(index));
         let revealed = self.personal_detail.revealed.contains(&index);
-        let generating = self.generator_target == Some(generator::GeneratorTarget::Saved(index));
-        let shown = copied || revealed || generating || input.dirty || input.error.is_some();
+        let shown = copied || revealed;
         let on_hover = |button: Button| {
+            let button = button.transitions(|transitions| {
+                controls::button_motion(transitions).opacity(crate::motion::hover())
+            });
             if shown {
-                button
+                button.opacity(1.)
             } else {
                 button
                     .opacity(0.)
@@ -1805,34 +1089,15 @@ impl DesktopView {
             secret,
             empty,
             has_code,
-            removable,
             website,
         } = actions;
-        let icons_only = self.shortcuts.narrow;
-        let labeled = |button: Button, label: &'static str| {
-            if icons_only {
-                button.tooltip(label)
-            } else {
-                button.label(label)
-            }
-        };
-        h_flex()
-            .flex_none()
-            .min_w(if icons_only {
-                NARROW_ACTIONS_WIDTH
-            } else {
-                ACTIONS_WIDTH
-            })
-            .justify_end()
-            .gap_1()
+        let labeled = |button: Button, label: &'static str| button.tooltip(label);
+        item_editor::field_actions()
             .when(!empty, |row| {
                 row.child(on_hover(
                     labeled(
-                        Button::new(("copy-personal-field", index))
+                        button(("copy-personal-field", index))
                             .ghost()
-                            .when(!icons_only, |button| {
-                                button.w(personal_actions::COPY_BUTTON_WIDTH)
-                            })
                             .icon(if copied {
                                 IconName::Check
                             } else {
@@ -1852,7 +1117,7 @@ impl DesktopView {
             .when_some(website, |row, url| {
                 row.child(on_hover(
                     labeled(
-                        Button::new(("open-personal-link", index))
+                        button(("open-personal-link", index))
                             .ghost()
                             .icon(IconName::ExternalLink),
                         "Open",
@@ -1860,18 +1125,10 @@ impl DesktopView {
                     .on_click(move |_, _, cx| cx.open_url(&url)),
                 ))
             })
-            .when(self.can_generate_saved_field(index), |row| {
-                row.children(self.render_generator(
-                    generator::GeneratorTarget::Saved(index),
-                    icons_only,
-                    |button| on_hover(button.ghost()),
-                    cx,
-                ))
-            })
-            .when(secret && !empty, |row| {
+            .when(secret && !empty && !has_code, |row| {
                 row.child(on_hover(
                     labeled(
-                        Button::new(("reveal-personal-field", index))
+                        button(("reveal-personal-field", index))
                             .ghost()
                             .icon(if revealed {
                                 IconName::EyeOff
@@ -1885,106 +1142,19 @@ impl DesktopView {
                     })),
                 ))
             })
-            .when(removable, |row| {
-                row.child(on_hover(
-                    Button::new(("remove-personal-field", index))
-                        .ghost()
-                        .icon(IconName::Delete)
-                        .tooltip("Remove field")
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.remove_personal_field(index, cx);
-                        })),
-                ))
-            })
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
 struct PersonalActions {
     secret: bool,
     empty: bool,
     has_code: bool,
-    removable: bool,
     website: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn editing_preserves_identity_metadata_and_other_fields() {
-        let mut original = PersonalSecret::generic("Test".into(), "secret".into());
-        original.tags.push("work".into());
-        original.favorite = true;
-        original.source = Some(serde_json::json!({"imported": true}));
-        original.sections[0].fields.push(PersonalField::new(
-            "username",
-            "Username",
-            PersonalFieldType::Text,
-            "alice",
-        ));
-        let updated = edited_item(&original, 0, "replacement").unwrap();
-        let mut expected = serde_json::to_value(&original).unwrap();
-        expected["sections"][0]["fields"][0]["value"] = "replacement".into();
-        assert_eq!(serde_json::to_value(&updated).unwrap(), expected);
-        assert_eq!(original.sections[0].fields[0].text(), Some("secret"));
-        let renamed = edited_item(&updated, NAME_INDEX, " New name ").unwrap();
-        assert_eq!(renamed.id, original.id);
-        assert_eq!(renamed.title, "New name");
-        assert!(edited_item(&updated, NAME_INDEX, "  ").is_err());
-    }
-
-    #[test]
-    fn only_custom_fields_can_be_removed_and_removal_keeps_the_rest() {
-        let mut item = PersonalSecret::generic("Test".into(), "secret".into());
-        item.sections.push(PersonalSection {
-            id: "custom".into(),
-            label: "Custom fields".into(),
-            fields: vec![
-                PersonalField::new("custom-0", "PIN", PersonalFieldType::Concealed, "1"),
-                PersonalField::new("custom-1", "Note", PersonalFieldType::Text, "2"),
-            ],
-        });
-        assert!(!custom_field(&item, 0));
-        assert!(custom_field(&item, 1));
-        assert!(custom_field(&item, 2));
-        assert!(!custom_field(&item, 3));
-        let removed = without_field(&item, 1).unwrap();
-        assert_eq!(removed.id, item.id);
-        assert_eq!(removed.sections[1].fields.len(), 1);
-        assert_eq!(removed.sections[1].fields[0].id, "custom-1");
-        let emptied = without_field(&removed, 1).unwrap();
-        assert_eq!(emptied.sections.len(), 1);
-        assert!(without_field(&emptied, 5).is_err());
-    }
-
-    #[test]
-    fn removing_the_last_custom_field_keeps_other_empty_sections() {
-        let mut item = PersonalSecret::generic("Test".into(), "secret".into());
-        item.sections.push(PersonalSection {
-            id: "imported".into(),
-            label: "Imported".into(),
-            fields: Vec::new(),
-        });
-        item.sections.push(PersonalSection {
-            id: "custom".into(),
-            label: "Custom fields".into(),
-            fields: vec![PersonalField::new(
-                "custom-0",
-                "PIN",
-                PersonalFieldType::Concealed,
-                "1",
-            )],
-        });
-        let removed = without_field(&item, 1).unwrap();
-        let sections: Vec<_> = removed
-            .sections
-            .iter()
-            .map(|section| section.id.as_str())
-            .collect();
-        assert_eq!(sections, [item.sections[0].id.as_str(), "imported"]);
-    }
 
     #[test]
     fn favoriting_preserves_everything_else() {
@@ -1995,23 +1165,6 @@ mod tests {
         expected["favorite"] = true.into();
         assert_eq!(serde_json::to_value(&favorite).unwrap(), expected);
         assert_eq!(favorite_item(&favorite, false).unwrap(), original);
-    }
-
-    #[test]
-    fn notes_and_structured_values_round_trip() {
-        let mut original = PersonalSecret::generic("Test".into(), "secret".into());
-        original.sections[0].fields[0].field_type = PersonalFieldType::Address;
-        original.sections[0].fields[0].value = serde_json::json!({"street": "First"});
-        assert!(edited_item(&original, 0, "invalid JSON").is_err());
-        let updated = edited_item(&original, 0, r#"{"street":"Second"}"#).unwrap();
-        assert_eq!(
-            updated.sections[0].fields[0].value,
-            serde_json::json!({"street": "Second"})
-        );
-        let updated = edited_item(&updated, 1, "Some notes").unwrap();
-        assert_eq!(updated.notes.as_deref(), Some("Some notes"));
-        assert!(edited_item(&updated, 1, "").unwrap().notes.is_none());
-        assert!(edited_item(&updated, 2, "missing field").is_err());
     }
 
     #[test]
@@ -2040,138 +1193,14 @@ mod tests {
             ..PersonalDetail::default()
         };
         detail.revealed.insert(0);
-        detail.added.insert(1);
+        assert!(detail.has_value(0));
+        assert!(!detail.has_value(1));
         let generation = detail.generation;
         detail.clear();
         assert!(detail.item.is_none());
         assert!(detail.revealed.is_empty());
-        assert!(detail.added.is_empty());
+        assert!(!detail.has_value(0));
         assert_ne!(detail.generation, generation);
-    }
-
-    #[test]
-    fn added_fields_keep_their_rows_when_fields_come_and_go() {
-        let mut detail = PersonalDetail::default();
-        detail.added.extend([1, 4]);
-        detail.field_inserted(4);
-        assert_eq!(detail.added, HashSet::from([1, 5]));
-        detail.field_removed(1);
-        assert_eq!(detail.added, HashSet::from([4]));
-        detail.field_removed(2);
-        assert_eq!(detail.added, HashSet::from([3]));
-    }
-
-    fn existing(
-        index: usize,
-        label: &str,
-        id: &str,
-        field_type: PersonalFieldType,
-    ) -> AddableField {
-        AddableField {
-            label: label.to_owned(),
-            id: id.to_owned(),
-            field_type,
-            target: AddTarget::Existing(index),
-        }
-    }
-
-    #[test]
-    fn empty_fields_and_notes_wait_behind_add_field() {
-        let mut item = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
-        item.sections[0].fields[0].value = "alice".into();
-        assert_eq!(
-            addable_fields(&item),
-            vec![
-                existing(1, "Password", "password", PersonalFieldType::Concealed),
-                existing(2, "Website", "url-0", PersonalFieldType::Url),
-                existing(3, "One-time password", "totp", PersonalFieldType::Totp),
-                existing(4, "Notes", "notes", PersonalFieldType::Multiline),
-            ]
-        );
-        item.notes = Some("Line one\nLine two".into());
-        item.sections[0].fields[1].value = serde_json::json!({"structured": true});
-        assert_eq!(
-            addable_fields(&item),
-            vec![
-                existing(2, "Website", "url-0", PersonalFieldType::Url),
-                existing(3, "One-time password", "totp", PersonalFieldType::Totp),
-            ]
-        );
-    }
-
-    #[test]
-    fn missing_template_fields_can_be_added_in_template_order() {
-        let mut item = PersonalSecret::new(PersonalSecretKind::Card, "Card".into());
-        item.notes = Some("note".into());
-        item.sections.push(PersonalSection {
-            id: "card".into(),
-            label: "Card".into(),
-            fields: vec![PersonalField::new(
-                "number",
-                "Card number",
-                PersonalFieldType::CardNumber,
-                "4111",
-            )],
-        });
-        item.sections.push(PersonalSection {
-            id: "custom".into(),
-            label: "Custom fields".into(),
-            fields: vec![PersonalField::new(
-                "custom-0",
-                "PIN",
-                PersonalFieldType::Concealed,
-                "1",
-            )],
-        });
-        let addable = addable_fields(&item);
-        assert_eq!(
-            addable
-                .iter()
-                .take(3)
-                .map(|field| field.target.clone())
-                .collect::<Vec<_>>(),
-            [
-                AddTarget::Template("cardholderName".into()),
-                AddTarget::Template("type".into()),
-                AddTarget::Template("code".into()),
-            ]
-        );
-        assert!(addable.iter().all(|field| field.id != "number"));
-        let (holder, index) = with_template_field(&item, "cardholderName").unwrap();
-        assert_eq!(index, 0);
-        assert_eq!(holder.sections[0].fields[0].id, "cardholderName");
-        assert_eq!(holder.sections[0].fields[1].id, "number");
-        assert_eq!(holder.id, item.id);
-        let (bank, index) = with_template_field(&holder, "bank").unwrap();
-        assert_eq!(
-            bank.sections
-                .iter()
-                .map(|section| section.id.as_str())
-                .collect::<Vec<_>>(),
-            ["card", "contactInfo", "custom"]
-        );
-        assert_eq!(index, 2);
-        assert!(with_template_field(&bank, "bank").is_err());
-        assert!(with_template_field(&bank, "made-up").is_err());
-    }
-
-    #[test]
-    fn custom_fields_join_the_custom_section_with_a_fresh_id() {
-        let item = PersonalSecret::generic("Test".into(), "secret".into());
-        let (first, index) = with_custom_field(&item, "  ", PersonalFieldType::Text, "a").unwrap();
-        assert_eq!(index, 1);
-        let custom = &first.sections[1];
-        assert_eq!(custom.id, "custom");
-        assert_eq!(custom.fields[0].id, "custom-0");
-        assert_eq!(custom.fields[0].label, "Custom field");
-        let (second, index) =
-            with_custom_field(&first, "PIN", PersonalFieldType::Concealed, "1234").unwrap();
-        assert_eq!(index, 2);
-        assert_eq!(second.sections.len(), 2);
-        let pin = &second.sections[1].fields[1];
-        assert_eq!((pin.id.as_str(), pin.label.as_str()), ("custom-1", "PIN"));
-        assert!(pin.concealed);
-        assert_eq!(pin.text(), Some("1234"));
     }
 
     #[test]
@@ -2185,10 +1214,13 @@ mod tests {
     }
 
     #[test]
-    fn section_headings_skip_the_item_type() {
+    fn section_headings_skip_the_item_type_and_empty_sections() {
         let login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
         assert!(!has_section_groups(&login));
-        let identity = personal_templates::new_item_template(PersonalSecretKind::Identity);
+        let mut identity = personal_templates::new_item_template(PersonalSecretKind::Identity);
+        assert!(!has_section_groups(&identity));
+        identity.sections[0].fields[0].value = "Alice".into();
+        identity.sections[1].fields[1].value = "+380".into();
         assert!(has_section_groups(&identity));
         assert_eq!(
             section_heading(&identity, &identity.sections[0]),
@@ -2203,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn added_fields_scroll_just_far_enough_to_show() {
+    fn rows_scroll_just_far_enough_to_show() {
         let viewport = Bounds::new(point(px(0.), px(100.)), size(px(500.), px(400.)));
         let row =
             |top: f32, height: f32| Bounds::new(point(px(0.), px(top)), size(px(500.), px(height)));

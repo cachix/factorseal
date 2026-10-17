@@ -327,30 +327,59 @@ impl DesktopView {
             return div();
         }
         let detected = Detected::read(global);
+        let theme = cx.theme().clone();
         v_flex()
-            .py_3()
-            .gap_2()
+            .mt_2()
             .flex_none()
             .w_full()
             .max_w(rems(420. / 16.))
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .overflow_hidden()
             .children(detected.browsers(false).map(
                 |(_, browser, paired_count, extension_installed)| {
+                    let status = if paired_count > 0 {
+                        theme.success
+                    } else if extension_installed {
+                        theme.warning
+                    } else {
+                        theme.muted_foreground
+                    };
                     h_flex()
                         .items_center()
-                        .justify_between()
                         .gap_3()
-                        .child(div().font_semibold().child(browser.name()))
+                        .px_4()
+                        .py_3()
+                        .border_b_1()
+                        .border_color(theme.border)
                         .child(
-                            div()
-                                .text_body()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(browser_state(paired_count, extension_installed)),
+                            icon_tile(2., &theme).child(
+                                gpui_component::Icon::new(IconName::Globe)
+                                    .size(rems(1.))
+                                    .text_color(theme.foreground),
+                            ),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .child(div().font_semibold().child(browser.name()))
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_caption()
+                                        .text_color(theme.muted_foreground)
+                                        .child(div().size_2().rounded_full().bg(status))
+                                        .child(browser_state(paired_count, extension_installed)),
+                                ),
                         )
                 },
             ))
             .child(
-                h_flex().pt_2().justify_center().child(
-                    Button::new("open-browser-settings")
+                h_flex().p_2().justify_end().child(
+                    button("open-browser-settings")
+                        .ghost()
                         .small()
                         .icon(IconName::Globe)
                         .label("Browser extensions")
@@ -392,7 +421,7 @@ impl DesktopView {
                     name: browser.name(),
                     state: browser_state(paired_count, extension_installed).into(),
                     install: (paired_count == 0 && !extension_installed).then(|| {
-                        Button::new(("install-browser-extension", index))
+                        button(("install-browser-extension", index))
                             .small()
                             .icon(IconName::ExternalLink)
                             .label("Install extension")
@@ -431,7 +460,7 @@ impl DesktopView {
                     .get(&key)
                     .map_or("Browser", |browser| browser.name());
                 let label = format!("Disconnect {browser} · {}…", &key[..key.len().min(16)]);
-                Button::new(("browser-revoke", index))
+                button(("browser-revoke", index))
                     .small()
                     .icon(IconName::CircleX)
                     .label(label)

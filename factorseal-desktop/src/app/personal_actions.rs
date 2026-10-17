@@ -3,22 +3,16 @@ use std::{
     time::Duration,
 };
 
-use gpui::{Animation, AnimationExt as _, Rems, relative};
+use gpui::{Animation, AnimationExt as _, relative};
 use gpui_component::Icon;
 
 use super::*;
 
 const CLIPBOARD_CLEAR_DELAY: Duration = Duration::from_secs(30);
-pub(super) const COPY_BUTTON_WIDTH: Rems = rems(100. / 16.);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum CopiedField {
-    Draft(usize),
     Saved(usize),
-}
-
-pub(super) fn can_generate(kind: PersonalSecretKind, field: &PersonalDraftField) -> bool {
-    can_generate_value(kind, &field.field_type, &field.id)
 }
 
 pub(super) fn can_generate_value(
@@ -46,6 +40,7 @@ impl DesktopView {
         ));
         self.copied_personal_field = Some(field);
         self.clipboard_notice = Some(copy);
+        self.clipboard_notice_leaving = false;
         cx.notify();
         cx.spawn(async move |view, cx| {
             smol::Timer::after(std::time::Duration::from_secs(2)).await;
@@ -76,9 +71,55 @@ impl DesktopView {
     }
 
     fn dismiss_clipboard_notice(&mut self, copy: u64, cx: &mut Context<Self>) {
-        if self.clipboard_notice == Some(copy) {
-            self.clipboard_notice = None;
-            cx.notify();
+        if self.clipboard_notice != Some(copy) || self.clipboard_notice_leaving {
+            return;
+        }
+        self.clipboard_notice_leaving = true;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            smol::Timer::after(crate::motion::LEAVE_DURATION).await;
+            let _ = view.update(cx, |view, cx| {
+                if view.clipboard_notice == Some(copy) {
+                    view.clipboard_notice = None;
+                    view.clipboard_notice_leaving = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn dismiss_change_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(toast) = self
+            .change_toast
+            .as_mut()
+            .filter(|toast| toast.id == id && !toast.leaving)
+        else {
+            return;
+        };
+        toast.leaving = true;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            smol::Timer::after(crate::motion::LEAVE_DURATION).await;
+            let _ = view.update(cx, |view, cx| {
+                if view
+                    .change_toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.id == id)
+                {
+                    view.change_toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn animate_notice(id: (&'static str, u64), leaving: bool, notice: Div) -> gpui::AnyElement {
+        if leaving {
+            crate::motion::leave(id, notice).into_any_element()
+        } else {
+            crate::motion::enter(id, notice).into_any_element()
         }
     }
 
@@ -118,11 +159,14 @@ impl DesktopView {
             .text_caption()
     }
 
-    fn render_change_toast(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_change_toast(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let toast = self.change_toast.as_ref()?;
         let theme = cx.theme();
         let undo = toast.undo;
-        Some(
+        let id = toast.id;
+        Some(Self::animate_notice(
+            ("change-toast", id),
+            toast.leaving,
             Self::notice(cx)
                 .child(if toast.error {
                     Icon::new(IconName::CircleX)
@@ -134,7 +178,7 @@ impl DesktopView {
                 .child(toast.message.clone())
                 .when_some(undo, |notice, direction| {
                     notice.child(
-                        Button::new("personal-change-toast")
+                        button("personal-change-toast")
                             .ghost()
                             .xsmall()
                             .label(match direction {
@@ -147,23 +191,24 @@ impl DesktopView {
                     )
                 })
                 .child(
-                    Button::new("dismiss-change-toast")
+                    button("dismiss-change-toast")
                         .ghost()
                         .xsmall()
                         .icon(IconName::Close)
                         .tooltip("Dismiss")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.change_toast = None;
-                            cx.notify();
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.dismiss_change_toast(id, cx);
                         })),
                 ),
-        )
+        ))
     }
 
-    fn render_clipboard_notice(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_clipboard_notice(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let copy = self.clipboard_notice?;
         let theme = cx.theme();
-        Some(
+        Some(Self::animate_notice(
+            ("clipboard-notice", copy),
+            self.clipboard_notice_leaving,
             Self::notice(cx)
                 .child(Icon::new(IconName::Check).small().text_color(theme.success))
                 .child("Copied to clipboard")
@@ -173,7 +218,7 @@ impl DesktopView {
                     |text, elapsed| text.child(clipboard_clear_text(seconds_left(elapsed))),
                 ))
                 .child(
-                    Button::new("dismiss-clipboard-notice")
+                    button("dismiss-clipboard-notice")
                         .ghost()
                         .xsmall()
                         .icon(IconName::Close)
@@ -195,7 +240,7 @@ impl DesktopView {
                             |fill, elapsed| fill.w(relative(1. - elapsed)),
                         ),
                 ),
-        )
+        ))
     }
 }
 

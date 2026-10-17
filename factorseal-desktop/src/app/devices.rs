@@ -5,6 +5,7 @@ use super::{
 };
 use crate::appearance::TypeScale as _;
 use crate::branding::Glyph;
+use crate::controls::button;
 use factorseal::desktop_worker::sync::network::Action;
 use factorseal::personal::sync::TransportBinding;
 use gpui::prelude::*;
@@ -254,7 +255,7 @@ impl DesktopView {
                     panel.child(div().text_body().text_color(theme.danger).child(error))
                 })
                 .child(h_flex().justify_end().child(
-                    Button::new("save-device-name").primary().icon(IconName::ArrowRight).label("Continue")
+                    button("save-device-name").primary().icon(IconName::ArrowRight).label("Continue")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.save_device_name(cx);
                         })))))
@@ -325,7 +326,7 @@ impl DesktopView {
                 let waiting = !state.joining && request.needs_merge_approval();
                 let approved_here = state.joining && !request.needs_merge_approval();
                 panel = panel.child(
-                    Button::new("approve-connection")
+                    button("approve-connection")
                         .primary()
                         .icon(IconName::Check)
                         .label(if waiting {
@@ -362,7 +363,7 @@ impl DesktopView {
         let panel = v_flex().gap_3().w_full().items_center();
         let Some(invitation) = &self.devices.state.invitation else {
             return panel.child(
-                Button::new("retry-pairing-code")
+                button("retry-pairing-code")
                     .icon(Glyph::Refresh)
                     .loading(busy)
                     .label(if busy {
@@ -381,7 +382,7 @@ impl DesktopView {
             return panel
                 .child(div().text_body().child("This pairing code has expired."))
                 .child(
-                    Button::new("renew-pairing-code")
+                    button("renew-pairing-code")
                         .primary()
                         .icon(Glyph::Refresh)
                         .label("New pairing code")
@@ -423,20 +424,20 @@ impl DesktopView {
             match screen {
                 PairingScreen::Choose => v_flex().gap_3().w_full()
                     .child(div().text_body().child("Start on either device. Connecting combines the personal secrets of every device you approve."))
-                    .child(Button::new("choose-show-code").primary().icon(Glyph::QrCode).label("Show pairing code")
+                    .child(button("choose-show-code").primary().icon(Glyph::QrCode).label("Show pairing code")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.device_pairing = Some(PairingScreen::Show);
                             let name = view.pairing_name(cx);
                             view.device_action(Action::Invite(name), cx);
                         })))
-                    .child(Button::new("choose-paste-code").icon(Glyph::Paste).label("Paste pairing code")
+                    .child(button("choose-paste-code").icon(Glyph::Paste).label("Paste pairing code")
                         .on_click(cx.listener(|view, _, _, cx| { view.device_pairing = Some(PairingScreen::Paste); cx.notify(); }))),
                 PairingScreen::Show => self.render_device_code(cx),
                 PairingScreen::Paste => v_flex().gap_3().w_full()
                     .child(div().text_body().child("Paste the pairing code from the other device. You’ll review all affected devices before anything is connected."))
                     .child(div().font_medium().child("Pairing code"))
                     .child(self.pairing_ticket.clone())
-                    .child(Button::new("use-pairing-code").primary().icon(IconName::ArrowRight).label("Review connection").disabled(busy)
+                    .child(button("use-pairing-code").primary().icon(IconName::ArrowRight).label("Review connection").disabled(busy)
                         .on_click(cx.listener(|view, _, _, cx| {
                             let ticket = zeroize::Zeroizing::new(view.pairing_ticket.read(cx).value().trim().to_owned());
                             let name = view.pairing_name(cx);
@@ -514,7 +515,7 @@ impl DesktopView {
                             .gap_2()
                             .when(left.is_some(), |row| {
                                 row.child(
-                                    Button::new("copy-pairing-code")
+                                    button("copy-pairing-code")
                                         .icon(IconName::Copy)
                                         .label("Copy pairing code")
                                         .on_click(cx.listener(|view, _, _, cx| {
@@ -532,7 +533,7 @@ impl DesktopView {
                             })
                             .child(div().flex_1())
                             .child(
-                                Button::new("cancel-device-pairing")
+                                button("cancel-device-pairing")
                                     .icon(IconName::Close)
                                     .label(if approved_here { "Close" } else { "Cancel" })
                                     .disabled(!self.can_cancel_pairing())
@@ -562,7 +563,7 @@ impl DesktopView {
     }
     pub(super) fn connect_device_button(&self, cx: &mut Context<Self>) -> Button {
         let state = &self.devices.state;
-        Button::new("connect-device")
+        button("connect-device")
             .flex_none()
             .primary()
             .icon(IconName::Plus)
@@ -604,7 +605,7 @@ impl DesktopView {
                 Input::new(&self.device_name),
             )))
             .child(
-                Button::new("save-device-rename")
+                button("save-device-rename")
                     .primary()
                     .icon(IconName::Check)
                     .label("Save")
@@ -615,7 +616,7 @@ impl DesktopView {
                     })),
             )
             .child(
-                Button::new("cancel-device-rename")
+                button("cancel-device-rename")
                     .ghost()
                     .icon(IconName::Close)
                     .label("Cancel")
@@ -673,7 +674,7 @@ impl DesktopView {
             .when(!alone, |panel| {
                 panel.child(
                     h_flex().child(
-                        Button::new("refresh-devices")
+                        button("refresh-devices")
                             .icon(Glyph::Refresh)
                             .label(if self.devices_syncing {
                                 "Syncing…"

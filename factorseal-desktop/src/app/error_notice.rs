@@ -121,7 +121,7 @@ impl DesktopView {
                     .gap_2()
                     .flex_wrap()
                     .when(retry, |actions| {
-                        actions.child(Button::new("error-retry").label("Try again").on_click(
+                        actions.child(button("error-retry").label("Try again").on_click(
                             cx.listener(|view, _, _, cx| {
                                 view.reset_error_details();
                                 refresh_desktop_snapshot(Arc::clone(&view.runtime), cx);
@@ -129,7 +129,7 @@ impl DesktopView {
                         ))
                     })
                     .child(
-                        Button::new("error-details")
+                        button("error-details")
                             .ghost()
                             .label(if self.error_details_open {
                                 "Hide details"
@@ -142,7 +142,7 @@ impl DesktopView {
                             })),
                     )
                     .child(
-                        Button::new("error-copy-details")
+                        button("error-copy-details")
                             .ghost()
                             .label(if self.error_details_copied {
                                 "Copied"

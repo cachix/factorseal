@@ -352,6 +352,19 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    pub(crate) fn lease_deadlines(&self, metadata: &VaultMetadata) -> Option<(u64, u64)> {
+        live_status(&self.config, metadata).ok().flatten()
+    }
+
+    pub(crate) fn keep_unsealed(&self, metadata: &VaultMetadata) -> Result<(), String> {
+        let request = VaultRequest::new(VaultAction::ListVaultEntries {
+            cursor: None,
+            limit: 1,
+        })
+        .map_err(|error| error.to_string())?;
+        self.request_live(metadata, &request).map(drop)
+    }
+
     pub(crate) fn read_personal_item(
         &self,
         metadata: &VaultMetadata,

@@ -14,6 +14,7 @@ use gpui_component::{
 use crate::{
     appearance::{self, Choice, TypeScale as _},
     branding::Glyph,
+    controls::button,
     settings::DesktopSettings,
 };
 
@@ -293,7 +294,7 @@ impl SettingsView {
 
     fn reset_button(cx: &mut Context<Self>) -> Button {
         let current = appearance::current(cx);
-        Button::new("reset-appearance")
+        button("reset-appearance")
             .icon(IconName::Undo2)
             .label("Reset to defaults")
             .disabled(*current == Self::default_appearance(current))
@@ -430,7 +431,7 @@ impl SettingsView {
     }
 
     fn export_button(&self, cx: &mut Context<Self>) -> Button {
-        Button::new("export-diagnostics")
+        button("export-diagnostics")
             .icon(Glyph::Download)
             .loading(self.export_busy)
             .label(if self.export_busy {
@@ -443,7 +444,7 @@ impl SettingsView {
     }
 
     fn report_button(cx: &mut Context<Self>) -> Button {
-        Button::new("report-issue-from-settings")
+        button("report-issue-from-settings")
             .icon(Glyph::Bug)
             .label("Report an issue")
             .on_click(cx.listener(|_, _, _, cx| cx.emit(ReportIssue)))

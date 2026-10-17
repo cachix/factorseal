@@ -111,7 +111,7 @@ impl DesktopView {
                     card = card.child(div().text_body().text_color(cx.theme().muted_foreground).child("Revoking this grant removes its access to every entry in its scope."));
                 }
                 card = card.child(
-                    Button::new(("revoke-entry-access", count))
+                    button(("revoke-entry-access", count))
                         .icon(IconName::CircleX)
                         .label(if inherited {
                             "Revoke inherited grant"

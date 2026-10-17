@@ -23,6 +23,9 @@ pub(crate) const TAG_ASSET: &str = "factorseal-tag.svg";
 pub(crate) const CLOCK_ASSET: &str = "factorseal-clock.svg";
 pub(crate) const MAIL_ASSET: &str = "factorseal-mail.svg";
 pub(crate) const PHONE_ASSET: &str = "factorseal-phone.svg";
+pub(crate) const PENCIL_ASSET: &str = "factorseal-pencil.svg";
+pub(crate) const GRIP_ASSET: &str = "factorseal-grip.svg";
+pub(crate) const KEYBOARD_ASSET: &str = "factorseal-keyboard.svg";
 pub(crate) const TAGLINE: &str = "Your secrets stay here.";
 
 #[derive(Clone, Copy)]
@@ -43,6 +46,9 @@ pub(crate) enum Glyph {
     Clock,
     Mail,
     Phone,
+    Pencil,
+    Grip,
+    Keyboard,
 }
 
 impl IconNamed for Glyph {
@@ -64,6 +70,9 @@ impl IconNamed for Glyph {
             Self::Clock => CLOCK_ASSET,
             Self::Mail => MAIL_ASSET,
             Self::Phone => PHONE_ASSET,
+            Self::Pencil => PENCIL_ASSET,
+            Self::Grip => GRIP_ASSET,
+            Self::Keyboard => KEYBOARD_ASSET,
         }
         .into()
     }

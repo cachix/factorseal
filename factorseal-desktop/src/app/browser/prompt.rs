@@ -244,7 +244,7 @@ impl Render for BrowserView {
             );
         }
         let mut requests = v_flex().gap_4().child(summary).child(
-            Button::new("browser-technical-details")
+            button("browser-technical-details")
                 .ghost()
                 .small()
                 .label(if self.details {
@@ -267,7 +267,7 @@ impl Render for BrowserView {
         if reviewing {
             for (index, candidate) in self.request.candidates.iter().enumerate() {
                 requests = requests.child(
-                    Button::new(("browser-account", index))
+                    button(("browser-account", index))
                         .label(format!(
                             "{}{} · {}",
                             if saving { "Update password: " } else { "" },
@@ -284,7 +284,7 @@ impl Render for BrowserView {
                 let selected = self.group.as_ref() == Some(group);
                 let group = group.clone();
                 groups = groups.child(
-                    Button::new(("browser-factor", index))
+                    button(("browser-factor", index))
                         .label(group.to_string())
                         .selected(selected)
                         .disabled(unlocking)
@@ -409,7 +409,7 @@ impl Render for BrowserView {
                         h_flex()
                             .justify_end()
                             .gap_2()
-                            .child(Button::new("deny-browser").ghost().label("Deny").on_click(
+                            .child(button("deny-browser").ghost().label("Deny").on_click(
                                 cx.listener(|view, _, _, cx| {
                                     let session = view.request.session.clone();
                                     let generation = view.request.generation;
@@ -418,7 +418,7 @@ impl Render for BrowserView {
                             ))
                             .when(!unsealed || pairing || revoking || saving, |element| {
                                 element.child(
-                                    Button::new("approve-browser")
+                                    button("approve-browser")
                                         .primary()
                                         .disabled(
                                             unlocking

@@ -52,6 +52,7 @@ fi
 mkdir -p "$output_dir" "$stage/$archive"
 cp LICENSE README.md "$stage/$archive/"
 cp assets/fonts/ibm-plex-sans/license.txt "$stage/$archive/LICENSE.IBM-Plex-Sans"
+cp assets/fonts/ibm-plex-mono/license.txt "$stage/$archive/LICENSE.IBM-Plex-Mono"
 cp "acceptance/$platform.sh" "$stage/$archive/run-acceptance.sh"
 chmod 0755 "$stage/$archive/run-acceptance.sh"
 

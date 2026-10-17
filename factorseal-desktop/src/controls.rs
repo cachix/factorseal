@@ -1,8 +1,20 @@
 use gpui::{
-    AnyElement, App, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
+    AnyElement, App, ColorExt as _, ElementId, Hsla, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, StatefulInteractiveElement, Styled, Window, div,
+    prelude::FluentBuilder, px,
 };
-use gpui_component::{ActiveTheme as _, ThemeStyled as _};
+use gpui_component::{ActiveTheme as _, ThemeStyled as _, button::Button};
+
+pub(crate) fn button(id: impl Into<ElementId>) -> Button {
+    Button::new(id).transitions(button_motion)
+}
+
+pub(crate) fn button_motion(transitions: gpui::StyleTransitions) -> gpui::StyleTransitions {
+    transitions
+        .bg(crate::motion::hover())
+        .border_color(crate::motion::hover())
+        .text_color(crate::motion::hover())
+}
 
 pub(crate) fn text_field<T>(element: T, focused: bool, window: &Window, cx: &App) -> T
 where
@@ -10,6 +22,7 @@ where
 {
     let hover = field_border(true, cx);
     element
+        .transitions(|transitions| transitions.border_color(crate::motion::hover()))
         .border_1()
         .border_color(field_border(false, cx))
         .cursor_text()
@@ -26,7 +39,9 @@ pub(crate) trait ClickStyle:
         let theme = cx.theme();
         let (hover, active) = (theme.secondary_hover, theme.secondary_active);
         let (ring, inner) = (theme.ring, theme.primary_foreground);
-        self.cursor_pointer()
+        self.transitions(|transitions| transitions.bg(crate::motion::hover()))
+            .when(!selected, |this| this.bg(hover.opacity(0.)))
+            .cursor_pointer()
             .tab_index(0)
             .focus_visible(move |style| {
                 if selected {
@@ -82,6 +97,8 @@ impl<T: StatefulInteractiveElement + Styled + FluentBuilder + Sized> ClickStyle 
 fn focus_states<T: ClickStyle>(element: T, cx: &App) -> T {
     let ring = cx.theme().ring;
     element
+        .transitions(|transitions| transitions.opacity(crate::motion::hover()))
+        .opacity(1.)
         .cursor_pointer()
         .tab_index(0)
         .rounded_sm()
@@ -176,6 +193,8 @@ impl RenderOnce for ToggleFrame {
         div()
             .id(self.id)
             .track_focus(&focus)
+            .transitions(|transitions| transitions.bg(crate::motion::hover()))
+            .bg(hover.opacity(0.))
             .p_1()
             .m(px(-4.))
             .rounded(theme.radius)

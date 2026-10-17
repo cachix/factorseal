@@ -34,6 +34,8 @@ actions!(
         NewLogin,
         BackUpVault,
         OpenSettings,
+        EditItem,
+        SaveItem,
     ]
 );
 
@@ -67,14 +69,27 @@ impl PaletteAction {
     }
 
     fn item(self) -> CommandItem {
-        let (label, action): (&str, Box<dyn gpui::Action>) = match self {
-            Self::SealNow => ("Seal now", Box::new(SealVault)),
-            Self::NewLogin => ("New login", Box::new(NewLogin)),
-            Self::BackUpVault => ("Back up vault", Box::new(BackUpVault)),
-            Self::Settings => ("Settings", Box::new(OpenSettings)),
-            Self::Shortcuts => ("Keyboard shortcuts", Box::new(ShowShortcuts)),
+        let (label, icon, action): (&str, gpui_component::Icon, Box<dyn gpui::Action>) = match self
+        {
+            Self::SealNow => ("Seal now", Glyph::Lock.into(), Box::new(SealVault)),
+            Self::NewLogin => ("New login", IconName::Plus.into(), Box::new(NewLogin)),
+            Self::BackUpVault => (
+                "Back up vault",
+                IconName::HardDrive.into(),
+                Box::new(BackUpVault),
+            ),
+            Self::Settings => (
+                "Settings",
+                IconName::Settings.into(),
+                Box::new(OpenSettings),
+            ),
+            Self::Shortcuts => (
+                "Keyboard shortcuts",
+                Glyph::Keyboard.into(),
+                Box::new(ShowShortcuts),
+            ),
         };
-        CommandItem::new().label(label).action(action)
+        CommandItem::new().label(label).icon(icon).action(action)
     }
 }
 
@@ -96,6 +111,8 @@ pub(super) fn bind_keys(cx: &mut App) {
             Some(OUTSIDE_TEXT_CONTEXT),
         ),
         KeyBinding::new("secondary-l", SealVault, Some(CONTEXT)),
+        KeyBinding::new("secondary-e", EditItem, Some(OUTSIDE_TEXT_CONTEXT)),
+        KeyBinding::new("secondary-s", SaveItem, Some(CONTEXT)),
         KeyBinding::new(SHORTCUTS_KEYS, ShowShortcuts, Some(CONTEXT)),
         KeyBinding::new("escape", GoBack, Some(OUTSIDE_SECRET_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(OUTSIDE_DIALOG_CONTEXT)),
@@ -309,6 +326,11 @@ fn palette_items(entries: &[factorseal::VaultEntryMetadata]) -> CommandGroup {
         .items(entries.iter().map(|entry| {
             let (label, detail) = vault_entry_label(entry);
             let row_label = label.clone();
+            let icon = if is_personal_secret(entry) {
+                personal_kind_icon(personal_entry_kind(entry))
+            } else {
+                sidebar_category_icon(entry.document_kind)
+            };
             CommandItem::new()
                 .label(label)
                 .keywords([
@@ -319,6 +341,11 @@ fn palette_items(entries: &[factorseal::VaultEntryMetadata]) -> CommandGroup {
                     h_flex()
                         .min_w_0()
                         .gap_2()
+                        .child(
+                            icon.clone()
+                                .size_4()
+                                .text_color(cx.theme().muted_foreground),
+                        )
                         .child(div().truncate().child(row_label.clone()))
                         .child(
                             div()
@@ -348,6 +375,8 @@ impl DesktopView {
             .on_action(cx.listener(Self::new_login))
             .on_action(cx.listener(Self::back_up_vault))
             .on_action(cx.listener(Self::open_settings_action))
+            .on_action(cx.listener(Self::edit_item))
+            .on_action(cx.listener(Self::save_item))
     }
 
     pub(super) fn scroll_list(&self, list: impl IntoElement) -> Div {
@@ -457,11 +486,10 @@ impl DesktopView {
     }
 
     fn personal_draft_started(&self, cx: &App) -> bool {
-        !self.personal_name.read(cx).value().trim().is_empty()
-            || self
-                .personal_fields
-                .iter()
-                .any(|field| !field.value.read(cx).value().is_empty())
+        self.item_editor
+            .as_ref()
+            .is_some_and(item_editor::Editor::is_new)
+            && self.item_editor_changed(cx)
     }
 
     fn drafting_new_item(&self) -> bool {
@@ -562,10 +590,10 @@ impl DesktopView {
         }
     }
 
-    fn focus_new_item_name(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_new_item_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.drafting_new_item() {
-            self.personal_name
-                .update(cx, |name, cx| name.focus(window, cx));
+            self.ensure_new_item_editor(window, cx);
+            self.item_name.update(cx, |name, cx| name.focus(window, cx));
         }
     }
 
@@ -629,7 +657,7 @@ impl DesktopView {
                 .personal_detail
                 .item()
                 .and_then(|item| copy_field_index(item, target))
-                .filter(|index| self.personal_detail.has_value(*index, cx)),
+                .filter(|index| self.personal_detail.has_value(*index)),
             _ => None,
         };
         match index {
@@ -675,7 +703,8 @@ impl DesktopView {
                 .update(cx, |search, cx| search.set_value("", window, cx));
             return;
         }
-        if self.cancel_custom_field(cx) {
+        if self.item_editor.is_some() {
+            self.cancel_item_editor(cx);
             return;
         }
         if !self.shortcuts.root.is_focused(window) && !self.shortcuts.list.is_focused(window) {
@@ -730,9 +759,6 @@ impl DesktopView {
         self.settings_open = false;
         if !(self.drafting_new_item() && self.personal_draft_started(cx)) {
             self.show_personal_panel(PersonalPanel::NewItem, cx);
-            if self.drafting_new_item() {
-                self.reset_personal_draft(window, cx);
-            }
         }
         self.focus_new_item_name(window, cx);
         cx.notify();
@@ -748,6 +774,24 @@ impl DesktopView {
 
     fn open_settings_action(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
         self.open_settings(cx);
+    }
+
+    fn edit_item(&mut self, _: &EditItem, window: &mut Window, cx: &mut Context<Self>) {
+        let viewing = matches!(&self.selected_vault_item, Some(VaultSelection::Entry(entry))
+            if is_personal_secret(entry));
+        if !viewing || self.settings_open || self.personal_detail.item().is_none() {
+            cx.propagate();
+            return;
+        }
+        self.begin_edit(item_editor::EditStart::Top, window, cx);
+    }
+
+    fn save_item(&mut self, _: &SaveItem, _: &mut Window, cx: &mut Context<Self>) {
+        if self.item_editor.is_none() {
+            cx.propagate();
+            return;
+        }
+        self.save_item_editor(cx);
     }
 
     fn show_shortcuts(&mut self, _: &ShowShortcuts, window: &mut Window, cx: &mut Context<Self>) {
@@ -766,13 +810,15 @@ impl DesktopView {
         let overlay = Rc::clone(&self.shortcuts.overlay);
         overlay.set(self.unsealed_contents().is_some());
         window.open_dialog(cx, move |dialog, window, cx| {
-            let rows: [(&str, Vec<Option<AnyElement>>); 9] = [
+            let rows: [(&str, Vec<Option<AnyElement>>); 11] = [
                 ("Search items and actions", vec![keys(&OpenPalette, window)]),
                 ("Search the vault", vec![keys(&FocusSearch, window)]),
                 ("Move through a list", vec![typed("up"), typed("down")]),
                 ("Open the selected item", vec![typed("enter")]),
                 ("Copy password", vec![keys(&CopyPassword, window)]),
                 ("Copy username", vec![keys(&CopyUsername, window)]),
+                ("Edit item", vec![keys(&EditItem, window)]),
+                ("Save changes", vec![keys(&SaveItem, window)]),
                 ("Seal now", vec![keys(&SealVault, window)]),
                 ("Go back", vec![keys(&GoBack, window)]),
                 ("Keyboard shortcuts", vec![keys(&ShowShortcuts, window)]),

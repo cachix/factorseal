@@ -158,7 +158,10 @@ fn apply_selected(cx: &mut App) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        theme.font_family = crate::theming::installed_or_bundled_font(theme.font_family, cx);
+        use crate::theming::{MONO_FONT_FAMILY, UI_FONT_FAMILY, installed_or_bundled_font};
+        theme.font_family = installed_or_bundled_font(theme.font_family, UI_FONT_FAMILY, cx);
+        theme.mono_font_family =
+            installed_or_bundled_font(theme.mono_font_family, MONO_FONT_FAMILY, cx);
     }
     if let Some(size) = settings.text_size {
         theme.font_size = gpui::px(f32::from(size));

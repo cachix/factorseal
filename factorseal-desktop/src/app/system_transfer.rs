@@ -46,7 +46,7 @@ impl DesktopView {
             panel.child("Start a transfer in your other password manager and choose FactorSeal. You will review the credentials here before importing.")
         } else {
             panel.child(
-                Button::new("system-credential-export")
+                button("system-credential-export")
                     .icon(Glyph::Upload)
                     .label("Choose destination app…")
                     .disabled(self.transfer_busy)
@@ -140,7 +140,7 @@ impl DesktopView {
             apple_exchange::finish();
             return;
         }
-        if !self.flush_personal_changes(cx) {
+        if self.item_editor_changed(cx) {
             self.cancel_system_transfer();
             self.transfer_notice = Some(TransferNotice::Error(
                 "Finish saving the current credential, then retry the system transfer.".into(),
@@ -153,6 +153,7 @@ impl DesktopView {
         let metadata = metadata.clone();
         let runtime = Arc::clone(&self.runtime);
         let replace = self.transfer_replace_existing;
+        self.close_item_editor(cx);
         self.clear_personal_detail();
         self.selected_vault_item = Some(VaultSelection::TransferCredentials);
         self.transfer_is_import = true;

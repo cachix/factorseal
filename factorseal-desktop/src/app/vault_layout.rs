@@ -1,5 +1,34 @@
 use super::*;
 
+#[derive(Default)]
+pub(super) struct Navigation {
+    page: String,
+    depth: u8,
+    direction: i8,
+}
+
+impl Navigation {
+    pub(super) fn visit(&mut self, page: String, depth: u8) {
+        if self.page != page {
+            self.direction = match depth.cmp(&self.depth) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            self.page = page;
+            self.depth = depth;
+        }
+    }
+
+    fn animate<E: IntoElement + Styled + 'static>(&self, element: E) -> impl IntoElement {
+        crate::motion::navigate(
+            gpui::ElementId::Name(self.page.clone().into()),
+            self.direction,
+            element,
+        )
+    }
+}
+
 impl DesktopView {
     pub(super) fn current_list(&self) -> Option<VaultSelection> {
         if self.settings_open {
@@ -7,6 +36,28 @@ impl DesktopView {
         } else {
             list_selection(self.selected_vault_item.as_ref())
         }
+    }
+
+    pub(super) fn navigation_page(
+        &self,
+        compact: bool,
+        single_pane: bool,
+        cx: &App,
+    ) -> (String, u8) {
+        let searching = self.showing_search_results(cx);
+        let opened = self.settings_open || self.selected_vault_item.is_some() || searching;
+        let drilled = compact && self.shows_single_item();
+        let section = self
+            .on_section_page()
+            .then(|| self.selected_section(cx))
+            .flatten()
+            .filter(|_| drilled);
+        let page = format!(
+            "page-{:?}-{}-{searching}-{drilled}-{section:?}",
+            vault_page(self.selected_vault_item.as_ref(), self.personal_panel),
+            self.settings_open,
+        );
+        (page, u8::from(single_pane && opened) + u8::from(drilled))
     }
 
     pub(super) fn shown_list(&self, compact: bool) -> Option<VaultSelection> {
@@ -184,9 +235,10 @@ impl DesktopView {
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)),
             )
             .child(
-                Button::new("seal-vault")
+                button("seal-vault")
                     .flex_none()
                     .small()
+                    .icon(Glyph::Lock)
                     .label("Seal")
                     .disabled(!*owned)
                     .on_click(cx.listener(|view, _, _, cx| view.seal(cx))),
@@ -204,7 +256,7 @@ impl DesktopView {
             let has_items = contents.entries.iter().any(is_personal_secret);
             Self::list_header("Personal secrets", cx).when(has_items, |header| {
                 header.child(
-                    Button::new("new-personal-secret")
+                    button("new-personal-secret")
                         .flex_none()
                         .primary()
                         .icon(IconName::Plus)
@@ -263,7 +315,7 @@ impl DesktopView {
                 let row_index = first_index + index;
                 let selected = is_selected_entry(self.selected_vault_item.as_ref(), entry);
                 let row = self
-                    .render_entry_row(entry, &query, row_index, cx)
+                    .render_entry_row(entry, &query, cx)
                     .when(row_index == cursor, |row| row.keyboard_cursor(selected, cx));
                 list = list.child(
                     v_flex()
@@ -346,14 +398,19 @@ impl DesktopView {
         &self,
         contents: &VaultContents,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
+        let detail = self.render_vault_detail(contents, cx);
+        if self.shortcuts.compact {
+            return detail.into_any_element();
+        }
         crate::motion::enter(
             format!(
                 "vault-page-{:?}",
                 vault_page(self.selected_vault_item.as_ref(), self.personal_panel)
             ),
-            self.render_vault_detail(contents, cx),
+            detail,
         )
+        .into_any_element()
     }
 
     fn render_detail_pane(&self, contents: &VaultContents, cx: &mut Context<Self>) -> Div {
@@ -410,7 +467,10 @@ impl DesktopView {
                             .h_full()
                             .border_r_1()
                             .border_color(theme.border)
-                            .child(self.render_search_results(contents, cx)),
+                            .child(crate::motion::fade(
+                                "search-results",
+                                self.render_search_results(contents, cx),
+                            )),
                     )
                     .child(self.render_detail_pane(contents, cx))
             };
@@ -426,25 +486,28 @@ impl DesktopView {
                         .child(self.render_vault_page_content(contents, cx)),
                 ),
             ),
-            Some(list) => {
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(
-                        v_flex()
-                            .w(rems(280. / 16.))
-                            .flex_none()
-                            .h_full()
-                            .border_r_1()
-                            .border_color(theme.border)
-                            .child(Self::render_list_header(&list, contents, cx))
-                            .child(div().flex_1().min_h_0().child(
-                                self.scroll_list(self.render_list_rows(&list, contents, cx)),
-                            )),
-                    )
-                    .child(self.render_detail_pane(contents, cx))
-            }
+            Some(list) => h_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .child(
+                    div()
+                        .w(rems(280. / 16.))
+                        .flex_none()
+                        .h_full()
+                        .border_r_1()
+                        .border_color(theme.border)
+                        .child(crate::motion::enter(
+                            format!("vault-list-{list:?}"),
+                            v_flex()
+                                .size_full()
+                                .child(Self::render_list_header(&list, contents, cx))
+                                .child(div().flex_1().min_h_0().child(
+                                    self.scroll_list(self.render_list_rows(&list, contents, cx)),
+                                )),
+                        )),
+                )
+                .child(self.render_detail_pane(contents, cx)),
         }
     }
 
@@ -458,7 +521,7 @@ impl DesktopView {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                Button::new("vault-back")
+                button("vault-back")
                     .ghost()
                     .small()
                     .flex_none()
@@ -494,49 +557,86 @@ impl DesktopView {
                 || self.showing_search_results(cx),
         );
         let back = panes == VaultPanes::Main || compact && self.shows_single_item();
-        h_flex()
+        let vault = h_flex()
             .size_full()
             .when(panes != VaultPanes::Main, |vault| {
                 vault.child(self.render_vault_sidebar(contents, panes == VaultPanes::Sidebar, cx))
             })
             .when(panes != VaultPanes::Sidebar, |vault| {
+                let page = v_flex()
+                    .size_full()
+                    .when(back, |main| {
+                        main.child(self.render_vault_back(panes == VaultPanes::Main, cx))
+                    })
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .child(self.render_vault_main(contents, compact, cx)),
+                    )
+                    .when_some(contents_error.map(str::to_owned), |main, error| {
+                        main.child(
+                            div()
+                                .flex_none()
+                                .px_6()
+                                .py_3()
+                                .text_color(theme.danger)
+                                .child(format!("Could not load vault contents: {error}")),
+                        )
+                    })
+                    .when_some(error.map(str::to_owned), |main, error| {
+                        main.child(
+                            div()
+                                .flex_none()
+                                .px_6()
+                                .py_3()
+                                .text_color(theme.danger)
+                                .child(error),
+                        )
+                    });
                 vault.child(
-                    v_flex()
+                    div()
                         .flex_1()
                         .min_w_0()
                         .h_full()
+                        .overflow_hidden()
                         .bg(theme.popover)
-                        .when(back, |main| {
-                            main.child(self.render_vault_back(panes == VaultPanes::Main, cx))
-                        })
-                        .child(
-                            h_flex()
-                                .flex_1()
-                                .min_h_0()
-                                .w_full()
-                                .child(self.render_vault_main(contents, compact, cx)),
-                        )
-                        .when_some(contents_error.map(str::to_owned), |main, error| {
-                            main.child(
-                                div()
-                                    .flex_none()
-                                    .px_6()
-                                    .py_3()
-                                    .text_color(theme.danger)
-                                    .child(format!("Could not load vault contents: {error}")),
-                            )
-                        })
-                        .when_some(error.map(str::to_owned), |main, error| {
-                            main.child(
-                                div()
-                                    .flex_none()
-                                    .px_6()
-                                    .py_3()
-                                    .text_color(theme.danger)
-                                    .child(error),
-                            )
+                        .map(|main| {
+                            if compact && !single_pane {
+                                main.child(self.navigation.animate(page))
+                            } else {
+                                main.child(page)
+                            }
                         }),
                 )
-            })
+            });
+        if single_pane {
+            div()
+                .size_full()
+                .overflow_hidden()
+                .child(self.navigation.animate(vault))
+        } else {
+            vault
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pages_slide_forward_into_items_and_back_out_of_them() {
+        let mut navigation = Navigation::default();
+        navigation.visit("list".into(), 0);
+        navigation.visit("item".into(), 1);
+        assert_eq!(navigation.direction, 1);
+        navigation.visit("item".into(), 1);
+        assert_eq!(navigation.direction, 1);
+        navigation.visit("list".into(), 0);
+        assert_eq!(navigation.direction, -1);
+        navigation.visit("other list".into(), 0);
+        assert_eq!(navigation.direction, 0);
     }
 }

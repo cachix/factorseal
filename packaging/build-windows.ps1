@@ -66,6 +66,7 @@ try {
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     Copy-Item $factorseal, $desktop, "LICENSE", "README.md" -Destination $stage
     Copy-Item "assets/fonts/ibm-plex-sans/license.txt" -Destination (Join-Path $stage "LICENSE.IBM-Plex-Sans")
+    Copy-Item "assets/fonts/ibm-plex-mono/license.txt" -Destination (Join-Path $stage "LICENSE.IBM-Plex-Mono")
     Copy-Item -LiteralPath $helpers -Destination $stage
     Copy-Item "packaging/windows/factorseal-task.xml.in", "packaging/windows/factorseal-askpass.ps1", "packaging/windows/factorseal-askpass.cmd", "packaging/windows/install-factorseal-task.ps1" -Destination $stage
     Copy-Item "acceptance/windows.ps1" -Destination (Join-Path $stage "run-acceptance.ps1")
