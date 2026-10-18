@@ -17,6 +17,17 @@ All notable changes to FactorSeal will be documented in this file.
   without spaces, padding or lowercase letters so they export to
   other password managers.
 
+- Add a website's one-time password from the FactorSeal browser
+  extension. Choose Add one-time password while the site shows its
+  QR code. The extension sends only that tab's picture to Desktop,
+  which reads the code and asks which login for the site gets it.
+
+- Show a FactorSeal button inside website login fields. Click it to
+  choose a login in Desktop, instead of Desktop opening by itself
+  whenever a login form appears. After you sign in, the page asks
+  whether to save the login, and Desktop opens only if you choose
+  Save.
+
 - Show website icons in Desktop's item list, search results and item pages,
   like Bitwarden. Desktop asks DuckDuckGo's icon service by website name
   through the sandboxed network helper, which also decodes the image. Icons

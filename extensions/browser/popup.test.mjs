@@ -2,14 +2,15 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
+const labels=await readFile(new URL('./labels.js',import.meta.url),'utf8');
 const source=await readFile(new URL('./popup.js',import.meta.url),'utf8');
 function popup(state,{allowed=true,reply}={}){
   const calls=[];let closed=false;
   const nodes=new Map();
   const element=id=>{if(!nodes.has(id))nodes.set(id,{id,hidden:false,disabled:false,textContent:''});return nodes.get(id);};
-  const buttons=['pair','enable','retry','save-page','pause','cancel','revoke'].map(element);
+  const buttons=['pair','enable','fill','save-page','one-time','pause','cancel','revoke'].map(element);
   const context=vm.createContext({document:{getElementById:element,querySelectorAll:()=>buttons},browser:{runtime:{sendMessage:async message=>{calls.push(message.type);return reply?.[message.type]??state;}},permissions:{request:async()=>{calls.push('site-permission');return allowed;}}},setTimeout:()=>{},close:()=>{closed=true;}});
-  vm.runInContext(source,context);context.render(state);
+  vm.runInContext(labels,context);vm.runInContext(source,context);context.render(state);
   return {element,render:context.render,calls,get closed(){return closed;}};
 }
 for(const allowed of [true,false])test(`pairing requests site access in the same click (allowed: ${allowed})`,async()=>{
@@ -81,10 +82,26 @@ for(const offered of [true,false])test(`Save login from this page closes the pop
   assert.equal(p.closed,offered);
   if(!offered)assert.equal(p.element('status').textContent,'No complete login form found on this page.');
 });
-for(const found of [true,false])test(`Check this page closes the popup only when the page has a login form (found: ${found})`,async()=>{
+for(const found of [true,false])test(`Fill this page closes the popup only when the page has a login form (found: ${found})`,async()=>{
   const state={paired:true,detection:true,site:'https://example.com',status:'idle'};
-  const p=popup(state,{reply:{retry:{found,status:found?'Checking page':'No complete login form found on this page.'},status:found?state:{...state,status:'No complete login form found on this page.'}}});
-  await p.element('retry').onclick();
+  const p=popup(state,{reply:{fill:{found,status:found?'connecting':'No complete login form found on this page.'},status:found?state:{...state,status:'No complete login form found on this page.'}}});
+  await p.element('fill').onclick();
   assert.equal(p.closed,found);
   if(!found)assert.equal(p.element('status').textContent,'No complete login form found on this page.');
+});
+test('Add one-time password is offered on a website to a paired profile with no request pending',()=>{
+  const {element,render}=popup({paired:true,detection:false,site:'https://example.com',status:'idle'});
+  assert.equal(element('one-time').hidden,false);
+  assert.equal(element('one-time').disabled,false);
+  render({paired:true,detection:false,status:'idle'});
+  assert.equal(element('one-time').disabled,true);
+  render({paired:true,pending:'one_time',site:'https://example.com',status:'reading'});
+  assert.equal(element('one-time').hidden,true);
+  assert.equal(element('status').textContent,'Reading the QR code on this page.');
+  render({paired:false,site:'https://example.com',status:'idle'});
+  assert.equal(element('one-time').hidden,true);
+});
+for(const [status,text] of [['one_time_saved','One-time password saved in FactorSeal.'],['no_code','No QR code found on this page.']])test(`one-time password result: ${status}`,()=>{
+  const {element}=popup({paired:true,site:'https://example.com',status});
+  assert.equal(element('status').textContent,text);
 });

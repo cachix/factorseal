@@ -13,6 +13,7 @@ use super::*;
 use crate::password_generator::Strength;
 use crate::runtime::PersonalWriteError;
 use crate::secret_input::{CancelEdit, PasteItem};
+use factorseal::personal::{CUSTOM_SECTION, CUSTOM_SECTION_LABEL};
 
 const NAME_MISSING: &str = "Give this item a name.";
 const INVALID_JSON: &str = "Enter valid JSON for this structured field.";
@@ -24,8 +25,6 @@ const USERNAME_ID: &str = "username";
 const ONE_TIME_LABEL: &str = "One-time password";
 const ONE_TIME_KEPT: &str = "This item already has this one-time password.";
 const ONE_TIME_REPLACED: &str = "Saving replaces the current one-time password.";
-const CUSTOM_SECTION: &str = "custom";
-const CUSTOM_SECTION_LABEL: &str = "Custom fields";
 const CUSTOM_LABEL: &str = "Custom field";
 const WEBSITE_LABEL: &str = "Website";
 const NOTES_ID: &str = "notes";
@@ -237,14 +236,6 @@ fn stored_value(
         }
         _ => Ok(serde_json::Value::String(entry.to_owned())),
     }
-}
-
-fn one_time_value(item: &PersonalSecret) -> Option<&str> {
-    item.sections
-        .iter()
-        .flat_map(|section| &section.fields)
-        .find(|field| field.field_type == PersonalFieldType::Totp)
-        .and_then(PersonalField::text)
 }
 
 fn find_field<'a>(item: &'a PersonalSecret, section: &str, id: &str) -> Option<&'a PersonalField> {
@@ -2008,7 +1999,7 @@ impl DesktopView {
             let kept = self
                 .personal_detail
                 .item()
-                .and_then(one_time_value)
+                .and_then(PersonalSecret::one_time_password)
                 .is_some_and(|value| totp::same_key(value, link));
             if kept {
                 self.show_toast(ONE_TIME_KEPT, None, false, cx);
@@ -3177,7 +3168,7 @@ mod tests {
         let mut draft = Draft::from_item(&item, fake);
         set(&mut draft, "totp", " jbsw y3dp ehpk 3pxp== ");
         let saved = draft.build(Some(&item), "GitHub", read).unwrap();
-        assert_eq!(one_time_value(&saved), Some("JBSWY3DPEHPK3PXP"));
+        assert_eq!(saved.one_time_password(), Some("JBSWY3DPEHPK3PXP"));
         let key = set(&mut draft, "totp", "JBSWY3DP!");
         assert_eq!(
             draft.build(Some(&item), "GitHub", read).err(),
@@ -3187,7 +3178,10 @@ mod tests {
             ))
         );
         assert_eq!(
-            one_time_value(&draft.salvage(Some(&item), "GitHub", read).unwrap()),
+            draft
+                .salvage(Some(&item), "GitHub", read)
+                .unwrap()
+                .one_time_password(),
             Some("JBSWY3DP!")
         );
     }
@@ -3228,7 +3222,10 @@ mod tests {
         item.sections[0].fields[3].value = "not a key".into();
         let draft = Draft::from_item(&item, fake);
         assert_eq!(
-            one_time_value(&draft.build(Some(&item), "GitHub", read).unwrap()),
+            draft
+                .build(Some(&item), "GitHub", read)
+                .unwrap()
+                .one_time_password(),
             Some("not a key")
         );
     }

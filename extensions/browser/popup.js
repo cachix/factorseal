@@ -1,7 +1,7 @@
 const api=globalThis.browser||globalThis.chrome;
 const element=id=>document.getElementById(id);
 const status=element('status');
-const labels={save_failed:'Login could not be saved. It may have changed; try again.',saved:'Login saved in FactorSeal.',already_saved:'This login is already saved.',awaiting_unseal:'Unseal FactorSeal in Desktop to continue.',matching:'Checking for matching logins…',awaiting_approval:'Approve this request in Desktop.',awaiting_context:'Checking the login page…',releasing:'Filling your login…',saving:'Saving approval…',pair_required:'Pair this browser profile with Desktop first.',no_match:'No matching login found.',denied:'Request denied.',changed:'This login changed in FactorSeal. Try again.',cancelled:'Request cancelled.',expired:'Request expired. Try again.',sealed:'Vault sealed.',revoked:'Browser profile disconnected.',done:'',busy:'Another request is pending.',vault_rejected:'The vault rejected this request. Pair with Desktop to try again.',desktop_unavailable:'Open FactorSeal Desktop, then try again.',native_disconnected:'Could not connect. Open FactorSeal Desktop and try again.',unauthorized:'Connection expired. Try again.',idle:'',Disconnected:'',Cancelled:'Request cancelled.'};
+const labels=globalThis.FactorSealLabels;
 let busy=false,notice='',previousStatus;
 function render(state) {
   const paired=state.paired===true;
@@ -20,16 +20,18 @@ function render(state) {
   element('cancel').hidden=!pending;
   element('save-page').hidden=!paired||!state.detection||pending;
   element('save-page').disabled=busy||!state.site;
+  element('one-time').hidden=!paired||pending;
+  element('one-time').disabled=busy||!state.site;
   element('detection').hidden=!paired||state.detection;
   element('site-controls').hidden=!paired||!state.detection;
   element('pause').textContent=state.paused?'Resume on this site':'Pause on this site';
-  for(const id of ['retry','pause','revoke','enable'])element(id).disabled=pending||busy||(id==='pause'&&!state.site);
+  for(const id of ['fill','pause','revoke','enable'])element(id).disabled=pending||busy||(id==='pause'&&!state.site);
   element('pairing-key').hidden=paired||!pending;
   const key=state.profile?`Profile key: ${state.profile}…`:'';
   element('profile-key').textContent=key;
   element('pending-profile-key').textContent=key;
   if(state.status!==previousStatus){notice='';previousStatus=state.status;}
-  status.textContent=notice||(state.status==='desktop_missing'?'Install FactorSeal Desktop, then open it and try again. Already installed? Open it once to finish browser setup.':state.status==='connecting'?(paired?'Connecting to Desktop…':''):state.status==='native_timeout'?'Desktop did not respond. Open FactorSeal and try again.':(labels[state.status]??state.status??''));
+  status.textContent=notice||(state.status==='connecting'&&!paired?'':labels[state.status]??state.status??'');
 }
 async function refresh() {try{render(await api.runtime.sendMessage({type:'status'}));}catch{status.textContent='Extension unavailable. Reload it and try again.';}}
 for(const button of document.querySelectorAll('button'))button.onclick=async()=>{
@@ -46,7 +48,7 @@ for(const button of document.querySelectorAll('button'))button.onclick=async()=>
       const result=await api.runtime.sendMessage({type:button.id});notice='';
       // The page checks itself, or offers its login, once it has focus again,
       // which the open popup keeps.
-      if((button.id==='retry'&&result?.found)||(button.id==='save-page'&&result?.offered))globalThis.close();
+      if((button.id==='fill'&&result?.found)||(button.id==='save-page'&&result?.offered))globalThis.close();
     }
   } catch {notice='Request unavailable. Open Desktop and try again.';}
   finally {busy=false;button.disabled=false;await refresh();}

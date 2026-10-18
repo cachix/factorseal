@@ -10,7 +10,10 @@ let queue=Promise.resolve();
 let recovery, nextRecovery=0;
 // A save the person asked for from the popup, which keeps the focus from the page.
 let explicitSave=null;
+const pendingSaves=new Map();
+const pages=[api.runtime.getURL('field.html'),api.runtime.getURL('notice.html')];
 const connectionFailures=new Set(['desktop_missing','desktop_unavailable','native_disconnected','native_timeout']);
+const imagePart=43688;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const serialized=fn=>{ const result=queue.then(fn); queue=result.catch(()=>{}); return result; };
 // Closing the port ourselves does not fire its onDisconnect, so forget it and
@@ -90,7 +93,16 @@ async function cancel() {
   active=null;
   try {await send({type:'cancel'});} catch {}
 }
-async function run(action,context) {
+async function sendImage(image,flow) {
+  const size=image.length/4*3-(image.endsWith('==')?2:image.endsWith('=')?1:0);
+  let response;
+  for(let start=0;start<image.length && active===flow;start+=imagePart){
+    response=await send({type:'image',size,data:image.slice(start,start+imagePart)});
+    if(response.type!=='state')break;
+  }
+  return response;
+}
+async function run(action,context,image) {
   if (active) return {status:'Another browser request is pending'};
   const flow={...context,kind:action.type,token:crypto.randomUUID()}; active=flow;
   status='connecting';statusScope=context?{tab:context.tab,origin:context.origin}:null;
@@ -99,13 +111,15 @@ async function run(action,context) {
     // Desktop forgets a session when it restarts or after ten idle minutes,
     // and refuses it before acting on anything. Connect again and ask once more.
     if(response.type==='finished' && response.reason==='unauthorized'){disconnect();response=await send(action);}
+    if(image && response.type==='state')response=await sendImage(image,flow);
     const deadline=Date.now()+300000;
     while (active===flow && Date.now()<deadline) {
       if (response.type==='finished') {
-        status=response.reason==='done' && action.type==='save'?'saved':response.reason;
+        status=(response.reason==='done' && {save:'saved',one_time:'one_time_saved'}[action.type])||response.reason;
         if(response.reason==='done' && action.type==='pair'){
           await api.storage.local.set({paired:true});
           await register().catch(()=>{});
+          await refreshTabs();
           // Start watching the current page too, without requiring a reload.
           try {
             const [tab]=await api.tabs.query({active:true,currentWindow:true});
@@ -114,7 +128,7 @@ async function run(action,context) {
               await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
           } catch {}
         }
-        if((response.reason==='done' && action.type==='revoke') || ['pair_required','revoked','vault_rejected'].includes(response.reason))await api.storage.local.set({paired:false});
+        if((response.reason==='done' && action.type==='revoke') || ['pair_required','revoked','vault_rejected'].includes(response.reason)){await api.storage.local.set({paired:false});await refreshTabs();}
         if(response.reason==='unauthorized')disconnect();break;
       }
       if (response.type==='fill') {
@@ -140,6 +154,35 @@ async function run(action,context) {
   finally {if(active===flow)active=null;}
   return {status};
 }
+async function settings(site) {
+  const {paired,paused}=await api.storage.local.get(['paired','paused']);
+  return {paired:paired===true,paused:(paused||[]).includes(site)};
+}
+async function tell(tab,message) {
+  return api.tabs.sendMessage(tab,message,{frameId:0}).catch(()=>null);
+}
+async function start(action,context,image) {
+  void run(action,context,image);
+  await tell(context.tab,{type:'notice'});
+}
+async function fill(tab,site,document,explicit) {
+  const {paired,paused}=await settings(site);
+  if(!tab.active || active || !paired || (paused && !explicit))return false;
+  await start({type:'detect',origin:site,document},{tab:tab.id,window:tab.windowId,origin:site,document});
+  return true;
+}
+function related(site,origin) {
+  const [host,saved]=[site,origin].map(url=>new URL(url).hostname.replace(/^www\./,''));
+  return host===saved || host.endsWith(`.${saved}`) || saved.endsWith(`.${host}`);
+}
+function pendingSave(tab,site) {
+  const save=pendingSaves.get(tab);
+  if(save && Date.now()>=save.until)pendingSaves.delete(tab);
+  return save && Date.now()<save.until && related(site,save.origin)?save:null;
+}
+async function refreshTabs() {
+  for(const tab of await api.tabs.query({}).catch(()=>[]))void tell(tab.id,{type:'site-changed'});
+}
 async function register() {
   if((await api.storage.local.get('paired')).paired!==true)return;
   if (!await api.permissions.contains({origins:['https://*/*']})) return;
@@ -152,10 +195,10 @@ api.runtime.onInstalled.addListener(()=>{void register().catch(()=>{});});
 void register().then(async()=>{
   if((await api.storage.local.get('paired')).paired===true)await send({type:'poll'},true);
 }).catch(()=>{});
-api.tabs.onRemoved.addListener(tab=>{if(active?.tab===tab)void cancel();});
+api.tabs.onRemoved.addListener(tab=>{if(active?.tab===tab)void cancel();pendingSaves.delete(tab);});
 api.tabs.onActivated.addListener(({tabId})=>{if(active?.tab!=null && active.tab!==tabId)void cancel();});
 api.windows.onFocusChanged.addListener(windowId=>{if(windowId>=0 && active?.window!=null && active.window!==windowId)void cancel();});
-api.tabs.onUpdated.addListener((tab,change)=>{if(active?.tab===tab && active.kind!=='save' && (change.status==='loading'||change.url))void cancel();});
+api.tabs.onUpdated.addListener((tab,change)=>{if(active?.tab===tab && !['save','one_time'].includes(active.kind) && (change.status==='loading'||change.url))void cancel();});
 api.runtime.onMessage.addListener((message,sender,reply)=>{
   (async()=>{
     if (sender.url===api.runtime.getURL('popup.html') && !sender.tab) {
@@ -182,47 +225,78 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
         if(!result?.offered){explicitSave=null;status='No complete login form found on this page.';statusScope={tab:tab.id,origin};}
         return {status,offered:!!result?.offered};
       }
-      if (message.type==='retry') {
+      if(message.type==='one-time'){
+        const [tab]=await api.tabs.query({active:true,currentWindow:true});
+        const origin=core.origin(tab?.url);
+        const picture=await api.tabs.captureVisibleTab(tab.windowId,{format:'jpeg',quality:92}).catch(()=>null);
+        if(typeof picture!=='string' || !picture.startsWith('data:image/jpeg;base64,')){status='capture_failed';statusScope={tab:tab.id,origin};return {status};}
+        await start({type:'one_time',origin},{tab:tab.id,window:tab.windowId,origin},picture.slice(picture.indexOf(',')+1));
+        return {status:'connecting'};
+      }
+      if (message.type==='fill') {
         const [tab]=await api.tabs.query({active:true,currentWindow:true});
         const origin=core.origin(tab?.url);
         await api.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
-        const result=await api.tabs.sendMessage(tab.id,{type:'retry'},{frameId:0});
-        if(!result?.found){status='No complete login form found on this page.';statusScope={tab:tab.id,origin};return {status,found:false};}
-        return {status:'Checking page',found:true};
+        const result=await tell(tab.id,{type:'find'});
+        if(!result?.document){status='No complete login form found on this page.';statusScope={tab:tab.id,origin};return {status,found:false};}
+        return {status:'connecting',found:await fill(tab,origin,result.document,true)};
       }
       if (message.type==='pause') {
         const [tab]=await api.tabs.query({active:true,currentWindow:true});
         const site=core.origin(tab.url);const paused=(await api.storage.local.get('paused')).paused||[];
-        await api.storage.local.set({paused:paused.includes(site)?paused.filter(x=>x!==site):[...paused,site]});await cancel();return {status:'Site pause toggled'};
+        await api.storage.local.set({paused:paused.includes(site)?paused.filter(x=>x!==site):[...paused,site]});await cancel();await refreshTabs();return {status:'Site pause toggled'};
       }
       throw new Error('unknown_action');
     }
-    if (sender.id!==api.runtime.id || sender.frameId!==0 || !sender.tab || !['detected','invalidated','save'].includes(message.type) || typeof message.document!=='string' || message.document.length>128) throw new Error('invalid_sender');
+    if (sender.id===api.runtime.id && sender.tab && pages.includes(sender.url?.split(/[?#]/)[0]) && typeof message.document==='string' && typeof message.frame==='string') {
+      const tab=await api.tabs.get(sender.tab.id);
+      const site=core.origin(tab.url);
+      const pressed={'fill-field':'field','notice-save':'notice'}[message.type];
+      if(!(await tell(tab.id,{type:pressed?'pressed':'owns',document:message.document,page:pressed,frame:message.frame}))?.valid)return {accepted:false};
+      if(message.type==='fill-field')return {accepted:await fill(tab,site,message.document)};
+      if(message.type==='notice-status')return {status:statusScope?.tab===tab.id?status:'idle',active:active?.tab===tab.id};
+      if(message.type==='notice-pending')return {pending:!!pendingSave(tab.id,site)};
+      if(message.type==='notice-close'){
+        if(message.frame==='save')pendingSaves.delete(tab.id);
+        await tell(tab.id,{type:'close-notice'});
+        return {accepted:true};
+      }
+      if(message.type==='notice-save'){
+        const save=pendingSave(tab.id,site);
+        if(!save || active)return {accepted:false};
+        pendingSaves.delete(tab.id);
+        await start({type:'save',origin:save.origin,document:message.document,username:save.username,password:save.password},{tab:tab.id,window:tab.windowId,origin:site,document:message.document});
+        return {accepted:true};
+      }
+      throw new Error('unknown_action');
+    }
+    if (sender.id!==api.runtime.id || sender.frameId!==0 || !sender.tab || !['field','pending','invalidated','save'].includes(message.type) || typeof message.document!=='string' || message.document.length>128) throw new Error('invalid_sender');
     if (message.type==='invalidated') {
       if(active?.kind!=='save' && active?.tab===sender.tab.id && active.document===message.document)await cancel();
       return {accepted:true};
     }
-    const tab=await api.tabs.get(sender.tab.id);const win=await api.windows.get(tab.windowId);
+    const tab=await api.tabs.get(sender.tab.id);
+    const site=core.origin(sender.url);if(core.origin(tab.url)!==site)return {accepted:false};
+    const {paired,paused}=await settings(site);
+    if(message.type==='field')return {show:paired && !paused};
+    if(message.type==='pending')return {save:paired && !paused && !!pendingSave(tab.id,site)};
+    const win=await api.windows.get(tab.windowId);
     // Only a page the person is looking at may ask, or a save they asked for
     // from the popup just now, once.
-    const explicit=message.type==='save' && explicitSave?.tab===tab.id && Date.now()<explicitSave.until;
+    const explicit=explicitSave?.tab===tab.id && Date.now()<explicitSave.until;
     if(explicit)explicitSave=null;
-    if (!tab.active || (!win.focused && !explicit)) return {accepted:false};
-    const site=core.origin(sender.url);if(core.origin(tab.url)!==site)return {accepted:false};
-    if (((await api.storage.local.get('paused')).paused||[]).includes(site)) return {accepted:false};
-    if(message.type==='save'){
-      if((await api.storage.local.get('paired')).paired!==true || typeof message.username!=='string' || typeof message.password!=='string'
-        || !message.username || !message.password || new TextEncoder().encode(message.username).length>512 || new TextEncoder().encode(message.password).length>4096)return {accepted:false};
-      if(active){
-        if(active.kind!=='detect' || active.tab!==tab.id || active.document!==message.document)return {accepted:false};
-        await cancel();
-      }
-      const password=btoa(String.fromCharCode(...new TextEncoder().encode(message.password)));
-      void run({type:'save',origin:site,document:message.document,username:message.username,password},{tab:tab.id,window:tab.windowId,origin:site,document:message.document});
-      return {accepted:true};
+    if (!tab.active || (!win.focused && !explicit) || (paused && !explicit) || !paired || typeof message.username!=='string' || typeof message.password!=='string'
+      || !message.username || !message.password || new TextEncoder().encode(message.username).length>512 || new TextEncoder().encode(message.password).length>4096)return {accepted:false};
+    const password=btoa(String.fromCharCode(...new TextEncoder().encode(message.password)));
+    if(!explicit){
+      pendingSaves.set(tab.id,{origin:site,username:message.username,password,until:Date.now()+120000});
+      return {accepted:true,ask:true};
     }
-    if(active)return {accepted:false};
-    void run({type:'detect',origin:site,document:message.document},{tab:tab.id,window:tab.windowId,origin:site,document:message.document});
+    if(active){
+      if(active.kind!=='detect' || active.tab!==tab.id || active.document!==message.document)return {accepted:false};
+      await cancel();
+    }
+    await start({type:'save',origin:site,document:message.document,username:message.username,password},{tab:tab.id,window:tab.windowId,origin:site,document:message.document});
     return {accepted:true};
   })().then(reply,()=>reply({status:'Request unavailable',accepted:false}));
   return true;

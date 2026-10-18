@@ -308,6 +308,50 @@ impl PersonalSecret {
             .find_map(website::host)
     }
 
+    #[must_use]
+    pub fn one_time_password(&self) -> Option<&str> {
+        self.sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .find(|field| field.field_type == PersonalFieldType::Totp)
+            .and_then(PersonalField::text)
+    }
+
+    pub fn set_one_time_password(&mut self, link: &str) {
+        if let Some(field) = self
+            .sections
+            .iter_mut()
+            .flat_map(|section| &mut section.fields)
+            .find(|field| field.field_type == PersonalFieldType::Totp)
+        {
+            field.value = link.into();
+            return;
+        }
+        let fields = || self.sections.iter().flat_map(|section| &section.fields);
+        let id = (0..=fields().count())
+            .map(|number| format!("custom-{number}"))
+            .find(|id| !fields().any(|field| field.id == *id))
+            .unwrap_or_default();
+        let field = PersonalField::new(
+            id,
+            PersonalFieldType::Totp.label(),
+            PersonalFieldType::Totp,
+            link,
+        );
+        match self
+            .sections
+            .iter_mut()
+            .find(|section| section.id == CUSTOM_SECTION)
+        {
+            Some(section) => section.fields.push(field),
+            None => self.sections.push(PersonalSection {
+                id: CUSTOM_SECTION.into(),
+                label: CUSTOM_SECTION_LABEL.into(),
+                fields: vec![field],
+            }),
+        }
+    }
+
     pub fn encode(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         self.validate()?;
         let bytes = serde_json::to_vec(self)
@@ -703,6 +747,48 @@ mod tests {
     }
 
     #[test]
+    fn one_time_passwords_replace_the_first_one_or_become_a_custom_field() {
+        let mut login = PersonalSecret::template(PersonalSecretKind::Login, "GitHub".into());
+        login.set_one_time_password("JBSWY3DPEHPK3PXP");
+        login.set_one_time_password("GEZDGNBVGY3TQOJQ");
+        assert_eq!(login.one_time_password(), Some("GEZDGNBVGY3TQOJQ"));
+        assert_eq!(login.sections.len(), 1);
+        let mut key = PersonalSecret::template(PersonalSecretKind::ApiCredential, "Hetzner".into());
+        assert_eq!(key.one_time_password(), None);
+        key.set_one_time_password("JBSWY3DPEHPK3PXP");
+        let custom = key.sections.last().unwrap();
+        assert_eq!(
+            (
+                custom.id.as_str(),
+                custom.fields[0].id.as_str(),
+                custom.fields[0].label.as_str()
+            ),
+            (CUSTOM_SECTION, "custom-0", "One-time password")
+        );
+        assert_eq!(key.one_time_password(), Some("JBSWY3DPEHPK3PXP"));
+        let mut pin = PersonalSecret::template(PersonalSecretKind::ApiCredential, "Bank".into());
+        pin.sections.push(PersonalSection {
+            id: CUSTOM_SECTION.into(),
+            label: CUSTOM_SECTION_LABEL.into(),
+            fields: vec![PersonalField::new(
+                "custom-0",
+                "PIN",
+                PersonalFieldType::Concealed,
+                "1234",
+            )],
+        });
+        pin.set_one_time_password("JBSWY3DPEHPK3PXP");
+        let fields = &pin.sections.last().unwrap().fields;
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.id.as_str())
+                .collect::<Vec<_>>(),
+            ["custom-0", "custom-1"]
+        );
+    }
+
+    #[test]
     fn concealed_usernames_are_not_shown() {
         let mut login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
         login.sections[0].fields[0].value = "alice".into();
@@ -935,6 +1021,9 @@ pub mod website;
 
 /// Legacy namespace reserved for personal items.
 pub const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";
+
+pub const CUSTOM_SECTION: &str = "custom";
+pub const CUSTOM_SECTION_LABEL: &str = "Custom fields";
 
 const PERSONAL_FORMAT: &str = "factorseal-personal-secret";
 
