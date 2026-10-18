@@ -998,6 +998,7 @@ impl StoreWorker {
         Ok(count)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn list_vault_entries(
         &mut self,
         cursor: Option<&str>,
@@ -1059,9 +1060,18 @@ impl StoreWorker {
                     continue;
                 }
                 let summary = document.personal_summary(&address, now)?;
-                let (mut display_name, display_type, updated_at) = summary
-                    .map(|(title, kind, updated)| (Some(title), Some(kind), Some(updated)))
-                    .unwrap_or_default();
+                let (mut display_name, display_type, display_username, updated_at, favorite) =
+                    summary
+                        .map(|s| {
+                            (
+                                Some(s.title),
+                                Some(s.kind),
+                                s.username,
+                                Some(s.updated_at),
+                                s.favorite,
+                            )
+                        })
+                        .unwrap_or_default();
                 if document_kind == DocumentKind::NetworkManagerWifi
                     && let Some((uuid, _)) = address.as_local()
                 {
@@ -1087,7 +1097,9 @@ impl StoreWorker {
                         access_project,
                         display_name,
                         display_type,
+                        display_username,
                         updated_at,
+                        favorite,
                         document_kind,
                         partition: partition.clone(),
                         address,

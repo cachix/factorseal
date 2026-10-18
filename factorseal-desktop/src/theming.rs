@@ -128,8 +128,45 @@ impl ChangeSources {
     }
 }
 
+const UI_FONTS: [&[u8]; 3] = [
+    include_bytes!("../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"),
+    include_bytes!("../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf"),
+    include_bytes!("../../assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf"),
+];
+
+#[cfg(target_os = "linux")]
+pub(crate) const UI_FONT_FAMILY: &str = "IBM Plex Sans";
+
+#[cfg(target_os = "linux")]
+pub(crate) const MONO_FONT_FAMILY: &str = "IBM Plex Mono";
+
+#[cfg(target_os = "linux")]
+pub(crate) fn installed_or_bundled_font(
+    family: gpui::SharedString,
+    bundled: &'static str,
+    cx: &App,
+) -> gpui::SharedString {
+    let text_system = cx.text_system();
+    let resolved = text_system.resolve_font(&gpui::font(family.clone()));
+    if text_system
+        .get_font_for_id(resolved)
+        .is_some_and(|font| font.family == family)
+    {
+        family
+    } else {
+        bundled.into()
+    }
+}
+
 /// Load the native theme and start monitoring it for changes.
 pub(crate) fn initialize(cx: &mut App) {
+    if let Err(error) = cx
+        .text_system()
+        .add_fonts(UI_FONTS.map(std::borrow::Cow::Borrowed).to_vec())
+    {
+        eprintln!("failed to load the bundled UI font: {error:#}");
+    }
+
     #[cfg(target_os = "linux")]
     initialize_linux(cx);
 
@@ -632,7 +669,143 @@ pub(crate) fn apply_native_theme(
     sync_component_colors(theme);
 }
 
+const TEXT_CONTRAST: f32 = 4.5;
+const BORDER_CONTRAST: f32 = 1.4;
+const CONTRAST_STEPS: u8 = 20;
+
+fn luminance(color: gpui::Hsla) -> f32 {
+    let linear = |channel: f32| {
+        if channel <= 0.040_45 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let rgb = gpui::hsla_to_rgba(color).color;
+    0.2126 * linear(rgb.red) + 0.7152 * linear(rgb.green) + 0.0722 * linear(rgb.blue)
+}
+
+pub(crate) fn contrast(first: gpui::Hsla, second: gpui::Hsla) -> f32 {
+    let (first, second) = (luminance(first), luminance(second));
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
+}
+
+fn lift(color: gpui::Hsla, target: gpui::Hsla, surfaces: &[gpui::Hsla], floor: f32) -> gpui::Hsla {
+    use gpui_component::Colorize as _;
+
+    std::iter::once(color)
+        .chain(
+            (1..=CONTRAST_STEPS)
+                .map(|step| target.mix_oklab(color, f32::from(step) / f32::from(CONTRAST_STEPS))),
+        )
+        .find(|color| {
+            surfaces
+                .iter()
+                .all(|surface| contrast(*color, *surface) >= floor)
+        })
+        .unwrap_or(target)
+}
+
+fn readable_on(color: gpui::Hsla, fills: &[gpui::Hsla]) -> gpui::Hsla {
+    let readable = |color: gpui::Hsla| {
+        fills
+            .iter()
+            .all(|fill| contrast(color, *fill) >= TEXT_CONTRAST)
+    };
+    let poles = if fills
+        .iter()
+        .all(|fill| luminance(color) >= luminance(*fill))
+    {
+        [gpui::white(), gpui::black()]
+    } else {
+        [gpui::black(), gpui::white()]
+    };
+    poles
+        .into_iter()
+        .map(|pole| lift(color, pole, fills, TEXT_CONTRAST))
+        .find(|color| readable(*color))
+        .unwrap_or(poles[0])
+}
+
+pub(crate) fn map_app_tokens(theme: &mut gpui_component::theme::Theme) {
+    let surfaces = [theme.background, theme.popover, theme.muted, theme.sidebar];
+    let pole = if theme.is_dark() {
+        gpui::white()
+    } else {
+        gpui::black()
+    };
+    theme.foreground = lift(theme.foreground, pole, &surfaces, TEXT_CONTRAST);
+    theme.muted_foreground = lift(
+        theme.muted_foreground,
+        theme.foreground,
+        &surfaces,
+        TEXT_CONTRAST,
+    );
+    theme.popover_foreground = lift(
+        theme.popover_foreground,
+        pole,
+        &[theme.popover],
+        TEXT_CONTRAST,
+    );
+    theme.sidebar_foreground = lift(
+        theme.sidebar_foreground,
+        pole,
+        &[theme.sidebar],
+        TEXT_CONTRAST,
+    );
+    theme.group_box_foreground = theme.foreground;
+    theme.link = lift(theme.link, pole, &surfaces, TEXT_CONTRAST);
+    theme.link_hover = lift(theme.link_hover, pole, &surfaces, TEXT_CONTRAST);
+    theme.link_active = lift(theme.link_active, pole, &surfaces, TEXT_CONTRAST);
+    theme.danger = lift(theme.danger, pole, &surfaces, TEXT_CONTRAST);
+    theme.danger_hover = lift(theme.danger_hover, pole, &surfaces, TEXT_CONTRAST);
+    theme.danger_active = lift(theme.danger_active, pole, &surfaces, TEXT_CONTRAST);
+    theme.danger_foreground = readable_on(
+        theme.danger_foreground,
+        &[theme.danger, theme.danger_hover, theme.danger_active],
+    );
+    theme.primary_foreground = readable_on(
+        theme.primary_foreground,
+        &[theme.primary, theme.primary_hover, theme.primary_active],
+    );
+    theme.secondary_foreground = readable_on(
+        theme.secondary_foreground,
+        &[
+            theme.secondary,
+            theme.secondary_hover,
+            theme.secondary_active,
+        ],
+    );
+    theme.accent_foreground = readable_on(theme.accent_foreground, &[theme.accent]);
+    theme.sidebar_accent_foreground =
+        readable_on(theme.sidebar_accent_foreground, &[theme.sidebar_accent]);
+    theme.sidebar_primary_foreground =
+        readable_on(theme.sidebar_primary_foreground, &[theme.sidebar_primary]);
+    let ground = if theme.is_dark() {
+        gpui::black()
+    } else {
+        gpui::white()
+    };
+    theme.list_active = lift(
+        theme.list_active,
+        ground,
+        &[theme.foreground, theme.muted_foreground],
+        TEXT_CONTRAST,
+    );
+
+    theme.border = lift(theme.border, theme.foreground, &surfaces, BORDER_CONTRAST);
+    theme.input = theme.border;
+    theme.sidebar_border = theme.border;
+    theme.title_bar_border = theme.border;
+    theme.window_border = theme.border;
+    theme.ring = theme.foreground;
+    sync_component_colors(theme);
+}
+
 pub(crate) fn sync_component_colors(theme: &mut gpui_component::theme::Theme) {
+    use gpui::ColorExt as _;
+
+    theme.transparent = theme.secondary_hover.opacity(0.);
     theme.tab = theme.background;
     theme.tab_foreground = theme.muted_foreground;
     theme.tab_active = theme.popover;

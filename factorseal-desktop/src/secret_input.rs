@@ -2,11 +2,13 @@
 //! Masked by default. Ordinary personal fields can opt into visible text;
 //! secret fields never send plaintext to the renderer or text-query callbacks.
 
+use crate::appearance::TypeScale as _;
+use crate::controls::text_field;
 use factorseal::security::LockedBytes;
 use gpui::{
     App, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, KeyDownEvent, MouseButton, Pixels, Point, SharedString, TextRun, UTF16Selection,
-    Window, canvas, div, prelude::*, px,
+    Window, WrappedLine, canvas, div, prelude::*, px, rems,
 };
 use gpui_component::{ActiveTheme as _, input::InputEvent};
 use std::ops::{Deref, Range};
@@ -34,6 +36,61 @@ fn rendered_index(value: &str, index: usize, masked: bool) -> usize {
     } else {
         index
     }
+}
+
+fn shaped_text(value: &str, masked: bool, wrap: bool) -> String {
+    rendered_text(value, masked).replace(|c| c == '\r' || (c == '\n' && !wrap), " ")
+}
+
+const LINE_HEIGHT: gpui::Rems = rems(20. / 16.);
+
+fn line_origins(lines: &[WrappedLine], line_height: Pixels) -> Vec<(usize, Pixels)> {
+    let mut start = 0;
+    let mut top = px(0.);
+    lines
+        .iter()
+        .map(|line| {
+            let origin = (start, top);
+            start += line.len() + 1;
+            top += line.size(line_height).height;
+            origin
+        })
+        .collect()
+}
+
+fn wrapped_position(lines: &[WrappedLine], index: usize, line_height: Pixels) -> Point<Pixels> {
+    let origins = line_origins(lines, line_height);
+    let line = origins
+        .iter()
+        .rposition(|(start, _)| *start <= index)
+        .unwrap_or(0);
+    let Some(((start, top), layout)) = origins.get(line).zip(lines.get(line)) else {
+        return Point::default();
+    };
+    layout
+        .position_for_index(index - start, line_height)
+        .unwrap_or_default()
+        + gpui::point(px(0.), *top)
+}
+
+fn wrapped_index_for_point(
+    lines: &[WrappedLine],
+    point: Point<Pixels>,
+    line_height: Pixels,
+) -> usize {
+    let origins = line_origins(lines, line_height);
+    let line = origins
+        .iter()
+        .zip(lines)
+        .position(|((_, top), layout)| point.y < *top + layout.size(line_height).height)
+        .unwrap_or(lines.len().saturating_sub(1));
+    let Some(((start, top), layout)) = origins.get(line).zip(lines.get(line)) else {
+        return 0;
+    };
+    start
+        + layout
+            .closest_index_for_position(point - gpui::point(px(0.), *top), line_height)
+            .unwrap_or_else(|index| index)
 }
 
 const MAX_BYTES: usize = 64 * 1024;
@@ -98,10 +155,15 @@ impl SecretBuffer {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SecretInputState {
     secret: SecretBuffer,
     masked: bool,
+    plain: bool,
+    bare: bool,
+    read_only: bool,
     submit_on_enter: bool,
+    newline_on_enter: bool,
     blur_subscription: Option<gpui::Subscription>,
     focus: FocusHandle,
     placeholder: SharedString,
@@ -109,8 +171,13 @@ pub(crate) struct SecretInputState {
     marked: Option<Range<usize>>,
     reversed: bool,
     last_layout: Option<(gpui::ShapedLine, Point<Pixels>)>,
+    wrap: bool,
+    last_wrapped: Option<(Vec<WrappedLine>, Point<Pixels>, Pixels)>,
 }
+pub(crate) struct CancelEdit;
+
 impl EventEmitter<InputEvent> for SecretInputState {}
+impl EventEmitter<CancelEdit> for SecretInputState {}
 impl Focusable for SecretInputState {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -121,15 +188,27 @@ impl SecretInputState {
         self.masked = masked;
         self
     }
+    pub(crate) fn is_masked(&self) -> bool {
+        self.masked
+    }
     pub(crate) fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
         self.masked = masked;
         self.last_layout = None;
+        self.last_wrapped = None;
         self.marked = None;
         cx.notify();
     }
     /// Allow multiline values in the same bounded, locked storage.
     pub(crate) fn multiline(mut self) -> Self {
         self.secret.multiline = true;
+        self
+    }
+    pub(crate) fn wrapped(mut self) -> Self {
+        self.wrap = true;
+        self
+    }
+    pub(crate) fn newline_on_enter(mut self) -> Self {
+        self.newline_on_enter = true;
         self
     }
     pub(crate) fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -139,14 +218,20 @@ impl SecretInputState {
         Self {
             secret: SecretBuffer::default(),
             masked: true,
+            plain: false,
+            bare: false,
+            read_only: false,
             submit_on_enter: false,
+            newline_on_enter: false,
             blur_subscription: None,
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
             placeholder: "".into(),
             selection: 0..0,
             marked: None,
             reversed: false,
             last_layout: None,
+            wrap: false,
+            last_wrapped: None,
         }
     }
     pub(crate) fn from_value(value: &str, masked: bool, cx: &mut Context<Self>) -> Self {
@@ -157,6 +242,19 @@ impl SecretInputState {
         }
         input.selection = input.secret.text.len()..input.secret.text.len();
         input
+    }
+    pub(crate) fn read_only(cx: &mut Context<Self>) -> Self {
+        let mut input = Self::empty(cx).multiline().wrapped().plain();
+        input.read_only = true;
+        input
+    }
+    pub(crate) fn plain(mut self) -> Self {
+        self.plain = true;
+        self
+    }
+    pub(crate) fn bare(mut self) -> Self {
+        self.bare = true;
+        self
     }
     pub(crate) fn placeholder(mut self, value: &'static str) -> Self {
         self.placeholder = value.into();
@@ -180,10 +278,14 @@ impl SecretInputState {
         self.selection = 0..0;
         self.reversed = false;
         self.last_layout = None;
+        self.last_wrapped = None;
         self.marked = None;
         cx.notify();
     }
     pub(crate) fn set_value(&mut self, value: &str, _: &mut Window, cx: &mut Context<Self>) {
+        self.replace(value, cx);
+    }
+    pub(crate) fn replace(&mut self, value: &str, cx: &mut Context<Self>) {
         self.clear(cx);
         self.secret.replace(0..0, value);
         let end = self.secret.text.len();
@@ -196,7 +298,20 @@ impl SecretInputState {
     fn range_byte_offset(&self, range: Range<usize>) -> Range<usize> {
         self.secret.byte_offset(range.start)..self.secret.byte_offset(range.end)
     }
+    fn wraps(&self) -> bool {
+        self.wrap && (self.read_only || !self.masked)
+    }
     fn byte_index_for_point(&self, point: Point<Pixels>) -> usize {
+        if self.wraps()
+            && let Some((lines, origin, line_height)) = &self.last_wrapped
+        {
+            let index = wrapped_index_for_point(lines, point - *origin, *line_height);
+            return if self.secret.text.is_char_boundary(index) {
+                index
+            } else {
+                self.secret.text.len()
+            };
+        }
         let Some((line, origin)) = &self.last_layout else {
             return self.secret.text.len();
         };
@@ -220,9 +335,15 @@ impl SecretInputState {
             modifiers.control
         };
         match key {
-            "escape" if self.submit_on_enter => window.blur(cx),
+            "escape" if self.submit_on_enter => {
+                cx.emit(CancelEdit);
+                window.blur(cx);
+            }
             "escape" => self.clear(cx),
-            "enter" if self.secret.multiline && (!self.submit_on_enter || modifiers.shift) => {
+            "enter"
+                if self.secret.multiline
+                    && (!self.submit_on_enter || self.newline_on_enter || modifiers.shift) =>
+            {
                 let range = self.selection.clone();
                 if self.secret.replace(range.clone(), "\n") {
                     self.selection = range.start + 1..range.start + 1;
@@ -412,10 +533,11 @@ impl Render for SecretInputState {
             }));
         }
         let entity = cx.entity();
+        let line_height = LINE_HEIGHT.to_pixels(window.rem_size());
         let text: SharedString = if self.secret.text.is_empty() {
             self.placeholder.clone()
         } else {
-            rendered_text(&self.secret.text, self.masked).into()
+            shaped_text(&self.secret.text, self.masked, self.wraps()).into()
         };
         let color = if self.secret.text.is_empty() {
             cx.theme().muted_foreground
@@ -424,108 +546,238 @@ impl Render for SecretInputState {
         };
         let input = div()
             .w_full()
-            .h(px(40.))
-            .px_3()
-            .py_2()
-            .overflow_hidden()
+            .text_body()
             .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(crate::theming::input_background(cx))
-            .track_focus(&self.focus)
-            .key_context("FactorsealSecret")
-            .on_key_down(cx.listener(Self::key_down))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                    this.focus(window, cx);
-                    let end = this.byte_index_for_point(event.position);
-                    this.selection = end..end;
-                    this.reversed = false;
-                    cx.notify();
-                }),
+            .when(!self.bare, |this| {
+                this.bg(crate::theming::input_background(cx))
+            })
+            .when(!self.read_only && !self.bare, |this| {
+                text_field(this, self.focus.is_focused(window), window, cx)
+            })
+            .when(!self.read_only && self.bare, gpui::Styled::cursor_text)
+            .when(self.plain && !self.focus.is_focused(window), |input| {
+                input
+                    .border_color(gpui::transparent_black())
+                    .bg(gpui::transparent_black())
+            })
+            .when(!self.read_only, |input| {
+                input
+                    .track_focus(&self.focus)
+                    .key_context("FactorsealSecret")
+                    .on_key_down(cx.listener(Self::key_down))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                            this.focus(window, cx);
+                            let end = this.byte_index_for_point(event.position);
+                            this.selection = end..end;
+                            this.reversed = false;
+                            cx.notify();
+                        }),
+                    )
+            });
+        let input = if self.wraps() {
+            input.min_h_8().child(
+                div()
+                    .w_full()
+                    .px_3()
+                    .py(rems(6. / 16.))
+                    .overflow_hidden()
+                    .child(Self::wrapped_canvas(text, color, line_height, entity)),
             )
-            .child(
-                canvas(
-                    move |_, window, _| {
-                        let style = window.text_style();
-                        let run = TextRun {
-                            len: text.len(),
-                            font: style.font(),
-                            color,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                            letter_spacing: style.letter_spacing,
-                        };
-                        window.text_system().shape_line(text, px(14.), &[run], None)
-                    },
-                    move |bounds, line, window, cx| {
-                        let input = entity.read(cx);
-                        let focus = input.focus.clone();
-                        let display_index =
-                            |index| rendered_index(&input.secret.text, index, input.masked);
-                        let selection = display_index(input.selection.start)
-                            ..display_index(input.selection.end);
-                        let caret = line.x_for_index(if input.reversed {
-                            selection.start
-                        } else {
-                            selection.end
-                        });
-                        let offset = (caret - bounds.size.width + px(2.)).max(px(0.));
-                        let origin = bounds.origin - gpui::point(offset, px(0.));
-                        if focus.is_focused(window) {
-                            if selection.is_empty() {
-                                window.paint_quad(gpui::fill(
-                                    Bounds::new(
-                                        origin + gpui::point(caret, px(0.)),
-                                        gpui::size(px(1.), bounds.size.height),
-                                    ),
-                                    cx.theme().foreground,
-                                ));
+        } else {
+            input.h_8().child(
+                div().size_full().px_3().py_1().overflow_hidden().child(
+                    canvas(
+                        move |_, window, _| {
+                            let style = window.text_style();
+                            let run = TextRun {
+                                len: text.len(),
+                                font: style.font(),
+                                color,
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                                letter_spacing: style.letter_spacing,
+                            };
+                            window.text_system().shape_line(
+                                text,
+                                style.font_size.to_pixels(window.rem_size()),
+                                &[run],
+                                None,
+                            )
+                        },
+                        move |bounds, line, window, cx| {
+                            let input = entity.read(cx);
+                            let focus = input.focus.clone();
+                            let display_index =
+                                |index| rendered_index(&input.secret.text, index, input.masked);
+                            let selection = display_index(input.selection.start)
+                                ..display_index(input.selection.end);
+                            let caret = line.x_for_index(if input.reversed {
+                                selection.start
                             } else {
-                                window.paint_quad(gpui::fill(
-                                    Bounds::from_corners(
-                                        origin
-                                            + gpui::point(
-                                                line.x_for_index(selection.start),
-                                                px(0.),
-                                            ),
-                                        origin
-                                            + gpui::point(
-                                                line.x_for_index(selection.end),
-                                                bounds.size.height,
-                                            ),
-                                    ),
-                                    cx.theme().selection,
-                                ));
+                                selection.end
+                            });
+                            let offset = if focus.is_focused(window) {
+                                (caret - bounds.size.width + px(2.)).max(px(0.))
+                            } else {
+                                px(0.)
+                            };
+                            let origin = bounds.origin - gpui::point(offset, px(0.));
+                            if focus.is_focused(window) {
+                                if selection.is_empty() {
+                                    window.paint_quad(gpui::fill(
+                                        Bounds::new(
+                                            origin + gpui::point(caret, px(0.)),
+                                            gpui::size(px(1.), bounds.size.height),
+                                        ),
+                                        cx.theme().foreground,
+                                    ));
+                                } else {
+                                    window.paint_quad(gpui::fill(
+                                        Bounds::from_corners(
+                                            origin
+                                                + gpui::point(
+                                                    line.x_for_index(selection.start),
+                                                    px(0.),
+                                                ),
+                                            origin
+                                                + gpui::point(
+                                                    line.x_for_index(selection.end),
+                                                    bounds.size.height,
+                                                ),
+                                        ),
+                                        cx.theme().selection,
+                                    ));
+                                }
                             }
-                        }
-                        window.handle_input(
-                            &focus,
-                            ElementInputHandler::new(bounds, entity.clone()),
-                            cx,
-                        );
-                        let _ = line.paint(
-                            origin,
-                            bounds.size.height,
-                            gpui::TextAlign::Left,
-                            None,
-                            window,
-                            cx,
-                        );
-                        entity.update(cx, |input, _| input.last_layout = Some((line, origin)));
-                    },
-                )
-                .w_full()
-                .h_full(),
-            );
+                            window.handle_input(
+                                &focus,
+                                ElementInputHandler::new(bounds, entity.clone()),
+                                cx,
+                            );
+                            let _ = line.paint(
+                                origin,
+                                bounds.size.height,
+                                gpui::TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                            entity.update(cx, |input, _| input.last_layout = Some((line, origin)));
+                        },
+                    )
+                    .w_full()
+                    .h_full(),
+                ),
+            )
+        };
         div()
             .w_full()
             .child(input)
             .when(self.secret.allocation_failed, |this| {
-                this.child(div().text_xs().child("Unable to secure input memory"))
+                this.child(div().text_caption().child("Unable to secure input memory"))
             })
+    }
+}
+
+impl SecretInputState {
+    fn wrapped_canvas(
+        text: SharedString,
+        color: gpui::Hsla,
+        line_height: Pixels,
+        entity: gpui::Entity<Self>,
+    ) -> impl IntoElement {
+        let sizer = div().w_full().opacity(0.).child(text.clone());
+        let canvas = canvas(
+            move |bounds, window, _| {
+                let style = window.text_style();
+                let run = TextRun {
+                    len: text.len(),
+                    font: style.font(),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                    letter_spacing: style.letter_spacing,
+                };
+                window
+                    .text_system()
+                    .shape_text(
+                        text,
+                        style.font_size.to_pixels(window.rem_size()),
+                        &[run],
+                        Some(bounds.size.width),
+                        None,
+                    )
+                    .map(|lines| lines.into_iter().collect::<Vec<_>>())
+                    .unwrap_or_default()
+            },
+            move |bounds, lines, window, cx| {
+                let input = entity.read(cx);
+                let focus = input.focus.clone();
+                if focus.is_focused(window) {
+                    let start = wrapped_position(&lines, input.selection.start, line_height);
+                    let end = wrapped_position(&lines, input.selection.end, line_height);
+                    let width = bounds.size.width;
+                    let mut highlight = |from: Point<Pixels>, to: Point<Pixels>, color| {
+                        window.paint_quad(gpui::fill(
+                            Bounds::from_corners(bounds.origin + from, bounds.origin + to),
+                            color,
+                        ));
+                    };
+                    if input.selection.is_empty() {
+                        highlight(
+                            end,
+                            end + gpui::point(px(1.), line_height),
+                            cx.theme().foreground,
+                        );
+                    } else if start.y == end.y {
+                        highlight(
+                            start,
+                            end + gpui::point(px(0.), line_height),
+                            cx.theme().selection,
+                        );
+                    } else {
+                        let selection = cx.theme().selection;
+                        highlight(start, gpui::point(width, start.y + line_height), selection);
+                        highlight(
+                            gpui::point(px(0.), start.y + line_height),
+                            gpui::point(width, end.y),
+                            selection,
+                        );
+                        highlight(
+                            gpui::point(px(0.), end.y),
+                            end + gpui::point(px(0.), line_height),
+                            selection,
+                        );
+                    }
+                }
+                window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
+                for (line, (_, top)) in lines.iter().zip(line_origins(&lines, line_height)) {
+                    let _ = line.paint(
+                        bounds.origin + gpui::point(px(0.), top),
+                        line_height,
+                        gpui::TextAlign::Left,
+                        Some(bounds),
+                        window,
+                        cx,
+                    );
+                }
+                entity.update(cx, |input, _| {
+                    input.last_wrapped = Some((lines, bounds.origin, line_height));
+                });
+            },
+        )
+        .absolute()
+        .inset_0();
+        div()
+            .relative()
+            .w_full()
+            .line_height(line_height)
+            .child(sizer)
+            .child(canvas)
     }
 }
 
@@ -542,6 +794,13 @@ mod tests {
         assert_eq!(rendered_text(value, true), "•••");
         assert_eq!(queried_text(value, true), "****");
         assert_eq!(rendered_index(value, 3, true), 6);
+    }
+
+    #[test]
+    fn only_wrapped_visible_inputs_shape_line_breaks() {
+        assert_eq!(shaped_text("a\nb\r\nc", false, false), "a b  c");
+        assert_eq!(shaped_text("a\nb\r\nc", false, true), "a\nb \nc");
+        assert_eq!(shaped_text("a\nb", true, true), "•••");
     }
 
     #[test]

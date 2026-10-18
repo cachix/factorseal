@@ -1,14 +1,82 @@
 use std::sync::LazyLock;
 
-use gpui::{ColorExt as _, Hsla, px, rgb, rgb_to_hsla};
-use gpui_component::{scroll::ScrollbarMode, theme::Theme};
+use gpui::{ColorExt as _, Hsla, SharedString, px, rgb, rgb_to_hsla};
+use gpui_component::{IconNamed, scroll::ScrollbarMode, theme::Theme};
 
 pub(crate) const MARK_ASSET: &str = "factorseal-mark.svg";
 pub(crate) const MICRO_MARK_ASSET: &str = "factorseal-mark-micro.svg";
 pub(crate) const SEARCH_ASSET: &str = "factorseal-search.svg";
 pub(crate) const CLOSE_ASSET: &str = "factorseal-close.svg";
 pub(crate) const BUG_ASSET: &str = "factorseal-bug.svg";
+pub(crate) const LOCK_ASSET: &str = "factorseal-lock.svg";
+pub(crate) const DOWNLOAD_ASSET: &str = "factorseal-download.svg";
+pub(crate) const UPLOAD_ASSET: &str = "factorseal-upload.svg";
+pub(crate) const KEY_ASSET: &str = "factorseal-key.svg";
+pub(crate) const CARD_ASSET: &str = "factorseal-card.svg";
+pub(crate) const REFRESH_ASSET: &str = "factorseal-refresh.svg";
+pub(crate) const TRANSFER_ASSET: &str = "factorseal-transfer.svg";
+pub(crate) const QR_CODE_ASSET: &str = "factorseal-qr-code.svg";
+pub(crate) const PASTE_ASSET: &str = "factorseal-paste.svg";
+pub(crate) const GENERATE_ASSET: &str = "factorseal-generate.svg";
+pub(crate) const TRASH_ASSET: &str = "factorseal-trash.svg";
+pub(crate) const TAG_ASSET: &str = "factorseal-tag.svg";
+pub(crate) const CLOCK_ASSET: &str = "factorseal-clock.svg";
+pub(crate) const MAIL_ASSET: &str = "factorseal-mail.svg";
+pub(crate) const PHONE_ASSET: &str = "factorseal-phone.svg";
+pub(crate) const PENCIL_ASSET: &str = "factorseal-pencil.svg";
+pub(crate) const GRIP_ASSET: &str = "factorseal-grip.svg";
+pub(crate) const KEYBOARD_ASSET: &str = "factorseal-keyboard.svg";
 pub(crate) const TAGLINE: &str = "Your secrets stay here.";
+
+#[derive(Clone, Copy)]
+pub(crate) enum Glyph {
+    Bug,
+    Lock,
+    Download,
+    Upload,
+    Key,
+    Card,
+    Refresh,
+    Transfer,
+    QrCode,
+    Paste,
+    Generate,
+    Trash,
+    Tag,
+    Clock,
+    Mail,
+    Phone,
+    Pencil,
+    Grip,
+    Keyboard,
+}
+
+impl IconNamed for Glyph {
+    fn path(self) -> SharedString {
+        match self {
+            Self::Bug => BUG_ASSET,
+            Self::Lock => LOCK_ASSET,
+            Self::Download => DOWNLOAD_ASSET,
+            Self::Upload => UPLOAD_ASSET,
+            Self::Key => KEY_ASSET,
+            Self::Card => CARD_ASSET,
+            Self::Refresh => REFRESH_ASSET,
+            Self::Transfer => TRANSFER_ASSET,
+            Self::QrCode => QR_CODE_ASSET,
+            Self::Paste => PASTE_ASSET,
+            Self::Generate => GENERATE_ASSET,
+            Self::Trash => TRASH_ASSET,
+            Self::Tag => TAG_ASSET,
+            Self::Clock => CLOCK_ASSET,
+            Self::Mail => MAIL_ASSET,
+            Self::Phone => PHONE_ASSET,
+            Self::Pencil => PENCIL_ASSET,
+            Self::Grip => GRIP_ASSET,
+            Self::Keyboard => KEYBOARD_ASSET,
+        }
+        .into()
+    }
+}
 
 #[derive(Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

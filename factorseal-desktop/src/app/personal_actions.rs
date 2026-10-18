@@ -1,27 +1,18 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+
+use gpui::{Animation, AnimationExt as _, relative};
+use gpui_component::Icon;
 
 use super::*;
 
+const CLIPBOARD_CLEAR_DELAY: Duration = Duration::from_secs(30);
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum CopiedField {
-    Draft(usize),
     Saved(usize),
-}
-
-fn passphrase_from_entropy(entropy: &[u8; 16]) -> Zeroizing<String> {
-    let mnemonic =
-        bip39::Mnemonic::from_entropy(entropy).expect("128 bits is a valid BIP-39 entropy length");
-    Zeroizing::new(mnemonic.to_string())
-}
-
-pub(super) fn generate_passphrase() -> Result<Zeroizing<String>, getrandom::Error> {
-    let mut entropy = Zeroizing::new([0_u8; 16]);
-    getrandom::fill(&mut *entropy)?;
-    Ok(passphrase_from_entropy(&entropy))
-}
-
-pub(super) fn can_generate(kind: PersonalSecretKind, field: &PersonalDraftField) -> bool {
-    can_generate_value(kind, &field.field_type, &field.id)
 }
 
 pub(super) fn can_generate_value(
@@ -34,34 +25,6 @@ pub(super) fn can_generate_value(
 }
 
 impl DesktopView {
-    pub(super) fn generate_personal_password(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(field) = self.personal_fields.get(index) else {
-            return;
-        };
-        if !can_generate(self.personal_kind, field) {
-            return;
-        }
-        match generate_passphrase() {
-            Ok(password) => {
-                field
-                    .value
-                    .update(cx, |input, cx| input.set_value(&password, window, cx));
-                self.personal_error = None;
-                self.copied_personal_field = None;
-            }
-            Err(_) => {
-                self.personal_error =
-                    Some("Could not generate a passphrase. Please try again.".into());
-            }
-        }
-        cx.notify();
-    }
-
     pub(super) fn copy_personal_value(
         &mut self,
         value: String,
@@ -69,16 +32,15 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) {
         static NEXT_COPY: AtomicU64 = AtomicU64::new(0);
-        let marker = format!(
-            "factorseal:{}:{}",
-            std::process::id(),
-            NEXT_COPY.fetch_add(1, Ordering::Relaxed)
-        );
+        let copy = NEXT_COPY.fetch_add(1, Ordering::Relaxed);
+        let marker = format!("factorseal:{}:{copy}", std::process::id());
         cx.write_to_clipboard(gpui::ClipboardItem::new_string_with_metadata(
             value,
             marker.clone(),
         ));
         self.copied_personal_field = Some(field);
+        self.clipboard_notice = Some(copy);
+        self.clipboard_notice_leaving = false;
         cx.notify();
         cx.spawn(async move |view, cx| {
             smol::Timer::after(std::time::Duration::from_secs(2)).await;
@@ -91,8 +53,8 @@ impl DesktopView {
         })
         .detach();
         // Only clear our own clipboard entry; preserve anything copied afterwards.
-        cx.spawn(async move |_, cx| {
-            smol::Timer::after(std::time::Duration::from_secs(30)).await;
+        cx.spawn(async move |view, cx| {
+            smol::Timer::after(CLIPBOARD_CLEAR_DELAY).await;
             cx.update(|cx| {
                 if cx
                     .read_from_clipboard()
@@ -103,14 +65,217 @@ impl DesktopView {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
                 }
             });
+            let _ = view.update(cx, |view, cx| view.dismiss_clipboard_notice(copy, cx));
         })
         .detach();
+    }
+
+    fn dismiss_clipboard_notice(&mut self, copy: u64, cx: &mut Context<Self>) {
+        if self.clipboard_notice != Some(copy) || self.clipboard_notice_leaving {
+            return;
+        }
+        self.clipboard_notice_leaving = true;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            smol::Timer::after(crate::motion::LEAVE_DURATION).await;
+            let _ = view.update(cx, |view, cx| {
+                if view.clipboard_notice == Some(copy) {
+                    view.clipboard_notice = None;
+                    view.clipboard_notice_leaving = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn dismiss_change_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(toast) = self
+            .change_toast
+            .as_mut()
+            .filter(|toast| toast.id == id && !toast.leaving)
+        else {
+            return;
+        };
+        toast.leaving = true;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            smol::Timer::after(crate::motion::LEAVE_DURATION).await;
+            let _ = view.update(cx, |view, cx| {
+                if view
+                    .change_toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.id == id)
+                {
+                    view.change_toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn animate_notice(id: (&'static str, u64), leaving: bool, notice: Div) -> gpui::AnyElement {
+        if leaving {
+            crate::motion::leave(id, notice).into_any_element()
+        } else {
+            crate::motion::enter(id, notice).into_any_element()
+        }
+    }
+
+    pub(super) fn render_notices(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.clipboard_notice.is_none() && self.change_toast.is_none() {
+            return None;
+        }
+        Some(
+            v_flex()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(rems(8. / 16.))
+                .items_center()
+                .gap_2()
+                .children(self.render_change_toast(cx))
+                .children(self.render_clipboard_notice(cx)),
+        )
+    }
+
+    fn notice(cx: &App) -> Div {
+        let theme = cx.theme();
+        h_flex()
+            .relative()
+            .items_center()
+            .gap_2()
+            .pl_3()
+            .pr_1()
+            .py_1()
+            .rounded_md()
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .shadow_md()
+            .text_caption()
+    }
+
+    fn render_change_toast(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let toast = self.change_toast.as_ref()?;
+        let theme = cx.theme();
+        let undo = toast.undo;
+        let id = toast.id;
+        Some(Self::animate_notice(
+            ("change-toast", id),
+            toast.leaving,
+            Self::notice(cx)
+                .child(if toast.error {
+                    Icon::new(IconName::CircleX)
+                        .small()
+                        .text_color(theme.danger)
+                } else {
+                    Icon::new(IconName::Check).small().text_color(theme.success)
+                })
+                .child(toast.message.clone())
+                .when_some(undo, |notice, direction| {
+                    notice.child(
+                        button("personal-change-toast")
+                            .ghost()
+                            .xsmall()
+                            .label(match direction {
+                                personal_history::Direction::Undo => "Undo",
+                                personal_history::Direction::Redo => "Redo",
+                            })
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.step_personal_history(direction, cx);
+                            })),
+                    )
+                })
+                .child(
+                    button("dismiss-change-toast")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip("Dismiss")
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.dismiss_change_toast(id, cx);
+                        })),
+                ),
+        ))
+    }
+
+    fn render_clipboard_notice(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let copy = self.clipboard_notice?;
+        let theme = cx.theme();
+        Some(Self::animate_notice(
+            ("clipboard-notice", copy),
+            self.clipboard_notice_leaving,
+            Self::notice(cx)
+                .child(Icon::new(IconName::Check).small().text_color(theme.success))
+                .child("Copied to clipboard")
+                .child(div().text_color(theme.muted_foreground).with_animation(
+                    ("clipboard-clear-text", copy),
+                    Animation::new(CLIPBOARD_CLEAR_DELAY).with_max_fps(30.),
+                    |text, elapsed| text.child(clipboard_clear_text(seconds_left(elapsed))),
+                ))
+                .child(
+                    button("dismiss-clipboard-notice")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip("Dismiss")
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.dismiss_clipboard_notice(copy, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .bottom_0()
+                        .h(px(2.))
+                        .bg(theme.primary)
+                        .with_animation(
+                            ("clipboard-clear", copy),
+                            Animation::new(CLIPBOARD_CLEAR_DELAY).with_max_fps(30.),
+                            |fill, elapsed| fill.w(relative(1. - elapsed)),
+                        ),
+                ),
+        ))
+    }
+}
+
+fn seconds_left(elapsed: f32) -> u64 {
+    let left = CLIPBOARD_CLEAR_DELAY.mul_f32(1. - elapsed);
+    left.as_secs() + u64::from(left.subsec_nanos() > 0)
+}
+
+fn clipboard_clear_text(seconds: u64) -> String {
+    if seconds == 1 {
+        "Clears in 1 second".into()
+    } else {
+        format!("Clears in {seconds} seconds")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_notice_counts_down_to_the_clear() {
+        assert_eq!(
+            clipboard_clear_text(seconds_left(0.)),
+            "Clears in 30 seconds"
+        );
+        assert_eq!(
+            clipboard_clear_text(seconds_left(0.5)),
+            "Clears in 15 seconds"
+        );
+        assert_eq!(
+            clipboard_clear_text(seconds_left(0.99)),
+            "Clears in 1 second"
+        );
+    }
 
     #[test]
     fn generation_is_available_for_passwords_but_not_external_credentials() {
@@ -149,24 +314,5 @@ mod tests {
             &PersonalFieldType::Concealed,
             "credential"
         ));
-    }
-
-    #[test]
-    fn generated_passphrases_are_valid_twelve_word_bip39_mnemonics() {
-        let first = generate_passphrase().unwrap();
-        let second = generate_passphrase().unwrap();
-        assert_ne!(*first, *second);
-        for phrase in [first, second] {
-            assert_eq!(phrase.split_whitespace().count(), 12);
-            assert!(bip39::Mnemonic::parse_in(bip39::Language::English, &*phrase).is_ok());
-        }
-    }
-
-    #[test]
-    fn passphrases_match_the_bip39_zero_entropy_test_vector() {
-        assert_eq!(
-            &*passphrase_from_entropy(&[0; 16]),
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-        );
     }
 }

@@ -99,6 +99,11 @@ impl PersonalField {
     pub fn text(&self) -> Option<&str> {
         self.value.as_str()
     }
+
+    #[must_use]
+    pub fn is_concealed(&self) -> bool {
+        self.concealed || self.field_type.concealed()
+    }
 }
 
 impl Drop for PersonalField {
@@ -280,6 +285,17 @@ impl PersonalSecret {
         let mut item = Self::template(PersonalSecretKind::Generic, title);
         item.sections[0].fields[0].value = value.into();
         item
+    }
+
+    #[must_use]
+    pub fn username(&self) -> Option<&str> {
+        self.sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .find(|field| field.id == "username")
+            .filter(|field| !field.is_concealed())
+            .and_then(PersonalField::text)
+            .filter(|username| !username.is_empty())
     }
 
     pub fn encode(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
@@ -664,6 +680,28 @@ mod tests {
         item.sections[0].fields[0].value = "x".repeat(512 * 1024).into();
         assert!(item.encode().unwrap_err().to_string().contains("512 KiB"));
         assert!(PersonalSecret::decode("binary", &[255]).is_err());
+    }
+
+    #[test]
+    fn username_is_the_filled_username_field() {
+        let mut login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
+        assert_eq!(login.username(), None);
+        login.sections[0].fields[0].value = "alice".into();
+        assert_eq!(login.username(), Some("alice"));
+        let card = PersonalSecret::template(PersonalSecretKind::Card, "Card".into());
+        assert_eq!(card.username(), None);
+    }
+
+    #[test]
+    fn concealed_usernames_are_not_shown() {
+        let mut login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
+        login.sections[0].fields[0].value = "alice".into();
+        login.sections[0].fields[0].concealed = true;
+        let decoded = PersonalSecret::decode_current(&login.encode().unwrap()).unwrap();
+        assert_eq!(decoded.username(), None);
+        login.sections[0].fields[0].concealed = false;
+        login.sections[0].fields[0].field_type = PersonalFieldType::Concealed;
+        assert_eq!(login.username(), None);
     }
 
     #[test]
