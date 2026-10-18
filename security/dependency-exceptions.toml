@@ -4,6 +4,9 @@
 # No vulnerabilities were reported; the five remaining findings are maintenance
 # warnings. Keep this review window to 30 days while migrating their parents.
 # Desktop adds four of these dependencies; paste also comes through native sync.
+# Reviewed 2026-10-18 with cargo-audit 0.22.2: no vulnerabilities or yanked
+# crates. Three new maintenance warnings require a coordinated zbus 6 migration
+# in Factorseal and its Desktop parents; their separate 30-day window ends below.
 
 [[exception]]
 id = "RUSTSEC-2025-0141"
@@ -54,3 +57,33 @@ reviewed = 2026-10-13
 expires = 2026-11-12
 reason = "fontdb 0.23, used by cosmic-text in the GPUI CE WGPU backend, still uses this parser. A direct Cargo version override cannot replace its APIs."
 migration = "DEP-6: migrate fontdb and cosmic-text together to maintained font parsing and validate font fallback, accessibility, and every enabled renderer."
+
+[[exception]]
+id = "RUSTSEC-2026-0371"
+package = "zbus_names"
+version = "4.3.4"
+owner = "Factorseal maintainers"
+reviewed = 2026-10-18
+expires = 2026-11-17
+reason = "zbus 5 and atspi-common require the standalone name types, now merged into zbus 6. Factorseal and its pinned Desktop parents still use zbus 5."
+migration = "DEP-7: migrate Factorseal, GPUI CE, ashpd/rfd, oo7, AccessKit/AT-SPI, gpui-tray, and notify-rust together to zbus 6 names; verify login lifecycle, Secret Service, provider transport, portals, tray, and accessibility."
+
+[[exception]]
+id = "RUSTSEC-2026-0370"
+package = "zvariant"
+version = "5.15.0"
+owner = "Factorseal maintainers"
+reviewed = 2026-10-18
+expires = 2026-11-17
+reason = "zbus 5 and Desktop portal, keyring, and accessibility dependencies require zvariant 5. Its replacement is zbus 6 wire, which also removes the blocking API used by Factorseal."
+migration = "DEP-7: move D-Bus values and serialization to zbus 6 wire, replace blocking calls with the supported runtime API, and upgrade all Desktop parents before removing zvariant; preserve Secret Service wire interoperability."
+
+[[exception]]
+id = "RUSTSEC-2026-0372"
+package = "zvariant_derive"
+version = "5.15.0"
+owner = "Factorseal maintainers"
+reviewed = 2026-10-18
+expires = 2026-11-17
+reason = "zvariant 5 requires these derive macros; upstream merged them into zbus 6. Updating only Factorseal's direct zbus dependency leaves the old derives in Desktop parents."
+migration = "DEP-7: migrate serialization derives with zvariant and all zbus 5 parents to zbus 6 macros; confirm both product and fuzz dependency graphs no longer contain the standalone crate."
