@@ -611,14 +611,17 @@ impl DesktopView {
                         }),
                 )
             });
-        if single_pane {
+        let vault = if single_pane {
             div()
                 .size_full()
                 .overflow_hidden()
                 .child(self.navigation.animate(vault))
         } else {
             vault
-        }
+        };
+        vault.relative().when(self.qr_target().is_some(), |vault| {
+            vault.child(Self::qr_drop_zone(cx))
+        })
     }
 }
 

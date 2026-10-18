@@ -8,16 +8,22 @@ use zeroize::Zeroize as _;
 
 use super::generator::GeneratorTarget;
 use super::personal_history::Direction;
-use super::totp::{Totp, unix_now};
+use super::totp::{self, Totp, unix_now};
 use super::*;
 use crate::password_generator::Strength;
 use crate::runtime::PersonalWriteError;
-use crate::secret_input::CancelEdit;
+use crate::secret_input::{CancelEdit, PasteItem};
 
 const NAME_MISSING: &str = "Give this item a name.";
 const INVALID_JSON: &str = "Enter valid JSON for this structured field.";
 const ALLOCATION_FAILED: &str = "Could not allocate secure memory. Re-enter the value.";
 const NOTHING_ENTERED: &str = "Enter at least one field value.";
+const VALUE_PLACEHOLDER: &str = "Add a value";
+const ONE_TIME_PLACEHOLDER: &str = "Paste a setup key or QR code";
+const USERNAME_ID: &str = "username";
+const ONE_TIME_LABEL: &str = "One-time password";
+const ONE_TIME_KEPT: &str = "This item already has this one-time password.";
+const ONE_TIME_REPLACED: &str = "Saving replaces the current one-time password.";
 const CUSTOM_SECTION: &str = "custom";
 const CUSTOM_SECTION_LABEL: &str = "Custom fields";
 const CUSTOM_LABEL: &str = "Custom field";
@@ -106,6 +112,7 @@ pub(super) struct Seed<'a> {
     pub(super) concealed: bool,
     pub(super) custom: bool,
     pub(super) multiline: bool,
+    pub(super) placeholder: &'static str,
 }
 
 pub(super) struct RowValue {
@@ -200,6 +207,46 @@ fn value_text(value: &serde_json::Value) -> Zeroizing<String> {
     })
 }
 
+fn stored_value(
+    field_type: &PersonalFieldType,
+    original: Option<&serde_json::Value>,
+    entry: &str,
+    salvage: bool,
+) -> Result<serde_json::Value, String> {
+    match original {
+        Some(source) if structured(source) => {
+            if *value_text(source) == *entry {
+                Ok(source.clone())
+            } else {
+                match serde_json::from_str(entry) {
+                    Ok(value) => Ok(value),
+                    Err(_) if salvage => Ok(source.clone()),
+                    Err(_) => Err(INVALID_JSON.to_owned()),
+                }
+            }
+        }
+        Some(serde_json::Value::Null) if entry.is_empty() => Ok(serde_json::Value::Null),
+        _ if *field_type == PersonalFieldType::Totp
+            && original.is_none_or(|source| *value_text(source) != *entry) =>
+        {
+            match totp::stored(entry) {
+                Ok(stored) => Ok(serde_json::Value::String(stored.to_string())),
+                Err(_) if salvage => Ok(serde_json::Value::String(entry.to_owned())),
+                Err(error) => Err(error),
+            }
+        }
+        _ => Ok(serde_json::Value::String(entry.to_owned())),
+    }
+}
+
+fn one_time_value(item: &PersonalSecret) -> Option<&str> {
+    item.sections
+        .iter()
+        .flat_map(|section| &section.fields)
+        .find(|field| field.field_type == PersonalFieldType::Totp)
+        .and_then(PersonalField::text)
+}
+
 fn find_field<'a>(item: &'a PersonalSecret, section: &str, id: &str) -> Option<&'a PersonalField> {
     item.sections
         .iter()
@@ -259,6 +306,7 @@ impl<V> Draft<V> {
             concealed: true,
             custom: false,
             multiline: true,
+            placeholder: VALUE_PLACEHOLDER,
         });
         self.new_row(
             NOTES_ID.into(),
@@ -286,6 +334,7 @@ impl<V> Draft<V> {
                     concealed: field.is_concealed(),
                     custom,
                     multiline: is_multiline(&field.field_type) || structured(&field.value),
+                    placeholder: placeholder(&field.field_type),
                 });
                 let mut row = draft.new_row(
                     field.id.clone(),
@@ -341,6 +390,7 @@ impl<V> Draft<V> {
                     concealed: field.is_concealed(),
                     custom: false,
                     multiline: is_multiline(&field.field_type),
+                    placeholder: placeholder(&field.field_type),
                 });
                 rows.push(draft.new_row(
                     field.id.clone(),
@@ -492,6 +542,7 @@ impl<V> Draft<V> {
             concealed: field.concealed || field.field_type.concealed(),
             custom: false,
             multiline: is_multiline(&field.field_type),
+            placeholder: placeholder(&field.field_type),
         });
         let row = self.new_row(
             field.id.clone(),
@@ -517,6 +568,7 @@ impl<V> Draft<V> {
             concealed: false,
             custom: false,
             multiline: false,
+            placeholder: VALUE_PLACEHOLDER,
         });
         let row = self.new_row(
             id,
@@ -556,6 +608,7 @@ impl<V> Draft<V> {
             concealed,
             custom: true,
             multiline: is_multiline(&field_type),
+            placeholder: placeholder(&field_type),
         });
         let row = self.new_row(
             id,
@@ -668,6 +721,36 @@ impl<V> Draft<V> {
                 .get(&row.key)
                 .is_some_and(|value| !value.value.is_empty())
         })
+    }
+
+    pub(super) fn replaced(
+        &self,
+        base: &PersonalSecret,
+        values: &HashMap<usize, RowValue>,
+    ) -> HashSet<usize> {
+        self.sections
+            .iter()
+            .flat_map(|section| {
+                section.rows.iter().filter(move |row| {
+                    let original =
+                        (row.field_type == PersonalFieldType::Totp && !row.fresh && !row.removed)
+                            .then(|| find_field(base, &section.id, &row.id))
+                            .flatten()
+                            .filter(|field| field.field_type == PersonalFieldType::Totp)
+                            .and_then(PersonalField::text)
+                            .filter(|original| !original.trim().is_empty());
+                    original
+                        .zip(values.get(&row.key))
+                        .is_some_and(|(original, entry)| {
+                            let value = entry.value.trim();
+                            !value.is_empty()
+                                && value != original.trim()
+                                && !totp::same_key(original, value)
+                        })
+                })
+            })
+            .map(|row| row.key)
+            .collect()
     }
 
     pub(super) fn changed(
@@ -810,25 +893,8 @@ impl<V> Draft<V> {
                     (None, _) => return Err(unreadable(row)),
                 };
                 filled |= !entry.value.is_empty();
-                let value = match original {
-                    Some(source) if structured(source) => {
-                        if *value_text(source) == *entry.value {
-                            source.clone()
-                        } else {
-                            match serde_json::from_str(&entry.value) {
-                                Ok(value) => value,
-                                Err(_) if salvage => source.clone(),
-                                Err(_) => {
-                                    return Err(Problem::new(Target::Row(row.key), INVALID_JSON));
-                                }
-                            }
-                        }
-                    }
-                    Some(serde_json::Value::Null) if entry.value.is_empty() => {
-                        serde_json::Value::Null
-                    }
-                    _ => serde_json::Value::String(entry.value.to_string()),
-                };
+                let value = stored_value(&row.field_type, original, &entry.value, salvage)
+                    .map_err(|error| Problem::new(Target::Row(row.key), error))?;
                 let label = match entry.label.as_deref().map(|label| label.trim()) {
                     Some(label) if row.custom && !label.is_empty() => label.to_owned(),
                     _ if row.custom && row.label.trim().is_empty() => CUSTOM_LABEL.to_owned(),
@@ -948,6 +1014,8 @@ pub(super) struct Editor {
     item_id: Option<String>,
     draft: Draft<Inputs>,
     problems: Vec<Problem>,
+    notices: HashMap<usize, &'static str>,
+    origin_pending: bool,
     strengths: HashMap<usize, Strength>,
     ratings: HashMap<usize, Task<()>>,
     scroll_to: Option<usize>,
@@ -970,6 +1038,8 @@ impl Editor {
             item_id,
             draft,
             problems: Vec::new(),
+            notices: HashMap::new(),
+            origin_pending: false,
             strengths: HashMap::new(),
             ratings: HashMap::new(),
             scroll_to: None,
@@ -1026,6 +1096,19 @@ impl Editor {
             .find(|problem| problem.target == target)
             .map(|problem| problem.message.as_str())
     }
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) enum QrTarget {
+    Vault,
+    NewItem,
+    Item(String),
+}
+
+#[derive(Clone, Copy)]
+struct Marks {
+    changed: bool,
+    replaced: bool,
 }
 
 type LeaveRequest = Box<dyn FnOnce(&mut DesktopView, &mut Context<DesktopView>)>;
@@ -1232,16 +1315,25 @@ fn value_fill(
     )
 }
 
+fn placeholder(field_type: &PersonalFieldType) -> &'static str {
+    if *field_type == PersonalFieldType::Totp {
+        ONE_TIME_PLACEHOLDER
+    } else {
+        VALUE_PLACEHOLDER
+    }
+}
+
 fn make_value(
     value: &str,
     masked: bool,
     multiline: bool,
+    placeholder: &'static str,
     cx: &mut Context<DesktopView>,
 ) -> gpui::Entity<SecretInputState> {
     cx.new(|cx| {
         let input = SecretInputState::from_value(value, masked, cx)
             .bare()
-            .placeholder("Add a value");
+            .placeholder(placeholder);
         if multiline {
             input.wrapped().newline_on_enter()
         } else {
@@ -1276,6 +1368,17 @@ fn with_custom_fields(
     )
 }
 
+fn one_time_row<V>(draft: &Draft<V>, preferred: Option<usize>) -> Option<&Row<V>> {
+    let shown = || {
+        draft
+            .field_rows()
+            .filter(|row| row.field_type == PersonalFieldType::Totp && !row.removed && !row.hidden)
+    };
+    shown()
+        .find(|row| Some(row.key) == preferred)
+        .or_else(|| shown().next())
+}
+
 fn make_inputs(
     seed: Seed<'_>,
     revealed: &HashSet<usize>,
@@ -1283,7 +1386,7 @@ fn make_inputs(
     cx: &mut Context<DesktopView>,
 ) -> Inputs {
     let masked = seed.concealed && !seed.index.is_some_and(|index| revealed.contains(&index));
-    let value = make_value(seed.value, masked, seed.multiline, cx);
+    let value = make_value(seed.value, masked, seed.multiline, seed.placeholder, cx);
     let label = seed.custom.then(|| {
         let label = seed.label.to_owned();
         cx.new(|cx| {
@@ -1324,6 +1427,12 @@ fn watch_row(key: usize, inputs: &Inputs, cx: &mut Context<DesktopView>) -> Vec<
         cx.subscribe(&inputs.value, |view, _, _: &CancelEdit, cx| {
             view.cancel_item_editor(cx);
         }),
+        cx.subscribe(
+            &inputs.value,
+            move |view, _, PasteItem(item): &PasteItem, cx| {
+                view.paste_into_row(item, key, cx);
+            },
+        ),
     ];
     if let Some(label) = &inputs.label {
         subscriptions.push(cx.subscribe(
@@ -1614,6 +1723,7 @@ impl DesktopView {
         if self.item_editor.take().is_none() {
             return;
         }
+        self.forget_qr_scan();
         if matches!(self.generator_target, Some(GeneratorTarget::Field(_))) {
             self.close_generator(cx);
         }
@@ -1850,6 +1960,14 @@ impl DesktopView {
         let Some(key) = key else {
             return;
         };
+        self.watch_new_row(key, cx);
+        self.focus_editor_row(Some(key), window, cx);
+    }
+
+    fn watch_new_row(&mut self, key: usize, cx: &mut Context<Self>) {
+        let Some(editor) = &mut self.item_editor else {
+            return;
+        };
         editor.arrived.insert(key);
         let inputs = editor.draft.row(key).map(|row| Inputs {
             value: row.inputs.value.clone(),
@@ -1861,7 +1979,188 @@ impl DesktopView {
                 editor.subscriptions.extend(subscriptions);
             }
         }
-        self.focus_editor_row(Some(key), window, cx);
+    }
+
+    pub(super) fn qr_target(&self) -> Option<QrTarget> {
+        if !self.is_unsealed() || self.settings_open {
+            return None;
+        }
+        Some(match &self.item_editor {
+            Some(editor) => editor
+                .item_id
+                .clone()
+                .map_or(QrTarget::NewItem, QrTarget::Item),
+            None => self
+                .personal_detail
+                .item()
+                .map_or(QrTarget::Vault, |item| QrTarget::Item(item.id.clone())),
+        })
+    }
+
+    pub(super) fn use_qr_code(
+        &mut self,
+        link: &str,
+        row: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.item_editor.is_none() {
+            let kept = self
+                .personal_detail
+                .item()
+                .and_then(one_time_value)
+                .is_some_and(|value| totp::same_key(value, link));
+            if kept {
+                self.show_toast(ONE_TIME_KEPT, None, false, cx);
+                return;
+            }
+            self.begin_edit(EditStart::Top, window, cx);
+        }
+        let Some(key) = self.show_one_time_row(row, window, cx) else {
+            return;
+        };
+        let values = self.editor_values(cx);
+        let replacing = self
+            .item_editor
+            .as_ref()
+            .filter(|editor| !editor.is_new())
+            .zip(self.personal_detail.item())
+            .is_some_and(|(editor, item)| editor.draft.replaced(item, &values).contains(&key));
+        let Some(editor) = &mut self.item_editor else {
+            return;
+        };
+        editor
+            .problems
+            .retain(|problem| problem.target != Target::Row(key));
+        editor.scroll_to = Some(key);
+        let Some(value) = editor.draft.row(key).map(|row| row.inputs.value.clone()) else {
+            return;
+        };
+        if totp::same_key(&value.read(cx).value(), link) {
+            if !replacing {
+                editor.notices.insert(key, ONE_TIME_KEPT);
+            }
+            cx.notify();
+            return;
+        }
+        value.update(cx, |input, cx| {
+            input.replace(link, cx);
+            input.set_masked(true, cx);
+        });
+        self.editor_value_changed(key, cx);
+    }
+
+    pub(super) fn fill_from_one_time_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self
+            .item_editor
+            .as_mut()
+            .filter(|editor| editor.origin_pending)
+        else {
+            return;
+        };
+        editor.origin_pending = false;
+        let link = editor
+            .draft
+            .field_rows()
+            .find(|row| row.field_type == PersonalFieldType::Totp && !row.removed)
+            .map(|row| row.inputs.value.clone());
+        let username = editor
+            .draft
+            .field_rows()
+            .find(|row| row.id == USERNAME_ID && !row.removed && !row.hidden)
+            .map(|row| (row.key, row.inputs.value.clone()));
+        let Some(link) = link
+            .map(|input| input.read(cx).value())
+            .filter(|link| Totp::parse(link).is_some())
+        else {
+            return;
+        };
+        let origin = totp::origin(&link);
+        if let Some(issuer) = origin.issuer
+            && self.item_name.read(cx).value().trim().is_empty()
+        {
+            self.item_name
+                .update(cx, |name, cx| name.set_value(issuer, window, cx));
+        }
+        if let (Some(account), Some((username, input))) = (origin.account, username)
+            && input.read(cx).value().is_empty()
+        {
+            input.update(cx, |input, cx| input.replace(&account, cx));
+            self.editor_value_changed(username, cx);
+        }
+    }
+
+    fn show_one_time_row(
+        &mut self,
+        row: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let editor = self.item_editor.as_mut()?;
+        let existing = one_time_row(&editor.draft, row)
+            .or_else(|| {
+                editor
+                    .draft
+                    .field_rows()
+                    .find(|row| row.field_type == PersonalFieldType::Totp)
+            })
+            .map(|row| (row.key, row.removed, row.hidden));
+        if let Some((key, removed, hidden)) = existing {
+            if removed {
+                editor.draft.restore(key);
+            }
+            if hidden {
+                editor.draft.show(key);
+            }
+            if removed || hidden {
+                editor.arrived.insert(key);
+            }
+            return Some(key);
+        }
+        let revealed = HashSet::new();
+        let template = template_fields(editor.draft.kind)
+            .into_iter()
+            .find(|field| field.field_type == PersonalFieldType::Totp);
+        let key = match template {
+            Some(field) => editor
+                .draft
+                .insert_template(&field.id, |seed| make_inputs(seed, &revealed, window, cx))?,
+            None => {
+                editor
+                    .draft
+                    .push_custom(ONE_TIME_LABEL, PersonalFieldType::Totp, "", &mut |seed| {
+                        make_inputs(seed, &revealed, window, cx)
+                    })
+            }
+        };
+        self.watch_new_row(key, cx);
+        Some(key)
+    }
+
+    pub(super) fn show_qr_problem(
+        &mut self,
+        message: &'static str,
+        row: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let row = self
+            .item_editor
+            .as_ref()
+            .and_then(|editor| one_time_row(&editor.draft, row))
+            .map(|row| row.key);
+        match (row, &mut self.item_editor) {
+            (Some(key), Some(editor)) => {
+                editor
+                    .problems
+                    .retain(|problem| problem.target != Target::Row(key));
+                editor
+                    .problems
+                    .push(Problem::new(Target::Row(key), message));
+                editor.scroll_to = Some(key);
+                cx.notify();
+            }
+            _ => self.show_toast(message, None, true, cx),
+        }
     }
 
     fn editor_remove(&mut self, key: usize, cx: &mut Context<Self>) {
@@ -1993,6 +2292,7 @@ impl DesktopView {
         };
         let masked = field_type.concealed();
         let multiline = is_multiline(&field_type);
+        let placeholder = placeholder(&field_type);
         let Some(reshaped) = editor
             .draft
             .row(key)
@@ -2006,11 +2306,12 @@ impl DesktopView {
         if let Some(row) = editor.draft.row_mut(key) {
             if reshaped {
                 let value = row.inputs.value.read(cx).value();
-                row.inputs.value = make_value(&value, masked, multiline, cx);
+                row.inputs.value = make_value(&value, masked, multiline, placeholder, cx);
             } else {
-                row.inputs
-                    .value
-                    .update(cx, |input, cx| input.set_masked(masked, cx));
+                row.inputs.value.update(cx, |input, cx| {
+                    input.set_masked(masked, cx);
+                    input.set_placeholder(placeholder, cx);
+                });
             }
         }
         if reshaped {
@@ -2041,6 +2342,7 @@ impl DesktopView {
             make_inputs(seed, &revealed, window, cx)
         });
         editor.problems.clear();
+        editor.notices.clear();
         editor.strengths.clear();
         editor.ratings.clear();
         self.close_generator(cx);
@@ -2056,6 +2358,17 @@ impl DesktopView {
         editor.problems.retain(|problem| {
             !matches!(problem.target, Target::Item) && problem.target != Target::Row(key)
         });
+        editor.notices.remove(&key);
+        let one_time = editor
+            .draft
+            .row(key)
+            .filter(|row| row.field_type == PersonalFieldType::Totp)
+            .map(|row| row.inputs.value.clone());
+        editor.origin_pending |= one_time.is_some() && editor.is_new();
+        let path = one_time
+            .as_ref()
+            .and_then(|input| qr_codes::file_path(&input.read(cx).value()))
+            .filter(|path| path.is_file());
         let kind = editor.draft.kind;
         let rated = editor.draft.row(key).is_some_and(|row| {
             !row.custom && personal_actions::can_generate_value(kind, &row.field_type, &row.id)
@@ -2066,6 +2379,10 @@ impl DesktopView {
                 let _ = view.update(cx, |view, cx| view.rate_editor_value(key, cx));
             });
             editor.ratings.insert(key, rating);
+        }
+        if let (Some(input), Some(path)) = (one_time, path) {
+            input.update(cx, |input, cx| input.replace("", cx));
+            self.read_qr_file(path, Some(key), cx);
         }
         self.update_personal_ticker(cx);
         cx.notify();
@@ -2280,11 +2597,17 @@ impl DesktopView {
         let Some(editor) = &self.item_editor else {
             return div();
         };
-        let changed = self
+        let (changed, replaced) = self
             .personal_detail
             .item()
             .filter(|_| !editor.is_new())
-            .map(|item| editor.draft.changed(item, &self.editor_values(cx)))
+            .map(|item| {
+                let values = self.editor_values(cx);
+                (
+                    editor.draft.changed(item, &values),
+                    editor.draft.replaced(item, &values),
+                )
+            })
             .unwrap_or_default();
         let mut groups = v_flex().w_full().gap_4();
         let visible = |section: &&Section<Inputs>| section.rows.iter().any(|row| !row.hidden);
@@ -2300,7 +2623,11 @@ impl DesktopView {
                 .iter()
                 .filter(|row| !row.hidden)
                 .map(|row| {
-                    self.render_editor_row(editor, row, true, changed.contains(&row.key), cx)
+                    let marks = Marks {
+                        changed: changed.contains(&row.key),
+                        replaced: replaced.contains(&row.key),
+                    };
+                    self.render_editor_row(editor, row, true, marks, cx)
                 })
                 .collect();
             groups = groups.child(field_group(heading, rows, cx));
@@ -2308,7 +2635,16 @@ impl DesktopView {
         if let Some(notes) = editor.draft.notes.as_ref().filter(|notes| !notes.hidden) {
             groups = groups.child(field_group(
                 None,
-                [self.render_editor_row(editor, notes, false, changed.contains(&notes.key), cx)],
+                [self.render_editor_row(
+                    editor,
+                    notes,
+                    false,
+                    Marks {
+                        changed: changed.contains(&notes.key),
+                        replaced: false,
+                    },
+                    cx,
+                )],
                 cx,
             ));
         }
@@ -2377,9 +2713,10 @@ impl DesktopView {
         editor: &Editor,
         row: &Row<Inputs>,
         draggable: bool,
-        changed: bool,
+        marks: Marks,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let changed = marks.changed;
         let theme = cx.theme().clone();
         let key = row.key;
         let icon = personal_field_icon(&row.id, &row.field_type)
@@ -2551,7 +2888,18 @@ impl DesktopView {
         } else {
             icon.into_any_element()
         };
-        let problem = editor.problem(Target::Row(key)).map(ToOwned::to_owned);
+        let message = editor
+            .problem(Target::Row(key))
+            .map(|problem| (problem.to_owned(), theme.danger))
+            .or_else(|| {
+                let notice = editor.notices.get(&key)?;
+                Some(((*notice).to_owned(), theme.muted_foreground))
+            })
+            .or_else(|| {
+                marks
+                    .replaced
+                    .then(|| (ONE_TIME_REPLACED.to_owned(), theme.warning))
+            });
         let mut generator = if can_generate {
             self.render_generator(GeneratorTarget::Field(key), true, ButtonVariants::ghost, cx)
         } else {
@@ -2574,7 +2922,13 @@ impl DesktopView {
                         })),
                 )
             }))
-            .child(action_slot().children(generator))
+            .child(
+                action_slot()
+                    .children(generator)
+                    .when(row.field_type == PersonalFieldType::Totp, |slot| {
+                        slot.child(self.qr_button(key, cx))
+                    }),
+            )
             .child(
                 shown_on_hover(
                     ("editor-tools", key),
@@ -2645,13 +2999,9 @@ impl DesktopView {
                             .child(value_box)
                             .children(code)
                             .children(strength)
-                            .when_some(problem, |column, problem| {
+                            .when_some(message, |column, (message, color)| {
                                 column.child(
-                                    div()
-                                        .px_3()
-                                        .text_caption()
-                                        .text_color(theme.danger)
-                                        .child(problem),
+                                    div().px_3().text_caption().text_color(color).child(message),
                                 )
                             }),
                     )
@@ -2822,6 +3172,68 @@ mod tests {
     }
 
     #[test]
+    fn one_time_password_keys_are_cleaned_and_checked_when_saved() {
+        let item = login();
+        let mut draft = Draft::from_item(&item, fake);
+        set(&mut draft, "totp", " jbsw y3dp ehpk 3pxp== ");
+        let saved = draft.build(Some(&item), "GitHub", read).unwrap();
+        assert_eq!(one_time_value(&saved), Some("JBSWY3DPEHPK3PXP"));
+        let key = set(&mut draft, "totp", "JBSWY3DP!");
+        assert_eq!(
+            draft.build(Some(&item), "GitHub", read).err(),
+            Some(Problem::new(
+                Target::Row(key),
+                "This is not a valid setup key."
+            ))
+        );
+        assert_eq!(
+            one_time_value(&draft.salvage(Some(&item), "GitHub", read).unwrap()),
+            Some("JBSWY3DP!")
+        );
+    }
+
+    #[test]
+    fn only_a_different_one_time_password_replaces_the_saved_one() {
+        let mut item = login();
+        let mut draft = Draft::from_item(&item, fake);
+        set(&mut draft, "totp", "JBSWY3DPEHPK3PXP");
+        assert!(draft.replaced(&item, &values(&draft)).is_empty());
+        item.sections[0].fields[3].value = "JBSWY3DPEHPK3PXP".into();
+        let mut draft = Draft::from_item(&item, fake);
+        set(&mut draft, "totp", "jbsw y3dp ehpk 3pxp");
+        assert!(draft.replaced(&item, &values(&draft)).is_empty());
+        set(
+            &mut draft,
+            "totp",
+            "otpauth://totp/GitHub:alice?secret=JBSWY3DPEHPK3PXP",
+        );
+        assert!(draft.replaced(&item, &values(&draft)).is_empty());
+        let key = set(&mut draft, "totp", "GEZDGNBVGY3TQOJQ");
+        assert_eq!(draft.replaced(&item, &values(&draft)), HashSet::from([key]));
+        set(&mut draft, "totp", "");
+        assert!(draft.replaced(&item, &values(&draft)).is_empty());
+        set(&mut draft, "totp", "GEZDGNBVGY3TQOJQ");
+        draft.remove(key, false);
+        assert!(draft.replaced(&item, &values(&draft)).is_empty());
+        item.sections[0].fields[3].value = "steam://JBSWY3DPEHPK3PXP".into();
+        let mut draft = Draft::from_item(&item, fake);
+        assert!(draft.replaced(&item, &values(&draft)).is_empty());
+        let key = set(&mut draft, "totp", "GEZDGNBVGY3TQOJQ");
+        assert_eq!(draft.replaced(&item, &values(&draft)), HashSet::from([key]));
+    }
+
+    #[test]
+    fn stored_one_time_password_keys_are_kept_until_they_are_edited() {
+        let mut item = login();
+        item.sections[0].fields[3].value = "not a key".into();
+        let draft = Draft::from_item(&item, fake);
+        assert_eq!(
+            one_time_value(&draft.build(Some(&item), "GitHub", read).unwrap()),
+            Some("not a key")
+        );
+    }
+
+    #[test]
     fn unchanged_items_build_back_to_themselves() {
         let mut item = login();
         item.favorite = true;
@@ -2853,6 +3265,24 @@ mod tests {
         let draft = Draft::from_item(&item, fake);
         assert_eq!(draft.build(Some(&item), "GitHub", read).unwrap(), item);
         assert_eq!(draft.build(Some(&item), " GitHub ", read).unwrap(), item);
+    }
+
+    #[test]
+    fn qr_codes_go_to_the_one_time_password_row_they_were_scanned_for() {
+        let mut draft = Draft::from_item(&login(), fake);
+        let key = |draft: &Draft<Fake>, id: &str| {
+            draft.field_rows().find(|row| row.id == id).unwrap().key
+        };
+        let template = key(&draft, "totp");
+        let password = key(&draft, "password");
+        let custom = draft.push_custom(ONE_TIME_LABEL, PersonalFieldType::Totp, "", &mut fake);
+        draft.show(template);
+        let picked = |draft: &Draft<Fake>, row| one_time_row(draft, row).map(|row| row.key);
+        assert_eq!(picked(&draft, Some(custom)), Some(custom));
+        assert_eq!(picked(&draft, Some(password)), Some(template));
+        assert_eq!(picked(&draft, None), Some(template));
+        draft.remove(template, true);
+        assert_eq!(picked(&draft, Some(template)), Some(custom));
     }
 
     #[test]

@@ -16,6 +16,7 @@ mod personal_detail;
 mod personal_history;
 mod personal_templates;
 mod placement;
+mod qr_codes;
 mod section_pages;
 mod shortcuts;
 #[cfg(feature = "apple-credential-exchange")]
@@ -25,6 +26,8 @@ mod vault_layout;
 mod website_icons;
 mod wifi;
 mod window_activation;
+#[cfg(target_os = "windows")]
+mod windows_screen;
 
 pub(crate) enum AccessEvent {
     #[cfg(target_os = "linux")]
@@ -1367,6 +1370,9 @@ struct DesktopView {
     item_leave: item_editor::Leave,
     navigation: vault_layout::Navigation,
     opening: u64,
+    qr_scan: Option<qr_codes::QrScan>,
+    qr_generation: u64,
+    qr_capturing: bool,
     archive_passphrase: gpui::Entity<SecretInputState>,
     archive_passphrase_confirmation: gpui::Entity<SecretInputState>,
     setup_method: SetupMethod,
@@ -1728,6 +1734,9 @@ impl DesktopView {
             item_leave: item_editor::Leave::default(),
             navigation: vault_layout::Navigation::default(),
             opening: 0,
+            qr_scan: None,
+            qr_generation: 0,
+            qr_capturing: false,
             archive_passphrase,
             archive_passphrase_confirmation,
             setup_method: SetupMethod::default(),
@@ -2217,6 +2226,7 @@ impl DesktopView {
         if !self.leave_item_editor(move |view, cx| view.select_vault_item(retry, cx), cx) {
             return;
         }
+        self.forget_qr_scan();
         match selection {
             VaultSelection::Entry(entry) if is_personal_secret(&entry) => {
                 self.open_personal_entry(*entry, cx);
@@ -2611,6 +2621,7 @@ impl DesktopView {
         if !self.leave_item_editor(move |view, cx| view.show_personal_panel(panel, cx), cx) {
             return;
         }
+        self.forget_qr_scan();
         self.clear_secret_inputs(cx);
         self.personal_panel = panel;
         self.settings_open = false;
@@ -4118,6 +4129,8 @@ impl DesktopView {
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_new_item_editor(window, cx);
+        self.apply_qr_scan(window, cx);
+        self.fill_from_one_time_link(window, cx);
         self.animate_item_editor(window, cx);
         self.open_leave_dialog(window, cx);
         let dialog_layer = Root::render_dialog_layer(window, cx);
