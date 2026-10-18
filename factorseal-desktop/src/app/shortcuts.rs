@@ -36,6 +36,7 @@ actions!(
         OpenSettings,
         EditItem,
         SaveItem,
+        PasteQrCode,
     ]
 );
 
@@ -113,6 +114,7 @@ pub(super) fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-l", SealVault, Some(CONTEXT)),
         KeyBinding::new("secondary-e", EditItem, Some(OUTSIDE_TEXT_CONTEXT)),
         KeyBinding::new("secondary-s", SaveItem, Some(CONTEXT)),
+        KeyBinding::new("secondary-v", PasteQrCode, Some(OUTSIDE_TEXT_CONTEXT)),
         KeyBinding::new(SHORTCUTS_KEYS, ShowShortcuts, Some(CONTEXT)),
         KeyBinding::new("escape", GoBack, Some(OUTSIDE_SECRET_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(OUTSIDE_DIALOG_CONTEXT)),
@@ -363,6 +365,8 @@ impl DesktopView {
         element
             .key_context(CONTEXT)
             .track_focus(&self.shortcuts.root)
+            .capture_action(cx.listener(Self::paste_qr_action))
+            .on_action(cx.listener(Self::paste_qr_code))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
@@ -774,6 +778,10 @@ impl DesktopView {
 
     fn open_settings_action(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
         self.open_settings(cx);
+    }
+
+    fn paste_qr_code(&mut self, _: &PasteQrCode, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste_qr(false, cx);
     }
 
     fn edit_item(&mut self, _: &EditItem, window: &mut Window, cx: &mut Context<Self>) {

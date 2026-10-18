@@ -4,6 +4,19 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Add a one-time password to a Desktop item from its QR code.
+  Scan the code on screen, drop an image of it anywhere in the
+  vault, or press Ctrl+V (Cmd+V on macOS) with a copied screenshot,
+  image file or setup link. Desktop reads the code locally, adds it
+  to the open item or the item with the same name, or starts a new
+  login named after it with the username filled in. It finds
+  light-on-dark and small blurry codes, never replaces a one-time
+  password without saying so, and removes the QR code or setup link
+  from the clipboard and deletes its screen capture once read. Setup
+  keys that cannot make a code are rejected, and keys are saved
+  without spaces, padding or lowercase letters so they export to
+  other password managers.
+
 - Show website icons in Desktop's item list, search results and item pages,
   like Bitwarden. Desktop asks DuckDuckGo's icon service by website name
   through the sandboxed network helper, which also decodes the image. Icons
