@@ -27,6 +27,8 @@ const NOTES_LABEL: &str = "Notes";
 const TITLE_INSET: Pixels = px(13.);
 const LABEL_WIDTH: gpui::Rems = rems(11.);
 const LABEL_BLEED: Pixels = px(6.);
+const VALUE_BASIS: gpui::Rems = rems(14.);
+pub(super) const TITLE_BASIS: gpui::Rems = rems(10.);
 const KIND_INSET: Pixels = px(6.);
 const TITLE_LINE: gpui::Rems = rems(1.5 * std::f32::consts::GOLDEN_RATIO);
 const TITLE_SPREAD: gpui::Rems = rems(5. / 16.);
@@ -1099,8 +1101,9 @@ pub(super) fn field_row(
         .id(id)
         .relative()
         .w_full()
+        .flex_wrap()
         .items_start()
-        .gap_3()
+        .gap_x_3()
         .py_1()
         .border_b_1()
         .border_color(if editing { border.opacity(0.) } else { border })
@@ -1135,6 +1138,15 @@ pub(super) fn field_label(icon: impl IntoElement, label: impl IntoElement, color
                 .items_center()
                 .child(label),
         )
+}
+
+pub(super) fn field_body() -> Div {
+    h_flex()
+        .flex_grow(1.)
+        .flex_basis(VALUE_BASIS)
+        .min_w_0()
+        .items_start()
+        .gap_3()
 }
 
 pub(super) fn field_value() -> Div {
@@ -2204,12 +2216,15 @@ impl DesktopView {
             .p_6()
             .child(
                 h_flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap_5()
+                    .gap_x_5()
+                    .gap_y_3()
                     .child(personal_icon_tile(kind, 56. / 16., &theme))
                     .child(
                         v_flex()
-                            .flex_1()
+                            .flex_grow(1.)
+                            .flex_basis(TITLE_BASIS)
                             .min_w_0()
                             .gap_1()
                             .child(
@@ -2624,21 +2639,24 @@ impl DesktopView {
                     .text_color(label_color),
             )
             .child(
-                field_value()
-                    .child(value_box)
-                    .children(code)
-                    .children(strength)
-                    .when_some(problem, |column, problem| {
-                        column.child(
-                            div()
-                                .px_3()
-                                .text_caption()
-                                .text_color(theme.danger)
-                                .child(problem),
-                        )
-                    }),
-            )
-            .child(crate::motion::fade(("editor-actions", key), actions));
+                field_body()
+                    .child(
+                        field_value()
+                            .child(value_box)
+                            .children(code)
+                            .children(strength)
+                            .when_some(problem, |column, problem| {
+                                column.child(
+                                    div()
+                                        .px_3()
+                                        .text_caption()
+                                        .text_color(theme.danger)
+                                        .child(problem),
+                                )
+                            }),
+                    )
+                    .child(crate::motion::fade(("editor-actions", key), actions)),
+            );
         let content = if editor.arrived.contains(&key) {
             crate::motion::enter(("editor-row-enter", key), line).into_any_element()
         } else {
