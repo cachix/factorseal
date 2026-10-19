@@ -559,6 +559,21 @@ impl DesktopRuntime {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn watch_permissions(
+        &self,
+        metadata: &VaultMetadata,
+        after_revision: Option<u64>,
+    ) -> Result<(u64, Vec<factorseal::Permission>), String> {
+        read_permissions(
+            |action| {
+                let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
+                self.request_live(metadata, &request)
+            },
+            after_revision,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn approve_permissions(
         &self,
         metadata: &VaultMetadata,
@@ -1011,13 +1026,19 @@ fn load_vault_entries(
 }
 
 fn load_permissions(
-    mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
+    request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
 ) -> Result<Vec<factorseal::Permission>, String> {
+    read_permissions(request, None).map(|(_, permissions)| permissions)
+}
+
+fn read_permissions(
+    mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
+    after_revision: Option<u64>,
+) -> Result<(u64, Vec<factorseal::Permission>), String> {
     factorseal::read_permission_pages(
         |action| request(action).map_err(factorseal::VaultError::Protocol),
-        None,
+        after_revision,
     )
-    .map(|(_, permissions)| permissions)
     .map_err(|error| error.to_string())
 }
 
@@ -1543,5 +1564,37 @@ mod tests {
         assert!(!contents.permissions_loading);
         contents.complete_permissions(Err("stale response".to_owned()));
         assert!(contents.permissions_error.is_none());
+    }
+
+    #[test]
+    fn permission_watch_lists_once_then_waits_for_the_last_revision() {
+        for after_revision in [None, Some(42)] {
+            let mut calls = 0;
+            let (revision, permissions) = super::read_permissions(
+                |action| {
+                    calls += 1;
+                    match after_revision {
+                        None => assert!(matches!(action, factorseal::VaultAction::ListPermissions)),
+                        Some(expected) => assert!(matches!(
+                            action,
+                            factorseal::VaultAction::WaitPermissions {
+                                after_revision,
+                                timeout_ms: factorseal::MAX_PERMISSION_WAIT_MS,
+                            } if after_revision == expected
+                        )),
+                    }
+                    Ok(VaultResponseBody::Permissions {
+                        revision: 42,
+                        permissions: Vec::new(),
+                        next_cursor: None,
+                    })
+                },
+                after_revision,
+            )
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(revision, 42);
+            assert_eq!(permissions.len(), 0);
+        }
     }
 }

@@ -44,55 +44,7 @@ struct AccessView {
 
 pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App) {
     cx.set_global(AccessWindow::default());
-    cx.spawn(async move |cx| {
-        loop {
-            smol::Timer::after(std::time::Duration::from_millis(500)).await;
-            let state = cx.update(|cx| {
-                let snapshot = &cx.global::<DesktopWindow>().snapshot;
-                match snapshot {
-                    Snapshot::Unsealed { metadata, .. } => Some((
-                        Arc::clone(&cx.global::<RuntimeGlobal>().0),
-                        metadata.clone(),
-                    )),
-                    _ => None,
-                }
-            });
-            let Some((runtime, metadata)) = state else {
-                continue;
-            };
-            if let Ok(permissions) =
-                smol::unblock(move || runtime.load_permissions(&metadata)).await
-            {
-                cx.update(|cx| {
-                    if !cx.global::<DesktopStatus>().unsealed {
-                        return;
-                    }
-                    if let Snapshot::Unsealed { contents, .. } =
-                        &mut cx.global_mut::<DesktopWindow>().snapshot
-                    {
-                        contents.permissions.clone_from(&permissions);
-                        contents.permissions_loading = false;
-                    }
-                    let holder = Arc::clone(&cx.global::<DesktopWindow>().view);
-                    if let Ok(holder) = holder.lock()
-                        && let Some(view) = holder.as_ref()
-                    {
-                        view.update(cx, |view, cx| {
-                            if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot
-                                && contents.permissions != permissions
-                            {
-                                contents.permissions.clone_from(&permissions);
-                                contents.permissions_loading = false;
-                                cx.notify();
-                            }
-                        });
-                    }
-                    show_pending(&permissions, cx);
-                });
-            }
-        }
-    })
-    .detach();
+    watch_permissions(cx);
     cx.spawn(async move |cx| {
         loop {
             smol::Timer::after(std::time::Duration::from_millis(500)).await;
@@ -124,6 +76,84 @@ pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App
     cx.spawn(async move |cx| {
         while let Ok(event) = receiver.recv().await {
             cx.update(|cx| open(event, cx));
+        }
+    })
+    .detach();
+}
+
+fn watch_permissions(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let mut generation = None;
+        let mut after_revision = None;
+        loop {
+            let state = cx.update(|cx| {
+                let desktop = cx.global::<DesktopWindow>();
+                match &desktop.snapshot {
+                    Snapshot::Unsealed { metadata, .. } => Some((
+                        Arc::clone(&cx.global::<RuntimeGlobal>().0),
+                        metadata.clone(),
+                        desktop.refresh_generation,
+                    )),
+                    _ => None,
+                }
+            });
+            let Some((runtime, metadata, current_generation)) = state else {
+                generation = None;
+                after_revision = None;
+                smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                continue;
+            };
+            if generation != Some(current_generation) {
+                generation = Some(current_generation);
+                after_revision = None;
+            }
+            let result =
+                smol::unblock(move || runtime.watch_permissions(&metadata, after_revision)).await;
+            if let Ok((revision, permissions)) = result {
+                let accepted = cx.update(|cx| {
+                    // A seal, another unlock or a refresh supersedes this wait.
+                    if !cx.global::<DesktopStatus>().unsealed
+                        || cx.global::<DesktopWindow>().refresh_generation != current_generation
+                    {
+                        return false;
+                    }
+                    if after_revision == Some(revision) {
+                        return true;
+                    }
+                    if let Snapshot::Unsealed { contents, .. } =
+                        &mut cx.global_mut::<DesktopWindow>().snapshot
+                    {
+                        contents.permissions.clone_from(&permissions);
+                        contents.permissions_loading = false;
+                        contents.permissions_error = None;
+                    }
+                    let holder = Arc::clone(&cx.global::<DesktopWindow>().view);
+                    if let Ok(holder) = holder.lock()
+                        && let Some(view) = holder.as_ref()
+                    {
+                        view.update(cx, |view, cx| {
+                            if let Snapshot::Unsealed { contents, .. } = &mut view.snapshot
+                                && (contents.permissions != permissions
+                                    || contents.permissions_loading
+                                    || contents.permissions_error.is_some())
+                            {
+                                contents.permissions.clone_from(&permissions);
+                                contents.permissions_loading = false;
+                                contents.permissions_error = None;
+                                cx.notify();
+                            }
+                        });
+                    }
+                    show_pending(&permissions, cx);
+                    true
+                });
+                after_revision = accepted.then_some(revision);
+            } else {
+                // Retry a fresh, complete inventory after a seal, transport
+                // failure or a concurrent mutation between permission pages.
+                after_revision = None;
+                smol::Timer::after(std::time::Duration::from_millis(500)).await;
+            }
         }
     })
     .detach();

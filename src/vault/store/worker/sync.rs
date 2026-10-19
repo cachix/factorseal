@@ -119,6 +119,19 @@ impl StoreWorker {
                     .map(SyncReply::Group);
             }
             SyncCommand::Pairing(command) => {
+                let state_before = zeroize::Zeroizing::new(
+                    serde_json::to_vec(&state)
+                        .map_err(|error| VaultError::InvalidData(error.to_string()))?,
+                );
+                // The courier offers its current group on every poll. Validate
+                // that offer normally, but do not create another generation
+                // when the already pinned group is unchanged.
+                let unchanged_group = match (&command, &state.pairing.group, &state.reader) {
+                    (PairingCommand::Accept(group), Some(pinned), Some(_)) => {
+                        pinned.verified()?.digest()? == group.digest()?
+                    }
+                    _ => false,
+                };
                 if state.reader.is_none() {
                     let identity = ReaderIdentity::generate()?;
                     state.reader = Some(self.secrets.protect_reader(
@@ -134,6 +147,13 @@ impl StoreWorker {
                 )?;
                 let previous = state.membership.as_ref().map(Membership::digest);
                 let reply = pairing::handle(&mut state, &identity, command, unix_time()?)?;
+                let state_after = zeroize::Zeroizing::new(
+                    serde_json::to_vec(&state)
+                        .map_err(|error| VaultError::InvalidData(error.to_string()))?,
+                );
+                if unchanged_group || state_before == state_after {
+                    return Ok(reply);
+                }
                 if previous != state.membership.as_ref().map(Membership::digest) {
                     state.prepared = None;
                     replicas.pending = replicas.replicas.keys().cloned().collect();

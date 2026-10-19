@@ -146,11 +146,13 @@ pub(super) async fn migrate_schema(
     secrets: &InstallationSecrets,
 ) -> VaultResult<()> {
     match read_schema_version(connection).await? {
-        SCHEMA_VERSION => Ok(()),
+        SCHEMA_VERSION | super::manifest::CURRENT_SCHEMA_VERSION => Ok(()),
         LEGACY_SCHEMA_VERSION => migrate_v3_to_v5(connection, device, secrets).await,
-        version if version > SCHEMA_VERSION => Err(VaultError::Database(format!(
-            "vault database schema version {version} was written by a newer Factorseal build"
-        ))),
+        version if version > super::manifest::CURRENT_SCHEMA_VERSION => {
+            Err(VaultError::Database(format!(
+                "vault database schema version {version} was written by a newer Factorseal build"
+            )))
+        }
         version => Err(VaultError::Database(format!(
             "vault database schema version {version} has no supported migration"
         ))),
@@ -159,7 +161,7 @@ pub(super) async fn migrate_schema(
 
 pub(super) async fn verify_schema(connection: &Connection) -> VaultResult<()> {
     let version = read_schema_version(connection).await?;
-    if version != SCHEMA_VERSION {
+    if version != SCHEMA_VERSION && version != super::manifest::CURRENT_SCHEMA_VERSION {
         return Err(VaultError::Database(format!(
             "expected vault database schema version {SCHEMA_VERSION}, found {version}"
         )));
@@ -167,7 +169,7 @@ pub(super) async fn verify_schema(connection: &Connection) -> VaultResult<()> {
     Ok(())
 }
 
-async fn read_schema_version(connection: &Connection) -> VaultResult<u32> {
+pub(super) async fn read_schema_version(connection: &Connection) -> VaultResult<u32> {
     let stored = query_optional_blob(
         connection,
         "SELECT value FROM store_meta WHERE key = 'schema-version'",
@@ -640,10 +642,10 @@ mod tests {
             let connection = database.connect().unwrap();
             assert_eq!(
                 read_schema_version(&connection).await.unwrap(),
-                SCHEMA_VERSION
+                super::super::manifest::CURRENT_SCHEMA_VERSION
             );
             assert_eq!(
-                query_count(&connection, "SELECT COUNT(*) FROM protected_commits", ())
+                query_count(&connection, "SELECT COUNT(*) FROM document_heads", ())
                     .await
                     .unwrap(),
                 1

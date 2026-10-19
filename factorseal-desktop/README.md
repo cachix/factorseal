@@ -138,6 +138,18 @@ writing, disk flush, and rename; the latter phases appear only when replacing a 
 Host executable identification overlaps TPM/password unsealing; only
 `wait_host_identities` adds time after unsealing if identification is still running.
 Password timings separate scratch-memory allocation, Argon2, and secure cleanup.
+The `store_open/verify_current_state` timing covers current inventory verification
+and any first-open migration. Schema v6 verifies one signed manifest, current
+head metadata, and current ciphertext digests. `store_chain` timings apply only
+to legacy migration: commit and snapshot batches include nested signature and
+digest timings, followed by row-set and inventory checks.
+Turso retains one encrypted snapshot per document and reuses freed pages during
+writes. There is no idle compaction timer. A legacy migration repacks once when
+unused pages occupy at least 64 MiB and half the database, verifying authenticated
+state afterward. A signed pending flag resumes interrupted cleanup on the next
+open. Current records, value-free history and personal replication history are
+preserved. Large deletions can leave a physical high-water mark. Turso 0.8.2's
+experimental vacuum flag is enabled only to support this migration cleanup.
 The initial unlocked view waits for inventory, then loads permissions separately;
 `permissions_ready` records when that follow-up has reached the UI.
 
