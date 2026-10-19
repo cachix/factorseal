@@ -41,7 +41,7 @@ impl Manager {
 pub(super) fn wifi(key_management: &str, flags: u32, secret: Option<&str>) -> Settings {
     let mut security = BTreeMap::from([
         ("key-mgmt".into(), string_variant(key_management)),
-        ("psk-flags".into(), OwnedValue::from(flags)),
+        ("psk-flags".into(), OwnedVariant::from(flags)),
     ]);
     if let Some(secret) = secret {
         security.insert("psk".into(), string_variant(secret));
@@ -64,10 +64,13 @@ pub(super) fn enterprise(secret: Option<Vec<u8>>, flags: u32) -> Settings {
     let mut settings = BTreeMap::from([
         (
             "eap".into(),
-            OwnedValue::try_from(Value::from(vec!["peap".to_owned()])).unwrap(),
+            OwnedVariant::try_from(Variant::from(vec!["peap".to_owned()])).unwrap(),
         ),
-        ("password-raw-flags".into(), OwnedValue::from(flags)),
-        ("private-key-password-flags".into(), OwnedValue::from(1_u32)),
+        ("password-raw-flags".into(), OwnedVariant::from(flags)),
+        (
+            "private-key-password-flags".into(),
+            OwnedVariant::from(1_u32),
+        ),
         (
             "private-key-password".into(),
             string_variant("key-password"),
@@ -76,7 +79,7 @@ pub(super) fn enterprise(secret: Option<Vec<u8>>, flags: u32) -> Settings {
     if let Some(secret) = secret {
         settings.insert(
             "password-raw".into(),
-            OwnedValue::try_from(Value::from(secret)).unwrap(),
+            OwnedVariant::try_from(Variant::from(secret)).unwrap(),
         );
     }
     profile.insert(protocol::EAP_SETTING.into(), settings);
@@ -178,7 +181,7 @@ fn network_manager_profile_rejects_invalid_identity_and_preserves_wire_types() {
     let mut tls = enterprise(None, 1);
     tls.get_mut(protocol::EAP_SETTING).unwrap().insert(
         "eap".into(),
-        OwnedValue::try_from(Value::from(vec!["tls".to_owned()])).unwrap(),
+        OwnedVariant::try_from(Variant::from(vec!["tls".to_owned()])).unwrap(),
     );
     let token = Profile::parse(&tls, &["pin".into()]).unwrap();
     assert!(
@@ -525,10 +528,10 @@ fn network_manager_dbus_vault_lifecycle() {
             // Mixed enterprise ownership must not prompt for, or persist, a
             // system-owned key password supplied by NetworkManager.
             let mut mixed = enterprise(None, 1);
-            mixed
-                .get_mut(protocol::EAP_SETTING)
-                .unwrap()
-                .insert("private-key-password-flags".into(), OwnedValue::from(0_u32));
+            mixed.get_mut(protocol::EAP_SETTING).unwrap().insert(
+                "private-key-password-flags".into(),
+                OwnedVariant::from(0_u32),
+            );
             let reply = get(&manager, &target, mixed, 0).await.unwrap();
             assert_eq!(
                 <&str>::try_from(&reply[protocol::EAP_SETTING]["private-key-password"]).unwrap(),

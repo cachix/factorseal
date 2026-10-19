@@ -66,6 +66,46 @@ separately checks installed SecretSpec discovery, approvals, CRUD, project
 isolation, and cache expiry. This is not full protocol conformance on every
 desktop platform.
 
+## D-Bus dependency migration (DEP-7)
+
+Factorseal and Desktop depend directly on zbus 6. Secret Service,
+NetworkManager, logind, provider transport, and desktop keyring probes use its
+async API and integrated wire types. Synchronous entry points drive complete
+operations with `zbus::block_on`; caller identity lookup keeps that runtime on
+its dedicated thread so async embedders do not enter a nested Tokio runtime.
+The desktop activation poll uses an async timer, and test services run on a
+runtime that remains active between synchronous probes.
+
+Desktop still pulls in zbus 5 and the unmaintained standalone `zvariant`,
+`zvariant_derive`, and `zbus_names` crates through these locked dependencies:
+
+| Path | Remaining migration |
+| --- | --- |
+| rfd 0.15.4, GPUI CE, direct ashpd 0.13.13 | Move both ashpd 0.11.1 and 0.13.13 portal paths to zbus 6. |
+| GPUI CE → oo7 0.6.0 | Migrate its D-Bus API and split GVariant codecs to zgvariant. |
+| GPUI CE → accesskit_unix 0.22.1 → AT-SPI | Migrate accesskit_atspi_common, atspi-common, atspi-proxies, and zbus-lockstep/XML tooling together. |
+| gpui-tray 0.1.2 | Replace its zbus 5 blocking calls and migrate tray serialization. |
+| GPUI CE → notify-rust 4.18.0 | Migrate notification calls to zbus 6. |
+
+Use these commands to inspect the remaining paths after each parent upgrade:
+
+```console
+$ cargo tree --locked --workspace --target all -i zbus@5.19.0
+$ cargo tree --locked --workspace --target all -i zvariant
+$ cargo tree --locked --workspace --target all -i zbus_names
+$ python3 scripts/check-fuzz-lock.py
+```
+
+These dependencies need API migrations, not a forced Cargo version override.
+Keep their types within each dependency's API boundary while zbus 5 and 6
+coexist. The exact-version exceptions in
+`security/dependency-exceptions.toml` retain their existing expiry. Remove the
+three exceptions only after the workspace graph no longer contains the
+standalone crates. Validate Secret Service/libsecret interoperability,
+NetworkManager, lifecycle sealing, portal dialogs, notifications, tray, and
+accessibility before completing DEP-7. The fuzz feature does not enable D-Bus,
+but shared dependency versions must still match the product lockfile.
+
 ## Release status
 
 The shared core, native transports, lifecycle monitors, CLI, Secret Service,

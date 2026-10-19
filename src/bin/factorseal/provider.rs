@@ -327,7 +327,7 @@ impl FactorsealProvider {
                 "org.freedesktop.Secret.Service",
             )
             .await?;
-            let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
+            let fd = zbus::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
             service
                 .call::<_, _, ()>("InputForIpc", &(attributes, fd))
                 .await
