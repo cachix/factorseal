@@ -1038,18 +1038,25 @@ impl StoreWorker {
                     continue;
                 }
                 let summary = document.personal_summary(&address, now)?;
-                let (mut display_name, display_type, display_username, updated_at, favorite) =
-                    summary
-                        .map(|s| {
-                            (
-                                Some(s.title),
-                                Some(s.kind),
-                                s.username,
-                                Some(s.updated_at),
-                                s.favorite,
-                            )
-                        })
-                        .unwrap_or_default();
+                let (
+                    mut display_name,
+                    display_type,
+                    display_username,
+                    display_website,
+                    updated_at,
+                    favorite,
+                ) = summary
+                    .map(|s| {
+                        (
+                            Some(s.title),
+                            Some(s.kind),
+                            s.username,
+                            s.website,
+                            Some(s.updated_at),
+                            s.favorite,
+                        )
+                    })
+                    .unwrap_or_default();
                 if document_kind == DocumentKind::NetworkManagerWifi
                     && let Some((uuid, _)) = address.as_local()
                 {
@@ -1076,6 +1083,7 @@ impl StoreWorker {
                         display_name,
                         display_type,
                         display_username,
+                        display_website,
                         updated_at,
                         favorite,
                         document_kind,

@@ -1104,6 +1104,15 @@ const fn secret_service_error() -> Option<String> {
     None
 }
 
+pub(crate) fn open_icon_helper() -> Result<factorseal::isolation::network::icon::IconManager, String>
+{
+    let desktop = std::env::current_exe().map_err(|error| error.to_string())?;
+    let cli = cli_executable(&desktop)?.ok_or("Factorseal CLI is not installed")?;
+    let helper = factorseal::isolation::helper_executable(&cli, "factorseal-network")
+        .map_err(|error| format!("Factorseal network helper is not installed: {error}"))?;
+    factorseal::isolation::network::icon::IconManager::open(&helper)
+}
+
 fn cli_executable(desktop: &Path) -> Result<Option<PathBuf>, String> {
     if let Some(path) = std::env::var_os(CLI_EXECUTABLE_ENV) {
         let path = PathBuf::from(path);
@@ -1467,6 +1476,7 @@ mod tests {
             display_name: None,
             display_type: None,
             display_username: None,
+            display_website: None,
             updated_at: None,
             favorite: false,
             document_kind: DocumentKind::SecretSpecProject,
@@ -1478,6 +1488,7 @@ mod tests {
             display_name: None,
             display_type: None,
             display_username: None,
+            display_website: None,
             updated_at: None,
             favorite: false,
             document_kind: DocumentKind::SecretSpecProject,
@@ -1520,6 +1531,7 @@ mod tests {
             display_name: None,
             display_type: None,
             display_username: None,
+            display_website: None,
             updated_at: None,
             favorite: false,
             document_kind: DocumentKind::SecretSpecProject,

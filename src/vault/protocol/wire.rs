@@ -1132,6 +1132,8 @@ pub struct VaultEntryMetadata {
     /// Display-only personal item username, derived from encrypted content during inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_website: Option<String>,
     /// Last personal-item modification time, in Unix seconds, derived during inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
@@ -1567,6 +1569,7 @@ mod entry_access_tests {
             display_name: None,
             display_type: None,
             display_username: None,
+            display_website: None,
             updated_at: None,
             favorite: false,
             document_kind: DocumentKind::SecretSpecProviderCache,

@@ -413,7 +413,12 @@ impl DesktopView {
                 h_flex()
                     .items_center()
                     .gap_5()
-                    .child(personal_entry_icon(entry, 56. / 16., &theme))
+                    .child(personal_entry_icon(
+                        entry,
+                        self.website_icons.icon(entry),
+                        56. / 16.,
+                        &theme,
+                    ))
                     .child(
                         v_flex()
                             .flex_1()
@@ -1268,6 +1273,7 @@ mod tests {
             display_name: Some("Hetzner Cloud".into()),
             display_type: Some("Login".into()),
             display_username: None,
+            display_website: None,
             updated_at: None,
             favorite: false,
             document_kind: factorseal::DocumentKind::LocalKeyring,
