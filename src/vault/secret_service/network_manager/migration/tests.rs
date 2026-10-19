@@ -107,8 +107,8 @@ impl MockConnection {
         &self,
         settings: Settings,
         flags: u32,
-        args: BTreeMap<String, OwnedValue>,
-    ) -> fdo::Result<BTreeMap<String, OwnedValue>> {
+        args: BTreeMap<String, OwnedVariant>,
+    ) -> fdo::Result<BTreeMap<String, OwnedVariant>> {
         eprintln!("migration mock: Update2");
         assert_eq!(flags, 0x41);
         let profile = Profile::parse(&settings, &[]).unwrap();
@@ -193,7 +193,6 @@ impl Fixture {
         // asynchronously, so the first VersionId request can arrive before it
         // subscribes and be lost without ever reaching the mock handler.
         let server = zbus::connection::Builder::session()
-            .unwrap()
             .serve_at(
                 PATH,
                 MockConnection {
@@ -201,7 +200,6 @@ impl Fixture {
                     store: store.clone(),
                 },
             )
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -325,7 +323,7 @@ async fn migration_preserves_temporary_flags_and_enterprise_binary_values() {
 
     let mut settings = enterprise(Some(vec![0xff, 0, 0x80]), 0);
     settings.get_mut(protocol::EAP_SETTING).unwrap().extend([
-        ("pin-flags".into(), OwnedValue::from(2_u32)),
+        ("pin-flags".into(), OwnedVariant::from(2_u32)),
         ("pin".into(), string_variant("1234")),
         (
             "domain-suffix-match".into(),
@@ -447,7 +445,7 @@ async fn migration_invalidates_an_older_password_prompt() {
 #[zbus::interface(name = "org.freedesktop.Secret.Service")]
 #[allow(clippy::unused_self, clippy::needless_pass_by_value)] // D-Bus dispatch methods.
 impl OldService {
-    fn open_session(&self, algorithm: &str, input: Value<'_>) -> (OwnedValue, OwnedObjectPath) {
+    fn open_session(&self, algorithm: &str, input: Variant<'_>) -> (OwnedVariant, OwnedObjectPath) {
         let _ = input;
         assert_eq!(algorithm, "plain");
         (

@@ -2,7 +2,7 @@
 //! credentials, unlock a collection implicitly, or delete an unverified item.
 
 use super::{
-    BTreeMap, Connection, OwnedObjectPath, OwnedValue, Property, Value, WireSecret, fdo, proxy,
+    BTreeMap, Connection, OwnedObjectPath, OwnedVariant, Property, Variant, WireSecret, fdo, proxy,
 };
 use std::collections::HashMap;
 use zeroize::Zeroizing;
@@ -41,8 +41,8 @@ impl Legacy {
             "org.freedesktop.Secret.Service",
         )
         .await?;
-        let (_, session): (OwnedValue, OwnedObjectPath) = service
-            .call("OpenSession", &("plain", Value::from("")))
+        let (_, session): (OwnedVariant, OwnedObjectPath) = service
+            .call("OpenSession", &("plain", Variant::from("")))
             .await?;
         drop(service);
         Ok(Self {

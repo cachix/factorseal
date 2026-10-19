@@ -1044,14 +1044,21 @@ fn read_permissions(
 
 #[cfg(target_os = "linux")]
 fn secret_service_error() -> Option<String> {
-    use zbus::blocking::{Proxy, connection::Builder};
+    zbus::block_on(secret_service_error_async())
+}
+
+#[cfg(target_os = "linux")]
+async fn secret_service_error_async() -> Option<String> {
+    use zbus::{Proxy, connection::Builder};
 
     const BUS_NAME: &str = "org.freedesktop.secrets";
     const SERVICE_PATH: &str = "/org/freedesktop/secrets";
     const SERVICE_INTERFACE: &str = "org.freedesktop.Secret.Service";
 
     let connection = match Builder::session()
-        .and_then(|builder| builder.method_timeout(Duration::from_secs(2)).build())
+        .method_timeout(Duration::from_secs(2))
+        .build()
+        .await
     {
         Ok(connection) => connection,
         Err(error) => {
@@ -1060,13 +1067,17 @@ fn secret_service_error() -> Option<String> {
             ));
         }
     };
-    let owner: Result<bool, zbus::Error> = Proxy::new(
+    let owner = Proxy::new(
         &connection,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
     )
-    .and_then(|bus| bus.call("NameHasOwner", &(BUS_NAME,)));
+    .await;
+    let owner = match owner {
+        Ok(bus) => bus.call::<_, _, bool>("NameHasOwner", &(BUS_NAME,)).await,
+        Err(error) => Err(error),
+    };
     match owner {
         Ok(false) => return None,
         Ok(true) => {}
@@ -1077,9 +1088,11 @@ fn secret_service_error() -> Option<String> {
         }
     }
 
-    let collections: Result<Vec<zbus::zvariant::OwnedObjectPath>, zbus::Error> =
-        Proxy::new(&connection, BUS_NAME, SERVICE_PATH, SERVICE_INTERFACE)
-            .and_then(|service| service.get_property("Collections"));
+    let collections: Result<Vec<zbus::OwnedObjectPath>, zbus::Error> =
+        match Proxy::new(&connection, BUS_NAME, SERVICE_PATH, SERVICE_INTERFACE).await {
+            Ok(service) => service.get_property("Collections").await,
+            Err(error) => Err(error),
+        };
     match collections {
         Ok(collections) if factorseal_secret_service(&collections) => None,
         Ok(_) => Some(
@@ -1093,7 +1106,7 @@ fn secret_service_error() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn factorseal_secret_service(collections: &[zbus::zvariant::OwnedObjectPath]) -> bool {
+fn factorseal_secret_service(collections: &[zbus::OwnedObjectPath]) -> bool {
     collections
         .iter()
         .any(|path| path.as_str() == "/org/freedesktop/secrets/collection/factorseal")
@@ -1414,13 +1427,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn recognizes_factorseal_as_the_secret_service_provider() {
-        let factorseal = zbus::zvariant::OwnedObjectPath::try_from(
-            "/org/freedesktop/secrets/collection/factorseal",
-        )
-        .unwrap();
-        let other =
-            zbus::zvariant::OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/login")
+        let factorseal =
+            zbus::OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/factorseal")
                 .unwrap();
+        let other =
+            zbus::OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/login").unwrap();
 
         assert!(factorseal_secret_service(&[factorseal]));
         assert!(!factorseal_secret_service(&[other]));
@@ -1436,9 +1447,9 @@ mod tests {
         #[zbus::interface(name = "org.freedesktop.Secret.Service")]
         impl Keyring {
             #[zbus(property)]
-            fn collections(&self) -> Vec<zbus::zvariant::OwnedObjectPath> {
+            fn collections(&self) -> Vec<zbus::OwnedObjectPath> {
                 vec![
-                    zbus::zvariant::OwnedObjectPath::try_from(if self.0 {
+                    zbus::OwnedObjectPath::try_from(if self.0 {
                         "/org/freedesktop/secrets/collection/factorseal"
                     } else {
                         "/org/freedesktop/secrets/collection/login"
@@ -1452,18 +1463,24 @@ mod tests {
         }
         assert!(secret_service_error().is_none());
         assert!(crate::wait_for_secret_service(Duration::ZERO).is_err());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         for factorseal in [true, false] {
-            let service = zbus::blocking::connection::Builder::session()
-                .unwrap()
-                .name("org.freedesktop.secrets")
-                .unwrap()
-                .serve_at("/org/freedesktop/secrets", Keyring(factorseal))
-                .unwrap()
-                .build()
+            let service = runtime
+                .block_on(
+                    zbus::connection::Builder::session()
+                        .name("org.freedesktop.secrets")
+                        .serve_at("/org/freedesktop/secrets", Keyring(factorseal))
+                        .build(),
+                )
                 .unwrap();
             assert!(crate::wait_for_secret_service(Duration::ZERO).is_ok());
             assert_eq!(secret_service_error().is_none(), factorseal);
-            service.release_name("org.freedesktop.secrets").unwrap();
+            runtime
+                .block_on(service.release_name("org.freedesktop.secrets"))
+                .unwrap();
         }
     }
 

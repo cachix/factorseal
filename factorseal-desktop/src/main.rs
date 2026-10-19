@@ -289,14 +289,17 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
-    use zbus::blocking::{Proxy, connection::Builder};
+    zbus::block_on(wait_for_secret_service_async(timeout))
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_secret_service_async(timeout: std::time::Duration) -> Result<(), String> {
+    use zbus::{Proxy, connection::Builder};
 
     let connection = Builder::session()
-        .and_then(|builder| {
-            builder
-                .method_timeout(std::time::Duration::from_secs(2))
-                .build()
-        })
+        .method_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .await
         .map_err(|error| format!("could not monitor Secret Service activation: {error}"))?;
     let proxy = Proxy::new(
         &connection,
@@ -304,11 +307,13 @@ fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
     )
+    .await
     .map_err(|error| format!("could not monitor Secret Service activation: {error}"))?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let has_owner: bool = proxy
             .call("NameHasOwner", &(SECRET_SERVICE_NAME,))
+            .await
             .map_err(|error| format!("could not inspect Secret Service activation: {error}"))?;
         if has_owner {
             return Ok(());
@@ -316,7 +321,7 @@ fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
         if std::time::Instant::now() >= deadline {
             return Err("timed out waiting for Desktop to unseal the keyring".to_owned());
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 

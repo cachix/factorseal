@@ -10,11 +10,7 @@ use std::time::Duration;
 
 use network_manager_protocol::{self as protocol, GetSecretsFlags};
 use tokio::sync::oneshot;
-use zbus::{
-    Connection, fdo,
-    message::Header,
-    zvariant::{OwnedObjectPath, OwnedValue, Value},
-};
+use zbus::{Connection, OwnedObjectPath, OwnedVariant, Variant, fdo, message::Header};
 
 use super::{SecretServiceAccessContext, SecretServiceError, Shared, agent::Store};
 use crate::vault::{
@@ -25,7 +21,7 @@ pub(super) mod migration;
 mod profile;
 use profile::{NAME_FIELD, NAMESPACE, PROPERTIES, Profile};
 
-type Settings = protocol::Settings<OwnedValue>;
+type Settings = protocol::Settings<OwnedVariant>;
 const IDENTIFIER: &str = "dev.factorseal.NetworkManager";
 
 #[derive(Debug, zbus::DBusError)]
@@ -183,8 +179,8 @@ async fn mutate(store: Store, mutations: Vec<VaultMutation>) -> Result<(), Error
     }
 }
 
-fn string_variant(value: &str) -> OwnedValue {
-    OwnedValue::from(zbus::zvariant::Str::from(value.to_owned()))
+fn string_variant(value: &str) -> OwnedVariant {
+    OwnedVariant::from(zbus::Str::from(value.to_owned()))
 }
 
 async fn existing_value(
@@ -316,7 +312,7 @@ impl Agent {
             }
             if let Some(value) = value {
                 let variant = if property.is_raw() {
-                    OwnedValue::try_from(Value::from(value.expose().to_vec()))
+                    OwnedVariant::try_from(Variant::from(value.expose().to_vec()))
                         .map_err(|_| Error::failed())?
                 } else {
                     string_variant(
