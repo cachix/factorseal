@@ -76,12 +76,21 @@ its dedicated thread so async embedders do not enter a nested Tokio runtime.
 The desktop activation poll uses an async timer, and test services run on a
 runtime that remains active between synchronous probes.
 
+The shared ashpd 0.13.13 dependency now uses a pinned backport of the
+[zbus 6 migration](https://github.com/bilelmoussaoui/ashpd/pull/491) in
+`domenkozar/ashpd`. Desktop's settings watcher, GPUI's portals, and oo7's
+Secret portal all use that source. The backport retains the stable 0.13.13
+API and compatibility fixes while the upstream migration targets main.
+The `async-io` feature now selects zbus's built-in runtime; it remains usable
+from GPUI's background executor. Its native I/O requires rustix 1.1.5, which
+is also selected in the fuzz lockfile.
+
 Desktop still pulls in zbus 5 and the unmaintained standalone `zvariant`,
 `zvariant_derive`, and `zbus_names` crates through these locked dependencies:
 
 | Path | Remaining migration |
 | --- | --- |
-| rfd 0.15.4, GPUI CE, direct ashpd 0.13.13 | Move both ashpd 0.11.1 and 0.13.13 portal paths to zbus 6. |
+| rfd 0.15.4 → ashpd 0.11.1 | Migrate the older file-dialog portal path. The shared ashpd 0.13.13 path already uses zbus 6. |
 | GPUI CE → oo7 0.6.0 | Migrate its D-Bus API and split GVariant codecs to zgvariant. |
 | GPUI CE → accesskit_unix 0.22.1 → AT-SPI | Migrate accesskit_atspi_common, atspi-common, atspi-proxies, and zbus-lockstep/XML tooling together. |
 | gpui-tray 0.1.2 | Replace its zbus 5 blocking calls and migrate tray serialization. |
