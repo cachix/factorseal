@@ -1,6 +1,7 @@
 { lib }:
 
 {
+  "ashpd-0.13.13" = "sha256-UhjCQekSm+sfDXW8yRBGAE8aFGrBkYhF1otCJ9hZp5Y=";
   "credential-exchange-format-0.4.0" = "sha256-hO6KBtHuPZLlE77UF02Ya8ybXF6DYBd4F3mkWKnfvFY=";
   "age-0.12.1" = "sha256-CNYGypRocOTPj454fLOr0xGA2zFj54PKPEC6opGE9f4=";
   "age-core-0.12.0" = "sha256-CNYGypRocOTPj454fLOr0xGA2zFj54PKPEC6opGE9f4=";
