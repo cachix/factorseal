@@ -4,10 +4,10 @@
   "credential-exchange-format-0.4.0" = "sha256-hO6KBtHuPZLlE77UF02Ya8ybXF6DYBd4F3mkWKnfvFY=";
   "age-0.12.1" = "sha256-CNYGypRocOTPj454fLOr0xGA2zFj54PKPEC6opGE9f4=";
   "age-core-0.12.0" = "sha256-CNYGypRocOTPj454fLOr0xGA2zFj54PKPEC6opGE9f4=";
-  "i18n-config-0.4.8" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";
-  "i18n-embed-0.16.0" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";
-  "i18n-embed-fl-0.10.1" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";
-  "i18n-embed-impl-0.8.4" = "sha256-mEK/4eeRITzfPjahscXK1NdZuws0y2wnfoYXVMbrhTs=";
+  "i18n-config-0.4.8" = "sha256-UrKRMN9dKJI21Ij3Tb6eb6hmQoz8SrmeEAOYQWD9LCw=";
+  "i18n-embed-0.16.0" = "sha256-UrKRMN9dKJI21Ij3Tb6eb6hmQoz8SrmeEAOYQWD9LCw=";
+  "i18n-embed-fl-0.10.1" = "sha256-UrKRMN9dKJI21Ij3Tb6eb6hmQoz8SrmeEAOYQWD9LCw=";
+  "i18n-embed-impl-0.8.4" = "sha256-UrKRMN9dKJI21Ij3Tb6eb6hmQoz8SrmeEAOYQWD9LCw=";
   "automerge-0.11.0" = "sha256-RRo6hDFB4JKGHOkG0aknmOnAc6pHHlw7Qjpe+EZ8juk=";
   "gpui-ce-0.2.2" = "sha256-IxOBj8XQHla0qEoBepH/CjP4uHPzR9xWGdA4VebKfh4=";
   "gpui_ce_apple-0.1.0" = "sha256-IxOBj8XQHla0qEoBepH/CjP4uHPzR9xWGdA4VebKfh4=";
