@@ -411,8 +411,10 @@ impl DesktopView {
             .p_6()
             .child(
                 h_flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap_5()
+                    .gap_x_5()
+                    .gap_y_3()
                     .child(personal_entry_icon(
                         entry,
                         self.website_icons.icon(entry),
@@ -421,7 +423,8 @@ impl DesktopView {
                     ))
                     .child(
                         v_flex()
-                            .flex_1()
+                            .flex_grow(1.)
+                            .flex_basis(item_editor::TITLE_BASIS)
                             .min_w_0()
                             .gap_1()
                             .child(
@@ -1041,11 +1044,14 @@ impl DesktopView {
                 muted,
             ))
             .child(
-                item_editor::field_value()
-                    .children(code)
-                    .when(show_input, |value| value.child(input.clone())),
+                item_editor::field_body()
+                    .child(
+                        item_editor::field_value()
+                            .children(code)
+                            .when(show_input, |value| value.child(input.clone())),
+                    )
+                    .child(self.render_personal_actions(index, actions, &group, cx)),
             )
-            .child(self.render_personal_actions(index, actions, &group, cx))
             .into_any_element()
     }
 

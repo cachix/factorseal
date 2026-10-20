@@ -175,9 +175,11 @@ pub(crate) struct SecretInputState {
     last_wrapped: Option<(Vec<WrappedLine>, Point<Pixels>, Pixels)>,
 }
 pub(crate) struct CancelEdit;
+pub(crate) struct PasteItem(pub(crate) gpui::ClipboardItem);
 
 impl EventEmitter<InputEvent> for SecretInputState {}
 impl EventEmitter<CancelEdit> for SecretInputState {}
+impl EventEmitter<PasteItem> for SecretInputState {}
 impl Focusable for SecretInputState {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -255,6 +257,10 @@ impl SecretInputState {
     pub(crate) fn bare(mut self) -> Self {
         self.bare = true;
         self
+    }
+    pub(crate) fn set_placeholder(&mut self, value: &'static str, cx: &mut Context<Self>) {
+        self.placeholder = value.into();
+        cx.notify();
     }
     pub(crate) fn placeholder(mut self, value: &'static str) -> Self {
         self.placeholder = value.into();
@@ -361,9 +367,14 @@ impl SecretInputState {
                 cx.notify();
             }
             "v" if command => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    let text = Zeroizing::new(text);
-                    self.replace_text_in_range(None, &text, window, cx);
+                if let Some(item) = cx.read_from_clipboard() {
+                    match item.text() {
+                        Some(text) => {
+                            let text = Zeroizing::new(text);
+                            self.replace_text_in_range(None, &text, window, cx);
+                        }
+                        None => cx.emit(PasteItem(item)),
+                    }
                 }
             }
             // Secret inputs deliberately have no copy/cut or undo/redo export path.
