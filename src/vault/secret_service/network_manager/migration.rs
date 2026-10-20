@@ -2,9 +2,9 @@
 //! updates retain the vault copy; we never roll back by deleting the only copy.
 
 use super::{
-    Arc, BTreeMap, Connection, Duration, Ordering, OwnedObjectPath, OwnedValue, PROPERTIES,
-    Profile, Settings, Shared, Store, Value, VaultMutation, WireSecret, fdo, mutate, name_mutation,
-    profile::Property, protocol, read, string_variant,
+    Arc, BTreeMap, Connection, Duration, Ordering, OwnedObjectPath, OwnedVariant, PROPERTIES,
+    Profile, Settings, Shared, Store, Variant, VaultMutation, WireSecret, fdo, mutate,
+    name_mutation, profile::Property, protocol, read, string_variant,
 };
 use crate::vault::{VaultError, VaultResult};
 use protocol::SecretFlags;
@@ -153,9 +153,9 @@ async fn proxy<'a>(
     interface: &'a str,
 ) -> zbus::Result<zbus::Proxy<'a>> {
     zbus::proxy::Builder::new(connection)
-        .destination(owner)?
-        .path(path)?
-        .interface(interface)?
+        .destination(owner)
+        .path(path)
+        .interface(interface)
         .cache_properties(zbus::proxy::CacheProperties::No)
         .build()
         .await
@@ -405,10 +405,10 @@ async fn migrate_profile(
     for copy in &copies {
         values.insert(
             copy.property.flags_name().into(),
-            OwnedValue::from(SecretFlags::AGENT_OWNED.bits()),
+            OwnedVariant::from(SecretFlags::AGENT_OWNED.bits()),
         );
         let value = if copy.property.is_raw() {
-            OwnedValue::try_from(Value::from(copy.value.expose().to_vec()))
+            OwnedVariant::try_from(Variant::from(copy.value.expose().to_vec()))
                 .map_err(|_| "Invalid binary credential")?
         } else {
             string_variant(
@@ -419,9 +419,9 @@ async fn migrate_profile(
     }
     // NM's settings plugin omits agent-owned values from persistent profiles.
     // Include them in the update so the daemon does not lose other secret state.
-    let args = BTreeMap::from([("version-id", OwnedValue::from(version))]);
+    let args = BTreeMap::from([("version-id", OwnedVariant::from(version))]);
     trace_migration!("Update2");
-    let _: BTreeMap<String, OwnedValue> = connection
+    let _: BTreeMap<String, OwnedVariant> = connection
         .call("Update2", &(settings, 0x41_u32, args))
         .await
         .map_err(
