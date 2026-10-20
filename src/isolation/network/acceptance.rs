@@ -19,6 +19,7 @@ struct Device {
     service: Arc<Mutex<Arc<VaultService>>>,
     stored: Arc<Mutex<Vec<crate::personal::sync::PacketId>>>,
     received: Arc<AtomicUsize>,
+    join_callbacks: Arc<AtomicUsize>,
     executable: PathBuf,
     root: tempfile::TempDir,
     callback: Arc<Mutex<Option<Callback>>>,
@@ -67,6 +68,7 @@ impl Device {
             service,
             stored: Arc::default(),
             received: Arc::default(),
+            join_callbacks: Arc::default(),
             executable,
             root,
             callback: Arc::default(),
@@ -80,6 +82,7 @@ impl Device {
         let service = Arc::clone(&self.service);
         let stored = Arc::clone(&self.stored);
         let received = Arc::clone(&self.received);
+        let join_callbacks = Arc::clone(&self.join_callbacks);
         let callback = Arc::clone(&self.callback);
         self.helper = Some(
             ProcessManager::open(
@@ -92,6 +95,9 @@ impl Device {
                         started,
                         finished: None,
                     });
+                    if matches!(&command, Command::Join { .. }) {
+                        join_callbacks.fetch_add(1, Ordering::Relaxed);
+                    }
                     let receiving = matches!(&command, Command::Receive(_));
                     let id = if let Command::Stored(id) = &command {
                         Some(*id)
@@ -154,26 +160,40 @@ impl Device {
             .unwrap();
         let invitation = offered.state.invitation.unwrap();
         let until = Instant::now() + Duration::from_secs(30);
+        let joins_before = other.join_callbacks.load(Ordering::Relaxed);
+        let mut attempts = 0;
         loop {
+            attempts += 1;
             match other.helper().action(Action::Join {
                 ticket: invitation.ticket().unwrap(),
                 name: "Receiver".into(),
             }) {
                 Ok(_) => break,
-                // Binding an endpoint precedes its public discovery record.
-                // This error occurs before the joining host is called.
+                // Endpoint binding precedes public discovery and relay readiness.
+                // Retry only transport failures before the host has seen Join:
+                // repeating an action after that callback could mutate host state.
                 Err(error)
-                    if error == "No addressing information available" && Instant::now() < until =>
+                    if matches!(
+                        error.as_str(),
+                        "No addressing information available" | "deadline has elapsed"
+                    ) && other.join_callbacks.load(Ordering::Relaxed) == joins_before
+                        && Instant::now() < until =>
                 {
+                    eprintln!("Waiting for pairing discovery after attempt {attempts}: {error}");
                     std::thread::sleep(Duration::from_secs(1));
                 }
                 Err(error) => panic!(
-                    "pairing join failed: {error}; inviter: {}; joiner: {}",
+                    "pairing join failed after {attempts} attempts: {error}; inviter: {}; joiner: {}; host Join callbacks: {}",
                     self.callback_progress(),
-                    other.callback_progress()
+                    other.callback_progress(),
+                    other.join_callbacks.load(Ordering::Relaxed) - joins_before,
                 ),
             }
         }
+        assert_eq!(
+            other.join_callbacks.load(Ordering::Relaxed),
+            joins_before + 1
+        );
         let request = self
             .wait("incoming pairing request", |view| {
                 view.state.request.is_some()
