@@ -109,6 +109,8 @@ jobs:
           cargo test --workspace --all-targets --all-features
       - name: Check lightweight client authentication build
         run: cargo clippy --no-default-features --features vault-client -- -D warnings
+      - name: Install ImageMagick
+        run: brew install imagemagick
       - name: Test macOS package build
         run: |
           plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist packaging/macos/FactorsealRuntime.entitlements packaging/macos/FactorsealBuildTest.entitlements

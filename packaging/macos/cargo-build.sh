@@ -14,23 +14,13 @@ cd "$(dirname "$0")/../.."
 unset IPHONEOS_DEPLOYMENT_TARGET TVOS_DEPLOYMENT_TARGET WATCHOS_DEPLOYMENT_TARGET \
     XROS_DEPLOYMENT_TARGET DRIVERKIT_DEPLOYMENT_TARGET
 
-# shellcheck disable=SC2086 # FACTORSEAL_CARGO_FEATURES holds cargo flags.
-set -- cargo build --locked --target "$RUST_TARGET" --profile "$CARGO_PROFILE" \
-    -p factorseal -p factorseal-desktop --bins ${FACTORSEAL_CARGO_FEATURES:-}
+export CLANG_MODULE_CACHE_PATH="$CARGO_TARGET_DIR/clang-modules"
+export FACTORSEAL_APPLE_BRIDGE_DIR="$CARGO_BIN_DIR/apple-bridge"
+export FACTORSEAL_BUILD_NUMBER="$CURRENT_PROJECT_VERSION"
 # -dead_strip_dylibs keeps unused Nix libraries out of the app.
-set -- env \
-    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-    CLANG_MODULE_CACHE_PATH="$CARGO_TARGET_DIR/clang-modules" \
-    FACTORSEAL_APPLE_BRIDGE_DIR="$CARGO_BIN_DIR/apple-bridge" \
-    FACTORSEAL_BUILD_NUMBER="$CURRENT_PROJECT_VERSION" \
-    MACOSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
-    NIX_LDFLAGS=-dead_strip_dylibs \
-    "$@"
+export NIX_LDFLAGS=-dead_strip_dylibs
 
-PATH="$PATH:$HOME/.cargo/bin"
-if command -v cargo >/dev/null 2>&1; then
-    exec "$@"
-fi
-# Nix-managed machines get cargo from devenv. Start from a clean environment so
-# Xcode's SDK and toolchain variables do not reach the Nix toolchain.
-exec devenv --no-tui shell --clean=HOME,TMPDIR -- "$@"
+bash packaging/macos/generate-icons.sh
+# shellcheck disable=SC2086 # FACTORSEAL_CARGO_FEATURES holds cargo flags.
+exec cargo build --locked --target "$RUST_TARGET" --profile "$CARGO_PROFILE" \
+    -p factorseal -p factorseal-desktop --bins ${FACTORSEAL_CARGO_FEATURES:-}
