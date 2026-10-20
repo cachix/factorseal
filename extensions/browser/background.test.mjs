@@ -55,15 +55,27 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
     scripting:{getRegisteredContentScripts:async()=>registrations,registerContentScripts:async scripts=>registrations.push(...scripts),executeScript:async options=>injections.push(options),unregisterContentScripts:async()=>{}},
     tabs:{query:async()=>[tab],get:async id=>id===tab.id?tab:{...tab,id},captureVisibleTab:async()=>{if(picture instanceof Error)throw picture;return picture;},sendMessage:async(_tab,m)=>{if(m.type==='pressed')return {valid:owned && untouched};if(['check','owns'].includes(m.type))return {valid:owned,document:m.document};if(m.type==='find')return {document:tab.form===false?null:'doc'};if(m.type==='save-current')return {offered:true};if(['notice','close-notice','site-changed'].includes(m.type)){notices.push(m);return {};}fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
     windows:{get:async()=>({focused}),onFocusChanged:event()}};
+  let now=Date.now();
+  const saveTimers=new Map();
+  const clock=class extends Date {static now(){return now;}};
+  const schedule=(fn,ms)=>{
+    if(ms!==120000)return setTimeout(fn,ms===350?1:ms);
+    const timer={};saveTimers.set(timer,{fn,until:clock.now()+ms});return timer;
+  };
+  const clear=timer=>{if(!saveTimers.delete(timer))clearTimeout(timer);};
   const navigator=chrome?{userAgentData:{brands:[{brand:'Chromium'}]}}:{userAgent:'Firefox/129'};
-  const context={navigator,crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,btoa,setTimeout:(fn,ms)=>setTimeout(fn,ms===350?1:ms),clearTimeout,console};
+  const context={navigator,crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,btoa,Date:clock,setTimeout:schedule,clearTimeout:clear,console};
   context[chrome?'chrome':'browser']=api;
   vm.runInNewContext(core,context);vm.runInNewContext(background,context);
   const message=(m,sender)=>new Promise(resolve=>runtime.onMessage.listeners[0](m,sender,resolve));
   const sender={id:runtime.id,frameId:0,tab,url:tab.url};
   const field={id:runtime.id,frameId:3,tab,url:'extension://factorseal/field.html?f1#doc'};
   const notice={id:runtime.id,frameId:4,tab,url:'extension://factorseal/notice.html?save#doc'};
-  return {message,sender,field,notice,notices,tab,fills,commands,payloads,registrations,injections,setNativeError(value){nativeError=value;},killPort(){deadPort=true;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
+  return {message,sender,field,notice,notices,tab,
+    pendingCount:()=>vm.runInNewContext('pendingSaves.size',context),
+    get saveTimerCount(){return saveTimers.size;},
+    advance(ms){now+=ms;for(const [timer,{fn,until}] of saveTimers)if(until<=clock.now()){saveTimers.delete(timer);fn();}},
+    closeTab(){for(const fn of api.tabs.onRemoved.listeners)fn(tab.id);},fills,commands,payloads,registrations,injections,setNativeError(value){nativeError=value;},killPort(){deadPort=true;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
 }
 async function until(condition){for(let i=0;i<300;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw new Error('timed out');}
 test('submitted save survives navigation and never persists credentials in extension storage',async()=>{
@@ -387,4 +399,47 @@ test('a tab that cannot be captured says so and never reaches Desktop',async()=>
   assert.equal((await h.message({type:'one-time'},popup)).status,'capture_failed');
   assert.equal((await h.message({type:'status'},popup)).status,'capture_failed');
   assert.ok(!h.commands.some(c=>c.action.type==='one_time'));
+});
+
+for(const action of ['pause','unpair'])test(`an existing save question is disabled after ${action}`,async()=>{
+  const h=await harness({paired:true});
+  await h.message({type:'save',document:'doc',username:'alice',password:'secret'},h.sender);
+  assert.equal((await h.message({type:'notice-pending',document:'doc',frame:'save'},h.notice)).pending,true);
+  if(action==='pause')await h.message({type:'pause'},popupSender);
+  else h.stored.paired=false;
+  assert.equal((await h.message({type:'notice-pending',document:'doc',frame:'save'},h.notice)).pending,false);
+  assert.equal((await h.message({type:'notice-save',document:'doc',frame:'save'},h.notice)).accepted,false);
+  assert.ok(!h.commands.some(c=>c.action.type==='save'));
+});
+test('pending credentials expire without any messages after navigation to an HTTP page',async()=>{
+  const h=await harness({paired:true});
+  await h.message({type:'save',document:'doc',username:'alice',password:'secret'},h.sender);
+  h.tab.url='http://example.com/';
+  h.advance(119999);
+  assert.equal(h.pendingCount(),1);
+  h.advance(1);
+  assert.equal(h.pendingCount(),0);
+  assert.equal(h.saveTimerCount,0);
+  assert.ok(!h.commands.some(c=>c.action.type==='save'));
+});
+test('a replacement save gets its own full lifetime',async()=>{
+  const h=await harness({paired:true});
+  const save=password=>h.message({type:'save',document:'doc',username:'alice',password},h.sender);
+  await save('old');
+  h.advance(60000);
+  await save('new');
+  assert.equal(h.saveTimerCount,1);
+  h.advance(60000);
+  assert.equal(h.pendingCount(),1);
+  h.advance(60000);
+  assert.equal(h.pendingCount(),0);
+});
+for(const action of ['dismiss','save','close tab'])test(`pending cleanup is cancelled on ${action}`,async()=>{
+  const h=await harness({paired:true});
+  await h.message({type:'save',document:'doc',username:'alice',password:'secret'},h.sender);
+  assert.equal(h.saveTimerCount,1);
+  if(action==='close tab')h.closeTab();
+  else await h.message({type:action==='save'?'notice-save':'notice-close',document:'doc',frame:'save'},h.notice);
+  assert.equal(h.pendingCount(),0);
+  assert.equal(h.saveTimerCount,0);
 });

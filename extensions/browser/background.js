@@ -175,9 +175,14 @@ function related(site,origin) {
   const [host,saved]=[site,origin].map(url=>new URL(url).hostname.replace(/^www\./,''));
   return host===saved || host.endsWith(`.${saved}`) || saved.endsWith(`.${host}`);
 }
+function clearPendingSave(tab) {
+  const save=pendingSaves.get(tab);
+  if(save)clearTimeout(save.timer);
+  pendingSaves.delete(tab);
+}
 function pendingSave(tab,site) {
   const save=pendingSaves.get(tab);
-  if(save && Date.now()>=save.until)pendingSaves.delete(tab);
+  if(save && Date.now()>=save.until)clearPendingSave(tab);
   return save && Date.now()<save.until && related(site,save.origin)?save:null;
 }
 async function refreshTabs() {
@@ -195,7 +200,7 @@ api.runtime.onInstalled.addListener(()=>{void register().catch(()=>{});});
 void register().then(async()=>{
   if((await api.storage.local.get('paired')).paired===true)await send({type:'poll'},true);
 }).catch(()=>{});
-api.tabs.onRemoved.addListener(tab=>{if(active?.tab===tab)void cancel();pendingSaves.delete(tab);});
+api.tabs.onRemoved.addListener(tab=>{if(active?.tab===tab)void cancel();clearPendingSave(tab);});
 api.tabs.onActivated.addListener(({tabId})=>{if(active?.tab!=null && active.tab!==tabId)void cancel();});
 api.windows.onFocusChanged.addListener(windowId=>{if(windowId>=0 && active?.window!=null && active.window!==windowId)void cancel();});
 api.tabs.onUpdated.addListener((tab,change)=>{if(active?.tab===tab && !['save','one_time'].includes(active.kind) && (change.status==='loading'||change.url))void cancel();});
@@ -255,16 +260,20 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
       if(!(await tell(tab.id,{type:pressed?'pressed':'owns',document:message.document,page:pressed,frame:message.frame}))?.valid)return {accepted:false};
       if(message.type==='fill-field')return {accepted:await fill(tab,site,message.document)};
       if(message.type==='notice-status')return {status:statusScope?.tab===tab.id?status:'idle',active:active?.tab===tab.id};
-      if(message.type==='notice-pending')return {pending:!!pendingSave(tab.id,site)};
+      if(message.type==='notice-pending'){
+        const {paired,paused}=await settings(site);
+        return {pending:paired && !paused && !!pendingSave(tab.id,site)};
+      }
       if(message.type==='notice-close'){
-        if(message.frame==='save')pendingSaves.delete(tab.id);
+        if(message.frame==='save')clearPendingSave(tab.id);
         await tell(tab.id,{type:'close-notice'});
         return {accepted:true};
       }
       if(message.type==='notice-save'){
+        const {paired,paused}=await settings(site);
         const save=pendingSave(tab.id,site);
-        if(!save || active)return {accepted:false};
-        pendingSaves.delete(tab.id);
+        if(!save || active || !paired || paused)return {accepted:false};
+        clearPendingSave(tab.id);
         await start({type:'save',origin:save.origin,document:message.document,username:save.username,password:save.password},{tab:tab.id,window:tab.windowId,origin:site,document:message.document});
         return {accepted:true};
       }
@@ -289,7 +298,10 @@ api.runtime.onMessage.addListener((message,sender,reply)=>{
       || !message.username || !message.password || new TextEncoder().encode(message.username).length>512 || new TextEncoder().encode(message.password).length>4096)return {accepted:false};
     const password=btoa(String.fromCharCode(...new TextEncoder().encode(message.password)));
     if(!explicit){
-      pendingSaves.set(tab.id,{origin:site,username:message.username,password,until:Date.now()+120000});
+      clearPendingSave(tab.id);
+      // Navigation can leave no content script to poll for expiration.
+      const timer=setTimeout(()=>clearPendingSave(tab.id),120000);
+      pendingSaves.set(tab.id,{origin:site,username:message.username,password,until:Date.now()+120000,timer});
       return {accepted:true,ask:true};
     }
     if(active){
