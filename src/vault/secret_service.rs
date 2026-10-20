@@ -1413,6 +1413,7 @@ mod tests {
                 permissions.is_empty(),
                 "saving must not create a persistent write permission"
             );
+            assert!(server.release_name(BUS_NAME).await.unwrap());
         });
     }
 
@@ -1449,6 +1450,7 @@ mod tests {
             .unwrap_err();
             assert!(matches!(&error, zbus::Error::MethodError(name, ..) if name.as_str() == "org.freedesktop.Secret.Error.NotSupported"), "{error:?}");
             assert!(requests.try_recv().is_err(), "unsupported input must not request unlock");
+            assert!(server.release_name(BUS_NAME).await.unwrap());
         });
     }
 
@@ -1506,6 +1508,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(exchange.await.unwrap().expose(), b"edited");
+            assert!(server.release_name(BUS_NAME).await.unwrap());
         });
     }
 
@@ -1539,6 +1542,8 @@ mod tests {
     /// already registered, can still run the unit suite. Linux CI runs it
     /// under `dbus-run-session`, where these exchanges are mandatory on an
     /// isolated bus. Returns a connection that briefly held the name.
+    /// Fixtures retaining the name must release it before dropping the guard,
+    /// so asynchronous socket teardown cannot race the next fixture.
     async fn free_session_bus() -> Option<(Connection, tokio::sync::MutexGuard<'static, ()>)> {
         static TEST_BUS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         std::env::var_os("DBUS_SESSION_BUS_ADDRESS")?;
@@ -1781,6 +1786,7 @@ mod tests {
                     .unwrap();
             session_proxy.call::<_, _, ()>("Close", &()).await.unwrap();
             assert!(session_proxy.call::<_, _, ()>("Close", &()).await.is_err());
+            assert!(server_connection.release_name(BUS_NAME).await.unwrap());
         });
     }
 

@@ -4557,7 +4557,7 @@ fn factorseal_icon(dark_background: bool, cx: &App) -> gpui_tray::Result<Icon> {
         include_bytes!("../../assets/logo/factorseal-tray-ink.png")
     };
     let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes.to_vec());
-    Icon::from_gpui(&image, cx)
+    Icon::from_gpui(&image, cx).build()
 }
 
 fn install_tray(cx: &mut App) {
@@ -4588,7 +4588,7 @@ pub(crate) fn refresh_tray_icon(cx: &mut App) {
     let dark_background = gpui_component::Theme::global(cx).is_dark();
     match factorseal_icon(dark_background, cx) {
         Ok(icon) => {
-            if let Err(error) = tray.set_icon(Some(icon), cx) {
+            if let Err(error) = tray.set_icon(icon, cx) {
                 factorseal::diagnostics::event("desktop", "refresh_tray_icon", "error");
                 eprintln!("failed to refresh FactorSeal tray bitmap: {error}");
             }

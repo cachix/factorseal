@@ -55,9 +55,9 @@ expires = 2026-11-12
 reason = "fontdb 0.23, used by cosmic-text in the GPUI CE WGPU backend, still uses this parser. A direct Cargo version override cannot replace its APIs."
 migration = "DEP-6: migrate fontdb and cosmic-text together to maintained font parsing and validate font fallback, accessibility, and every enabled renderer."
 
-# Factorseal, Desktop, and shared ashpd 0.13 use zbus 6. Accessibility,
-# ashpd 0.11 via rfd, tray, and keyring parents still use zbus 5 and its standalone
-# helpers. See docs/development.md for the remaining DEP-7 migration paths.
+# Factorseal, Desktop, shared ashpd 0.13, oo7, and gpui-tray use zbus 6.
+# Accessibility, ashpd 0.11 via rfd, and notification parents still use zbus 5
+# and its standalone helpers. See docs/development.md for the remaining DEP-7 migration paths.
 [[exception]]
 id = "RUSTSEC-2026-0370"
 package = "zvariant"
@@ -65,8 +65,8 @@ version = "5.15.0"
 owner = "Factorseal maintainers"
 reviewed = 2026-10-18
 expires = 2026-11-12
-reason = "Standalone zvariant moved into zbus 6's wire module. The pinned zbus 5, oo7, AT-SPI, and zbus-lockstep parents still require its existing API."
-migration = "DEP-7: direct Factorseal, Desktop, and shared ashpd 0.13 migration to zbus 6 is complete; migrate oo7, AT-SPI/accesskit, ashpd 0.11 through rfd, notify-rust, gpui-tray, and zbus-lockstep next; validate portals, tray, keyring, and accessibility on native targets."
+reason = "Standalone zvariant moved into zbus 6's wire module. The pinned zbus 5, AT-SPI, and zbus-lockstep parents still require its existing API."
+migration = "DEP-7: direct callers, shared ashpd 0.13, oo7, and gpui-tray use zbus 6; migrate AT-SPI/accesskit, ashpd 0.11 through rfd, notify-rust, and zbus-lockstep next; validate portals, tray, keyring, and accessibility on native targets."
 
 [[exception]]
 id = "RUSTSEC-2026-0371"

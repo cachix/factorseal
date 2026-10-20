@@ -85,15 +85,19 @@ The `async-io` feature now selects zbus's built-in runtime; it remains usable
 from GPUI's background executor. Its native I/O requires rustix 1.1.5, which
 is also selected in the fuzz lockfile.
 
+GPUI uses the pinned [oo7 zbus 6 migration](https://github.com/linux-credentials/oo7/pull/610).
+Its dependency declaration selects oo7 0.7.0-alpha, which uses `zgvariant` for
+keyring files and the integrated zbus wire module for D-Bus. gpui-tray 0.2.0
+also uses zbus 6. These pins are reviewed together with the direct and portal
+migrations in the combined Factorseal PR.
+
 Desktop still pulls in zbus 5 and the unmaintained standalone `zvariant`,
 `zvariant_derive`, and `zbus_names` crates through these locked dependencies:
 
 | Path | Remaining migration |
 | --- | --- |
 | rfd 0.15.4 → ashpd 0.11.1 | Migrate the older file-dialog portal path. The shared ashpd 0.13.13 path already uses zbus 6. |
-| GPUI CE → oo7 0.6.0 | Migrate its D-Bus API and split GVariant codecs to zgvariant. |
 | GPUI CE → accesskit_unix 0.22.1 → AT-SPI | Migrate accesskit_atspi_common, atspi-common, atspi-proxies, and zbus-lockstep/XML tooling together. |
-| gpui-tray 0.1.2 | Replace its zbus 5 blocking calls and migrate tray serialization. |
 | GPUI CE → notify-rust 4.18.0 | Migrate notification calls to zbus 6. |
 
 Use these commands to inspect the remaining paths after each parent upgrade:
