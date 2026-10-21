@@ -269,22 +269,27 @@ fn main() {
             None
         });
     factorseal::diagnostics::event("desktop", "open_application", "start");
-    gpui_platform::application()
-        .with_assets(Assets)
-        .with_quit_mode(QuitMode::Explicit)
-        .run(move |cx| {
-            app::setup(
-                config,
-                args.background || args.keyring_activation,
-                args.no_tray,
-                activations,
-                access_requests,
-                secret_service_host,
-                cx,
-            );
-        });
+    desktop_application().run(move |cx| {
+        app::setup(
+            config,
+            args.background || args.keyring_activation,
+            args.no_tray,
+            activations,
+            access_requests,
+            secret_service_host,
+            cx,
+        );
+    });
     drop(instance_lock);
     factorseal::diagnostics::finish(true);
+}
+
+fn desktop_application() -> gpui::Application {
+    let application = gpui_platform::application()
+        .with_assets(Assets)
+        .with_quit_mode(QuitMode::Explicit);
+    application.on_reopen(|cx| cx.dispatch_action(&app::OpenDesktop));
+    application
 }
 
 #[cfg(target_os = "linux")]

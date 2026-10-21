@@ -67,6 +67,10 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView", "NSWindow"] }
+raw-window-handle = "0.6.2"
+
 [dev-dependencies]
 qrcode = { version = "0.14.1", default-features = false }
 

@@ -4647,6 +4647,8 @@ fn open_desktop_window(
             ..Default::default()
         },
         move |window, cx| {
+            #[cfg(target_os = "macos")]
+            window_activation::configure_desktop(window);
             window.on_window_should_close(cx, |window, cx| {
                 remember_desktop(window, cx);
                 if cx.global::<DesktopStatus>().no_tray {
