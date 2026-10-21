@@ -4342,6 +4342,10 @@ fn toggle_desktop(_: &ToggleDesktop, cx: &mut App) {
 }
 
 fn show_desktop(cx: &mut App) {
+    // Activate the app to bring its window to the foreground on macOS.
+    #[cfg(target_os = "macos")]
+    cx.activate(true);
+
     let existing = cx.global::<DesktopWindow>().handle;
     if let Some(handle) = existing {
         if window_activation::desktop(handle, cx).is_ok() {
