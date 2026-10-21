@@ -206,7 +206,11 @@ api.windows.onFocusChanged.addListener(windowId=>{if(windowId>=0 && active?.wind
 api.tabs.onUpdated.addListener((tab,change)=>{if(active?.tab===tab && !['save','one_time'].includes(active.kind) && (change.status==='loading'||change.url))void cancel();});
 api.runtime.onMessage.addListener((message,sender,reply)=>{
   (async()=>{
-    if (sender.url===api.runtime.getURL('popup.html') && !sender.tab) {
+    const popupUrl=api.runtime.getURL('popup.html');
+    // The browser supplies a tab for our own popup opened as a page too.
+    // Only that extension's top-level page may use the popup controls.
+    const popupTab=sender.id===api.runtime.id && sender.frameId===0 && sender.tab?.url===popupUrl;
+    if (sender.url===popupUrl && (!sender.tab || popupTab)) {
       if (message.type==='status') {
         recoverConnection();
         const paired=(await api.storage.local.get('paired')).paired===true;

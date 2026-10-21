@@ -246,6 +246,29 @@ test('Not now forgets the login without asking Desktop',async()=>{
 });
 
 const popupSender={url:'extension://factorseal/popup.html'};
+test('the extension popup opened as a top-level tab can pair with Desktop',async()=>{
+  const h=await harness();
+  h.tab.url=popupSender.url;
+  const sender={...h.sender,url:popupSender.url};
+  assert.equal((await h.message({type:'status'},sender)).paired,false);
+  assert.equal((await h.message({type:'pair'},sender)).status,'Approve pairing in Desktop');
+  await until(()=>h.stored.paired===true);
+  assert.equal((await h.message({type:'status'},sender)).paired,true);
+});
+test('web pages, foreign extensions, and embedded popup frames cannot request pairing',async()=>{
+  for(const changed of [
+    {url:'https://example.com/login'},
+    {id:'other-extension'},
+    {frameId:3},
+    {tab:{id:1,url:'https://example.com/login'}},
+  ]){
+    const h=await harness();
+    h.tab.url=popupSender.url;
+    const sender={...h.sender,url:popupSender.url,...changed};
+    assert.equal((await h.message({type:'pair'},sender)).accepted,false);
+    assert.equal(h.connects,0);
+  }
+});
 test('pairing UI state persists only after approval and clears after revocation',async()=>{
   const h=await harness();
   assert.equal((await h.message({type:'status'},popupSender)).paired,false);
