@@ -2223,6 +2223,7 @@ fn approval_wait_wakes_when_a_grant_expires_without_another_request() {
                 id: interaction.id.clone(),
                 signature,
                 duration_seconds: Some(60),
+                single_use: false,
             })
             .unwrap(),
             100,

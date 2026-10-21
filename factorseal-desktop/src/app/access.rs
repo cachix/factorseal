@@ -466,6 +466,12 @@ impl AccessView {
         if grants.is_empty() {
             return;
         }
+        let (duration, single_use) = grant_choice(&grants, self.choice).lifetime();
+        if single_use && !single_write_allowed(&grants) {
+            self.error = Some("The requests changed. Choose how long to allow access.".to_owned());
+            cx.notify();
+            return;
+        }
         let Some(metadata) = self.snapshot.metadata().cloned() else {
             return;
         };
@@ -483,7 +489,6 @@ impl AccessView {
         self.password.update(cx, SecretInputState::clear);
         let runtime = Arc::clone(&self.runtime);
         let ids: Vec<_> = grants.iter().map(|grant| grant.id.clone()).collect();
-        let (duration, single_use) = grant_choice(&grants, self.choice).lifetime();
         self.approving = true;
         self.error = None;
         cx.spawn(async move |this, cx| {
@@ -858,12 +863,10 @@ fn single_write_allowed(grants: &[factorseal::Permission]) -> bool {
 // A plain SecretSpec write asks for no more than that write unless the
 // person picks a longer lifetime; a cache write, which SecretSpec repeats
 // whenever the entry expires, defaults to an hour (see
-// `Permission::defaults_to_single_use`). A pick of "This write only" that no
-// longer applies, because a request that is not a SecretSpec write joined
-// the popup, falls back to one hour.
+// `Permission::defaults_to_single_use`). Keep an explicit choice even if new
+// requests make it incompatible; granting then requires a fresh choice.
 fn grant_choice(grants: &[factorseal::Permission], choice: Option<GrantChoice>) -> GrantChoice {
     match choice {
-        Some(GrantChoice::ThisWriteOnly) if !single_write_allowed(grants) => GrantChoice::Hour,
         Some(choice) => choice,
         None if !grants.is_empty()
             && grants
@@ -964,6 +967,9 @@ impl Render for AccessView {
         let theme = cx.theme().clone();
         let busy = self.approving || matches!(self.snapshot, Snapshot::Unlocking { .. });
         let choice = grant_choice(&self.grants, self.choice);
+        if !self.grants.is_empty() {
+            self.choice = Some(choice);
+        }
         let unsealed = matches!(self.snapshot, Snapshot::Unsealed { .. });
         let metadata = self.snapshot.metadata();
         let mut projects: Vec<_> = if self.inputs.is_empty() {
@@ -1517,8 +1523,8 @@ mod tests {
         );
         assert!(grant_scope_note(std::slice::from_ref(&grant)).contains("entries, app, folder"));
 
-        // A SecretSpec write defaults to this write only, and the pick
-        // falls back to an hour once a request that is not one joins.
+        // A SecretSpec write defaults to this write only. An incompatible
+        // request must not silently broaden that choice to an hour.
         grant.scope = Some(factorseal::DocumentKind::SecretSpecProviderCache);
         let write = grant.clone();
         assert_eq!(
@@ -1534,6 +1540,7 @@ mod tests {
             expires_at: 2,
             challenge: [0; 32],
             expiring_write: true,
+            awaited: false,
         };
         assert_eq!(
             grant_choice(std::slice::from_ref(&cache_write), None),
@@ -1557,7 +1564,7 @@ mod tests {
         let mixed = [write.clone(), read];
         assert_eq!(
             grant_choice(&mixed, Some(GrantChoice::ThisWriteOnly)),
-            GrantChoice::Hour
+            GrantChoice::ThisWriteOnly
         );
         assert_eq!(
             grant_choice(
@@ -1684,16 +1691,17 @@ mod tests {
                 expires_at: 2,
                 challenge: [0; 32],
                 awaited: false,
+                expiring_write: false,
             },
         }
     }
 
     #[test]
-    fn the_verified_header_only_shows_when_grants_are_all_that_is_asked() {
+    fn the_requester_header_only_shows_when_grants_are_all_that_is_asked() {
         let grant = secretspec_grant("/nix/store/abc-factorseal/bin/factorseal", None);
         assert_eq!(
             header_requester(&[&grant], false).as_deref(),
-            Some("/nix/store/abc-factorseal/bin/factorseal")
+            Some("SecretSpec")
         );
         assert_eq!(header_requester(&[&grant], true), None);
     }
@@ -1704,7 +1712,7 @@ mod tests {
         let mut second = secretspec_grant("/usr/bin/tool", None);
         assert_eq!(
             requester_label(&[&first, &second]).as_deref(),
-            Some("/usr/bin/tool")
+            Some("SecretSpec")
         );
         second.principal.executable_digest = [1; 32];
         assert_eq!(requester_label(&[&first, &second]), None);
@@ -1735,7 +1743,12 @@ mod tests {
         let visible = visible_text(&path);
         assert!(visible.ends_with("tool Folder /trusted"));
         assert!(!visible.contains(['\n', '\u{202E}']));
-        let grant = secretspec_grant("/usr/bin/tool\u{2066}\nSecretSpec", None);
+        assert_eq!(
+            launch_chain_label(&["secretspec\u{202e}.exe".to_owned()]).as_deref(),
+            Some("secretspec.exe (not verified)")
+        );
+        let mut grant = secretspec_grant("/usr/bin/tool\u{2066}\nSecretSpec", None);
+        grant.scope = Some(factorseal::DocumentKind::LinuxSecretService);
         assert_eq!(
             requester_label(&[&grant]).as_deref(),
             Some("/usr/bin/tool SecretSpec")
@@ -1750,6 +1763,7 @@ mod tests {
             expires_at: 300,
             challenge: [0; 32],
             awaited: true,
+            expiring_write: false,
         };
         assert!(awaited(&waiting));
         let mut given_up = waiting.clone();
@@ -1758,6 +1772,7 @@ mod tests {
             expires_at: 300,
             challenge: [0; 32],
             awaited: false,
+            expiring_write: false,
         };
         assert!(!awaited(&given_up));
         let shown = std::slice::from_ref(&waiting);

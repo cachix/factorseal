@@ -284,17 +284,19 @@ approval remains useful when the caller retries.
 With the headless agent, SecretSpec writes use these signed project permissions.
 With Desktop on Linux, each write uses the secure input dialog described below.
 The provider checks the host's input capability before choosing the flow;
-cancelling or failing a desktop dialog ends the write. Desktop on macOS and
-Windows has no secure input dialog, so writes there use the signed project
-permissions too: each write without a permission asks in Desktop's approval
-popup. The popup offers "This write only", its default for a write, which the
-vault removes when it authorizes that write (or after five minutes if the write
-never comes), so the next write asks again. "1 hour" and "Until revoked" instead
-cover later writes of that entry for the chosen duration, and "1 hour" is the
-default for a write that expires: SecretSpec's cache writes such an entry again
-each time it expires, so a single-use approval would ask at every refresh. A single-use
-permission is removed before the value is written, so a write that then fails
-needs a new approval.
+cancelling or failing a desktop dialog ends the write. Other platforms and
+headless hosts use signed project permissions, approved through the CLI.
+Desktop's permission approval popup is currently available only on Linux.
+
+A SecretSpec write can be approved for one write only. The vault removes that
+permission when it authorizes the write, or after five minutes if unused, so the
+next write asks again. Desktop calls this choice "This write only"; the CLI calls
+it `once`. It is the default for a plain write. Longer approvals cover later
+writes of the entry for the chosen duration. Expiring cache writes default to
+one hour in Desktop, or the requested duration in the CLI (one hour if absent),
+because SecretSpec refreshes them automatically when they expire. They can
+still be approved once. A single-use permission is removed before storing the
+value, so a write that then fails needs a new approval.
 
 Granting requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal

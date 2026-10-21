@@ -389,6 +389,7 @@ impl PendingApprovals {
         self.create_at(candidate, now, Instant::now())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn create_at(
         &mut self,
         candidate: ApprovalCandidate,

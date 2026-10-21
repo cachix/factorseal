@@ -631,7 +631,7 @@ async fn secretspec_request_waits_for_approval_and_completes() {
     );
     // The test harness launched this process, so the provider names it.
     let chain = &permissions[0].application.declared_launch_chain;
-    assert!(!chain.is_empty());
+    assert_ne!(chain.len(), 0);
     assert_eq!(chain, &launch_chain::launch_chain());
 
     let unsealed = Vault::unseal_with_key_protector_group(

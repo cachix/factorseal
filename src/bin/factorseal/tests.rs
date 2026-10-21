@@ -909,6 +909,7 @@ fn pending_permission(
             expires_at: 2,
             challenge: [0; 32],
             expiring_write: false,
+            awaited: false,
         },
     }
 }
@@ -1002,6 +1003,7 @@ fn a_secretspec_write_is_approved_once_unless_a_duration_is_given() {
         expires_at: 2,
         challenge: [0; 32],
         expiring_write: true,
+        awaited: false,
     };
     let mut default = std::io::Cursor::new(b"\n");
     assert_eq!(
