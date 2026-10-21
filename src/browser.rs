@@ -11,6 +11,7 @@ pub use crate::vault::browser_transport as transport;
 
 pub const VERSION: u16 = 1;
 pub const MAX_FRAME: usize = 64 * 1024;
+pub const MAX_IMAGE: usize = 8 * 1024 * 1024;
 pub const PAIR_NAMESPACE: &[u8] = b"factorseal/browser-pairing/v1";
 
 pub(crate) fn random_id() -> VaultResult<String> {
@@ -97,19 +98,23 @@ impl Command {
         if self.version != VERSION || self.session.len() != 64 || self.sequence == 0 {
             return Err(invalid());
         }
-        if let Action::Detect {
-            origin: site,
-            document,
+        if let Action::Detect { origin: site, .. }
+        | Action::Save { origin: site, .. }
+        | Action::OneTime { origin: site } = &self.action
+            && (site.len() > 2048 || origin(site)? != *site)
+        {
+            return Err(invalid());
         }
-        | Action::Save {
-            origin: site,
-            document,
-            ..
-        } = &self.action
-            && (site.len() > 2048
-                || origin(site)? != *site
-                || document.is_empty()
-                || document.len() > 128)
+        if let Action::Detect { document, .. } | Action::Save { document, .. } = &self.action
+            && (document.is_empty() || document.len() > 128)
+        {
+            return Err(invalid());
+        }
+        if let Action::Image { size, data } = &self.action
+            && (*size == 0
+                || *size as usize > MAX_IMAGE
+                || data.expose().is_empty()
+                || data.expose().len() > *size as usize)
         {
             return Err(invalid());
         }
@@ -140,6 +145,13 @@ pub enum Action {
         document: String,
         username: String,
         password: WireSecret,
+    },
+    OneTime {
+        origin: String,
+    },
+    Image {
+        size: u32,
+        data: WireSecret,
     },
     Poll,
     Confirm {
@@ -198,6 +210,39 @@ pub struct Candidate {
     pub title: String,
     pub username: String,
     pub digest: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub one_time: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OneTimePassword {
+    pub link: String,
+    pub issuer: Option<String>,
+    pub account: Option<String>,
+}
+impl std::fmt::Debug for OneTimePassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OneTimePassword")
+            .field("issuer", &self.issuer)
+            .finish_non_exhaustive()
+    }
+}
+impl OneTimePassword {
+    #[must_use]
+    pub fn label(&self) -> Option<String> {
+        match (&self.issuer, &self.account) {
+            (Some(issuer), Some(account)) => Some(format!("{issuer} · {account}")),
+            (Some(name), None) | (None, Some(name)) => Some(name.clone()),
+            (None, None) => None,
+        }
+    }
+}
+impl Drop for OneTimePassword {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.link.zeroize();
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -221,6 +266,12 @@ pub enum WorkerAction {
         ticket: String,
         candidate: Option<Candidate>,
         request: Signed,
+    },
+    SaveOneTime {
+        ticket: String,
+        candidate: Option<Candidate>,
+        request: Signed,
+        one_time: OneTimePassword,
     },
 }
 #[derive(Debug, Serialize, Deserialize)]

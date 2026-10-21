@@ -2,7 +2,7 @@
 use super::*;
 use factorseal::browser::discovery::Browser;
 use factorseal::browser::{
-    WorkerAction,
+    OneTimePassword, WorkerAction,
     desktop::{Hub, Prompt},
 };
 use std::sync::Mutex;
@@ -143,8 +143,10 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
             }
             for work in work {
                 let result = runtime.browser_request(work.action.clone());
-                if matches!(work.action, WorkerAction::Save { .. })
-                    && matches!(result, Ok(factorseal::browser::WorkerReply::Done))
+                if matches!(
+                    work.action,
+                    WorkerAction::Save { .. } | WorkerAction::SaveOneTime { .. }
+                ) && matches!(result, Ok(factorseal::browser::WorkerReply::Done))
                 {
                     saved.store(true, std::sync::atomic::Ordering::Release);
                 }
@@ -195,6 +197,9 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
                 );
                 let prompt = if let Ok(mut h) = hub.lock() {
                     h.snapshot(unsealed);
+                    if let Some((session, generation, image)) = h.take_image() {
+                        read_one_time_password(Arc::clone(&hub), session, generation, image, cx);
+                    }
                     let p = h.prompt();
                     if external {
                         if let Some(p) = &p {
@@ -215,6 +220,31 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
                     view.update(cx, |_, cx| cx.notify());
                 }
             });
+        }
+    })
+    .detach();
+}
+fn read_one_time_password(
+    hub: Arc<Mutex<Hub>>,
+    session: String,
+    generation: u64,
+    image: Zeroizing<Vec<u8>>,
+    cx: &App,
+) {
+    cx.spawn(async move |_| {
+        let scanned = smol::unblock(move || totp::scan(&image))
+            .await
+            .ok()
+            .map(|mut link| {
+                let origin = totp::origin(&link);
+                OneTimePassword {
+                    link: std::mem::take(&mut *link),
+                    issuer: origin.issuer,
+                    account: origin.account,
+                }
+            });
+        if let Ok(mut h) = hub.lock() {
+            h.scanned(&session, generation, scanned);
         }
     })
     .detach();

@@ -2935,7 +2935,7 @@ fn dialog_cache_write_is_manager_only_and_does_not_grant_future_writes() {
 #[cfg(feature = "browser")]
 mod browser_integration {
     use super::*;
-    use crate::browser::{Action, Command, Signed, WorkerAction, WorkerReply};
+    use crate::browser::{Action, Command, OneTimePassword, Signed, WorkerAction, WorkerReply};
     use ed25519_dalek::{Signer, SigningKey};
     fn submitted(sequence: u32, username: &str, password: &str) -> Signed {
         signed(
@@ -3260,6 +3260,189 @@ mod browser_integration {
             },
         );
         assert!(request(&service, &manager, WorkerAction::Lookup { request: next }).is_err());
+    }
+    fn one_time(sequence: u32) -> Signed {
+        signed(
+            sequence,
+            Action::OneTime {
+                origin: "https://example.com".into(),
+            },
+        )
+    }
+    fn code(secret: &str) -> OneTimePassword {
+        OneTimePassword {
+            link: format!("otpauth://totp/Example:bob?secret={secret}"),
+            issuer: Some("Example".into()),
+            account: Some("bob".into()),
+        }
+    }
+    fn review(
+        service: &VaultService,
+        manager: &CallerIdentity,
+        submission: &Signed,
+    ) -> (String, Vec<crate::browser::Candidate>) {
+        let WorkerReply::Candidates { ticket, candidates } = request(
+            service,
+            manager,
+            WorkerAction::Lookup {
+                request: submission.clone(),
+            },
+        )
+        .unwrap() else {
+            panic!("review");
+        };
+        (ticket, candidates)
+    }
+    fn stored(service: &VaultService, id: &str) -> crate::personal::PersonalSecret {
+        let state = service.state.lock_live(Instant::now()).unwrap();
+        let bytes = state
+            .store()
+            .get_at(
+                DocumentKind::LocalKeyring,
+                crate::personal::PERSONAL_SECRET_NAMESPACE,
+                &SecretAddress::new(id, None).unwrap(),
+                100,
+            )
+            .unwrap()
+            .unwrap();
+        crate::personal::PersonalSecret::decode_current(&bytes).unwrap()
+    }
+    fn paired_for_one_time() -> (tempfile::TempDir, VaultService, CallerIdentity) {
+        let (dir, service, manager) = setup();
+        request(
+            &service,
+            &manager,
+            WorkerAction::Pair {
+                key: one_time(1).key.clone(),
+            },
+        )
+        .unwrap();
+        (dir, service, manager)
+    }
+    #[test]
+    fn browser_one_time_passwords_go_only_to_the_reviewed_version_of_a_login() {
+        let (_dir, service, manager) = paired_for_one_time();
+        let first = one_time(1);
+        let (ticket, mut candidates) = review(&service, &manager, &first);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].one_time);
+        let alice = candidates.remove(0);
+        request(
+            &service,
+            &manager,
+            WorkerAction::SaveOneTime {
+                ticket,
+                candidate: Some(alice.clone()),
+                request: first,
+                one_time: code("JBSWY3DPEHPK3PXP"),
+            },
+        )
+        .unwrap();
+        let saved = stored(&service, &alice.id);
+        assert_eq!(
+            saved.one_time_password(),
+            Some("otpauth://totp/Example:bob?secret=JBSWY3DPEHPK3PXP")
+        );
+        assert_eq!(saved.username(), Some("alice"));
+        let (ticket, candidates) = review(&service, &manager, &one_time(2));
+        assert!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::Release {
+                    ticket: ticket.clone(),
+                    candidate: candidates[0].clone(),
+                    confirmation: signed(3, Action::Confirm { nonce: ticket }),
+                }
+            )
+            .is_err()
+        );
+        let stale = one_time(4);
+        let (ticket, _) = review(&service, &manager, &stale);
+        assert!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::SaveOneTime {
+                    ticket,
+                    candidate: Some(alice),
+                    request: stale,
+                    one_time: code("GEZDGNBVGY3TQOJQ"),
+                }
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn browser_one_time_passwords_without_a_login_start_one_named_after_the_issuer() {
+        let (_dir, service, manager) = paired_for_one_time();
+        let submission = one_time(1);
+        let (ticket, _) = review(&service, &manager, &submission);
+        request(
+            &service,
+            &manager,
+            WorkerAction::SaveOneTime {
+                ticket,
+                candidate: None,
+                request: submission,
+                one_time: code("GEZDGNBVGY3TQOJQ"),
+            },
+        )
+        .unwrap();
+        let (_, candidates) = review(
+            &service,
+            &manager,
+            &signed(
+                2,
+                Action::Detect {
+                    origin: "https://example.com".into(),
+                    document: "doc".into(),
+                },
+            ),
+        );
+        assert!(candidates.iter().all(|c| !c.one_time));
+        let bob = candidates.iter().find(|c| c.username == "bob").unwrap();
+        assert_eq!(bob.title, "Example");
+        assert_eq!(
+            stored(&service, &bob.id).one_time_password(),
+            Some("otpauth://totp/Example:bob?secret=GEZDGNBVGY3TQOJQ")
+        );
+    }
+    #[test]
+    fn browser_one_time_passwords_never_name_a_login_after_overlong_labels() {
+        let (_dir, service, manager) = paired_for_one_time();
+        let submission = one_time(1);
+        let (ticket, _) = review(&service, &manager, &submission);
+        let mut long = code("GEZDGNBVGY3TQOJQ");
+        long.issuer = Some("x".repeat(600));
+        long.account = Some("y".repeat(600));
+        request(
+            &service,
+            &manager,
+            WorkerAction::SaveOneTime {
+                ticket,
+                candidate: None,
+                request: submission,
+                one_time: long,
+            },
+        )
+        .unwrap();
+        let (_, candidates) = review(
+            &service,
+            &manager,
+            &signed(
+                2,
+                Action::Detect {
+                    origin: "https://example.com".into(),
+                    document: "doc".into(),
+                },
+            ),
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.title == "https://example.com" && c.username.is_empty())
+        );
     }
     #[test]
     fn browser_rechecks_revocation_before_release() {

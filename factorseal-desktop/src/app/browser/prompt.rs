@@ -57,7 +57,9 @@ pub(super) fn sync(request: Option<Prompt>, cx: &mut App) {
     // An unsealed vault looks for matching logins first. Open only once there
     // is something to approve: a page with no stored login must not take the
     // foreground from the browser, only to close again.
-    if request.state == "matching" && cx.global::<BrowserWindow>().0.is_none() {
+    if matches!(request.state.as_str(), "reading" | "decoding" | "matching")
+        && cx.global::<BrowserWindow>().0.is_none()
+    {
         return;
     }
     if let Some((_, view)) = cx.global::<BrowserWindow>().0.clone() {
@@ -219,22 +221,29 @@ impl Render for BrowserView {
         let pairing = self.request.site == "Pair browser profile";
         let revoking = self.request.site == "Disconnect browser profile";
         let saving = self.request.save_username.is_some();
+        let one_time = self.request.one_time;
+        let confirms = pairing || revoking || saving || one_time;
         let title = if pairing {
             "Pair browser profile"
         } else if revoking {
             "Disconnect browser profile"
         } else if saving {
             "Save login"
+        } else if one_time {
+            "Add one-time password"
         } else {
             "Fill a login"
         };
         let mut summary = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted)
             .child(div().text_heading().font_semibold().child(if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() }))
-            .child(if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." });
+            .child(if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else if one_time { "Add this website’s one-time password to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." });
         if let Some(username) = &self.request.save_username {
             summary = summary
                 .child(div().child(format!("Username: {username}")))
                 .child(div().child("Password: ••••••••"));
+        }
+        if let Some(code) = &self.request.code {
+            summary = summary.child(div().min_w_0().truncate().child(format!("Code for {code}")));
         }
         if pairing || revoking {
             summary = summary.child(
@@ -266,16 +275,31 @@ impl Render for BrowserView {
         }
         if reviewing {
             for (index, candidate) in self.request.candidates.iter().enumerate() {
-                requests = requests.child(
-                    button(("browser-account", index))
-                        .label(format!(
-                            "{}{} · {}",
-                            if saving { "Update password: " } else { "" },
-                            candidate.title,
-                            candidate.username
-                        ))
-                        .on_click(cx.listener(move |view, _, _, cx| view.approve(Some(index), cx))),
-                );
+                let account = button(("browser-account", index))
+                    .label(format!(
+                        "{}{} · {}",
+                        if saving {
+                            "Update password: "
+                        } else if one_time {
+                            "Add to "
+                        } else {
+                            ""
+                        },
+                        candidate.title,
+                        candidate.username
+                    ))
+                    .on_click(cx.listener(move |view, _, _, cx| view.approve(Some(index), cx)));
+                requests = requests.child(v_flex().gap_1().child(account).when(
+                    candidate.one_time,
+                    |account| {
+                        account.child(
+                            div()
+                                .text_caption()
+                                .text_color(theme.warning)
+                                .child("Replaces the current one-time password."),
+                        )
+                    },
+                ));
             }
         }
         let mut groups = h_flex().gap_2().flex_wrap();
@@ -416,7 +440,7 @@ impl Render for BrowserView {
                                     cx.defer(move |cx| deny(&session, generation, cx));
                                 }),
                             ))
-                            .when(!unsealed || pairing || revoking || saving, |element| {
+                            .when(!unsealed || confirms, |element| {
                                 element.child(
                                     button("approve-browser")
                                         .primary()
@@ -447,6 +471,8 @@ impl Render for BrowserView {
                                             } else {
                                                 "Save as new login"
                                             }
+                                        } else if one_time {
+                                            "Save as new login"
                                         } else {
                                             "Pair browser"
                                         })

@@ -1,13 +1,14 @@
 //! Bounded interaction coordinator. Contains no vault keys or persistent passwords.
 use super::{
-    Action, Candidate, Request, Response, Signed, VERSION, VaultResult, WorkerAction, WorkerReply,
-    invalid, random_id,
+    Action, Candidate, OneTimePassword, Request, Response, Signed, VERSION, VaultResult,
+    WorkerAction, WorkerReply, invalid, random_id,
 };
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
 /// Why the vault worker refused a browser action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +27,8 @@ pub struct Prompt {
     pub state: String,
     pub candidates: Vec<Candidate>,
     pub save_username: Option<String>,
+    pub one_time: bool,
+    pub code: Option<String>,
 }
 #[derive(Clone)]
 pub struct Work {
@@ -44,6 +47,62 @@ struct Flow {
     context_deadline: Option<Instant>,
     generation: u64,
     save_username: Option<String>,
+    one_time: bool,
+    image: Zeroizing<Vec<u8>>,
+    image_size: usize,
+    scanned: Option<OneTimePassword>,
+}
+impl Flow {
+    fn new(signed: Signed, action: Action, generation: u64) -> VaultResult<Self> {
+        let site = match &action {
+            Action::Detect { origin, .. }
+            | Action::Save { origin, .. }
+            | Action::OneTime { origin } => origin.clone(),
+            Action::Pair => "Pair browser profile".into(),
+            Action::Revoke => "Disconnect browser profile".into(),
+            _ => return Err(invalid()),
+        };
+        let one_time = matches!(action, Action::OneTime { .. });
+        Ok(Self {
+            signed,
+            site,
+            phase: if one_time {
+                "reading"
+            } else {
+                "awaiting_unseal"
+            }
+            .into(),
+            candidates: vec![],
+            ticket: String::new(),
+            selected: None,
+            started: Instant::now(),
+            context_deadline: None,
+            generation,
+            save_username: match action {
+                Action::Save { username, .. } => Some(username),
+                _ => None,
+            },
+            one_time,
+            image: Zeroizing::new(Vec::new()),
+            image_size: 0,
+            scanned: None,
+        })
+    }
+    fn add_image(&mut self, size: usize, data: &[u8]) -> VaultResult<()> {
+        if (self.image_size != 0 && self.image_size != size) || self.image.len() + data.len() > size
+        {
+            return Err(invalid());
+        }
+        if self.image_size == 0 {
+            self.image_size = size;
+            self.image = Zeroizing::new(Vec::with_capacity(size));
+        }
+        self.image.extend_from_slice(data);
+        if self.image.len() == size {
+            self.phase = "decoding".into();
+        }
+        Ok(())
+    }
 }
 struct Session {
     key: Option<String>,
@@ -149,6 +208,20 @@ impl Hub {
                     None => Response::finished("idle"),
                 })
             }
+            Action::Image { size, data } => {
+                let f = session
+                    .flow
+                    .as_mut()
+                    .filter(|f| f.phase == "reading")
+                    .ok_or_else(invalid)?;
+                match f.add_image(size as usize, data.expose()) {
+                    Ok(()) => Ok(Response::state(&f.phase)),
+                    Err(error) => {
+                        session.flow = None;
+                        Err(error)
+                    }
+                }
+            }
             Action::Confirm { nonce } => {
                 let f = session.flow.as_mut().ok_or_else(invalid)?;
                 if f.phase != "awaiting_context" || f.ticket != nonce || !self.unsealed {
@@ -178,33 +251,18 @@ impl Hub {
                     return Ok(Response::finished("busy"));
                 }
                 self.generation += 1;
+                let flow = Flow::new(message, action, self.generation)?;
                 let session = self
                     .sessions
                     .get_mut(&command.session)
                     .ok_or_else(invalid)?;
-                let site = match &action {
-                    Action::Detect { origin, .. } | Action::Save { origin, .. } => origin.clone(),
-                    Action::Pair => "Pair browser profile".into(),
-                    Action::Revoke => "Disconnect browser profile".into(),
-                    _ => return Err(invalid()),
-                };
                 session.result = None;
-                session.flow = Some(Flow {
-                    signed: message,
-                    site,
-                    phase: "awaiting_unseal".into(),
-                    candidates: vec![],
-                    ticket: String::new(),
-                    selected: None,
-                    started: Instant::now(),
-                    context_deadline: None,
-                    generation: self.generation,
-                    save_username: match action {
-                        Action::Save { username, .. } => Some(username),
-                        _ => None,
-                    },
-                });
-                Ok(Response::state("awaiting_unseal"))
+                session.flow = Some(flow);
+                self.advance();
+                let session = self.sessions.get(&command.session).ok_or_else(invalid)?;
+                Ok(Response::state(
+                    &session.flow.as_ref().ok_or_else(invalid)?.phase,
+                ))
             }
         }
     }
@@ -236,7 +294,10 @@ impl Hub {
             self.work.clear();
         }
         self.unsealed = unsealed;
-        if !unsealed {
+        self.advance();
+    }
+    fn advance(&mut self) {
+        if !self.unsealed {
             return;
         }
         for (id, s) in &mut self.sessions {
@@ -244,7 +305,7 @@ impl Hub {
                 && f.phase == "awaiting_unseal"
             {
                 match f.signed.verify().map(|c| c.action) {
-                    Ok(Action::Detect { .. } | Action::Save { .. }) => {
+                    Ok(Action::Detect { .. } | Action::Save { .. } | Action::OneTime { .. }) => {
                         f.phase = "matching".into();
                         self.work.push(Work {
                             session: id.clone(),
@@ -270,8 +331,40 @@ impl Hub {
                 state: f.phase.clone(),
                 candidates: f.candidates.clone(),
                 save_username: f.save_username.clone(),
+                one_time: f.one_time,
+                code: f.scanned.as_ref().and_then(OneTimePassword::label),
             })
         })
+    }
+    pub fn take_image(&mut self) -> Option<(String, u64, Zeroizing<Vec<u8>>)> {
+        self.expire();
+        self.sessions.iter_mut().find_map(|(id, s)| {
+            let f = s
+                .flow
+                .as_mut()
+                .filter(|f| f.phase == "decoding" && !f.image.is_empty())?;
+            Some((id.clone(), f.generation, std::mem::take(&mut f.image)))
+        })
+    }
+    pub fn scanned(&mut self, id: &str, generation: u64, one_time: Option<OneTimePassword>) {
+        let Some(s) = self.sessions.get_mut(id) else {
+            return;
+        };
+        let Some(f) = s
+            .flow
+            .as_mut()
+            .filter(|f| f.generation == generation && f.phase == "decoding")
+        else {
+            return;
+        };
+        if let Some(one_time) = one_time {
+            f.scanned = Some(one_time);
+            f.phase = "awaiting_unseal".into();
+            self.advance();
+        } else {
+            s.flow = None;
+            s.result = Some(Response::finished("no_code"));
+        }
     }
     pub fn deny(&mut self, id: &str) {
         if let Some(s) = self.sessions.get_mut(id) {
@@ -313,7 +406,7 @@ impl Hub {
                     f.context_deadline = Some(Instant::now() + Duration::from_secs(5));
                 }
             }
-            Action::Save { .. } => {
+            Action::Save { .. } | Action::OneTime { .. } => {
                 let candidate = match index {
                     Some(index) => {
                         let Some(candidate) = f.candidates.get(index) else {
@@ -323,14 +416,28 @@ impl Hub {
                     }
                     None => None,
                 };
+                let (ticket, request) = (f.ticket.clone(), f.signed.clone());
+                let action = if f.one_time {
+                    let Some(one_time) = f.scanned.take() else {
+                        return;
+                    };
+                    WorkerAction::SaveOneTime {
+                        ticket,
+                        candidate,
+                        request,
+                        one_time,
+                    }
+                } else {
+                    WorkerAction::Save {
+                        ticket,
+                        candidate,
+                        request,
+                    }
+                };
                 self.work.push(Work {
                     session: id.into(),
                     generation: f.generation,
-                    action: WorkerAction::Save {
-                        ticket: f.ticket.clone(),
-                        candidate,
-                        request: f.signed.clone(),
-                    },
+                    action,
                 });
                 f.phase = "saving".into();
             }
@@ -363,7 +470,7 @@ impl Hub {
         }
         match result {
             Ok(WorkerReply::Candidates { ticket, candidates })
-                if !candidates.is_empty() || f.save_username.is_some() =>
+                if !candidates.is_empty() || f.save_username.is_some() || f.one_time =>
             {
                 f.ticket = ticket;
                 f.candidates = candidates;
@@ -399,7 +506,9 @@ impl Hub {
                 // A login changed since it was offered is not a pairing
                 // problem: the profile stays paired and can try again.
                 s.result = Some(Response::finished(match (&work.action, failure) {
-                    (WorkerAction::Save { .. }, _) => "save_failed",
+                    (WorkerAction::Save { .. } | WorkerAction::SaveOneTime { .. }, _) => {
+                        "save_failed"
+                    }
                     (_, WorkerFailure::Changed) => "changed",
                     (_, WorkerFailure::Rejected) => "vault_rejected",
                 }));
@@ -540,6 +649,7 @@ mod tests {
                         title: "Example".into(),
                         username: "alice".into(),
                         digest: "d".repeat(64),
+                        one_time: false,
                     }],
                 }),
             );
@@ -557,6 +667,132 @@ mod tests {
                     .contains(&hex::encode(key().verifying_key().as_bytes()))
             );
         }
+    }
+    fn image(size: u32, data: &[u8]) -> Action {
+        Action::Image {
+            size,
+            data: WireSecret::new(data.to_vec()).unwrap(),
+        }
+    }
+    fn state(response: &Response) -> &str {
+        match response {
+            Response::State { state } => state,
+            Response::Finished { reason } => reason,
+            _ => "",
+        }
+    }
+    #[test]
+    fn one_time_passwords_are_read_from_the_tab_picture_before_anything_is_asked() {
+        let mut h = Hub::default();
+        let s = session(&mut h);
+        h.paired
+            .insert(hex::encode(key().verifying_key().as_bytes()));
+        let one_time = |origin: &str| Action::OneTime {
+            origin: origin.into(),
+        };
+        assert_eq!(state(&send(&mut h, &s, 1, image(4, b"ab"))), "unauthorized");
+        assert_eq!(
+            state(&send(&mut h, &s, 2, one_time("http://example.com"))),
+            "unauthorized"
+        );
+        assert_eq!(
+            state(&send(&mut h, &s, 3, one_time("https://example.com"))),
+            "reading"
+        );
+        h.snapshot(true);
+        assert!(h.take_work().is_empty() && h.take_image().is_none());
+        assert_eq!(state(&send(&mut h, &s, 4, image(4, b"ab"))), "reading");
+        assert_eq!(state(&send(&mut h, &s, 5, image(5, b"cd"))), "unauthorized");
+        assert!(h.prompt().is_none());
+        send(&mut h, &s, 6, one_time("https://example.com"));
+        assert_eq!(state(&send(&mut h, &s, 7, image(4, b"ab"))), "reading");
+        assert_eq!(state(&send(&mut h, &s, 8, image(4, b"cd"))), "decoding");
+        let (id, generation, picture) = h.take_image().unwrap();
+        assert_eq!(
+            (id.as_str(), picture.as_slice()),
+            (s.as_str(), &b"abcd"[..])
+        );
+        assert!(h.take_image().is_none());
+        assert!(
+            h.prompt()
+                .is_some_and(|p| p.one_time && p.state == "decoding")
+        );
+        h.scanned(&s, generation + 1, None);
+        h.scanned(&s, generation, None);
+        assert_eq!(state(&send(&mut h, &s, 9, Action::Poll)), "no_code");
+        send(&mut h, &s, 10, one_time("https://example.com"));
+        send(&mut h, &s, 11, image(1, b"x"));
+        let (_, generation, _) = h.take_image().unwrap();
+        h.scanned(
+            &s,
+            generation,
+            Some(OneTimePassword {
+                link: "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP".into(),
+                issuer: Some("Example".into()),
+                account: Some("alice".into()),
+            }),
+        );
+        h.snapshot(true);
+        let lookup = h.take_work().pop().unwrap();
+        assert!(matches!(lookup.action, WorkerAction::Lookup { .. }));
+        h.complete(
+            &lookup,
+            Ok(WorkerReply::Candidates {
+                ticket: "t".repeat(64),
+                candidates: vec![],
+            }),
+        );
+        let prompt = h.prompt().unwrap();
+        assert_eq!(
+            (prompt.state.as_str(), prompt.code.as_deref()),
+            ("awaiting_approval", Some("Example · alice"))
+        );
+        h.approve(&s, generation, None);
+        let save = h.take_work().pop().unwrap();
+        assert!(
+            matches!(&save.action, WorkerAction::SaveOneTime { candidate: None, one_time, .. } if one_time.link.ends_with("JBSWY3DPEHPK3PXP"))
+        );
+        h.complete(&save, Ok(WorkerReply::Done));
+        assert_eq!(state(&send(&mut h, &s, 12, Action::Poll)), "done");
+        let too_big = u32::try_from(super::super::MAX_IMAGE).unwrap() + 1;
+        for (sequence, invalid) in [
+            (13, image(0, b"a")),
+            (14, image(1, b"ab")),
+            (15, image(too_big, b"a")),
+        ] {
+            assert_eq!(state(&send(&mut h, &s, sequence, invalid)), "unauthorized");
+        }
+    }
+    #[test]
+    fn an_unsealed_vault_starts_looking_for_logins_at_once() {
+        let mut h = Hub::default();
+        let s = session(&mut h);
+        h.paired
+            .insert(hex::encode(key().verifying_key().as_bytes()));
+        h.snapshot(true);
+        let detect = Action::Detect {
+            origin: "https://example.com".into(),
+            document: "doc".into(),
+        };
+        assert_eq!(state(&send(&mut h, &s, 1, detect)), "matching");
+        assert!(matches!(
+            h.take_work().pop().unwrap().action,
+            WorkerAction::Lookup { .. }
+        ));
+    }
+    #[test]
+    fn a_stray_picture_never_ends_another_request() {
+        let mut h = Hub::default();
+        let s = session(&mut h);
+        h.paired
+            .insert(hex::encode(key().verifying_key().as_bytes()));
+        let detect = Action::Detect {
+            origin: "https://example.com".into(),
+            document: "doc".into(),
+        };
+        assert_eq!(state(&send(&mut h, &s, 1, detect)), "awaiting_unseal");
+        assert_eq!(state(&send(&mut h, &s, 2, image(4, b"ab"))), "unauthorized");
+        assert_eq!(state(&send(&mut h, &s, 3, Action::Poll)), "awaiting_unseal");
     }
     #[test]
     fn sealed_detection_prompts_without_lookup_and_resumes_after_unlock() {
