@@ -99,6 +99,11 @@ impl PersonalField {
     pub fn text(&self) -> Option<&str> {
         self.value.as_str()
     }
+
+    #[must_use]
+    pub fn is_concealed(&self) -> bool {
+        self.concealed || self.field_type.concealed()
+    }
 }
 
 impl Drop for PersonalField {
@@ -280,6 +285,71 @@ impl PersonalSecret {
         let mut item = Self::template(PersonalSecretKind::Generic, title);
         item.sections[0].fields[0].value = value.into();
         item
+    }
+
+    #[must_use]
+    pub fn username(&self) -> Option<&str> {
+        self.sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .find(|field| field.id == "username")
+            .filter(|field| !field.is_concealed())
+            .and_then(PersonalField::text)
+            .filter(|username| !username.is_empty())
+    }
+
+    #[must_use]
+    pub fn website_host(&self) -> Option<String> {
+        self.sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .filter(|field| field.field_type == PersonalFieldType::Url && !field.concealed)
+            .filter_map(PersonalField::text)
+            .find_map(website::host)
+    }
+
+    #[must_use]
+    pub fn one_time_password(&self) -> Option<&str> {
+        self.sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .find(|field| field.field_type == PersonalFieldType::Totp)
+            .and_then(PersonalField::text)
+    }
+
+    pub fn set_one_time_password(&mut self, link: &str) {
+        if let Some(field) = self
+            .sections
+            .iter_mut()
+            .flat_map(|section| &mut section.fields)
+            .find(|field| field.field_type == PersonalFieldType::Totp)
+        {
+            field.value = link.into();
+            return;
+        }
+        let fields = || self.sections.iter().flat_map(|section| &section.fields);
+        let id = (0..=fields().count())
+            .map(|number| format!("custom-{number}"))
+            .find(|id| !fields().any(|field| field.id == *id))
+            .unwrap_or_default();
+        let field = PersonalField::new(
+            id,
+            PersonalFieldType::Totp.label(),
+            PersonalFieldType::Totp,
+            link,
+        );
+        match self
+            .sections
+            .iter_mut()
+            .find(|section| section.id == CUSTOM_SECTION)
+        {
+            Some(section) => section.fields.push(field),
+            None => self.sections.push(PersonalSection {
+                id: CUSTOM_SECTION.into(),
+                label: CUSTOM_SECTION_LABEL.into(),
+                fields: vec![field],
+            }),
+        }
     }
 
     pub fn encode(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
@@ -667,6 +737,88 @@ mod tests {
     }
 
     #[test]
+    fn username_is_the_filled_username_field() {
+        let mut login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
+        assert_eq!(login.username(), None);
+        login.sections[0].fields[0].value = "alice".into();
+        assert_eq!(login.username(), Some("alice"));
+        let card = PersonalSecret::template(PersonalSecretKind::Card, "Card".into());
+        assert_eq!(card.username(), None);
+    }
+
+    #[test]
+    fn one_time_passwords_replace_the_first_one_or_become_a_custom_field() {
+        let mut login = PersonalSecret::template(PersonalSecretKind::Login, "GitHub".into());
+        login.set_one_time_password("JBSWY3DPEHPK3PXP");
+        login.set_one_time_password("GEZDGNBVGY3TQOJQ");
+        assert_eq!(login.one_time_password(), Some("GEZDGNBVGY3TQOJQ"));
+        assert_eq!(login.sections.len(), 1);
+        let mut key = PersonalSecret::template(PersonalSecretKind::ApiCredential, "Hetzner".into());
+        assert_eq!(key.one_time_password(), None);
+        key.set_one_time_password("JBSWY3DPEHPK3PXP");
+        let custom = key.sections.last().unwrap();
+        assert_eq!(
+            (
+                custom.id.as_str(),
+                custom.fields[0].id.as_str(),
+                custom.fields[0].label.as_str()
+            ),
+            (CUSTOM_SECTION, "custom-0", "One-time password")
+        );
+        assert_eq!(key.one_time_password(), Some("JBSWY3DPEHPK3PXP"));
+        let mut pin = PersonalSecret::template(PersonalSecretKind::ApiCredential, "Bank".into());
+        pin.sections.push(PersonalSection {
+            id: CUSTOM_SECTION.into(),
+            label: CUSTOM_SECTION_LABEL.into(),
+            fields: vec![PersonalField::new(
+                "custom-0",
+                "PIN",
+                PersonalFieldType::Concealed,
+                "1234",
+            )],
+        });
+        pin.set_one_time_password("JBSWY3DPEHPK3PXP");
+        let fields = &pin.sections.last().unwrap().fields;
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.id.as_str())
+                .collect::<Vec<_>>(),
+            ["custom-0", "custom-1"]
+        );
+    }
+
+    #[test]
+    fn concealed_usernames_are_not_shown() {
+        let mut login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
+        login.sections[0].fields[0].value = "alice".into();
+        login.sections[0].fields[0].concealed = true;
+        let decoded = PersonalSecret::decode_current(&login.encode().unwrap()).unwrap();
+        assert_eq!(decoded.username(), None);
+        login.sections[0].fields[0].concealed = false;
+        login.sections[0].fields[0].field_type = PersonalFieldType::Concealed;
+        assert_eq!(login.username(), None);
+    }
+
+    #[test]
+    fn website_host_is_the_first_public_website_field() {
+        let mut login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
+        assert_eq!(login.website_host(), None);
+        login.sections[0].fields[2].value = "http://router.local".into();
+        assert_eq!(login.website_host(), None);
+        login.sections[0].fields.push(PersonalField::new(
+            "url-1",
+            "Website",
+            PersonalFieldType::Url,
+            "https://GitHub.com/login",
+        ));
+        assert_eq!(login.website_host().as_deref(), Some("github.com"));
+        let mut note = PersonalSecret::template(PersonalSecretKind::SecureNote, "Note".into());
+        note.sections[0].fields[0].value = "github.com".into();
+        assert_eq!(note.website_host(), None);
+    }
+
+    #[test]
     fn card_templates_export_by_field_id_and_renamed_login_fields_are_not_lost() {
         let mut card = PersonalSecret::template(PersonalSecretKind::Card, "Card".into());
         card.sections[0].fields[1].value = "001234".into();
@@ -708,7 +860,10 @@ mod tests {
         for kind in PersonalSecretKind::ALL {
             let item = PersonalSecret::template(kind, kind.label().into());
             assert!(ids.insert(item.id.clone()));
-            assert!(!item.sections[0].fields.is_empty());
+            assert_ne!(
+                item.sections[0].fields,
+                [] as [crate::personal::PersonalField; 0]
+            );
             assert_eq!(
                 item,
                 PersonalSecret::decode("", &item.encode().unwrap()).unwrap()
@@ -862,9 +1017,13 @@ pub(crate) mod legacy_revision;
 pub mod replica;
 #[cfg(feature = "personal-sync")]
 pub mod sync;
+pub mod website;
 
 /// Legacy namespace reserved for personal items.
 pub const PERSONAL_SECRET_NAMESPACE: &[u8] = b"factorseal/personal-secrets/v1";
+
+pub const CUSTOM_SECTION: &str = "custom";
+pub const CUSTOM_SECTION_LABEL: &str = "Custom fields";
 
 const PERSONAL_FORMAT: &str = "factorseal-personal-secret";
 

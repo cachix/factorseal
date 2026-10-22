@@ -6,21 +6,21 @@
   outputs =
     { self, nixpkgs }:
     let
+      inherit (nixpkgs.lib) genAttrs;
       linuxSystems = [
         "x86_64-linux"
         "aarch64-linux"
       ];
-      forLinuxSystems = nixpkgs.lib.genAttrs linuxSystems;
     in
     {
-      packages = forLinuxSystems (
+      packages = genAttrs linuxSystems (
         system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
         {
-          default = pkgs.callPackage ./nix/package.nix { };
-          factorseal = self.packages.${system}.default;
+          default = self.packages.${system}.factorseal;
+          factorseal = pkgs.callPackage ./nix/package.nix { };
           factorseal-desktop = pkgs.callPackage ./nix/desktop-package.nix { };
         }
       );
@@ -29,7 +29,7 @@
       # host's real TPM and asks the operator to trigger a session-lock event.
       # `nix run` builds the same patched Linux package that release artifacts
       # use, then runs the opt-in physical acceptance suite against it.
-      apps = forLinuxSystems (
+      apps = genAttrs linuxSystems (
         system:
         let
           pkgs = import nixpkgs { inherit system; };

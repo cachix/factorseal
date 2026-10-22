@@ -54,6 +54,10 @@ pub struct SecurityEvent {
 }
 
 pub fn record(kind: Kind) {
+    #[allow(
+        deprecated,
+        reason = "try_update requires Rust 1.95; core supports Rust 1.91"
+    )]
     let _ = COUNTS[kind as usize].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
         Some(count.saturating_add(1))
     });

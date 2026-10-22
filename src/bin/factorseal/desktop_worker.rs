@@ -94,6 +94,11 @@ fn run_inner(root: &Path, socket: Option<&Path>, reported: &mut bool) -> Result<
     )?;
     timing::result("desktop_worker", "arm_lifecycle", || lifecycle.arm())?;
     let initializing = matches!(operation, Operation::Initialize { .. });
+    if !initializing {
+        timing::result("desktop_worker", "check_vault_socket", || {
+            super::platform::check_vault_socket(root, socket)
+        })?;
+    }
     #[cfg(feature = "secretspec-provider")]
     timing::result("desktop_worker", "publish_secretspec_claim", || {
         super::secretspec_discovery::publish_for_default_root(root)

@@ -50,10 +50,11 @@ users must manually unlock Desktop before applications can look up credentials.
 Clients that explicitly request `Unlock` can still use the normal prompt flow.
 
 Desktop secret-entry fields use bounded locked, guarded buffers, omit undo/copy
-history, and send only masked text to the renderer. Submitting, leaving a secret
-view, or sealing clears the inputs. Clipboard, native input methods, crypto
-libraries, and operating-system internals can still hold copies; this is not a
-claim of comprehensive memory erasure.
+history, and send only masked text to the renderer until the value is revealed.
+Submitting, leaving a secret view, or sealing clears the inputs. Clipboard,
+native input methods, the password strength check, crypto libraries, and
+operating-system internals can still hold copies; this is not a claim of
+comprehensive memory erasure.
 
 Every unlock group is hardware-bound. Factors inside a group are AND
 requirements and independently wrapped groups are OR alternatives. Password
@@ -188,6 +189,11 @@ GUI dependency parents still retain the six flagged crates. GUI libraries are
 outside the separately built CLI key owner's dependency graph.
 
 ## Honest limitations
+
+- Desktop's website icons, on by default, send the host name of each personal
+  item's website to DuckDuckGo's icon service while the vault is unsealed.
+  The request and image decoding run in the sandboxed network helper. Turn
+  off Show website icons in Settings to keep these names on the device.
 
 - Personal documents retain per-item Automerge histories inside their signed,
   encrypted snapshots. Unlike the value-free audit log, this includes old and

@@ -958,24 +958,35 @@ fn desktop_executable() -> Result<PathBuf, CliError> {
 
     let current =
         std::env::current_exe().map_err(|error| CliError::DesktopLaunch(error.to_string()))?;
+    if let Some(executable) = installed_desktop_executable(&current) {
+        return Ok(executable);
+    }
+    Err(CliError::DesktopLaunch(format!(
+        "Factorseal Desktop is not installed beside {}; install Factorseal Desktop or set {DESKTOP_EXECUTABLE_ENV}",
+        current.display()
+    )))
+}
+
+pub(super) fn installed_desktop_executable(current: &Path) -> Option<PathBuf> {
     let name = if cfg!(windows) {
         "factorseal-desktop.exe"
     } else {
         "factorseal-desktop"
     };
-    let sibling = current
-        .parent()
-        .ok_or_else(|| {
-            CliError::DesktopLaunch("the Factorseal executable has no parent directory".to_owned())
-        })?
-        .join(name);
+    let directory = current.parent()?;
+    let sibling = directory.join(name);
     if sibling.is_file() {
-        return Ok(sibling);
+        return Some(sibling);
     }
-    Err(CliError::DesktopLaunch(format!(
-        "{name} is not installed beside {}; install Factorseal Desktop or set {DESKTOP_EXECUTABLE_ENV}",
-        current.display()
-    )))
+    #[cfg(target_os = "macos")]
+    if directory.ends_with("Contents/Helpers/FactorsealWorker.app/Contents/MacOS") {
+        // current_exe resolves the CLI alias into its provisioned worker bundle.
+        let desktop = directory.ancestors().nth(4)?.join("MacOS").join(name);
+        if desktop.is_file() {
+            return Some(desktop);
+        }
+    }
+    None
 }
 
 pub(super) fn wait_for_initialization(root: &Path, poll_interval: Duration) {
@@ -1186,6 +1197,7 @@ fn permission_text_cannot_execute_terminal_or_unicode_controls() {
             created_at: 1,
             expires_at: 99,
             challenge: [0; 32],
+            awaited: false,
             expiring_write: false,
         },
     };
@@ -1313,6 +1325,7 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
         )
     })
     .and_then(|()| writeln!(output, "  reason: {reason}"))
+    .and_then(|()| write_launch_chain(output, &approval.application.declared_launch_chain))
     .and_then(|()| {
         if let Some(distro) = approval.application.declared_wsl_origin.as_deref() {
             // Caller-declared, not authenticated -- see
@@ -1326,7 +1339,6 @@ fn write_permission(output: &mut impl Write, approval: &Permission) -> Result<()
             Ok(())
         }
     })
-    .and_then(|()| write_launch_chain(output, &approval.application.declared_launch_chain))
     .and_then(|()| {
         if let Some(duration) = approval.application.requested_permission_duration_seconds {
             writeln!(

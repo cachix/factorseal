@@ -150,6 +150,18 @@ writing, disk flush, and rename; the latter phases appear only when replacing a 
 Host executable identification overlaps TPM/password unsealing; only
 `wait_host_identities` adds time after unsealing if identification is still running.
 Password timings separate scratch-memory allocation, Argon2, and secure cleanup.
+The `store_open/verify_current_state` timing covers current inventory verification
+and any first-open migration. Schema v6 verifies one signed manifest, current
+head metadata, and current ciphertext digests. `store_chain` timings apply only
+to legacy migration: commit and snapshot batches include nested signature and
+digest timings, followed by row-set and inventory checks.
+Turso retains one encrypted snapshot per document and reuses freed pages during
+writes. There is no idle compaction timer. A legacy migration repacks once when
+unused pages occupy at least 64 MiB and half the database, verifying authenticated
+state afterward. A signed pending flag resumes interrupted cleanup on the next
+open. Current records, value-free history and personal replication history are
+preserved. Large deletions can leave a physical high-water mark. Turso 0.8.2's
+experimental vacuum flag is enabled only to support this migration cleanup.
 The initial unlocked view waits for inventory, then loads permissions separately;
 `permissions_ready` records when that follow-up has reached the UI.
 
@@ -249,8 +261,9 @@ in Factorseal's state directory on Linux, or its cache directory on macOS and
 Windows, outside the vault root. Set
 `FACTORSEAL_DIAGNOSTICS_DIR` to use another location. Automatic submission requires
 a configured Sentry DSN, as described below. The bug button immediately before
-“Your secrets stay here” opens a form for describing what happened, what was
-expected, and steps to reproduce. A nonempty description (up to 4,000 characters)
+“Your secrets stay here”, or Report an issue in Settings under Diagnostics once
+the vault is unsealed, opens a form for describing what happened, what was expected, and
+steps to reproduce. A nonempty description (up to 4,000 characters)
 is required. Send report submits the description with the current Desktop
 diagnostic log without requiring a crash; Cancel sends nothing. It reports successful delivery only after Sentry
 acknowledges receipt; offline or delayed submissions remain queued for retry.
@@ -273,7 +286,9 @@ Automatic diagnostics exclude secret values, vault contents, arguments, environm
 raw error strings, thread names, and panic payloads. They do not collect memory
 dumps or redirect stderr. Backtraces may contain build-time source paths, so
 review the export before sharing it. Release builds retain line tables; packages
-must retain debug symbols for useful source locations. Descriptions entered in
+must retain debug symbols for useful source locations. Linux Nix packages compress
+the debug sections with zlib to reduce executable authentication time while
+preserving backtrace source locations. Descriptions entered in
 the issue form are sent as written and retained with queued reports for retries;
 do not include passwords or secret values. Drafts stay in memory until submitted.
 

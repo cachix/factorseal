@@ -72,29 +72,39 @@ Open the extension popup and choose **Pair with Desktop**. In Desktop, choose
 A successful unlock completes that pairing without another confirmation.
 Pairing requests HTTPS site access, then enables login detection automatically
 after Desktop approves. If you decline site access, you can enable it later
-from the popup. When a visible login form is
-detected in the focused browser's active tab, Desktop prompts to unseal if needed,
-checks for matching logins, and offers account-specific Fill buttons. No matches
-means no fill prompt. Denial suppresses that document until manual retry or reload.
+from the popup. Login fields on HTTPS pages then get a small FactorSeal button.
+Choosing it opens Desktop, which prompts to unseal if needed, checks for matching
+logins, and offers account-specific Fill buttons. Desktop never opens just because
+a page has a login form. Field buttons and page notices are extension pages inside
+a closed shadow root, so the website can neither read nor press them.
 
-Use **Check this page** to retry, **Pause / resume this site** to control automatic
-prompts, or **Disconnect profile** to revoke pairing with Desktop approval. Close
-or cancel a request to dismiss it. Browser requests use the same compact approval
-window as access grants, including in-dialog unsealing and the Wayland overlay
-with a normal dialog fallback. Closing that approval window or pressing Escape
-denies the request. The main Desktop window can stay closed.
+Use **Fill this page** when a field button is hidden, **Pause / resume this
+site** to hide field buttons and save questions on a site, or **Disconnect
+profile** to revoke pairing with Desktop approval. Close or cancel a request to
+dismiss it. Browser requests use the same compact approval window as access
+grants, including in-dialog unsealing and the Wayland overlay with a normal
+dialog fallback. Closing that approval window or pressing Escape denies the
+request. The main Desktop window can stay closed.
 
-Submitting a login or registration form offers to save its credentials in Desktop.
-If sealed, unlock there first. Desktop offers **Save login**, or an explicit
-**Update password** choice for existing logins with the same origin and username.
-Unchanged credentials are skipped. Updates preserve the item's other fields and
-reject records changed since review. A save survives the submission's navigation;
-closing the tab, canceling, expiry, or sealing cancels pending review. Submission
-does not prove that login or registration succeeded.
+Submitting a login or registration form asks **Save this login in FactorSeal?**
+on the page, and again on the next page of the same site if the submission
+navigates. Choose **Save** to review it in Desktop, unlocking there first if
+sealed. **Not now** forgets it, and the question expires after two minutes. A
+login FactorSeal just filled is not offered again. Desktop offers **Save login**,
+or an explicit **Update password** choice for existing logins with the same
+origin and username. Unchanged credentials are skipped. Updates preserve the
+item's other fields and reject records changed since review. A save survives the
+submission's navigation; closing the tab, canceling, expiry, or sealing cancels
+pending review. Submission does not prove that login or registration succeeded.
 
 For pages that do not emit a standard form submission, choose **Save login from
 this page** in the popup while the completed form is still visible. Captured
 credentials are kept only in memory during review, never in extension storage.
+
+Choose **Add one-time password** in the popup while a site shows its two-factor
+QR code. The extension captures only that tab and sends the picture to Desktop in
+signed pieces. Desktop reads the code and offers the site's logins or **Save as
+new login**. The extension never receives the setup key.
 
 ## Current boundaries
 

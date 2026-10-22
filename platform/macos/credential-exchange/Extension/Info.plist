@@ -5,8 +5,8 @@
   <key>CFBundleIdentifier</key><string>dev.factorseal.credentials</string>
   <key>CFBundleName</key><string>FactorSeal</string>
   <key>CFBundlePackageType</key><string>XPC!</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSExtension</key><dict>
     <key>NSExtensionPointIdentifier</key><string>com.apple.authentication-services-credential-provider-ui</string>

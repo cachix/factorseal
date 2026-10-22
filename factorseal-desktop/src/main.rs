@@ -7,8 +7,11 @@ mod appearance;
 #[cfg(feature = "apple-credential-exchange")]
 mod apple_exchange;
 mod branding;
+mod controls;
 mod crash_reporting;
 mod instance;
+mod motion;
+mod password_generator;
 mod runtime;
 mod secret_input;
 mod settings;
@@ -42,6 +45,60 @@ impl AssetSource for Assets {
             branding::BUG_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../../assets/logo/factorseal-bug.svg"
             )))),
+            branding::LOCK_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-lock.svg"
+            )))),
+            branding::DOWNLOAD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-download.svg"
+            )))),
+            branding::UPLOAD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-upload.svg"
+            )))),
+            branding::KEY_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-key.svg"
+            )))),
+            branding::CARD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-card.svg"
+            )))),
+            branding::REFRESH_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-refresh.svg"
+            )))),
+            branding::TRANSFER_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-transfer.svg"
+            )))),
+            branding::QR_CODE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-qr-code.svg"
+            )))),
+            branding::PASTE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-paste.svg"
+            )))),
+            branding::GENERATE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-generate.svg"
+            )))),
+            branding::TRASH_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-trash.svg"
+            )))),
+            branding::TAG_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-tag.svg"
+            )))),
+            branding::CLOCK_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-clock.svg"
+            )))),
+            branding::MAIL_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-mail.svg"
+            )))),
+            branding::PHONE_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-phone.svg"
+            )))),
+            branding::PENCIL_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-pencil.svg"
+            )))),
+            branding::GRIP_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-grip.svg"
+            )))),
+            branding::KEYBOARD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/logo/factorseal-keyboard.svg"
+            )))),
             _ => gpui_component_assets::Assets.load(path),
         }
     }
@@ -55,6 +112,24 @@ impl AssetSource for Assets {
                 branding::SEARCH_ASSET.into(),
                 branding::CLOSE_ASSET.into(),
                 branding::BUG_ASSET.into(),
+                branding::LOCK_ASSET.into(),
+                branding::DOWNLOAD_ASSET.into(),
+                branding::UPLOAD_ASSET.into(),
+                branding::KEY_ASSET.into(),
+                branding::CARD_ASSET.into(),
+                branding::REFRESH_ASSET.into(),
+                branding::TRANSFER_ASSET.into(),
+                branding::QR_CODE_ASSET.into(),
+                branding::PASTE_ASSET.into(),
+                branding::GENERATE_ASSET.into(),
+                branding::TRASH_ASSET.into(),
+                branding::TAG_ASSET.into(),
+                branding::CLOCK_ASSET.into(),
+                branding::MAIL_ASSET.into(),
+                branding::PHONE_ASSET.into(),
+                branding::PENCIL_ASSET.into(),
+                branding::GRIP_ASSET.into(),
+                branding::KEYBOARD_ASSET.into(),
             ]
             .into_iter()
             .filter(|asset: &SharedString| asset.starts_with(path)),
@@ -198,34 +273,42 @@ fn main() {
             None
         });
     factorseal::diagnostics::event("desktop", "open_application", "start");
-    gpui_platform::application()
-        .with_assets(Assets)
-        .with_quit_mode(QuitMode::Explicit)
-        .run(move |cx| {
-            app::setup(
-                config,
-                args.background || args.keyring_activation,
-                args.no_tray,
-                activations,
-                access_requests,
-                secret_service_host,
-                cx,
-            );
-        });
+    desktop_application().run(move |cx| {
+        app::setup(
+            config,
+            args.background || args.keyring_activation,
+            args.no_tray,
+            activations,
+            access_requests,
+            secret_service_host,
+            cx,
+        );
+    });
     drop(instance_lock);
     factorseal::diagnostics::finish(true);
 }
 
+fn desktop_application() -> gpui::Application {
+    let application = gpui_platform::application()
+        .with_assets(Assets)
+        .with_quit_mode(QuitMode::Explicit);
+    application.on_reopen(|cx| cx.dispatch_action(&app::OpenDesktop));
+    application
+}
+
 #[cfg(target_os = "linux")]
 fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
-    use zbus::blocking::{Proxy, connection::Builder};
+    zbus::block_on(wait_for_secret_service_async(timeout))
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_secret_service_async(timeout: std::time::Duration) -> Result<(), String> {
+    use zbus::{Proxy, connection::Builder};
 
     let connection = Builder::session()
-        .and_then(|builder| {
-            builder
-                .method_timeout(std::time::Duration::from_secs(2))
-                .build()
-        })
+        .method_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .await
         .map_err(|error| format!("could not monitor Secret Service activation: {error}"))?;
     let proxy = Proxy::new(
         &connection,
@@ -233,11 +316,13 @@ fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
     )
+    .await
     .map_err(|error| format!("could not monitor Secret Service activation: {error}"))?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let has_owner: bool = proxy
             .call("NameHasOwner", &(SECRET_SERVICE_NAME,))
+            .await
             .map_err(|error| format!("could not inspect Secret Service activation: {error}"))?;
         if has_owner {
             return Ok(());
@@ -245,7 +330,7 @@ fn wait_for_secret_service(timeout: std::time::Duration) -> Result<(), String> {
         if std::time::Instant::now() >= deadline {
             return Err("timed out waiting for Desktop to unseal the keyring".to_owned());
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 

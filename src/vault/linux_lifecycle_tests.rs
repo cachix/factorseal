@@ -37,7 +37,7 @@ impl Manager {
     }
 
     fn get_session(&self, id: &str) -> OwnedObjectPath {
-        assert!(!id.is_empty());
+        assert_ne!(id, "");
         self.sessions.lock().unwrap().first().map_or_else(
             || SESSION_PATH.try_into().unwrap(),
             |session| session.4.clone(),
@@ -57,7 +57,6 @@ impl SessionProperties {
 
 async fn monitor() -> LinuxLifecycleConnection {
     let connection = zbus::connection::Builder::session()
-        .unwrap()
         .method_timeout(Duration::from_secs(2))
         .build()
         .await
@@ -65,6 +64,30 @@ async fn monitor() -> LinuxLifecycleConnection {
     LinuxLifecycleConnection::with_connection(connection, Arc::new(LifecycleSignal::new()))
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn dbus_identity_lookup_from_an_async_caller() {
+    if std::env::var_os("FACTORSEAL_TEST_PRIVATE_DBUS").is_none() {
+        return;
+    }
+    let connection = Connection::session().await.unwrap();
+    let name = connection.unique_name().unwrap().to_string();
+    // The synchronous API must not nest zbus's runtime inside this Tokio task.
+    let (identity, folder) = dbus_caller_identity(&name).unwrap();
+    let (local, _remote) = UnixStream::pair().unwrap();
+    let expected = caller_identity(&local, &CallerIdentityCache::default()).unwrap();
+    assert_eq!(identity, expected);
+    assert!(Path::new(&folder).is_absolute());
+    assert!(matches!(
+        dbus_caller_identity("org.freedesktop.DBus"),
+        Err(VaultError::AuthorizationRequired)
+    ));
+    connection.close().await.unwrap();
+    assert!(matches!(
+        dbus_caller_identity(&name),
+        Err(VaultError::AuthorizationRequired)
+    ));
 }
 
 #[tokio::test]
@@ -87,9 +110,7 @@ async fn logind_wire_events_and_inhibitor_lifetime() {
     let inhibitors = Arc::new(Mutex::new(Vec::new()));
     let locked = Arc::new(AtomicBool::new(false));
     let server = zbus::connection::Builder::session()
-        .unwrap()
         .name("org.freedesktop.login1")
-        .unwrap()
         .serve_at(
             MANAGER_PATH,
             Manager {
@@ -97,9 +118,7 @@ async fn logind_wire_events_and_inhibitor_lifetime() {
                 inhibitors: Arc::clone(&inhibitors),
             },
         )
-        .unwrap()
         .serve_at(SESSION_PATH, SessionProperties(Arc::clone(&locked)))
-        .unwrap()
         .build()
         .await
         .unwrap();
@@ -170,7 +189,7 @@ async fn logind_wire_events_and_inhibitor_lifetime() {
 
     for value in [false, true] {
         let mut monitor = self::monitor().await;
-        let changed = HashMap::from([("LockedHint", OwnedValue::from(value))]);
+        let changed = HashMap::from([("LockedHint", OwnedVariant::from(value))]);
         server
             .emit_signal(
                 None::<&str>,

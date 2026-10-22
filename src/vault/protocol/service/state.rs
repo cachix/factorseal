@@ -297,6 +297,7 @@ impl LiveStateGuard<'_> {
         let deadline = started
             .checked_add(timeout)
             .ok_or_else(|| VaultError::Protocol("permission wait timeout overflows".to_owned()))?;
+        self.live.approvals.awaited(caller, id, deadline);
         loop {
             if self.live.store.is_sealed() || self.live.lease.is_expired(Instant::now()) {
                 self.live.store.seal();
@@ -336,12 +337,28 @@ impl LiveStateGuard<'_> {
             }
             // The condition-variable wait releases the guard; a manager's
             // grant may be revoked or expire before it is reacquired.
-            super::require_permission_manager(&self, caller, clock.wall())?;
+            let manager_expiry = super::permission_manager_deadline(&self, caller, clock.wall())?;
             let current = self.list_permissions(clock.wall())?;
             if current.0 != after_revision {
                 return Ok(current);
             }
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            // Expiring permissions must wake the watcher even without a
+            // mutation or notification from another request.
+            let next_expiry = current
+                .1
+                .iter()
+                .filter_map(|permission| match permission.state {
+                    super::super::PermissionState::Pending { expires_at, .. } => Some(expires_at),
+                    super::super::PermissionState::Granted { expires_at, .. } => expires_at,
+                })
+                .chain(manager_expiry)
+                .min();
+            let wake_at =
+                next_expiry.map_or(deadline, |expiry| deadline.min(clock.deadline(expiry)));
+            let Some(remaining) = wake_at.checked_duration_since(Instant::now()) else {
+                if Instant::now() < deadline {
+                    continue;
+                }
                 return Ok(current);
             };
             let (live, _) = self

@@ -8,6 +8,9 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+# Turso disables branches' defaults; its no_std abort uses an intrinsic removed
+# from nightly. Use std::process::abort for these hosted fuzz binaries.
+branches = { version = "0.4.6", default-features = false, features = ["std"] }
 libfuzzer-sys = "0.4"
 factorseal = { path = "..", default-features = false, features = ["fuzzing"] }
 
@@ -15,10 +18,10 @@ factorseal = { path = "..", default-features = false, features = ["fuzzing"] }
 members = ["."]
 
 [patch.crates-io]
-i18n-config = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
-i18n-embed = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
-i18n-embed-impl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
-i18n-embed-fl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "9dcd77dbc62717f232815377838a2dc37f8f7f6a" }
+i18n-config = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "10e345470d97c9cffb3bc611182f595ad93251bf" }
+i18n-embed = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "10e345470d97c9cffb3bc611182f595ad93251bf" }
+i18n-embed-impl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "10e345470d97c9cffb3bc611182f595ad93251bf" }
+i18n-embed-fl = { git = "https://github.com/kellpossible/cargo-i18n.git", rev = "10e345470d97c9cffb3bc611182f595ad93251bf" }
 
 [[bin]]
 name = "personal_sync"

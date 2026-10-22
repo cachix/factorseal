@@ -1,4 +1,6 @@
-{ pkgs, ... }: {
+{ pkgs, lib, ... }: {
+  apple.sdk = if pkgs.stdenv.hostPlatform.isDarwin then pkgs.apple-sdk_26 else null;
+
   # GTK and Qt expose their own linker flags through pkg-config. Keeping the
   # aggregate Nix linker list would exceed Linux's argument-size limit once
   # both SDKs and their propagated dependencies are present.
@@ -37,12 +39,16 @@
       export PATH="${llvmPackages_21.clang-unwrapped}/bin:$PATH"
       exec ${llvmPackages_21.bintools-unwrapped}/bin/llvm-rc "$@"
     '')
+  ] ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+    pkgs.imagemagick
+    pkgs.swift
+    pkgs.swiftpm
   ];
 
   languages.rust = {
     enable = true;
     channel = "stable";
-    version = "1.97.1";
+    version = "1.99.0";
     targets = [ "x86_64-pc-windows-msvc" ];
   };
 

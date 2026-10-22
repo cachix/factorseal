@@ -132,7 +132,8 @@ fn queued_request_is_rejected_after_absolute_expiry() {
 use super::super::grant::{
     GrantTarget, list_granted_permissions, promote_permission, revoke_permission, store_grant,
 };
-use super::super::wire::{MAX_WSL_GRANT_SECONDS, SINGLE_USE_GRANT_SECONDS};
+use super::super::wire::MAX_WSL_GRANT_SECONDS;
+use super::super::wire::SINGLE_USE_GRANT_SECONDS;
 use super::*;
 use crate::vault::{
     DeviceKeyId, HistoryEntry, HistoryOperation, MAX_HISTORY_PAGE_SIZE, Permission,
@@ -796,18 +797,35 @@ fn vault_inventory_is_value_free_paginated_and_permission_manager_only() {
 
 #[test]
 fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
-    use crate::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret};
+    use crate::personal::{
+        PERSONAL_SECRET_NAMESPACE, PersonalField, PersonalFieldType, PersonalSecret,
+    };
 
     let (_directory, service) = service(100, UnsealLeasePolicy::default());
     let manager = caller();
     service.authorize_permission_manager(&manager, 100).unwrap();
     let mut item = PersonalSecret::generic("Original title".into(), "secret".into());
+    item.sections[0].fields.push(PersonalField::new(
+        "username",
+        "Username",
+        PersonalFieldType::Text,
+        "alice",
+    ));
+    item.sections[0].fields.push(PersonalField::new(
+        "url-0",
+        "Website",
+        PersonalFieldType::Url,
+        "https://github.com/login",
+    ));
     item.kind = crate::personal::PersonalSecretKind::Login;
     let source = VaultEntryMetadata {
         access_project: None,
         display_name: Some("untrusted title".into()),
         display_type: Some("untrusted type".into()),
+        display_username: Some("untrusted user".into()),
+        display_website: Some("untrusted.example.com".into()),
         updated_at: Some(u64::MAX),
+        favorite: true,
         document_kind: DocumentKind::LocalKeyring,
         partition: PERSONAL_SECRET_NAMESPACE.to_vec(),
         address: SecretAddress::new("legacy title address", None).unwrap(),
@@ -852,7 +870,10 @@ fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
     );
     assert_eq!(entries[0].display_name.as_deref(), Some("Renamed"));
     assert_eq!(entries[0].display_type.as_deref(), Some(item.kind.label()));
+    assert_eq!(entries[0].display_username.as_deref(), Some("alice"));
+    assert_eq!(entries[0].display_website.as_deref(), Some("github.com"));
     assert_eq!(entries[0].updated_at, Some(101));
+    assert!(!entries[0].favorite);
     let response = service.handle(
         &manager,
         VaultRequest::new(VaultAction::ExportVaultEntry {
@@ -888,7 +909,10 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
         access_project: None,
         display_name: None,
         display_type: None,
+        display_username: None,
+        display_website: None,
         updated_at: None,
+        favorite: false,
         document_kind: DocumentKind::LocalKeyring,
         partition: b"portable-entry-test".to_vec(),
         address: SecretAddress::new("source", None).unwrap(),
@@ -1185,7 +1209,10 @@ fn revoking_an_expired_permission_cleans_the_registry() {
     revoke_permission(store, "prm_short", 160, &provenance).unwrap();
     assert!(revoke_permission(store, "prm_short", 161, &provenance).is_err());
     revoke_permission(store, "prm_long", 162, &provenance).unwrap();
-    assert!(list_granted_permissions(store, 162).unwrap().is_empty());
+    assert_eq!(
+        list_granted_permissions(store, 162).unwrap(),
+        [] as [crate::vault::protocol::wire::Permission; 0]
+    );
 }
 
 #[test]
@@ -1335,7 +1362,7 @@ fn project_history_is_paginated_value_free_and_separately_authorized() {
     else {
         panic!("expected an empty filtered page");
     };
-    assert!(entries.is_empty());
+    assert_eq!(entries, [] as [crate::vault::history::HistoryEntry; 0]);
 
     // The writer sees its own entries in full, and a permission manager sees
     // every principal, as it does through `ListPermissions`.
@@ -1745,6 +1772,93 @@ fn approval_is_entry_scoped_and_requires_a_vault_signature() {
     ));
 }
 
+/// The launch chain is display context read from a spoofable process table
+/// (see `VaultApplicationContext::declared_launch_chain`). A grant binds the
+/// authenticated caller and the target, so the same provider launched from
+/// another program is covered by it, and the chain must not be mistaken for
+/// a check that it is not.
+#[test]
+fn declared_launch_chain_is_shown_but_does_not_scope_the_grant() {
+    let (directory, service) = service(100, UnsealLeasePolicy::default());
+    let provider = caller();
+    let get = |launcher: &str| {
+        let application = VaultApplicationContext::new(
+            Some("demo".to_owned()),
+            Some("production".to_owned()),
+            Some(format!(
+                "{}/projects/first",
+                if cfg!(windows) { "C:" } else { "" }
+            )),
+            Some("deploy".to_owned()),
+        )
+        .unwrap()
+        .with_declared_launch_chain(vec!["secretspec".to_owned(), launcher.to_owned()])
+        .unwrap();
+        VaultRequest::new_with_application(
+            VaultAction::GetCache {
+                project: "demo".to_owned(),
+                address: project_address("demo"),
+            },
+            application,
+        )
+        .unwrap()
+    };
+
+    let denied = service.handle(&provider, get("terminal"), 101);
+    assert!(denied.result.unwrap_err().interaction.is_some());
+    let manager = CallerIdentity::new(
+        CallerPlatform::Linux,
+        "uid:1000",
+        "dev.factorseal.cli",
+        [9; 32],
+        None,
+    )
+    .unwrap();
+    service.authorize_permission_manager(&manager, 101).unwrap();
+    let listed = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+        102,
+    );
+    let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
+        panic!("expected one pending permission");
+    };
+    assert_eq!(
+        permissions[0].application.declared_launch_chain,
+        ["secretspec", "terminal"]
+    );
+    let PermissionState::Pending { challenge, .. } = &permissions[0].state else {
+        panic!("expected pending permission");
+    };
+    let unsealed = Vault::unseal_for_test(&directory.path().join("factorseal")).unwrap();
+    let signature = unsealed
+        .sign_permission_challenge(&permissions[0].id, challenge, Some(3_600))
+        .unwrap();
+    let approved = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ApprovePermission {
+            id: permissions[0].id.clone(),
+            signature,
+            duration_seconds: Some(3_600),
+            single_use: false,
+        })
+        .unwrap(),
+        103,
+    );
+    assert!(matches!(
+        approved.result,
+        Ok(VaultResponseBody::PermissionChanged {
+            status: PermissionChange::Granted
+        })
+    ));
+
+    let other_launcher = service.handle(&provider, get("another-program"), 104);
+    assert!(matches!(
+        other_launcher.result,
+        Ok(VaultResponseBody::Secret { .. })
+    ));
+}
+
 /// A request relayed from WSL has no equivalent of the executable-identity
 /// hint a native caller gets, even as defense in depth (see
 /// `VaultApplicationContext::declared_wsl_origin`), so approving one must
@@ -1855,93 +1969,6 @@ fn wsl_declared_origin_caps_the_granted_lease() {
     let retried = service.handle(&provider, get(), 104);
     assert!(matches!(
         retried.result,
-        Ok(VaultResponseBody::Secret { .. })
-    ));
-}
-
-/// The launch chain is display context read from a spoofable process table
-/// (see `VaultApplicationContext::declared_launch_chain`). A grant binds the
-/// authenticated caller and the target, so the same provider launched from
-/// another program is covered by it, and the chain must not be mistaken for
-/// a check that it is not.
-#[test]
-fn declared_launch_chain_is_shown_but_does_not_scope_the_grant() {
-    let (directory, service) = service(100, UnsealLeasePolicy::default());
-    let provider = caller();
-    let get = |launcher: &str| {
-        let application = VaultApplicationContext::new(
-            Some("demo".to_owned()),
-            Some("production".to_owned()),
-            Some(format!(
-                "{}/projects/first",
-                if cfg!(windows) { "C:" } else { "" }
-            )),
-            Some("deploy".to_owned()),
-        )
-        .unwrap()
-        .with_declared_launch_chain(vec!["secretspec".to_owned(), launcher.to_owned()])
-        .unwrap();
-        VaultRequest::new_with_application(
-            VaultAction::GetCache {
-                project: "demo".to_owned(),
-                address: project_address("demo"),
-            },
-            application,
-        )
-        .unwrap()
-    };
-
-    let denied = service.handle(&provider, get("terminal"), 101);
-    assert!(denied.result.unwrap_err().interaction.is_some());
-    let manager = CallerIdentity::new(
-        CallerPlatform::Linux,
-        "uid:1000",
-        "dev.factorseal.cli",
-        [9; 32],
-        None,
-    )
-    .unwrap();
-    service.authorize_permission_manager(&manager, 101).unwrap();
-    let listed = service.handle(
-        &manager,
-        VaultRequest::new(VaultAction::ListPermissions).unwrap(),
-        102,
-    );
-    let Ok(VaultResponseBody::Permissions { permissions, .. }) = listed.result else {
-        panic!("expected one pending permission");
-    };
-    assert_eq!(
-        permissions[0].application.declared_launch_chain,
-        ["secretspec", "terminal"]
-    );
-    let PermissionState::Pending { challenge, .. } = &permissions[0].state else {
-        panic!("expected pending permission");
-    };
-    let unsealed = Vault::unseal_for_test(&directory.path().join("factorseal")).unwrap();
-    let signature = unsealed
-        .sign_permission_challenge(&permissions[0].id, challenge, Some(3_600))
-        .unwrap();
-    let approved = service.handle(
-        &manager,
-        VaultRequest::new(VaultAction::ApprovePermission {
-            id: permissions[0].id.clone(),
-            signature,
-            duration_seconds: Some(3_600),
-            single_use: false,
-        })
-        .unwrap(),
-        103,
-    );
-    assert!(matches!(
-        approved.result,
-        Ok(VaultResponseBody::PermissionChanged {
-            status: PermissionChange::Granted
-        })
-    ));
-
-    let other_launcher = service.handle(&provider, get("another-program"), 104);
-    assert!(matches!(
-        other_launcher.result,
         Ok(VaultResponseBody::Secret { .. })
     ));
 }
@@ -2085,7 +2112,10 @@ fn pending_approval_survives_sealing_and_is_approved_after_unseal() {
 
     // A granted request is no longer pending after the next seal either.
     let service = reopen_after_seal(&directory, service, now + 60);
-    assert!(pending_ids(&service, &manager, now + 61).is_empty());
+    assert_eq!(
+        pending_ids(&service, &manager, now + 61),
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -2131,7 +2161,10 @@ fn denied_and_expired_approvals_do_not_return_after_unseal() {
 
     // Unsealed again after the request's seven-day lifetime.
     let service = reopen_after_seal(&directory, service, kept.expires_at + 1);
-    assert!(pending_ids(&service, &manager, kept.expires_at + 2).is_empty());
+    assert_eq!(
+        pending_ids(&service, &manager, kept.expires_at + 2),
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -2267,6 +2300,130 @@ fn approval_wait_wakes_on_revision_change_and_times_out_unchanged() {
             permissions, ..
         }) if revision > 0 && permissions.len() == 1
     ));
+}
+
+#[test]
+fn approval_wait_wakes_when_a_grant_expires_without_another_request() {
+    let (directory, service) = service(100, UnsealLeasePolicy::default());
+    let manager = permission_manager();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    let interaction = service
+        .handle(&caller(), cache_request("demo"), 100)
+        .result
+        .unwrap_err()
+        .interaction
+        .unwrap();
+    let VaultResponseBody::Permissions { permissions, .. } = service
+        .handle(
+            &manager,
+            VaultRequest::new(VaultAction::ListPermissions).unwrap(),
+            100,
+        )
+        .result
+        .unwrap()
+    else {
+        panic!("expected pending permission")
+    };
+    let PermissionState::Pending { challenge, .. } = permissions[0].state else {
+        panic!("expected pending permission")
+    };
+    let signature = Vault::unseal_for_test(&directory.path().join("factorseal"))
+        .unwrap()
+        .sign_permission_challenge(&interaction.id, &challenge, Some(60))
+        .unwrap();
+    service
+        .handle(
+            &manager,
+            VaultRequest::new(VaultAction::ApprovePermission {
+                id: interaction.id.clone(),
+                signature,
+                duration_seconds: Some(60),
+                single_use: false,
+            })
+            .unwrap(),
+            100,
+        )
+        .result
+        .unwrap();
+    let (before, permissions) = crate::read_permission_pages(
+        |action| {
+            service
+                .handle(&manager, VaultRequest::new(action)?, 100)
+                .result
+                .map_err(|error| VaultError::Protocol(error.message))
+        },
+        None,
+    )
+    .unwrap();
+    let PermissionState::Granted {
+        expires_at: Some(expiry),
+        ..
+    } = permissions[0].state
+    else {
+        panic!("expected expiring grant")
+    };
+    let started = Instant::now();
+    let response = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::WaitPermissions {
+            after_revision: before,
+            timeout_ms: super::super::MAX_PERMISSION_WAIT_MS,
+        })
+        .unwrap(),
+        expiry - 1,
+    );
+    let VaultResponseBody::Permissions {
+        revision,
+        permissions,
+        ..
+    } = response.result.unwrap()
+    else {
+        panic!("unexpected permission response")
+    };
+    assert_ne!(revision, before);
+    assert!(
+        permissions
+            .iter()
+            .all(|permission| permission.id != interaction.id)
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn approval_wait_wakes_on_seal_without_waiting_for_its_timeout() {
+    let (_directory, service) = service(100, UnsealLeasePolicy::default());
+    let service = std::sync::Arc::new(service);
+    let manager = caller();
+    service.authorize_permission_manager(&manager, 100).unwrap();
+    let (revision, _) = crate::read_permission_pages(
+        |action| {
+            service
+                .handle(&manager, VaultRequest::new(action)?, 100)
+                .result
+                .map_err(|error| VaultError::Protocol(error.message))
+        },
+        None,
+    )
+    .unwrap();
+    let started = Instant::now();
+    let waiter_service = std::sync::Arc::clone(&service);
+    let waiter = std::thread::spawn(move || {
+        waiter_service.handle(
+            &manager,
+            VaultRequest::new(VaultAction::WaitPermissions {
+                after_revision: revision,
+                timeout_ms: super::super::MAX_PERMISSION_WAIT_MS,
+            })
+            .unwrap(),
+            100,
+        )
+    });
+    service.seal().unwrap();
+    assert_eq!(
+        waiter.join().unwrap().result.unwrap_err().code,
+        VaultResponseErrorCode::Sealed
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
 }
 
 #[test]
@@ -2737,7 +2894,10 @@ fn export_obeys_record_delivery_expiry() {
         access_project: None,
         display_name: None,
         display_type: None,
+        display_username: None,
+        display_website: None,
         updated_at: None,
+        favorite: false,
         document_kind: DocumentKind::LocalKeyring,
         partition: b"audit".to_vec(),
         address: SecretAddress::new("token", None).unwrap(),
@@ -2993,7 +3153,7 @@ fn dialog_cache_write_is_manager_only_and_does_not_grant_future_writes() {
 #[cfg(feature = "browser")]
 mod browser_integration {
     use super::*;
-    use crate::browser::{Action, Command, Signed, WorkerAction, WorkerReply};
+    use crate::browser::{Action, Command, OneTimePassword, Signed, WorkerAction, WorkerReply};
     use ed25519_dalek::{Signer, SigningKey};
     fn submitted(sequence: u32, username: &str, password: &str) -> Signed {
         signed(
@@ -3318,6 +3478,189 @@ mod browser_integration {
             },
         );
         assert!(request(&service, &manager, WorkerAction::Lookup { request: next }).is_err());
+    }
+    fn one_time(sequence: u32) -> Signed {
+        signed(
+            sequence,
+            Action::OneTime {
+                origin: "https://example.com".into(),
+            },
+        )
+    }
+    fn code(secret: &str) -> OneTimePassword {
+        OneTimePassword {
+            link: format!("otpauth://totp/Example:bob?secret={secret}"),
+            issuer: Some("Example".into()),
+            account: Some("bob".into()),
+        }
+    }
+    fn review(
+        service: &VaultService,
+        manager: &CallerIdentity,
+        submission: &Signed,
+    ) -> (String, Vec<crate::browser::Candidate>) {
+        let WorkerReply::Candidates { ticket, candidates } = request(
+            service,
+            manager,
+            WorkerAction::Lookup {
+                request: submission.clone(),
+            },
+        )
+        .unwrap() else {
+            panic!("review");
+        };
+        (ticket, candidates)
+    }
+    fn stored(service: &VaultService, id: &str) -> crate::personal::PersonalSecret {
+        let state = service.state.lock_live(Instant::now()).unwrap();
+        let bytes = state
+            .store()
+            .get_at(
+                DocumentKind::LocalKeyring,
+                crate::personal::PERSONAL_SECRET_NAMESPACE,
+                &SecretAddress::new(id, None).unwrap(),
+                100,
+            )
+            .unwrap()
+            .unwrap();
+        crate::personal::PersonalSecret::decode_current(&bytes).unwrap()
+    }
+    fn paired_for_one_time() -> (tempfile::TempDir, VaultService, CallerIdentity) {
+        let (dir, service, manager) = setup();
+        request(
+            &service,
+            &manager,
+            WorkerAction::Pair {
+                key: one_time(1).key.clone(),
+            },
+        )
+        .unwrap();
+        (dir, service, manager)
+    }
+    #[test]
+    fn browser_one_time_passwords_go_only_to_the_reviewed_version_of_a_login() {
+        let (_dir, service, manager) = paired_for_one_time();
+        let first = one_time(1);
+        let (ticket, mut candidates) = review(&service, &manager, &first);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].one_time);
+        let alice = candidates.remove(0);
+        request(
+            &service,
+            &manager,
+            WorkerAction::SaveOneTime {
+                ticket,
+                candidate: Some(alice.clone()),
+                request: first,
+                one_time: code("JBSWY3DPEHPK3PXP"),
+            },
+        )
+        .unwrap();
+        let saved = stored(&service, &alice.id);
+        assert_eq!(
+            saved.one_time_password(),
+            Some("otpauth://totp/Example:bob?secret=JBSWY3DPEHPK3PXP")
+        );
+        assert_eq!(saved.username(), Some("alice"));
+        let (ticket, candidates) = review(&service, &manager, &one_time(2));
+        assert!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::Release {
+                    ticket: ticket.clone(),
+                    candidate: candidates[0].clone(),
+                    confirmation: signed(3, Action::Confirm { nonce: ticket }),
+                }
+            )
+            .is_err()
+        );
+        let stale = one_time(4);
+        let (ticket, _) = review(&service, &manager, &stale);
+        assert!(
+            request(
+                &service,
+                &manager,
+                WorkerAction::SaveOneTime {
+                    ticket,
+                    candidate: Some(alice),
+                    request: stale,
+                    one_time: code("GEZDGNBVGY3TQOJQ"),
+                }
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn browser_one_time_passwords_without_a_login_start_one_named_after_the_issuer() {
+        let (_dir, service, manager) = paired_for_one_time();
+        let submission = one_time(1);
+        let (ticket, _) = review(&service, &manager, &submission);
+        request(
+            &service,
+            &manager,
+            WorkerAction::SaveOneTime {
+                ticket,
+                candidate: None,
+                request: submission,
+                one_time: code("GEZDGNBVGY3TQOJQ"),
+            },
+        )
+        .unwrap();
+        let (_, candidates) = review(
+            &service,
+            &manager,
+            &signed(
+                2,
+                Action::Detect {
+                    origin: "https://example.com".into(),
+                    document: "doc".into(),
+                },
+            ),
+        );
+        assert!(candidates.iter().all(|c| !c.one_time));
+        let bob = candidates.iter().find(|c| c.username == "bob").unwrap();
+        assert_eq!(bob.title, "Example");
+        assert_eq!(
+            stored(&service, &bob.id).one_time_password(),
+            Some("otpauth://totp/Example:bob?secret=GEZDGNBVGY3TQOJQ")
+        );
+    }
+    #[test]
+    fn browser_one_time_passwords_never_name_a_login_after_overlong_labels() {
+        let (_dir, service, manager) = paired_for_one_time();
+        let submission = one_time(1);
+        let (ticket, _) = review(&service, &manager, &submission);
+        let mut long = code("GEZDGNBVGY3TQOJQ");
+        long.issuer = Some("x".repeat(600));
+        long.account = Some("y".repeat(600));
+        request(
+            &service,
+            &manager,
+            WorkerAction::SaveOneTime {
+                ticket,
+                candidate: None,
+                request: submission,
+                one_time: long,
+            },
+        )
+        .unwrap();
+        let (_, candidates) = review(
+            &service,
+            &manager,
+            &signed(
+                2,
+                Action::Detect {
+                    origin: "https://example.com".into(),
+                    document: "doc".into(),
+                },
+            ),
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.title == "https://example.com" && c.username.is_empty())
+        );
     }
     #[test]
     fn browser_rechecks_revocation_before_release() {

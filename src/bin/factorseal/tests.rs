@@ -909,6 +909,7 @@ fn pending_permission(
             expires_at: 2,
             challenge: [0; 32],
             expiring_write: false,
+            awaited: false,
         },
     }
 }
@@ -1002,6 +1003,7 @@ fn a_secretspec_write_is_approved_once_unless_a_duration_is_given() {
         expires_at: 2,
         challenge: [0; 32],
         expiring_write: true,
+        awaited: false,
     };
     let mut default = std::io::Cursor::new(b"\n");
     assert_eq!(
@@ -1050,4 +1052,46 @@ fn the_signing_helper_takes_single_use_or_a_duration_but_not_both() {
         }
     ));
     assert!(parse(&["--single-use", "--duration-seconds", "60"]).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn provisioned_worker_finds_installed_executables() -> std::io::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    let contents = directory
+        .path()
+        .canonicalize()?
+        .join("Factorseal.app/Contents");
+    let executables = contents.join("MacOS");
+    let worker_directory = contents.join("Helpers/FactorsealWorker.app/Contents/MacOS");
+    fs::create_dir_all(&executables)?;
+    fs::create_dir_all(&worker_directory)?;
+    let worker = worker_directory.join("factorseal");
+    fs::write(&worker, b"worker")?;
+    let cli = executables.join("factorseal");
+    symlink(&worker, &cli)?;
+    let current = cli.canonicalize()?;
+
+    assert_eq!(commands::installed_desktop_executable(&current), None);
+    let desktop = executables.join("factorseal-desktop");
+    fs::write(&desktop, b"desktop")?;
+    assert_eq!(
+        commands::installed_desktop_executable(&current),
+        Some(desktop)
+    );
+
+    for name in ["factorseal-parser", "factorseal-network"] {
+        let missing = factorseal::isolation::helper_executable(&current, name)
+            .expect_err("helper is not installed yet");
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        let helper = executables.join(name);
+        fs::write(&helper, b"helper")?;
+        assert_eq!(
+            factorseal::isolation::helper_executable(&current, name)?,
+            helper
+        );
+    }
+    Ok(())
 }

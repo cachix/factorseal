@@ -6,15 +6,18 @@ supported browser. Automated DOM/protocol tests do not replace this acceptance.
 1. Serve `fixtures/login.html` on a controlled HTTPS origin and create a Personal
    Login with that exact origin and test username/password. Build/install using
    the README; verify the extension's profile fingerprint in Desktop when pairing.
-2. With the vault sealed, visit the page in the focused browser's active tab.
-   Confirm that the compact approval window opens above the current app, names
-   the origin, and asks to unseal without claiming a
-   match. Unseal, choose the account, and confirm the correct fields are filled
-   without submission.
-3. Repeat with an origin having no stored login. Unseal must still be offered;
-   afterward there must be no fill approval or browser credential response.
-4. Deny, press Escape, or close the browser approval window. DOM mutations must not reopen the prompt.
-   Explicit retry should work. Pause the site and verify reload stays quiet.
+2. With the vault sealed, visit the page in the focused browser's active tab and
+   choose the FactorSeal button in the username field. Confirm that the compact
+   approval window opens above the current app, names the origin, and asks to
+   unseal without claiming a match. Unseal, choose the account, and confirm the
+   correct fields are filled without submission.
+3. Repeat with an origin having no stored login. Unseal must still be offered.
+   Afterward the page must show "No matching login found." with no fill approval
+   or browser credential response.
+4. Deny, press Escape, or close the browser approval window. Loading the page or
+   changing its DOM must never open Desktop by itself. **Fill this page** in the
+   popup should work. Pause the site and verify its field buttons and save
+   questions disappear.
 5. While unseal/approval is pending, navigate, close the tab, replace the form,
    switch tabs/windows, reseal, or disconnect the browser. No old request may fill
    a new document. Opening Desktop's own prompt must not falsely count as a tab
@@ -40,11 +43,14 @@ supported browser. Automated DOM/protocol tests do not replace this acceptance.
     Windows. Validate Nix wrappers separately. Record browser/OS/build revisions
     and results before making a release-support claim.
 12. Submit the login and registration fixtures with new test credentials. Verify
-    Desktop names the original origin and username, masks the password, and saves
-    only after approval. Confirm the new Personal Login appears without reopening
-    Desktop and can subsequently be filled. Repeat unchanged credentials: no save
-    prompt or duplicate. Change the password: explicitly update the correct account
-    and retain its other fields. Change the record during review: the update must fail.
+    the page asks "Save this login in FactorSeal?" without opening Desktop, that
+    **Not now** saves nothing, and that **Save** opens Desktop naming the original
+    origin and username with the password masked, saving only after approval.
+    Confirm the new Personal Login appears without reopening Desktop and can
+    subsequently be filled. Submitting a login FactorSeal just filled must not ask
+    again. Repeat unchanged credentials: no duplicate. Change the password:
+    explicitly update the correct account and retain its other fields. Change the
+    record during review: the update must fail.
 13. Exercise save navigation, denial, tab closure, pairing revocation, and expiry.
     Check that extension storage contains no submitted credentials. Mismatched
     confirmation, hidden fields, and cross-origin actions must not offer saves.
@@ -56,3 +62,10 @@ supported browser. Automated DOM/protocol tests do not replace this acceptance.
     extension to identify it without re-pairing. Browser host registration alone
     must not make an absent browser appear installed. Sealed vaults show no setup
     panel; all-paired vaults keep browser management available in Settings.
+15. Open a page showing a two-factor QR code and choose **Add one-time password**.
+    Desktop must read the code from that tab only, even while the popup covers
+    part of it, name the origin, and offer that origin's logins with a note on any
+    that already has a one-time password. Nothing may be saved before approval.
+    On a page without a code the page must show "No QR code found on this page."
+16. Check that page scripts cannot reach the field buttons or notices, and that a
+    page embedding field.html or notice.html itself cannot start a request.

@@ -4,6 +4,163 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Add a one-time password to a Desktop item from its QR code.
+  Scan the code on screen, drop an image of it anywhere in the
+  vault, or press Ctrl+V (Cmd+V on macOS) with a copied screenshot,
+  image file or setup link. Desktop reads the code locally, adds it
+  to the open item or the item with the same name, or starts a new
+  login named after it with the username filled in. It finds
+  light-on-dark and small blurry codes, never replaces a one-time
+  password without saying so, and removes the QR code or setup link
+  from the clipboard and deletes its screen capture once read. Setup
+  keys that cannot make a code are rejected, and keys are saved
+  without spaces, padding or lowercase letters so they export to
+  other password managers.
+
+- Add a website's one-time password from the FactorSeal browser
+  extension. Choose Add one-time password while the site shows its
+  QR code. The extension sends only that tab's picture to Desktop,
+  which reads the code and asks which login for the site gets it.
+
+- Show a FactorSeal button inside website login fields. Click it to
+  choose a login in Desktop, instead of Desktop opening by itself
+  whenever a login form appears. After you sign in, the page asks
+  whether to save the login, and Desktop opens only if you choose
+  Save.
+
+- Show website icons in Desktop's item list, search results and item pages,
+  like Bitwarden. Desktop asks DuckDuckGo's icon service by website name
+  through the sandboxed network helper, which also decodes the image. Icons
+  stay in memory only while the vault is unsealed. Turn them off with Show
+  website icons in Settings, Appearance.
+
+- Show Desktop's unsealed vault as one window-height sidebar, a list column
+  and a detail pane, without the header, page title, outer card and footer
+  around them. The sidebar holds search, the secret types, Devices, Transfer
+  credentials, Back up vault and Settings, with the seal status and Seal at
+  its foot. Settings, Transfer credentials, Back up vault and Devices list
+  their sections in the same middle column as the secret types. Item fields
+  are label and value rows whose actions show on hover or keyboard focus, so
+  a whole login fits in a 720-pixel-high window.
+
+- Show one vault pane at a time in narrow Desktop windows. Below 720 px the
+  vault shows the sidebar, the list or the open item, with a Back button to
+  return.
+
+- Put Desktop text and controls on one size scale. Screens now use five text
+  sizes that follow the system or chosen text size, and inputs and the buttons
+  beside them share one height. Desktop bundles IBM Plex Sans as a fallback
+  when the system font cannot be read or is missing.
+
+- Keep Desktop readable with bundled third-party themes such as One Dark.
+  They now follow FactorSeal's own rules for borders, input fields and the
+  focus ring. Text, links and button labels keep a contrast of at least
+  4.5:1, and borders stay visible. Colors that already meet this are kept.
+
+- Remember Desktop's window size, position and last open page, and title the
+  window FactorSeal. A window saved on a display that is gone opens centered
+  at its saved size.
+
+- Make Desktop's vault setup and unlock smoother. The password field is
+  focused when the window opens, Enter creates the vault or unlocks it, and
+  a button shows or hides the password. Setup errors sit under the field they
+  belong to and clear as soon as the password changes. A new vault opens
+  right after it is created, through the same unlock steps as any other
+  unlock, and the unlock screen says which step is running.
+
+- Explain Desktop's vault errors in one plain sentence that says what to do
+  next, with Show details and Copy details for the raw text. The "Vault
+  unavailable" and create screens also offer Try again. The desktop worker
+  now checks that the vault socket folder is private before the hardware
+  unlock, so a shared folder fails at once instead of after the full unlock.
+  A lifecycle monitor error no longer repeats "invalid vault protocol
+  message:".
+
+- Search every part of the vault from Desktop's search box. Results from all
+  categories show in one list, grouped by type, with the matching text
+  highlighted. Ctrl+F (Cmd+F on macOS) jumps to the search box, the arrow keys
+  and Enter pick a result, and Escape clears the search and then leaves the
+  box. The sidebar keeps all its categories while searching.
+
+- Add keyboard shortcuts to Desktop. Ctrl+K (Cmd+K on macOS) opens a palette
+  that finds items and runs New login, Back up vault, Settings, Keyboard
+  shortcuts and Seal now. The arrow keys and Enter move through and open a
+  list, Ctrl+C and Ctrl+Shift+C copy the open login's password and username
+  outside text fields, Ctrl+L seals, Escape steps back, and Ctrl+/ shows every
+  shortcut.
+
+- Show each personal item in Desktop's list with its type icon, its name in
+  bold and its username. The item page has a large title with the icon,
+  groups the fields, shows an icon next to each field name, and hides empty
+  fields behind Add field, which also adds custom fields. Websites can be
+  opened, passwords show their strength while being changed, one-time
+  passwords show the current code with a countdown, notes show their line
+  breaks, and the page shows when the item was last modified.
+
+- Pin favorite personal items to the top of Desktop's item list with the
+  star next to an item's title. The rest of the list, search results and the
+  palette are sorted by name. Favorites are the flag items already carry, so
+  favorites from Bitwarden, 1Password and other imports show up right away.
+
+- Delete personal items from Desktop. The item page has a Delete button that
+  asks first, and a toast offers Undo right after. Every saved edit now shows
+  a Saved toast with Undo, and Ctrl+Z and Ctrl+Shift+Z undo and redo saved
+  changes on the open item, including a password replaced by Generate.
+  Editing a field shows Save and Cancel, and Escape cancels. Custom fields
+  can be removed.
+
+- Let Desktop's Generate button make a random password as well as the
+  12-word phrase, which many sites reject for its length or for missing
+  digits and symbols. Generate now opens a panel to pick Random or Words, the
+  length, digits and symbols, with a preview that stays hidden until shown
+  and a strength meter. Desktop remembers the last choice. The new vault
+  password shows the same strength meter.
+
+- Keep Desktop's Copy button the same width when it turns into Copied, and
+  show a small notice after copying that counts down to the 30-second
+  clipboard clear.
+
+- Show Desktop's choices for file type and key mode as segmented controls,
+  with the selected choice raised. Pick a new item's type from a menu with an
+  icon for each type. New items start as Login instead of Other.
+
+- Show the commands in Desktop's help steps in monospace blocks with a copy
+  button, and show each category's item count only once, in the sidebar.
+
+- Show this device first in Desktop's Devices list, with a Rename button until
+  it is paired, instead of an empty list until a second device joins. Pairing
+  opens in a sheet with a centered QR, a live countdown until the code
+  expires and a single Cancel button. The text now says pairing code
+  everywhere.
+
+- Show who is asking in Desktop's approval popup. Apps are named by their
+  full path, and the reason passed with `--reason` shows as text from the
+  app. The popup names the profile once, scrolls the technical details
+  instead of clipping them, and says when the app stopped waiting instead of
+  closing.
+
+- Patch quinn-proto to 0.11.18 for three denial-of-service advisories. Review the
+  five exact-version maintenance exceptions against the current advisory database
+  and renew them until 2026-11-12 while their parent migrations remain tracked.
+  Keep vulnerability findings fatal. Preserve the Rust 1.91 atomic API while
+  allowing its compatibility alias's deprecation on newer compilers.
+
+- Wait for permission revisions in Desktop instead of reloading the encrypted
+  permission inventory twice per second. Wake for permission expiry and discard
+  results superseded by a seal, unlock, or refresh.
+
+- Keep one current encrypted snapshot per document in Turso and authenticate the
+  complete current inventory with one device-signed manifest. Replace snapshots,
+  document heads, and the manifest atomically; unlock verifies only current state.
+  Authenticate every retained legacy generation before migrating to schema v6.
+  Repack once during migration when at least 64 MiB and half the file are unused,
+  with authenticated retry state if interrupted. Preserve encrypted change and
+  personal replication histories. Unchanged pairing commands no longer write.
+
+- Compress debug sections in Linux Nix release binaries with zlib. Retain source
+  locations in diagnostic backtraces while reducing the bytes read to authenticate
+  Desktop, the CLI, and helper executables.
+
 - Let SecretSpec 0.21 and later pass `FACTORSEAL_ROOT` and
   `FACTORSEAL_SOCKET` to the provider. Those releases start a provider with
   only a fixed base environment plus the variables its discovery claim lists,
@@ -19,10 +176,9 @@ All notable changes to FactorSeal will be documented in this file.
 
 - Keep permission requests that are waiting for review when the vault seals.
   Pending permissions are now stored in the encrypted vault, local to the
-  device, and offered again after the next unseal, even after Desktop
-  restarts. Desktop's approval popup stays open through a seal and offers to
-  unlock; granting still takes the password again. A request denied while the
-  vault is sealed is denied as soon as it is unsealed.
+  device, and stay pending after the next unseal, even after Desktop
+  restarts. Desktop offers a request again when the app asks again. A request
+  denied while the vault is sealed is denied as soon as it is unsealed.
 
 - Flash Desktop's taskbar button on Windows when the approval popup loses
   the foreground before it was clicked, as when Windows gives it the focus
@@ -94,12 +250,14 @@ All notable changes to FactorSeal will be documented in this file.
   `WireSecret::new` is now fallible and request/response `encode` returns
   `LockedBytes`. Large archives require a sufficient OS memory-lock quota.
 
-The current formats are metadata v8, database schema v5, snapshot envelope v7,
-protected commit v6, document v3 (personal documents v5), record v2, and native protocol v14. Database
-schema v3 is authenticated and migrated transactionally after unseal: current
-document heads are projected into the new record/history envelope, document
-keys are rotated, and a compact current-format commit chain is signed before
-the schema version advances. Unknown formats are rejected and never deleted.
+The current formats are metadata v8, database schema v6, snapshot envelope v7,
+current-state manifest v6, document v3 (personal documents v5), record v2, and
+native protocol v17. Database schemas v3 and v5 are authenticated and migrated
+transactionally after unseal. The v3 conversion projects current document heads
+into the record/history envelope and rotates document keys. The v5 conversion
+verifies the complete legacy protected-commit v6 chain and its retained snapshots
+before replacing it with current heads and a signed manifest. Unknown formats
+are rejected and never deleted.
 
 - Fix keyring backup/restore with atomic metadata/value imports and v1 archive
   conversion; new archives use v2. Export from live inventory and reject a

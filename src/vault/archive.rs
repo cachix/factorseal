@@ -57,7 +57,10 @@ impl VaultArchive {
         for entry in &mut entries {
             entry.metadata.display_name = None;
             entry.metadata.display_type = None;
+            entry.metadata.display_username = None;
+            entry.metadata.display_website = None;
             entry.metadata.updated_at = None;
+            entry.metadata.favorite = false;
         }
         Self {
             format: FORMAT.to_owned(),
@@ -435,7 +438,10 @@ mod tests {
                     access_project: None,
                     display_name: None,
                     display_type: None,
+                    display_username: None,
+                    display_website: None,
                     updated_at: None,
+                    favorite: false,
                     document_kind: DocumentKind::LocalKeyring,
                     partition: b"factorseal/personal-secrets/v1".to_vec(),
                     address: SecretAddress::new("example", None).unwrap(),
@@ -444,6 +450,19 @@ mod tests {
                 evict_at: None,
             }],
         )
+    }
+
+    #[test]
+    fn archives_strip_display_metadata_derived_from_item_content() {
+        let mut entries = example().entries;
+        entries[0].metadata.display_name = Some("GitHub".into());
+        entries[0].metadata.display_username = Some("alice".into());
+        entries[0].metadata.display_website = Some("github.com".into());
+        let archive = VaultArchive::new(42, entries);
+        let metadata = &archive.entries[0].metadata;
+        assert_eq!(metadata.display_name, None);
+        assert_eq!(metadata.display_username, None);
+        assert_eq!(metadata.display_website, None);
     }
 
     #[test]
@@ -505,7 +524,10 @@ mod tests {
             access_project: None,
             display_name: None,
             display_type: None,
+            display_username: None,
+            display_website: None,
             updated_at: None,
+            favorite: false,
             document_kind: DocumentKind::LinuxSecretService,
             partition: NAMESPACE.to_vec(),
             address,

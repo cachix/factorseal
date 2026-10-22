@@ -10,6 +10,23 @@ use crate::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret};
 const PERSONAL_LAYOUT: &str = "personal-layout";
 const PERSONAL_ALIASES: &str = "personal-legacy-addresses";
 
+pub(crate) struct PersonalSummary {
+    pub(crate) title: String,
+    pub(crate) kind: String,
+    pub(crate) username: Option<String>,
+    pub(crate) website: Option<String>,
+    pub(crate) updated_at: u64,
+    pub(crate) favorite: bool,
+}
+
+fn display_text(value: &str) -> String {
+    let mut end = value.len().min(1024);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
 impl SecretDocument {
     pub(super) fn ensure_personal_unconflicted(&self, address: &SecretAddress) -> VaultResult<()> {
         if self.is_personal()
@@ -54,7 +71,7 @@ impl SecretDocument {
         &self,
         address: &SecretAddress,
         _now: u64,
-    ) -> VaultResult<Option<(String, String, u64)>> {
+    ) -> VaultResult<Option<PersonalSummary>> {
         if !self.is_personal() {
             return Ok(None);
         }
@@ -75,15 +92,14 @@ impl SecretDocument {
             SecretRead::Value(value) => {
                 let item = PersonalSecret::decode_current(&value)
                     .map_err(|_| VaultError::InvalidData("invalid personal item".into()))?;
-                let mut title = item.title.clone();
-                if title.len() > 1024 {
-                    let mut end = 1024;
-                    while !title.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    title.truncate(end);
-                }
-                Ok(Some((title, item.kind.label().to_owned(), updated_at)))
+                Ok(Some(PersonalSummary {
+                    title: display_text(&item.title),
+                    kind: item.kind.label().to_owned(),
+                    username: item.username().map(display_text),
+                    website: item.website_host(),
+                    updated_at,
+                    favorite: item.favorite,
+                }))
             }
             SecretRead::Missing | SecretRead::Expired => Ok(None),
             SecretRead::Conflict => Err(VaultError::Conflict),
@@ -261,7 +277,7 @@ mod tests {
                     .personal_summary(&address, 10)
                     .unwrap()
                     .as_ref()
-                    .map(|(title, _, _)| title.as_str()),
+                    .map(|summary| summary.title.as_str()),
                 Some("Same title")
             );
             let SecretRead::Value(value) = document.get(&address, 10).unwrap() else {
@@ -304,6 +320,7 @@ mod tests {
             "unchanged puts do not create revisions"
         );
         first.title = "Renamed".into();
+        first.favorite = true;
         document
             .put(&address, &first.encode().unwrap(), None, &context())
             .unwrap();
@@ -322,8 +339,8 @@ mod tests {
                 .personal_summary(&address, 10)
                 .unwrap()
                 .as_ref()
-                .map(|(title, _, _)| title.as_str()),
-            Some("Renamed")
+                .map(|summary| (summary.title.as_str(), summary.favorite)),
+            Some(("Renamed", true))
         );
         assert!(document.delete(&address).unwrap().is_some());
         assert_eq!(document.addresses().unwrap().len(), 1);
@@ -383,7 +400,10 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(document.addresses().unwrap().is_empty());
+        assert_eq!(
+            document.addresses().unwrap(),
+            [] as [(std::string::String, crate::vault::SecretAddress); 0]
+        );
         assert!(
             document.personal_replicas().unwrap().replicas.is_empty(),
             "rejected batches must roll back the outbox too"

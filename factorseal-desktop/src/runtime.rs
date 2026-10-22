@@ -7,9 +7,11 @@ use factorseal::browser::desktop::WorkerFailure;
 use factorseal::security::LockedBytes;
 use factorseal::{
     DocumentKind, MAX_LIST_PAGE_SIZE, NativeVaultClient, UnlockGroup, UnlockPolicy, Vault,
-    VaultAction, VaultArchive, VaultClient, VaultEntryMetadata, VaultMetadata, VaultRequest,
-    VaultResponseBody, WireSecret, WireSecretAddress, decrypt_vault_archive, encrypt_vault_archive,
+    VaultAction, VaultArchive, VaultClient, VaultEntryMetadata, VaultMetadata, VaultMutation,
+    VaultRequest, VaultResponseBody, VaultResponseErrorCode, WireSecret, WireSecretAddress,
+    decrypt_vault_archive, encrypt_vault_archive,
 };
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use factorseal::isolation::network::ProcessManager as SyncManager;
@@ -99,6 +101,43 @@ pub(crate) use factorseal::transfer::import_plan::{
     ImportSummary as TransferSummary, PreparedImport,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ItemVersion([u8; 32]);
+
+impl ItemVersion {
+    pub(crate) fn of(value: &[u8]) -> Self {
+        Self(Sha256::digest(value).into())
+    }
+}
+
+pub(crate) enum PersonalWriteError {
+    Changed(VaultContents),
+    Failed(String),
+}
+
+impl From<String> for PersonalWriteError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl std::fmt::Display for PersonalWriteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Changed(_) => formatter.write_str("the item changed somewhere else"),
+            Self::Failed(error) => formatter.write_str(error),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum UnlockStep {
+    #[default]
+    Verifying,
+    Starting,
+    Loading,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Snapshot {
     Uninitialized {
@@ -112,6 +151,7 @@ pub(crate) enum Snapshot {
     Unlocking {
         metadata: VaultMetadata,
         group: UnlockGroup,
+        step: UnlockStep,
     },
     Sealing {
         metadata: VaultMetadata,
@@ -244,17 +284,12 @@ impl DesktopRuntime {
         }
         crate::timing::begin_unlock();
         let runtime = Arc::clone(self);
-        let event_metadata = metadata.clone();
-        let event_group = group.clone();
-        let _ = self.events.try_send(Snapshot::Unlocking {
-            metadata: event_metadata,
-            group: event_group,
-        });
+        self.report_unlock_step(&metadata, &group, UnlockStep::Verifying);
         if std::thread::Builder::new()
             .name("factorseal-desktop-agent".to_owned())
             .spawn(move || {
                 crate::timing::mark_unlock("worker_started", "ok");
-                runtime.run_unsealed(metadata, group, password);
+                runtime.run_unsealed(metadata, &group, password);
             })
             .is_err()
         {
@@ -317,11 +352,24 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    pub(crate) fn lease_deadlines(&self, metadata: &VaultMetadata) -> Option<(u64, u64)> {
+        live_status(&self.config, metadata).ok().flatten()
+    }
+
+    pub(crate) fn keep_unsealed(&self, metadata: &VaultMetadata) -> Result<(), String> {
+        let request = VaultRequest::new(VaultAction::ListVaultEntries {
+            cursor: None,
+            limit: 1,
+        })
+        .map_err(|error| error.to_string())?;
+        self.request_live(metadata, &request).map(drop)
+    }
+
     pub(crate) fn read_personal_item(
         &self,
         metadata: &VaultMetadata,
         entry: &VaultEntryMetadata,
-    ) -> Result<PersonalSecret, String> {
+    ) -> Result<(PersonalSecret, ItemVersion), String> {
         if !is_personal_entry(entry) {
             return Err("This is not a personal item.".into());
         }
@@ -331,7 +379,9 @@ impl DesktopRuntime {
         .map_err(|error| error.to_string())?;
         match self.request_live(metadata, &request)? {
             VaultResponseBody::VaultEntrySecret { value, .. } => {
-                PersonalSecret::decode_current(value.expose()).map_err(|error| error.to_string())
+                let item = PersonalSecret::decode_current(value.expose())
+                    .map_err(|error| error.to_string())?;
+                Ok((item, ItemVersion::of(value.expose())))
             }
             _ => Err("Could not read the personal item.".into()),
         }
@@ -340,19 +390,59 @@ impl DesktopRuntime {
     pub(crate) fn put_personal_secret(
         &self,
         secret: &PersonalSecret,
-    ) -> Result<VaultContents, String> {
-        let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
+        expected: Option<ItemVersion>,
+    ) -> Result<(ItemVersion, VaultContents), PersonalWriteError> {
         let encoded = secret.encode().map_err(|error| error.to_string())?;
-        let request = VaultRequest::new(VaultAction::Put {
-            namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
+        let mutation = VaultMutation::Put {
             address: WireSecretAddress::new(secret.id.clone(), None),
-            value: WireSecret::new(encoded.to_vec()).map_err(|e| e.to_string())?,
+            value: WireSecret::new(encoded.to_vec()).map_err(|error| error.to_string())?,
             evict_at: None,
+        };
+        let contents = self.change_personal_secret(&secret.id, expected, mutation)?;
+        Ok((ItemVersion::of(&encoded), contents))
+    }
+
+    pub(crate) fn delete_personal_secret(
+        &self,
+        id: &str,
+        expected: Option<ItemVersion>,
+    ) -> Result<VaultContents, PersonalWriteError> {
+        let mutation = VaultMutation::Delete {
+            address: WireSecretAddress::new(id, None),
+        };
+        self.change_personal_secret(id, expected, mutation)
+    }
+
+    fn change_personal_secret(
+        &self,
+        id: &str,
+        expected: Option<ItemVersion>,
+        mutation: VaultMutation,
+    ) -> Result<VaultContents, PersonalWriteError> {
+        let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
+        let request = VaultRequest::new(VaultAction::Mutate {
+            namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
+            mutations: vec![
+                VaultMutation::Check {
+                    address: WireSecretAddress::new(id, None),
+                    expected_sha256: expected.map(|version| version.0),
+                },
+                mutation,
+            ],
         })
         .map_err(|error| error.to_string())?;
-        match self.request_live(&metadata, &request)? {
-            VaultResponseBody::Stored => self.load_live_contents(&metadata),
-            _ => Err("vault returned an unexpected personal-secret response".to_owned()),
+        let response = native_client(&self.config, &metadata)
+            .request(&request)
+            .map_err(|error| error.to_string())?;
+        match response.result {
+            Ok(VaultResponseBody::Mutated) => Ok(self.load_live_contents(&metadata)?),
+            Err(error) if error.code == VaultResponseErrorCode::Conflict => Err(
+                PersonalWriteError::Changed(self.load_live_contents(&metadata)?),
+            ),
+            Err(error) => Err(error.message.into()),
+            Ok(_) => Err("vault returned an unexpected personal-secret response"
+                .to_owned()
+                .into()),
         }
     }
 
@@ -468,6 +558,20 @@ impl DesktopRuntime {
         })
     }
 
+    pub(crate) fn watch_permissions(
+        &self,
+        metadata: &VaultMetadata,
+        after_revision: Option<u64>,
+    ) -> Result<(u64, Vec<factorseal::Permission>), String> {
+        read_permissions(
+            |action| {
+                let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
+                self.request_live(metadata, &request)
+            },
+            after_revision,
+        )
+    }
+
     pub(crate) fn approve_permissions(
         &self,
         metadata: &VaultMetadata,
@@ -558,7 +662,7 @@ impl DesktopRuntime {
     fn run_unsealed(
         self: Arc<Self>,
         metadata: VaultMetadata,
-        group: UnlockGroup,
+        group: &UnlockGroup,
         password: LockedBytes,
     ) {
         let result = self.supervise_worker(&metadata, group, password);
@@ -577,31 +681,45 @@ impl DesktopRuntime {
         });
     }
 
+    fn report_unlock_step(&self, metadata: &VaultMetadata, group: &UnlockGroup, step: UnlockStep) {
+        let _ = self.events.try_send(Snapshot::Unlocking {
+            metadata: metadata.clone(),
+            group: group.clone(),
+            step,
+        });
+    }
+
     fn run_initialization(self: Arc<Self>, policy: UnlockPolicy, password: LockedBytes) {
         factorseal::diagnostics::event("desktop", "initialize_vault", "start");
         let result = (|| {
+            let unlock_password =
+                LockedBytes::from_slice(&password).map_err(|error| error.to_string())?;
             let mut worker = self.spawn_worker(
                 factorseal::desktop_worker::Operation::Initialize { policy },
                 password,
             )?;
             worker.read_ready()?;
             worker.wait()?;
-            Vault::inspect(&self.config.root).map_err(|error| error.to_string())
+            let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
+            Ok((metadata, unlock_password))
         })();
-        self.unlock_in_progress.store(false, Ordering::Release);
         factorseal::diagnostics::event(
             "desktop",
             "initialize_vault",
             if result.is_ok() { "ok" } else { "error" },
         );
-        let snapshot = match result {
-            Ok(metadata) => Snapshot::Sealed {
-                metadata,
-                error: None,
-            },
-            Err(error) => Snapshot::Error(error),
-        };
-        let _ = self.events.try_send(snapshot);
+        match result {
+            Ok((metadata, password)) => {
+                let group = metadata.preferred_unlock_group().clone();
+                crate::timing::begin_unlock();
+                self.report_unlock_step(&metadata, &group, UnlockStep::Verifying);
+                self.run_unsealed(metadata, &group, password);
+            }
+            Err(error) => {
+                self.unlock_in_progress.store(false, Ordering::Release);
+                let _ = self.events.try_send(Snapshot::Error(error));
+            }
+        }
     }
 
     fn spawn_worker(
@@ -676,15 +794,16 @@ impl DesktopRuntime {
     fn supervise_worker(
         &self,
         metadata: &VaultMetadata,
-        group: UnlockGroup,
+        group: &UnlockGroup,
         password: LockedBytes,
     ) -> Result<(), String> {
         let mut worker = crate::timing::result("desktop_startup", "spawn_worker", || {
-            self.spawn_worker(self.unlock_operation(group)?, password)
+            self.spawn_worker(self.unlock_operation(group.clone())?, password)
         })?;
         crate::timing::result("desktop_startup", "wait_worker_ready", || {
             worker.read_ready()
         })?;
+        self.report_unlock_step(metadata, group, UnlockStep::Starting);
         let (idle_deadline, absolute_deadline) =
             crate::timing::result("desktop_startup", "wait_service_ready", || {
                 let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -733,6 +852,7 @@ impl DesktopRuntime {
         drop(control_install);
         // Publish the inventory before requesting permissions. The UI starts
         // that request once it has applied this first unlocked snapshot.
+        self.report_unlock_step(metadata, group, UnlockStep::Loading);
         let client = native_client(&self.config, metadata);
         let (contents, contents_error) =
             match load_vault_entries(|action| request_contents(&client, action)) {
@@ -912,26 +1032,39 @@ fn load_vault_entries(
 }
 
 fn load_permissions(
-    mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
+    request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
 ) -> Result<Vec<factorseal::Permission>, String> {
+    read_permissions(request, None).map(|(_, permissions)| permissions)
+}
+
+fn read_permissions(
+    mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
+    after_revision: Option<u64>,
+) -> Result<(u64, Vec<factorseal::Permission>), String> {
     factorseal::read_permission_pages(
         |action| request(action).map_err(factorseal::VaultError::Protocol),
-        None,
+        after_revision,
     )
-    .map(|(_, permissions)| permissions)
     .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "linux")]
 fn secret_service_error() -> Option<String> {
-    use zbus::blocking::{Proxy, connection::Builder};
+    zbus::block_on(secret_service_error_async())
+}
+
+#[cfg(target_os = "linux")]
+async fn secret_service_error_async() -> Option<String> {
+    use zbus::{Proxy, connection::Builder};
 
     const BUS_NAME: &str = "org.freedesktop.secrets";
     const SERVICE_PATH: &str = "/org/freedesktop/secrets";
     const SERVICE_INTERFACE: &str = "org.freedesktop.Secret.Service";
 
     let connection = match Builder::session()
-        .and_then(|builder| builder.method_timeout(Duration::from_secs(2)).build())
+        .method_timeout(Duration::from_secs(2))
+        .build()
+        .await
     {
         Ok(connection) => connection,
         Err(error) => {
@@ -940,13 +1073,17 @@ fn secret_service_error() -> Option<String> {
             ));
         }
     };
-    let owner: Result<bool, zbus::Error> = Proxy::new(
+    let owner = Proxy::new(
         &connection,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
     )
-    .and_then(|bus| bus.call("NameHasOwner", &(BUS_NAME,)));
+    .await;
+    let owner = match owner {
+        Ok(bus) => bus.call::<_, _, bool>("NameHasOwner", &(BUS_NAME,)).await,
+        Err(error) => Err(error),
+    };
     match owner {
         Ok(false) => return None,
         Ok(true) => {}
@@ -957,9 +1094,11 @@ fn secret_service_error() -> Option<String> {
         }
     }
 
-    let collections: Result<Vec<zbus::zvariant::OwnedObjectPath>, zbus::Error> =
-        Proxy::new(&connection, BUS_NAME, SERVICE_PATH, SERVICE_INTERFACE)
-            .and_then(|service| service.get_property("Collections"));
+    let collections: Result<Vec<zbus::OwnedObjectPath>, zbus::Error> =
+        match Proxy::new(&connection, BUS_NAME, SERVICE_PATH, SERVICE_INTERFACE).await {
+            Ok(service) => service.get_property("Collections").await,
+            Err(error) => Err(error),
+        };
     match collections {
         Ok(collections) if factorseal_secret_service(&collections) => None,
         Ok(_) => Some(
@@ -973,7 +1112,7 @@ fn secret_service_error() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn factorseal_secret_service(collections: &[zbus::zvariant::OwnedObjectPath]) -> bool {
+fn factorseal_secret_service(collections: &[zbus::OwnedObjectPath]) -> bool {
     collections
         .iter()
         .any(|path| path.as_str() == "/org/freedesktop/secrets/collection/factorseal")
@@ -982,6 +1121,15 @@ fn factorseal_secret_service(collections: &[zbus::zvariant::OwnedObjectPath]) ->
 #[cfg(not(target_os = "linux"))]
 const fn secret_service_error() -> Option<String> {
     None
+}
+
+pub(crate) fn open_icon_helper() -> Result<factorseal::isolation::network::icon::IconManager, String>
+{
+    let desktop = std::env::current_exe().map_err(|error| error.to_string())?;
+    let cli = cli_executable(&desktop)?.ok_or("Factorseal CLI is not installed")?;
+    let helper = factorseal::isolation::helper_executable(&cli, "factorseal-network")
+        .map_err(|error| format!("Factorseal network helper is not installed: {error}"))?;
+    factorseal::isolation::network::icon::IconManager::open(&helper)
 }
 
 fn cli_executable(desktop: &Path) -> Result<Option<PathBuf>, String> {
@@ -1285,13 +1433,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn recognizes_factorseal_as_the_secret_service_provider() {
-        let factorseal = zbus::zvariant::OwnedObjectPath::try_from(
-            "/org/freedesktop/secrets/collection/factorseal",
-        )
-        .unwrap();
-        let other =
-            zbus::zvariant::OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/login")
+        let factorseal =
+            zbus::OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/factorseal")
                 .unwrap();
+        let other =
+            zbus::OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/login").unwrap();
 
         assert!(factorseal_secret_service(&[factorseal]));
         assert!(!factorseal_secret_service(&[other]));
@@ -1307,9 +1453,9 @@ mod tests {
         #[zbus::interface(name = "org.freedesktop.Secret.Service")]
         impl Keyring {
             #[zbus(property)]
-            fn collections(&self) -> Vec<zbus::zvariant::OwnedObjectPath> {
+            fn collections(&self) -> Vec<zbus::OwnedObjectPath> {
                 vec![
-                    zbus::zvariant::OwnedObjectPath::try_from(if self.0 {
+                    zbus::OwnedObjectPath::try_from(if self.0 {
                         "/org/freedesktop/secrets/collection/factorseal"
                     } else {
                         "/org/freedesktop/secrets/collection/login"
@@ -1323,18 +1469,24 @@ mod tests {
         }
         assert!(secret_service_error().is_none());
         assert!(crate::wait_for_secret_service(Duration::ZERO).is_err());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         for factorseal in [true, false] {
-            let service = zbus::blocking::connection::Builder::session()
-                .unwrap()
-                .name("org.freedesktop.secrets")
-                .unwrap()
-                .serve_at("/org/freedesktop/secrets", Keyring(factorseal))
-                .unwrap()
-                .build()
+            let service = runtime
+                .block_on(
+                    zbus::connection::Builder::session()
+                        .name("org.freedesktop.secrets")
+                        .serve_at("/org/freedesktop/secrets", Keyring(factorseal))
+                        .build(),
+                )
                 .unwrap();
             assert!(crate::wait_for_secret_service(Duration::ZERO).is_ok());
             assert_eq!(secret_service_error().is_none(), factorseal);
-            service.release_name("org.freedesktop.secrets").unwrap();
+            runtime
+                .block_on(service.release_name("org.freedesktop.secrets"))
+                .unwrap();
         }
     }
 
@@ -1346,7 +1498,10 @@ mod tests {
             access_project: None,
             display_name: None,
             display_type: None,
+            display_username: None,
+            display_website: None,
             updated_at: None,
+            favorite: false,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"alpha".to_vec(),
             address: SecretAddress::secret_spec(first).unwrap(),
@@ -1355,7 +1510,10 @@ mod tests {
             access_project: None,
             display_name: None,
             display_type: None,
+            display_username: None,
+            display_website: None,
             updated_at: None,
+            favorite: false,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"beta".to_vec(),
             address: SecretAddress::secret_spec(second).unwrap(),
@@ -1385,7 +1543,7 @@ mod tests {
 
         assert!(responses.is_empty());
         assert_eq!(contents.entries, vec![first, second]);
-        assert!(contents.permissions.is_empty());
+        assert_eq!(contents.permissions, [] as [factorseal::Permission; 0]);
         assert!(!contents.permissions_loading);
     }
 
@@ -1395,7 +1553,10 @@ mod tests {
             access_project: None,
             display_name: None,
             display_type: None,
+            display_username: None,
+            display_website: None,
             updated_at: None,
+            favorite: false,
             document_kind: DocumentKind::SecretSpecProject,
             partition: b"project".to_vec(),
             address: SecretAddress::secret_spec(
@@ -1416,7 +1577,7 @@ mod tests {
         .unwrap();
         assert_eq!(contents.entries, vec![entry.clone()]);
         assert!(contents.permissions_loading);
-        assert!(contents.permissions.is_empty());
+        assert_eq!(contents.permissions, [] as [factorseal::Permission; 0]);
 
         // An unsuccessful follow-up must leave the visible inventory intact.
         contents.complete_permissions(Err("permission request failed".to_owned()));
@@ -1438,5 +1599,37 @@ mod tests {
         assert!(!contents.permissions_loading);
         contents.complete_permissions(Err("stale response".to_owned()));
         assert!(contents.permissions_error.is_none());
+    }
+
+    #[test]
+    fn permission_watch_lists_once_then_waits_for_the_last_revision() {
+        for after_revision in [None, Some(42)] {
+            let mut calls = 0;
+            let (revision, permissions) = super::read_permissions(
+                |action| {
+                    calls += 1;
+                    match after_revision {
+                        None => assert!(matches!(action, factorseal::VaultAction::ListPermissions)),
+                        Some(expected) => assert!(matches!(
+                            action,
+                            factorseal::VaultAction::WaitPermissions {
+                                after_revision,
+                                timeout_ms: factorseal::MAX_PERMISSION_WAIT_MS,
+                            } if after_revision == expected
+                        )),
+                    }
+                    Ok(VaultResponseBody::Permissions {
+                        revision: 42,
+                        permissions: Vec::new(),
+                        next_cursor: None,
+                    })
+                },
+                after_revision,
+            )
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(revision, 42);
+            assert_eq!(permissions.len(), 0);
+        }
     }
 }

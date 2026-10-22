@@ -58,7 +58,8 @@ rustPlatform.buildRustPackage {
 
   doCheck = false;
   strictDeps = true;
-  # Keep release line tables available for local panic backtraces.
+  # Keep release line tables for backtraces, but compress them below so caller
+  # authentication does not have to hash hundreds of megabytes of debug data.
   dontStrip = true;
 
   installPhase = ''
@@ -67,6 +68,7 @@ rustPlatform.buildRustPackage {
     install -Dm0755 \
       target/${stdenv.hostPlatform.rust.rustcTarget}/release/factorseal-desktop \
       "$out/bin/factorseal-desktop"
+    ${stdenv.cc.targetPrefix}objcopy --compress-debug-sections=zlib "$out/bin/factorseal-desktop"
     install -Dm0644 ${../assets/logo/factorseal-app-icon.svg} \
       "$out/share/icons/hicolor/scalable/apps/dev.factorseal.Desktop.svg"
     install -Dm0644 ${../assets/logo/dev.factorseal.Desktop-symbolic.svg} \
@@ -92,7 +94,10 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "Graphical host for the FactorSeal hardware-backed vault";
     homepage = "https://github.com/domenkozar/factorseal";
-    license = lib.licenses.asl20;
+    license = with lib.licenses; [
+      asl20
+      ofl
+    ];
     mainProgram = "factorseal-desktop";
     platforms = lib.platforms.linux;
   };

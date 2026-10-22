@@ -28,8 +28,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use secret_service_protocol::{Session as ProtocolSession, SessionOutput};
 use tokio::sync::{mpsc, oneshot};
 use zbus::object_server::ObjectServer;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 use zbus::{Connection, fdo};
+use zbus::{OwnedObjectPath, OwnedVariant};
 use zeroize::Zeroizing;
 
 use super::secret_service_prompt::AccessDecision;
@@ -60,7 +60,7 @@ const MAX_SESSIONS: usize = 1024;
 const TAKEOVER_POLL: Duration = Duration::from_secs(1);
 
 type Secret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
-type Properties = HashMap<String, OwnedValue>;
+type Properties = HashMap<String, OwnedVariant>;
 
 /// Permissions the adapter needs on its vault namespace.
 #[cfg(feature = "vault-store")]
@@ -750,7 +750,7 @@ async fn claim_name(
     let mut announced = false;
     loop {
         let claim = connection
-            .request_name_with_flags(BUS_NAME, fdo::RequestNameFlags::DoNotQueue.into())
+            .request_name_with_flags(BUS_NAME, fdo::RequestNameFlags::DO_NOT_QUEUE)
             .await;
         if secret_service_name_claimed(claim)? {
             return Ok(true);
@@ -889,15 +889,15 @@ async fn complete_prompts(shared: &Arc<Shared>, server: &ObjectServer, dismissed
 
 /// `Unlock` prompts complete with the unlocked object paths, or with an
 /// empty string when dismissed, matching the reference implementations.
-fn prompt_result(dismissed: bool, objects: Vec<OwnedObjectPath>) -> fdo::Result<OwnedValue> {
+fn prompt_result(dismissed: bool, objects: Vec<OwnedObjectPath>) -> fdo::Result<OwnedVariant> {
     if dismissed {
-        OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).map_err(failed)
+        OwnedVariant::try_from(zbus::Variant::from(String::new())).map_err(failed)
     } else {
-        OwnedValue::try_from(zbus::zvariant::Value::from(objects)).map_err(failed)
+        OwnedVariant::try_from(zbus::Variant::from(objects)).map_err(failed)
     }
 }
 
-fn session_input(algorithm: &str, input: OwnedValue) -> fdo::Result<Vec<u8>> {
+fn session_input(algorithm: &str, input: OwnedVariant) -> fdo::Result<Vec<u8>> {
     if algorithm == secret_service_protocol::ALGORITHM_PLAIN {
         let plain = String::try_from(input).map_err(|_| {
             fdo::Error::Failed("invalid plain Secret Service session input".to_owned())
@@ -915,13 +915,13 @@ fn session_input(algorithm: &str, input: OwnedValue) -> fdo::Result<Vec<u8>> {
     }
 }
 
-fn session_output(output: SessionOutput) -> fdo::Result<OwnedValue> {
+fn session_output(output: SessionOutput) -> fdo::Result<OwnedVariant> {
     match output {
         SessionOutput::Plain => {
-            OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).map_err(failed)
+            OwnedVariant::try_from(zbus::Variant::from(String::new())).map_err(failed)
         }
         SessionOutput::DhPublicKey(value) => {
-            OwnedValue::try_from(zbus::zvariant::Value::from(value)).map_err(failed)
+            OwnedVariant::try_from(zbus::Variant::from(value)).map_err(failed)
         }
     }
 }
@@ -1041,7 +1041,10 @@ mod tests {
             assert_eq!(shared.invoke_prompt("late").unwrap(), Some(dismissed));
             assert!(shared.invoke_prompt("early").is_err());
             assert!(shared.invoke_prompt("late").is_err());
-            assert!(shared.take_prompts(dismissed).unwrap().is_empty());
+            assert_eq!(
+                shared.take_prompts(dismissed).unwrap(),
+                Vec::<String>::new()
+            );
         }
     }
 
@@ -1273,8 +1276,8 @@ mod tests {
             )
             .await
             .unwrap();
-            let input = OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
-            let (_, session): (OwnedValue, OwnedObjectPath) = service
+            let input = OwnedVariant::try_from(zbus::Variant::from(String::new())).unwrap();
+            let (_, session): (OwnedVariant, OwnedObjectPath) = service
                 .call("OpenSession", &("plain", input))
                 .await
                 .unwrap();
@@ -1289,11 +1292,11 @@ mod tests {
             let properties = HashMap::from([
                 (
                     "org.freedesktop.Secret.Item.Label".to_owned(),
-                    OwnedValue::try_from(zbus::zvariant::Value::from("Test")).unwrap(),
+                    OwnedVariant::try_from(zbus::Variant::from("Test")).unwrap(),
                 ),
                 (
                     "org.freedesktop.Secret.Item.Attributes".to_owned(),
-                    OwnedValue::try_from(zbus::zvariant::Value::from(HashMap::from([(
+                    OwnedVariant::try_from(zbus::Variant::from(HashMap::from([(
                         "service".to_owned(),
                         "secretspec/write-test/default/TOKEN".to_owned(),
                     )])))
@@ -1336,6 +1339,7 @@ mod tests {
                 permissions.is_empty(),
                 "saving must not create a persistent write permission"
             );
+            assert!(server.release_name(BUS_NAME).await.unwrap());
         });
     }
 
@@ -1362,7 +1366,7 @@ mod tests {
             .unwrap();
             assert!(!service.get_property::<bool>("SupportsSecureInput").await.unwrap());
             let (_local, remote) = std::os::unix::net::UnixStream::pair().unwrap();
-            let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
+            let fd = zbus::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
             let error = tokio::time::timeout(
                 Duration::from_secs(2),
                 service.call::<_, _, ()>("InputForIpc", &(HashMap::from([("project", "test")]), fd)),
@@ -1372,6 +1376,7 @@ mod tests {
             .unwrap_err();
             assert!(matches!(&error, zbus::Error::MethodError(name, ..) if name.as_str() == "org.freedesktop.Secret.Error.NotSupported"), "{error:?}");
             assert!(requests.try_recv().is_err(), "unsupported input must not request unlock");
+            assert!(server.release_name(BUS_NAME).await.unwrap());
         });
     }
 
@@ -1407,7 +1412,7 @@ mod tests {
             .unwrap();
             assert!(service.get_property::<bool>("SupportsSecureInput").await.unwrap());
             let (_local, remote) = std::os::unix::net::UnixStream::pair().unwrap();
-            let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
+            let fd = zbus::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
             let denied = service.call::<_, _, ()>("InputForIpc", &(HashMap::from([("project", "test")]), fd)).await.unwrap_err();
             assert!(matches!(denied, zbus::Error::MethodError(name, ..) if name.as_str().ends_with(".AccessDenied")));
             vault.authorize_permission_manager(&peer, unix_time()).unwrap();
@@ -1423,12 +1428,13 @@ mod tests {
                 .unwrap();
                 crate::desktop_worker::receive::<super::super::WireSecret>(&mut local).unwrap()
             });
-            let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
+            let fd = zbus::OwnedFd::from(std::os::fd::OwnedFd::from(remote));
             service
                 .call::<_, _, ()>("InputForIpc", &(HashMap::from([("project", "test")]), fd))
                 .await
                 .unwrap();
             assert_eq!(exchange.await.unwrap().expose(), b"edited");
+            assert!(server.release_name(BUS_NAME).await.unwrap());
         });
     }
 
@@ -1462,6 +1468,8 @@ mod tests {
     /// already registered, can still run the unit suite. Linux CI runs it
     /// under `dbus-run-session`, where these exchanges are mandatory on an
     /// isolated bus. Returns a connection that briefly held the name.
+    /// Fixtures retaining the name must release it before dropping the guard,
+    /// so asynchronous socket teardown cannot race the next fixture.
     async fn free_session_bus() -> Option<(Connection, tokio::sync::MutexGuard<'static, ()>)> {
         static TEST_BUS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         std::env::var_os("DBUS_SESSION_BUS_ADDRESS")?;
@@ -1475,7 +1483,7 @@ mod tests {
             }
         };
         match connection
-            .request_name_with_flags(BUS_NAME, fdo::RequestNameFlags::DoNotQueue.into())
+            .request_name_with_flags(BUS_NAME, fdo::RequestNameFlags::DO_NOT_QUEUE)
             .await
         {
             Ok(_) => Some((connection, guard)),
@@ -1536,7 +1544,7 @@ mod tests {
         assert_eq!(updated.attributes, attributes);
         agent.delete_item(&item.id).unwrap();
         assert!(agent.store.get(secret_item(&item.id)).unwrap().is_none());
-        assert!(agent.all_items().unwrap().is_empty());
+        assert_eq!(agent.all_items().unwrap(), Vec::new());
         let index: Index = serde_json::from_slice(
             &agent
                 .store
@@ -1545,7 +1553,7 @@ mod tests {
                 .expect("index is retained"),
         )
         .unwrap();
-        assert!(index.items.is_empty());
+        assert_eq!(index.items, Vec::new());
     }
 
     #[test]
@@ -1623,19 +1631,19 @@ mod tests {
             )
             .await
             .unwrap();
-            let input = OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
-            let (_output, session): (OwnedValue, OwnedObjectPath) = service
+            let input = OwnedVariant::try_from(zbus::Variant::from(String::new())).unwrap();
+            let (_output, session): (OwnedVariant, OwnedObjectPath) = service
                 .call("OpenSession", &("plain".to_owned(), input))
                 .await
                 .unwrap();
             let properties = HashMap::from([
                 (
                     "org.freedesktop.Secret.Item.Label".to_owned(),
-                    OwnedValue::try_from(zbus::zvariant::Value::from("Example")).unwrap(),
+                    OwnedVariant::try_from(zbus::Variant::from("Example")).unwrap(),
                 ),
                 (
                     "org.freedesktop.Secret.Item.Attributes".to_owned(),
-                    OwnedValue::try_from(zbus::zvariant::Value::from(HashMap::from([(
+                    OwnedVariant::try_from(zbus::Variant::from(HashMap::from([(
                         "service".to_owned(),
                         "example.test".to_owned(),
                     )])))
@@ -1704,6 +1712,7 @@ mod tests {
                     .unwrap();
             session_proxy.call::<_, _, ()>("Close", &()).await.unwrap();
             assert!(session_proxy.call::<_, _, ()>("Close", &()).await.is_err());
+            assert!(server_connection.release_name(BUS_NAME).await.unwrap());
         });
     }
 
@@ -1753,9 +1762,7 @@ mod tests {
                 shared: Arc::clone(&shared),
             };
             let message = zbus::Message::method_call(SERVICE_PATH, "SearchItems")
-                .unwrap()
                 .sender(connection.unique_name().unwrap())
-                .unwrap()
                 .build(&())
                 .unwrap();
             let searches = async {
@@ -1787,8 +1794,8 @@ mod tests {
                 .unwrap();
             };
             let ((service_result, collection_result), ()) = tokio::join!(searches, unlock);
-            assert!(service_result.unwrap().0.is_empty());
-            assert!(collection_result.unwrap().is_empty());
+            assert_eq!(service_result.unwrap().0, Vec::<OwnedObjectPath>::new());
+            assert_eq!(collection_result.unwrap(), Vec::<OwnedObjectPath>::new());
             assert!(requested.try_recv().is_err());
         });
     }
@@ -2081,9 +2088,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let input =
-                    OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
-                let (_, path): (OwnedValue, OwnedObjectPath) =
+                let input = OwnedVariant::try_from(zbus::Variant::from(String::new())).unwrap();
+                let (_, path): (OwnedVariant, OwnedObjectPath) =
                     proxy.call("OpenSession", &("plain", input)).await.unwrap();
                 drop(proxy);
                 transient.close().await.unwrap();
@@ -2148,7 +2154,7 @@ mod tests {
             ];
             let (unlocked, path): (Vec<OwnedObjectPath>, OwnedObjectPath) =
                 service.call("Unlock", &(objects.clone(),)).await.unwrap();
-            assert!(unlocked.is_empty());
+            assert_eq!(unlocked, Vec::<OwnedObjectPath>::new());
             // A different connection invoking Prompt must not replace the original requester.
             let invoker = Connection::session().await.unwrap();
             let prompt = Proxy::new(&invoker, BUS_NAME, path, "org.freedesktop.Secret.Prompt")
@@ -2181,7 +2187,7 @@ mod tests {
             .call("Unlock", &(vec![object_path(COLLECTION_PATH).unwrap()],))
             .await
             .unwrap();
-        assert!(unlocked.is_empty());
+        assert_eq!(unlocked, Vec::<OwnedObjectPath>::new());
         assert!(prompt.as_str().starts_with(PROMPT_PREFIX));
         Proxy::new(client, BUS_NAME, prompt, "org.freedesktop.Secret.Prompt")
             .await
@@ -2191,7 +2197,7 @@ mod tests {
     async fn completion(
         prompt: &Proxy<'_>,
         signals: &mut zbus::proxy::SignalStream<'_>,
-    ) -> (bool, OwnedValue) {
+    ) -> (bool, OwnedVariant) {
         let _ = prompt;
         let signal = next(signals).await.expect("prompt completes");
         signal.body().deserialize().unwrap()
@@ -2239,20 +2245,20 @@ mod tests {
             .await
             .unwrap();
             assert!(collection.get_property::<bool>("Locked").await.unwrap());
-            assert!(
+            assert_eq!(
                 collection
                     .get_property::<Vec<OwnedObjectPath>>("Items")
                     .await
-                    .unwrap()
-                    .is_empty()
+                    .unwrap(),
+                Vec::<OwnedObjectPath>::new()
             );
             let alias: OwnedObjectPath = service
                 .call("ReadAlias", &("default",))
                 .await
                 .unwrap();
             assert_eq!(alias.as_str(), DEFAULT_ALIAS_PATH);
-            let input = OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
-            let (_output, session): (OwnedValue, OwnedObjectPath) = service
+            let input = OwnedVariant::try_from(zbus::Variant::from(String::new())).unwrap();
+            let (_output, session): (OwnedVariant, OwnedObjectPath) = service
                 .call("OpenSession", &("plain".to_owned(), input))
                 .await
                 .unwrap();
@@ -2614,7 +2620,7 @@ mod tests {
             unix_time(),
         );
         assert!(response.result.is_err());
-        assert!(target.all_items().unwrap().is_empty());
+        assert_eq!(target.all_items().unwrap(), Vec::new());
         assert!(
             target
                 .store
@@ -2681,9 +2687,9 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(paths.len(), 1);
-            assert!(locked.is_empty());
-            let input = OwnedValue::try_from(zbus::zvariant::Value::from(String::new())).unwrap();
-            let (_, session): (OwnedValue, OwnedObjectPath) =
+            assert_eq!(locked, Vec::<OwnedObjectPath>::new());
+            let input = OwnedVariant::try_from(zbus::Variant::from(String::new())).unwrap();
+            let (_, session): (OwnedVariant, OwnedObjectPath) =
                 proxy.call("OpenSession", &("plain", input)).await.unwrap();
             let item = Proxy::new(
                 &client,

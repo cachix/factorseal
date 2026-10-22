@@ -11,11 +11,12 @@ use crate::vault::{
 };
 
 use super::{DocumentHead, DocumentRow, LoadedDocument, StoreWorker, VerifiedDocument};
-use crate::vault::store::chain::{CommitContents, ProtectedCommit, digest};
+use crate::vault::store::chain::{CommitContents, digest};
 use crate::vault::store::database::{
     array_from_blob, database_error, from_i64, query_optional_blob, row_blob, row_deadline,
     row_integer, row_text, to_i64,
 };
+use crate::vault::store::manifest::CurrentHead;
 
 struct PreparedCommit {
     vault_id: VaultId,
@@ -26,23 +27,21 @@ struct PreparedCommit {
     key_epoch: u64,
     wrapped_dek: Vec<u8>,
     snapshot_envelope: Vec<u8>,
-    protected_commit: ProtectedCommit,
-    protected_record: Vec<u8>,
+    current_head: CurrentHead,
+    head_record: Vec<u8>,
     next_eviction: Option<u64>,
 }
 
 impl StoreWorker {
     /// Load a document's current head: its row, its envelope verified against
-    /// the signed commit the row points at, and its unwrapped key. Nothing is
+    /// the manifest-authenticated head the row points at, and its unwrapped key. Nothing is
     /// decrypted yet, so a caller pays only for the part it reads.
     async fn load_head(
         &self,
         document_id: DocumentId,
         expected_scope: DocumentKind,
     ) -> VaultResult<Option<DocumentHead>> {
-        if self.current_commit_head().await? != self.verified.head {
-            return Err(VaultError::Signature);
-        }
+        self.verify_state_anchor().await?;
         let mut rows = self
             .connection
             .query(
@@ -123,7 +122,7 @@ impl StoreWorker {
                 "snapshot metadata does not match document row".to_owned(),
             ));
         }
-        self.verify_snapshot_against_commit(
+        self.verify_snapshot_against_head(
             current_commit_id,
             document_id,
             generation,
@@ -185,13 +184,6 @@ impl StoreWorker {
     ) -> VaultResult<()> {
         let prepared = self.prepare_commit(document_id, scope, current, mutation, context)?;
         self.persist_commit(prepared).await?;
-        self.verified.chain_length = self.verified.chain_length.saturating_add(1);
-        // The write is durable here and compaction runs in its own
-        // transaction, so a compaction failure never loses the write. It is
-        // still reported: the next open runs the same compaction and refuses
-        // the vault if it keeps failing, so a caller must learn about it while
-        // the vault is still open rather than at the next unseal.
-        self.compact_if_needed().await?;
         self.checkpoint().await
     }
 
@@ -253,9 +245,6 @@ impl StoreWorker {
         )?;
         let wrapped_dek = serde_json::to_vec(&wrapped)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-        let signer = self
-            .secrets
-            .signer(self.device.installation_id(), self.device.device_vault_id())?;
         let envelope_context = EnvelopeContext {
             vault_id: self.device.device_vault_id(),
             document_id,
@@ -267,23 +256,20 @@ impl StoreWorker {
         let envelope = encrypt_snapshot(&envelope_context, &snapshot, &history_bytes, &data_key)?;
         let snapshot_bytes = serde_json::to_vec(&envelope)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
-        let previous_commit_id = self.verified.head;
-        let protected_commit = ProtectedCommit::new(
-            CommitContents {
-                previous_commit_id,
-                vault_id: self.device.device_vault_id(),
-                document_id,
-                scope,
-                generation,
-                key_epoch,
-                wrapped_key_digest: digest(&wrapped_dek),
-                snapshot_digest: digest(&snapshot_bytes),
-                next_eviction,
-                device_key_id: self.device.device_key_id(),
-            },
-            &signer,
-        )?;
-        let protected_bytes = serde_json::to_vec(&protected_commit)
+        let previous_commit_id = None;
+        let current_head = CurrentHead::new(CommitContents {
+            previous_commit_id,
+            vault_id: self.device.device_vault_id(),
+            document_id,
+            scope,
+            generation,
+            key_epoch,
+            wrapped_key_digest: digest(&wrapped_dek),
+            snapshot_digest: digest(&snapshot_bytes),
+            next_eviction,
+            device_key_id: self.device.device_key_id(),
+        });
+        let head_bytes = serde_json::to_vec(&current_head)
             .map_err(|error| VaultError::InvalidData(error.to_string()))?;
 
         Ok(PreparedCommit {
@@ -295,8 +281,8 @@ impl StoreWorker {
             key_epoch,
             wrapped_dek,
             snapshot_envelope: snapshot_bytes,
-            protected_commit,
-            protected_record: protected_bytes,
+            current_head,
+            head_record: head_bytes,
             next_eviction,
         })
     }
@@ -312,31 +298,26 @@ impl StoreWorker {
             document_id,
             generation,
             snapshot_envelope,
-            protected_commit,
-            protected_record,
+            current_head,
+            head_record,
             ..
         } = prepared;
         let snapshot_bytes = snapshot_envelope.len() as u64;
         Self::persist_snapshot(&transaction, document_id, generation, snapshot_envelope).await?;
-        Self::persist_protected_record(
-            &transaction,
+        Self::persist_head_record(&transaction, document_id, &current_head, head_record).await?;
+        let mut next = self.verified.documents.clone();
+        next.insert(
             document_id,
-            generation,
-            &protected_commit,
-            protected_record,
-        )
-        .await?;
-        Self::advance_commit_head(&transaction, protected_commit.commit_id).await?;
-        transaction.commit().await.map_err(database_error)?;
-        self.verified.head = Some(protected_commit.commit_id);
-        self.verified.retained_snapshot_bytes = self
-            .verified
-            .retained_snapshot_bytes
-            .saturating_add(snapshot_bytes);
-        self.verified.documents.insert(
-            document_id,
-            VerifiedDocument::new(&protected_commit, snapshot_bytes),
+            VerifiedDocument::new(&current_head, snapshot_bytes),
         );
+        let manifest = self.sign_manifest(&next, false)?;
+        let fingerprint = Self::persist_manifest(&transaction, &manifest).await?;
+        transaction.commit().await.map_err(database_error)?;
+        self.verified = super::VerifiedStoreState {
+            head: Some(manifest.manifest_id),
+            manifest_digest: Some(fingerprint),
+            documents: next,
+        };
         Ok(())
     }
 
@@ -366,7 +347,7 @@ impl StoreWorker {
                             to_i64(prepared.generation)?,
                             to_i64(prepared.key_epoch)?,
                             prepared.wrapped_dek.clone(),
-                            prepared.protected_commit.commit_id.to_vec(),
+                            prepared.current_head.head_id.to_vec(),
                             prepared.document_id.as_bytes().to_vec(),
                             prepared.vault_id.as_bytes().to_vec(),
                             to_i64(expected.generation)?,
@@ -399,7 +380,7 @@ impl StoreWorker {
                             to_i64(prepared.generation)?,
                             to_i64(prepared.key_epoch)?,
                             prepared.wrapped_dek.clone(),
-                            prepared.protected_commit.commit_id.to_vec(),
+                            prepared.current_head.head_id.to_vec(),
                             next_eviction,
                         ],
                     )
@@ -418,6 +399,13 @@ impl StoreWorker {
     ) -> VaultResult<()> {
         transaction
             .execute(
+                "DELETE FROM document_snapshots WHERE document_id=?1",
+                [document_id.as_bytes().to_vec()],
+            )
+            .await
+            .map_err(database_error)?;
+        transaction
+            .execute(
                 "INSERT INTO document_snapshots(document_id, generation, envelope)
                  VALUES (?1, ?2, ?3)",
                 params![
@@ -431,45 +419,17 @@ impl StoreWorker {
         Ok(())
     }
 
-    async fn persist_protected_record(
+    async fn persist_head_record(
         transaction: &Transaction<'_>,
         document_id: DocumentId,
-        generation: u64,
-        protected_commit: &ProtectedCommit,
-        protected_record: Vec<u8>,
+        current_head: &CurrentHead,
+        head_record: Vec<u8>,
     ) -> VaultResult<()> {
-        transaction
-            .execute(
-                "INSERT INTO protected_commits(
-                     commit_id, previous_commit_id, document_id, generation, record
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    protected_commit.commit_id.to_vec(),
-                    protected_commit
-                        .previous_commit_id
-                        .map_or(Value::Null, |value| Value::Blob(value.to_vec())),
-                    document_id.as_bytes().to_vec(),
-                    to_i64(generation)?,
-                    protected_record,
-                ],
-            )
-            .await
-            .map_err(database_error)?;
-        Ok(())
-    }
-
-    async fn advance_commit_head(
-        transaction: &Transaction<'_>,
-        commit_id: [u8; 32],
-    ) -> VaultResult<()> {
-        transaction
-            .execute(
-                "INSERT INTO store_meta(key, value) VALUES ('current-commit-head', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [commit_id.to_vec()],
-            )
-            .await
-            .map_err(database_error)?;
+        transaction.execute(
+            "INSERT INTO document_heads(document_id, head_id, record) VALUES (?1, ?2, ?3)
+             ON CONFLICT(document_id) DO UPDATE SET head_id=excluded.head_id, record=excluded.record",
+            params![document_id.as_bytes().to_vec(), current_head.head_id.to_vec(), head_record],
+        ).await.map_err(database_error)?;
         Ok(())
     }
 }

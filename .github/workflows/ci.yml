@@ -68,8 +68,8 @@ jobs:
           done
       - name: Lint packaged shell scripts
         run: devenv shell -- shellcheck packaging/build-unix.sh packaging/linux/factorseal-start scripts/test-with-dbus.sh scripts/test-apple-exchange.sh
-      - name: Lint packaged POSIX helpers
-        run: devenv shell -- shellcheck -s sh packaging/macos/factorseal-askpass packaging/macos/prepare-app.sh packaging/macos/sign-app.sh
+      - name: Lint macOS build scripts and helpers
+        run: devenv shell -- shellcheck packaging/macos/factorseal-askpass packaging/macos/*.sh
       - name: Lint opt-in native acceptance runners
         run: devenv shell -- shellcheck acceptance/linux.sh acceptance/macos.sh
       - name: Evaluate the physical Linux acceptance app
@@ -109,13 +109,12 @@ jobs:
           cargo test --workspace --all-targets --all-features
       - name: Check lightweight client authentication build
         run: cargo clippy --no-default-features --features vault-client -- -D warnings
-      - name: Build and inspect locally signed macOS package
+      - name: Install ImageMagick
+        run: brew install imagemagick
+      - name: Test macOS package build
         run: |
-          plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist packaging/macos/Factorseal.entitlements.in packaging/macos/FactorsealRuntime.entitlements
-          env \
-            -u FACTORSEAL_MACOS_SIGNING_IDENTITY \
-            -u FACTORSEAL_MACOS_PROVISIONING_PROFILE \
-            packaging/build-unix.sh macos
+          plutil -lint packaging/macos/Info.plist packaging/macos/dev.factorseal.plist packaging/macos/FactorsealRuntime.entitlements packaging/macos/FactorsealBuildTest.entitlements
+          packaging/build-unix.sh macos
 
           archive=$(find dist -name 'factorseal-*-macos-*.tar.gz' -print -quit)
           unpacked=$(mktemp -d)
@@ -148,13 +147,6 @@ jobs:
           done
           "$app/Contents/MacOS/factorseal" --version
           FACTORSEAL_TEST_HELPER_DIR="$app/Contents/MacOS" cargo test -p factorseal --lib --all-features installed_
-          while IFS= read -r candidate; do
-            file -b "$candidate" | grep -q 'Mach-O' || continue
-            if otool -l "$candidate" | grep -F '/nix/store/'; then
-              echo "Nix store reference remains in $candidate" >&2
-              exit 1
-            fi
-          done < <(find "$app/Contents" -type f -print)
       - uses: actions/upload-artifact@v4
         with:
           name: factorseal-macos

@@ -25,12 +25,16 @@ $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo fmt --all -- --check
 ```
 
+The macOS app bundle comes from `packaging/macos/Factorseal.xcodeproj`. Xcode
+runs `cargo build` through `packaging/macos/cargo-build.sh` and then assembles
+and signs the bundle. See [packaging](../packaging/README.md#macos-builds).
+
 To build and check Desktop on Windows from a WSL2 checkout, including its
 approval popup, see [Windows Desktop checks from WSL2](../scripts/windows-desktop-check/README.md).
 
 For Apple credential-exchange SDK and Rust interoperability checks on macOS 26+
 with Xcode 26+, run `bash scripts/test-apple-exchange.sh`. See the
-[Apple test setup](../platform/apple/README.md) for CI artifacts and the separate
+[Apple test setup](../platform/macos/credential-exchange/README.md) for CI artifacts and the separate
 signed-app acceptance procedure.
 
 The feature split is intentional:
@@ -83,6 +87,59 @@ The claim is written to SecretSpec's per-user provider directory:
 `$XDG_CONFIG_HOME/secretspec/providers.d` (or `~/.config/secretspec/providers.d`)
 on Linux, `~/Library/Application Support/SecretSpec/providers.d` on macOS, and
 `%APPDATA%\SecretSpec\providers.d` on Windows.
+
+## D-Bus dependency migration (DEP-7)
+
+Factorseal and Desktop depend directly on zbus 6. Secret Service,
+NetworkManager, logind, provider transport, and desktop keyring probes use its
+async API and integrated wire types. Synchronous entry points drive complete
+operations with `zbus::block_on`; caller identity lookup keeps that runtime on
+its dedicated thread so async embedders do not enter a nested Tokio runtime.
+The desktop activation poll uses an async timer, and test services run on a
+runtime that remains active between synchronous probes.
+
+The shared ashpd 0.13.13 dependency now uses a pinned backport of the
+[zbus 6 migration](https://github.com/bilelmoussaoui/ashpd/pull/491) in
+`domenkozar/ashpd`. Desktop's settings watcher, GPUI's portals, and oo7's
+Secret portal all use that source. The backport retains the stable 0.13.13
+API and compatibility fixes while the upstream migration targets main.
+The `async-io` feature now selects zbus's built-in runtime; it remains usable
+from GPUI's background executor. Its native I/O requires rustix 1.1.5, which
+is also selected in the fuzz lockfile.
+
+GPUI uses the pinned [oo7 zbus 6 migration](https://github.com/linux-credentials/oo7/pull/610).
+Its dependency declaration selects oo7 0.7.0-alpha, which uses `zgvariant` for
+keyring files and the integrated zbus wire module for D-Bus. gpui-tray 0.2.0
+also uses zbus 6. These pins are reviewed together with the direct and portal
+migrations in the combined Factorseal PR.
+
+Desktop still pulls in zbus 5 and the unmaintained standalone `zvariant`,
+`zvariant_derive`, and `zbus_names` crates through these locked dependencies:
+
+| Path | Remaining migration |
+| --- | --- |
+| rfd 0.15.4 → ashpd 0.11.1 | Migrate the older file-dialog portal path. The shared ashpd 0.13.13 path already uses zbus 6. |
+| GPUI CE → accesskit_unix 0.22.1 → AT-SPI | Migrate accesskit_atspi_common, atspi-common, atspi-proxies, and zbus-lockstep/XML tooling together. |
+| GPUI CE → notify-rust 4.18.0 | Migrate notification calls to zbus 6. |
+
+Use these commands to inspect the remaining paths after each parent upgrade:
+
+```console
+$ cargo tree --locked --workspace --target all -i zbus@5.19.0
+$ cargo tree --locked --workspace --target all -i zvariant
+$ cargo tree --locked --workspace --target all -i zbus_names
+$ python3 scripts/check-fuzz-lock.py
+```
+
+These dependencies need API migrations, not a forced Cargo version override.
+Keep their types within each dependency's API boundary while zbus 5 and 6
+coexist. The exact-version exceptions in
+`security/dependency-exceptions.toml` retain their existing expiry. Remove the
+three exceptions only after the workspace graph no longer contains the
+standalone crates. Validate Secret Service/libsecret interoperability,
+NetworkManager, lifecycle sealing, portal dialogs, notifications, tray, and
+accessibility before completing DEP-7. The fuzz feature does not enable D-Bus,
+but shared dependency versions must still match the product lockfile.
 
 ## Release status
 

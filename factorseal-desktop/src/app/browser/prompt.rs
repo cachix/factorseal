@@ -62,7 +62,9 @@ pub(super) fn sync(request: Option<Prompt>, cx: &mut App) {
     // An unsealed vault looks for matching logins first. Open only once there
     // is something to approve: a page with no stored login must not take the
     // foreground from the browser, only to close again.
-    if request.state == "matching" && cx.global::<BrowserWindow>().0.is_none() {
+    if matches!(request.state.as_str(), "reading" | "decoding" | "matching")
+        && cx.global::<BrowserWindow>().0.is_none()
+    {
         return;
     }
     if let Some((_, view)) = cx.global::<BrowserWindow>().0.clone() {
@@ -155,6 +157,7 @@ fn open(request: &Prompt, snapshot: &Snapshot, cx: &mut App) {
             layered,
             "FactorSeal — Browser access",
             "dev.factorseal.BrowserAccess",
+            px(640.),
             cx,
         )
     };
@@ -211,7 +214,11 @@ impl BrowserView {
                 // This view is bound to the reviewed session and generation;
                 // cancellation or replacement discards this consent with it.
                 self.pair_after_unlock = self.request.site == "Pair browser profile";
-                self.snapshot = Snapshot::Unlocking { metadata, group };
+                self.snapshot = Snapshot::Unlocking {
+                    metadata,
+                    group,
+                    step: UnlockStep::default(),
+                };
                 self.error = None;
             }
             Err(error) => self.error = Some(error.to_owned()),
@@ -237,32 +244,39 @@ impl Render for BrowserView {
         let pairing = self.request.site == "Pair browser profile";
         let revoking = self.request.site == "Disconnect browser profile";
         let saving = self.request.save_username.is_some();
+        let one_time = self.request.one_time;
+        let confirms = pairing || revoking || saving || one_time;
         let title = if pairing {
             "Pair browser profile"
         } else if revoking {
             "Disconnect browser profile"
         } else if saving {
             "Save login"
+        } else if one_time {
+            "Add one-time password"
         } else {
             "Fill a login"
         };
         // Text needs an ID to reach screen readers and UI Automation.
         let mut summary = v_flex().p_4().gap_3().rounded_lg().bg(theme.muted)
-            .child(div().text_lg().font_semibold().child(text("site", if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() })))
-            .child(text("description", if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." }));
+            .child(div().text_heading().font_semibold().child(text("site", if pairing || revoking { "Browser extension".to_owned() } else { self.request.site.clone() })))
+            .child(text("description", if pairing { "Allow this browser profile to request logins. Every fill still needs your approval." } else if revoking { "Remove this profile’s permission to request logins." } else if saving { "Save this website’s login to Personal secrets." } else if one_time { "Add this website’s one-time password to Personal secrets." } else { "Choose one account to fill once. The browser will check the original page again." }));
         if let Some(username) = &self.request.save_username {
             summary = summary
                 .child(div().child(text("username", format!("Username: {username}"))))
                 .child(div().child(text("password", "Password: ••••••••")));
         }
+        if let Some(code) = &self.request.code {
+            summary = summary.child(div().min_w_0().truncate().child(format!("Code for {code}")));
+        }
         if pairing || revoking {
-            summary = summary.child(div().text_sm().child(text(
+            summary = summary.child(div().text_body().child(text(
                 "profile-key",
                 format!("Profile key: {}…", &self.request.key[..16]),
             )));
         }
         let mut requests = v_flex().gap_4().child(summary).child(
-            Button::new("browser-technical-details")
+            button("browser-technical-details")
                 .ghost()
                 .small()
                 .label(if self.details {
@@ -276,23 +290,38 @@ impl Render for BrowserView {
                 })),
         );
         if self.details {
-            requests = requests.child(div().text_xs().child(text(
+            requests = requests.child(div().text_caption().child(text(
                 "public-key",
                 format!("Profile public key: {}", self.request.key),
             )));
         }
         if reviewing {
             for (index, candidate) in self.request.candidates.iter().enumerate() {
-                requests = requests.child(
-                    Button::new(("browser-account", index))
-                        .label(format!(
-                            "{}{} · {}",
-                            if saving { "Update password: " } else { "" },
-                            candidate.title,
-                            candidate.username
-                        ))
-                        .on_click(cx.listener(move |view, _, _, cx| view.approve(Some(index), cx))),
-                );
+                let account = button(("browser-account", index))
+                    .label(format!(
+                        "{}{} · {}",
+                        if saving {
+                            "Update password: "
+                        } else if one_time {
+                            "Add to "
+                        } else {
+                            ""
+                        },
+                        candidate.title,
+                        candidate.username
+                    ))
+                    .on_click(cx.listener(move |view, _, _, cx| view.approve(Some(index), cx)));
+                requests = requests.child(v_flex().gap_1().child(account).when(
+                    candidate.one_time,
+                    |account| {
+                        account.child(
+                            div()
+                                .text_caption()
+                                .text_color(theme.warning)
+                                .child("Replaces the current one-time password."),
+                        )
+                    },
+                ));
             }
         }
         let mut groups = h_flex()
@@ -306,7 +335,7 @@ impl Render for BrowserView {
                 let selected = self.group.as_ref() == Some(group);
                 let group = group.clone();
                 groups = groups.child(
-                    Button::new(("browser-factor", index))
+                    button(("browser-factor", index))
                         .label(group.to_string())
                         .role(Some(gpui::Role::RadioButton))
                         .toggled(selected)
@@ -349,7 +378,7 @@ impl Render for BrowserView {
                 _ => "Saving browser authorization…",
             }
         };
-        v_flex()
+        let request = v_flex()
             .size_full()
             .track_focus(&self.focus)
             .border_1()
@@ -365,7 +394,7 @@ impl Render for BrowserView {
             .bg(theme.background)
             .text_color(theme.foreground)
             .font_family(theme.font_family.clone())
-            .text_size(theme.font_size)
+            .text_body()
             .child(
                 v_flex()
                     .p_6()
@@ -377,14 +406,14 @@ impl Render for BrowserView {
                             .child(brand_mark(22., theme.foreground))
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_body()
                                     .text_color(theme.muted_foreground)
                                     .child(text("brand", "FactorSeal")),
                             ),
                     )
                     .child(
                         div()
-                            .text_xl()
+                            .text_heading()
                             .font_semibold()
                             .child(text("browser-title", title)),
                     ),
@@ -407,7 +436,7 @@ impl Render for BrowserView {
                     .border_color(theme.border)
                     .child(
                         div()
-                            .text_xs()
+                            .text_caption()
                             .text_color(theme.muted_foreground)
                             .child(text("status", status)),
                     )
@@ -427,7 +456,7 @@ impl Render for BrowserView {
                     .when(
                         matches!(self.snapshot, Snapshot::Uninitialized { .. }),
                         |element| {
-                            element.child(div().text_sm().child(text(
+                            element.child(div().text_body().child(text(
                                 "setup-note",
                                 "Set up your vault in FactorSeal Desktop first.",
                             )))
@@ -437,16 +466,16 @@ impl Render for BrowserView {
                         h_flex()
                             .justify_end()
                             .gap_2()
-                            .child(Button::new("deny-browser").ghost().label("Deny").on_click(
+                            .child(button("deny-browser").ghost().label("Deny").on_click(
                                 cx.listener(|view, _, _, cx| {
                                     let session = view.request.session.clone();
                                     let generation = view.request.generation;
                                     cx.defer(move |cx| deny(&session, generation, cx));
                                 }),
                             ))
-                            .when(!unsealed || pairing || revoking || saving, |element| {
+                            .when(!unsealed || confirms, |element| {
                                 element.child(
-                                    Button::new("approve-browser")
+                                    button("approve-browser")
                                         .primary()
                                         .disabled(
                                             unlocking
@@ -475,6 +504,8 @@ impl Render for BrowserView {
                                             } else {
                                                 "Save as new login"
                                             }
+                                        } else if one_time {
+                                            "Save as new login"
                                         } else {
                                             "Pair browser"
                                         })
@@ -488,6 +519,7 @@ impl Render for BrowserView {
                                 )
                             }),
                     ),
-            )
+            );
+        crate::motion::enter("browser-request", request)
     }
 }

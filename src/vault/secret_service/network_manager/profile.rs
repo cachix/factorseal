@@ -132,7 +132,7 @@ fn string<'a>(settings: &'a Settings, section: &str, key: &str) -> Result<&'a st
         .ok_or_else(Error::invalid)
 }
 
-fn strings(value: Option<&zbus::zvariant::OwnedValue>) -> Result<Vec<String>, Error> {
+fn strings(value: Option<&zbus::OwnedVariant>) -> Result<Vec<String>, Error> {
     value
         .map(|value| {
             Vec::<String>::try_from(value.try_clone().map_err(|_| Error::invalid())?)

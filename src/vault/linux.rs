@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::getuid;
-use zbus::zvariant::{OwnedFd, OwnedObjectPath, OwnedValue};
 use zbus::{Connection, MessageStream, Proxy};
+use zbus::{OwnedFd, OwnedObjectPath, OwnedVariant};
 
 use super::transport::unix_socket::{
     accept_until_sealed, bind_listener, install_shutdown_signal_handler, validate_socket_options,
@@ -62,6 +62,10 @@ impl LinuxVaultOptions {
             install_secret_service: true,
         }
     }
+
+    pub fn validate(&self) -> VaultResult<()> {
+        validate_socket_options("Linux", &self.socket_path, self.poll_interval)
+    }
 }
 
 /// Serve the shared vault protocol through a same-user Unix socket.
@@ -105,7 +109,7 @@ pub fn serve_linux_vault_with_ready(
     lifecycle_monitor: Option<&LinuxVaultLifecycle>,
     ready: impl FnOnce() -> VaultResult<()>,
 ) -> VaultResult<()> {
-    validate_socket_options("Linux", &options.socket_path, options.poll_interval)?;
+    options.validate()?;
     if options.install_lifecycle_monitor {
         service.enable_emergency_exit();
     }
@@ -191,7 +195,7 @@ impl LinuxVaultLifecycle {
                 {
                     Ok(runtime) => runtime,
                     Err(error) => {
-                        let _ = ready_sender.send(Err(error.to_string()));
+                        let _ = ready_sender.send(Err(VaultError::Protocol(error.to_string())));
                         return;
                     }
                 };
@@ -205,7 +209,7 @@ impl LinuxVaultLifecycle {
                                 monitor
                             }
                             Err(error) => {
-                                let _ = ready_sender.send(Err(error.to_string()));
+                                let _ = ready_sender.send(Err(error));
                                 return;
                             }
                         };
@@ -222,12 +226,9 @@ impl LinuxVaultLifecycle {
             .map_err(|error| {
                 VaultError::Protocol(format!("could not start Linux lifecycle monitor: {error}"))
             })?;
-        ready_receiver
-            .recv()
-            .map_err(|_| {
-                VaultError::Protocol("Linux lifecycle monitor stopped during startup".to_owned())
-            })?
-            .map_err(VaultError::Protocol)?;
+        ready_receiver.recv().map_err(|_| {
+            VaultError::Protocol("Linux lifecycle monitor stopped during startup".to_owned())
+        })??;
         Ok(Self {
             signal,
             stopping,
@@ -275,7 +276,6 @@ struct LinuxLifecycleConnection {
 impl LinuxLifecycleConnection {
     async fn new(signal: Arc<LifecycleSignal>) -> VaultResult<Self> {
         let connection = zbus::connection::Builder::system()
-            .map_err(|error| lifecycle_error(&error))?
             .method_timeout(LIFECYCLE_DBUS_TIMEOUT)
             .build()
             .await
@@ -293,23 +293,20 @@ impl LinuxLifecycleConnection {
         let owner_rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
             .sender("org.freedesktop.DBus")
-            .map_err(|error| lifecycle_error(&error))?
             .path("/org/freedesktop/DBus")
-            .map_err(|error| lifecycle_error(&error))?
             .interface("org.freedesktop.DBus")
-            .map_err(|error| lifecycle_error(&error))?
             .member("NameOwnerChanged")
-            .map_err(|error| lifecycle_error(&error))?
             .add_arg("org.freedesktop.login1")
-            .map_err(|error| lifecycle_error(&error))?
-            .build();
-        let owner_changes = MessageStream::for_match_rule(owner_rule, &connection, Some(8))
-            .await
+            .build()
             .map_err(|error| lifecycle_error(&error))?;
+        let owner_changes =
+            MessageStream::for_match_rule(owner_rule, &connection, std::num::NonZeroUsize::new(8))
+                .await
+                .map_err(|error| lifecycle_error(&error))?;
         let owner = bus
             .get_name_owner(
                 zbus::names::BusName::try_from("org.freedesktop.login1")
-                    .map_err(|error| lifecycle_error(&error.into()))?,
+                    .map_err(|error| lifecycle_error(&error))?,
             )
             .await
             .map_err(|error| lifecycle_error(&error.into()))?;
@@ -318,11 +315,12 @@ impl LinuxLifecycleConnection {
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
             .sender(owner.clone())
-            .map_err(|error| lifecycle_error(&error))?
-            .build();
-        let messages = MessageStream::for_match_rule(rule, &connection, Some(64))
-            .await
+            .build()
             .map_err(|error| lifecycle_error(&error))?;
+        let messages =
+            MessageStream::for_match_rule(rule, &connection, std::num::NonZeroUsize::new(64))
+                .await
+                .map_err(|error| lifecycle_error(&error))?;
         let manager = Proxy::new(
             &connection,
             owner.as_str(),
@@ -395,7 +393,7 @@ impl LinuxLifecycleConnection {
             (Some("org.freedesktop.DBus.Properties"), Some("PropertiesChanged")) => {
                 let (interface, changed, _invalidated): (
                     String,
-                    std::collections::HashMap<String, OwnedValue>,
+                    std::collections::HashMap<String, OwnedVariant>,
                     Vec<String>,
                 ) = message
                     .body()
@@ -539,7 +537,7 @@ fn message_path_is_tracked(path: Option<String>, paths: &Mutex<HashSet<String>>)
         .map_or(true, |paths| paths.contains(path.as_str()))
 }
 
-fn locked_hint_is_true(changed: &std::collections::HashMap<String, OwnedValue>) -> bool {
+fn locked_hint_is_true(changed: &std::collections::HashMap<String, OwnedVariant>) -> bool {
     changed
         .get("LockedHint")
         .and_then(|value| bool::try_from(value).ok())
@@ -602,7 +600,7 @@ pub(crate) fn caller_identity(
 
 pub(crate) fn dbus_caller_identity(name: &str) -> VaultResult<(CallerIdentity, String)> {
     // The synchronous vault API can also be called from an async embedder.
-    // zbus's blocking facade runs its own Tokio runtime, so keep that runtime
+    // zbus::block_on runs its own Tokio runtime, so keep that runtime
     // off the caller's executor thread.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
@@ -615,25 +613,34 @@ pub(crate) fn dbus_caller_identity(name: &str) -> VaultResult<(CallerIdentity, S
 }
 
 fn dbus_caller_identity_blocking(name: &str) -> VaultResult<(CallerIdentity, String)> {
+    zbus::block_on(dbus_caller_identity_async(name))
+}
+
+async fn dbus_caller_identity_async(name: &str) -> VaultResult<(CallerIdentity, String)> {
     static CACHE: std::sync::OnceLock<CallerIdentityCache> = std::sync::OnceLock::new();
     if !name.starts_with(':') {
         return Err(VaultError::AuthorizationRequired);
     }
-    let connection = zbus::blocking::connection::Builder::session()
-        .and_then(|builder| builder.method_timeout(Duration::from_secs(2)).build())
+    let connection = zbus::connection::Builder::session()
+        .method_timeout(Duration::from_secs(2))
+        .build()
+        .await
         .map_err(|error| VaultError::Protocol(error.to_string()))?;
-    let proxy = zbus::blocking::Proxy::new(
+    let proxy = zbus::Proxy::new(
         &connection,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
     )
+    .await
     .map_err(|_| VaultError::AuthorizationRequired)?;
     let uid: u32 = proxy
         .call("GetConnectionUnixUser", &(name,))
+        .await
         .map_err(|_| VaultError::AuthorizationRequired)?;
     let pid: u32 = proxy
         .call("GetConnectionUnixProcessID", &(name,))
+        .await
         .map_err(|_| VaultError::AuthorizationRequired)?;
     let identity = process_identity(
         uid,
@@ -641,7 +648,7 @@ fn dbus_caller_identity_blocking(name: &str) -> VaultResult<(CallerIdentity, Str
         CACHE.get_or_init(CallerIdentityCache::default),
     )?;
     // The unique bus name must still refer to the same live connection.
-    let current: Result<u32, _> = proxy.call("GetConnectionUnixProcessID", &(name,));
+    let current: Result<u32, _> = proxy.call("GetConnectionUnixProcessID", &(name,)).await;
     if current.ok() != Some(pid) {
         return Err(VaultError::AuthorizationRequired);
     }
@@ -796,7 +803,7 @@ mod tests {
         let identity = caller_identity(&left, &CallerIdentityCache::default()).unwrap();
         assert_eq!(identity.platform(), CallerPlatform::Linux);
         assert_eq!(identity.user_id(), format!("uid:{}", getuid().as_raw()));
-        assert!(!identity.application_id().is_empty());
+        assert_ne!(identity.application_id(), "");
         assert_ne!(identity.executable_digest(), &[0; 32]);
     }
 

@@ -74,6 +74,10 @@ impl MacosVaultOptions {
             install_lifecycle_monitor: true,
         }
     }
+
+    pub fn validate(&self) -> VaultResult<()> {
+        validate_socket_options("macOS", &self.socket_path, self.poll_interval)
+    }
 }
 
 /// Serve through a private Unix socket authenticated with macOS kernel peer
@@ -116,7 +120,7 @@ pub fn serve_macos_vault_with_ready(
     if options.install_lifecycle_monitor {
         service.enable_emergency_exit();
     }
-    validate_socket_options("macOS", &options.socket_path, options.poll_interval)?;
+    options.validate()?;
     let (listener, _socket_guard) = bind_listener(&options.socket_path)?;
 
     let stopping = Arc::new(AtomicBool::new(false));

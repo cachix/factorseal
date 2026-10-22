@@ -11,16 +11,25 @@ type Host = dyn Fn(Command) -> Result<Reply, String> + Send + Sync;
 
 #[cfg(all(test, feature = "hardware", any(unix, windows)))]
 mod acceptance;
+pub mod icon;
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Bootstrap {
-    version: u8,
-    root: std::path::PathBuf,
+enum Bootstrap {
+    Sync {
+        version: u8,
+        root: std::path::PathBuf,
+    },
+    Icons {
+        version: u8,
+    },
 }
 #[derive(Serialize, Deserialize)]
 enum ToChild {
     View(u64),
+    Icon {
+        id: u64,
+        host: String,
+    },
     Action {
         id: u64,
         action: Action,
@@ -42,6 +51,10 @@ enum ToParent {
     Host {
         id: u64,
         command: Box<Command>,
+    },
+    Icon {
+        id: u64,
+        icon: Option<icon::Icon>,
     },
 }
 
@@ -228,7 +241,8 @@ mod native {
             let root = std::fs::canonicalize(root).map_err(err)?;
             let (owner, mut channel) = process::spawn(executable, Some(&root)).map_err(err)?;
             let owner = Arc::new(Mutex::new(owner));
-            process::send(&mut channel, &Bootstrap { version: 1, root }, 16384).map_err(err)?;
+            process::send(&mut channel, &Bootstrap::Sync { version: 1, root }, 16384)
+                .map_err(err)?;
             let shared = Arc::new(Shared {
                 writer: Mutex::new(channel.try_clone().map_err(err)?),
                 pending: Mutex::new(HashMap::new()),
@@ -310,6 +324,10 @@ mod native {
             // Allocate IDs while holding the write lock so concurrent view and
             // action requests always reach the helper in sequence order.
             let mut writer = self.shared.writer.lock().map_err(err)?;
+            #[allow(
+                deprecated,
+                reason = "try_update requires Rust 1.95; core supports Rust 1.91"
+            )]
             let id = self
                 .sequence
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -371,6 +389,7 @@ mod native {
                 ToParent::Failed(error) => {
                     return Err(format!("network helper stopped: {error}"));
                 }
+                ToParent::Icon { .. } => return Err("unexpected network icon reply".into()),
                 ToParent::View { id, result } => {
                     let sender = shared
                         .pending
@@ -442,12 +461,15 @@ mod native {
     }
 
     fn run_inner() -> io::Result<()> {
-        let bootstrap: Bootstrap =
-            codec::decode(&codec::read(&mut io::stdin().lock(), 16384)?, 16384)?;
-        if bootstrap.version != 1 || !bootstrap.root.is_absolute() {
-            return Err(io::Error::other("invalid network bootstrap"));
+        match codec::decode(&codec::read(&mut io::stdin().lock(), 16384)?, 16384)? {
+            Bootstrap::Sync { version: 1, root } if root.is_absolute() => run_sync(&root),
+            Bootstrap::Icons { version: 1 } => super::icon::serve(),
+            _ => Err(io::Error::other("invalid network bootstrap")),
         }
-        sandbox::network(&bootstrap.root).inspect_err(|error| {
+    }
+
+    fn run_sync(root: &Path) -> io::Result<()> {
+        sandbox::network(Some(root)).inspect_err(|error| {
             let _ = codec::send(
                 &mut io::stdout().lock(),
                 &ToParent::StartupFailed(format!("sandbox: {error}")),
@@ -467,6 +489,10 @@ mod native {
         let callback_gate = Mutex::new(());
         let host = Arc::new(move |command| {
             let _gate = callback_gate.lock().map_err(err)?;
+            #[allow(
+                deprecated,
+                reason = "try_update requires Rust 1.95; core supports Rust 1.91"
+            )]
             let id = sequence
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                     value.checked_add(1)
@@ -490,7 +516,7 @@ mod native {
             result
         });
         let manager = Arc::new(
-            crate::desktop_worker::sync::network::Manager::open(&bootstrap.root, host)
+            crate::desktop_worker::sync::network::Manager::open(root, host)
                 .map_err(io::Error::other)
                 .inspect_err(|error| {
                     if let Ok(mut writer) = writer.lock() {
@@ -591,6 +617,9 @@ mod native {
                     previous_request = id;
                     actions.try_send((id, action)).map_err(io::Error::other)?;
                 }
+                ToChild::Icon { .. } => {
+                    return Err(io::Error::other("unexpected icon request"));
+                }
             }
         }
     }
@@ -621,7 +650,7 @@ mod native {
             )
             .unwrap();
             let (_owner, mut channel) = process::spawn(&executable, Some(&root)).unwrap();
-            process::send(&mut channel, &Bootstrap { version: 1, root }, 16384).unwrap();
+            process::send(&mut channel, &Bootstrap::Sync { version: 1, root }, 16384).unwrap();
             let mut ready = false;
             let mut callback = None;
             while !ready || callback.is_none() {

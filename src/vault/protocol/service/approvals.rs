@@ -1,9 +1,8 @@
 //! Bounded entry approval lifecycle.
 //!
 //! Pending approvals are held in memory and written through to the vault
-//! store, so a request still waiting for review survives the vault sealing
-//! and is offered again after the next unseal. Resolved outcomes and the
-//! creation rate window stay in memory only.
+//! store, so a request still waiting for review survives the vault sealing.
+//! Resolved outcomes and the creation rate window stay in memory only.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -39,6 +38,7 @@ const MAX_PENDING_PER_CALLER: usize = 16;
 const APPROVAL_RATE_WINDOW: Duration = Duration::from_mins(1);
 const MAX_NEW_APPROVALS_PER_CALLER: usize = 8;
 const MAX_NEW_APPROVALS: usize = 128;
+const REQUESTER_GRACE: Duration = Duration::from_secs(2);
 
 pub(super) const PERMISSION_CONTROL_NAMESPACE: &[u8] = b"factorseal/permissions/v1";
 
@@ -68,6 +68,8 @@ struct ApprovalRecord {
     namespace: Vec<u8>,
     address: Option<crate::SecretAddress>,
     permission: GrantPermission,
+    #[serde(skip)]
+    awaited_until: Option<Instant>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -119,8 +121,8 @@ impl ApprovalCandidate {
                 base_dir: Some(base_dir),
                 reason: Some(format!("System keyring: {service}")),
                 requested_permission_duration_seconds: None,
-                declared_wsl_origin: None,
                 declared_launch_chain: Vec::new(),
+                declared_wsl_origin: None,
             },
             scope: DocumentKind::LinuxSecretService,
             namespace: project.into_bytes(),
@@ -388,6 +390,7 @@ impl PendingApprovals {
         self.create_at(candidate, now, Instant::now())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn create_at(
         &mut self,
         candidate: ApprovalCandidate,
@@ -408,7 +411,7 @@ impl PendingApprovals {
             return Err(VaultError::AuthorizationRequired);
         }
         let fingerprint = candidate.caller.fingerprint();
-        if let Some(existing) = self.records.iter().find(|record| {
+        if let Some(existing) = self.records.iter_mut().find(|record| {
             record.caller.fingerprint() == fingerprint
                 && record.summary.application == candidate.application
                 && record.address == candidate.address
@@ -424,10 +427,23 @@ impl PendingApprovals {
             let PermissionState::Pending { expires_at, .. } = existing.summary.state else {
                 unreachable!("queue stores only pending records");
             };
-            return Ok(VaultInteractionReference {
+            // A program that asks again after it stopped waiting must reach
+            // the approval prompt again, and the prompt follows the revision.
+            // A repeat while it still waits changes nothing.
+            let asked_again = existing
+                .awaited_until
+                .is_none_or(|until| until <= monotonic_now);
+            existing.awaited_until = existing
+                .awaited_until
+                .max(Some(monotonic_now + REQUESTER_GRACE));
+            let reference = VaultInteractionReference {
                 id: existing.summary.id.clone(),
                 expires_at,
-            });
+            };
+            if asked_again {
+                self.revision = self.revision.wrapping_add(1);
+            }
+            return Ok(reference);
         }
         self.recent_creations.retain(|(created, _)| {
             monotonic_now.saturating_duration_since(*created) < APPROVAL_RATE_WINDOW
@@ -478,6 +494,7 @@ impl PendingApprovals {
                 created_at: now,
                 expires_at,
                 challenge,
+                awaited: false,
                 expiring_write: candidate.expiring_write,
             },
         };
@@ -488,6 +505,7 @@ impl PendingApprovals {
             namespace: candidate.namespace,
             address: candidate.address,
             permission: candidate.permission,
+            awaited_until: Some(monotonic_now + REQUESTER_GRACE),
         });
         self.recent_creations
             .push_back((monotonic_now, fingerprint));
@@ -498,14 +516,37 @@ impl PendingApprovals {
     }
 
     pub(super) fn list(&mut self, now: u64) -> (u64, Vec<Permission>) {
+        self.list_at(now, Instant::now())
+    }
+
+    fn list_at(&mut self, now: u64, monotonic_now: Instant) -> (u64, Vec<Permission>) {
         self.purge_expired(now);
         (
             self.revision,
             self.records
                 .iter()
-                .map(|record| record.summary.clone())
+                .map(|record| {
+                    let mut summary = record.summary.clone();
+                    if let PermissionState::Pending { awaited, .. } = &mut summary.state {
+                        *awaited = record
+                            .awaited_until
+                            .is_some_and(|until| until > monotonic_now);
+                    }
+                    summary
+                })
                 .collect(),
         )
+    }
+
+    pub(super) fn awaited(&mut self, caller: &CallerIdentity, id: &str, until: Instant) {
+        let fingerprint = caller.fingerprint();
+        if let Some(record) = self
+            .records
+            .iter_mut()
+            .find(|record| record.summary.id == id && record.caller.fingerprint() == fingerprint)
+        {
+            record.awaited_until = record.awaited_until.max(Some(until + REQUESTER_GRACE));
+        }
     }
 
     pub(super) fn deny(&mut self, id: &str, now: u64) -> VaultResult<()> {
@@ -712,6 +753,61 @@ mod tests {
             approvals.create_at(candidate(0, 99), 200, instant),
             Err(VaultError::ApprovalLimited)
         ));
+    }
+
+    #[test]
+    fn approvals_count_as_awaited_only_while_their_requester_waits() {
+        let awaited = |approvals: &mut PendingApprovals, at| {
+            approvals
+                .list_at(100, at)
+                .1
+                .iter()
+                .map(|permission| {
+                    matches!(
+                        permission.state,
+                        PermissionState::Pending { awaited: true, .. }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut approvals = PendingApprovals::default();
+        let start = Instant::now();
+        let first = approvals.create_at(candidate(0, 0), 100, start).unwrap();
+        assert_eq!(awaited(&mut approvals, start), [true]);
+        assert_eq!(awaited(&mut approvals, start + REQUESTER_GRACE), [false]);
+        let caller = candidate(0, 0).caller;
+        let deadline = start + Duration::from_secs(5);
+        approvals.awaited(&caller, &first.id, deadline);
+        assert_eq!(awaited(&mut approvals, deadline), [true]);
+        assert_eq!(awaited(&mut approvals, deadline + REQUESTER_GRACE), [false]);
+        approvals.awaited(
+            &candidate(1, 0).caller,
+            &first.id,
+            deadline + REQUESTER_GRACE,
+        );
+        assert_eq!(awaited(&mut approvals, deadline + REQUESTER_GRACE), [false]);
+        let later = deadline + Duration::from_mins(1);
+        let retried = approvals.create_at(candidate(0, 0), 160, later).unwrap();
+        assert_eq!(retried.id, first.id);
+        assert_eq!(awaited(&mut approvals, later), [true]);
+        let PermissionState::Pending { awaited, .. } = approvals.records[0].summary.state else {
+            panic!("pending");
+        };
+        assert!(!awaited);
+    }
+
+    #[test]
+    fn a_request_asked_again_after_its_requester_stopped_waiting_changes_the_revision() {
+        let mut approvals = PendingApprovals::default();
+        let start = Instant::now();
+        let first = approvals.create_at(candidate(0, 0), 100, start).unwrap();
+        let revision = approvals.revision();
+        approvals.create_at(candidate(0, 0), 100, start).unwrap();
+        assert_eq!(revision, approvals.revision());
+        let later = start + REQUESTER_GRACE + Duration::from_secs(1);
+        let retried = approvals.create_at(candidate(0, 0), 103, later).unwrap();
+        assert_eq!(retried.id, first.id);
+        assert_ne!(revision, approvals.revision());
     }
 
     #[test]

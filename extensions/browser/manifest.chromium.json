@@ -16,6 +16,17 @@
   "background": {
     "service_worker": "background.js"
   },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "field.html",
+        "notice.html"
+      ],
+      "matches": [
+        "https://*/*"
+      ]
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

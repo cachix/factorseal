@@ -35,7 +35,7 @@ device-signed data.
                               |
                   scoped Automerge operations
                               |
-          encrypted snapshots + device-signed commits
+          encrypted snapshots + device-signed manifest
                               |
                      embedded Turso database
 ```
@@ -73,8 +73,9 @@ requires platform biometric approval, so unsealing needs one native ceremony.
 Unsealing reverses those layers, reconstructs the selected signing provider,
 and rejects any public-identity mismatch before opening the database.
 The store then verifies its schema, installation/device-vault identity, signed
-commit chain, wrapped document-key digests, and current document heads before
-serving requests.
+current-state manifest, complete document inventory, wrapped document-key
+digests, and current ciphertext before serving requests. Legacy chain
+verification is required only during migration.
 
 ### Authenticated local requests
 
@@ -150,17 +151,18 @@ projection of the document's current records, so deleted and overwritten
 values do not survive in it, and it is encrypted under a fresh DEK for that
 generation with AES-256-GCM and a 96-bit nonce. The AEAD header binds its
 device-vault ID, document ID and kind, generation, and key epoch. Plaintext
-Automerge heads are never published in the header. One ML-DSA-65 signed
-protected commit per generation binds the snapshot digest, wrapped key and
-eviction deadline. Live reads and compaction compare against verified in-memory
-heads; compaction cannot certify a partially rolled-back document.
+Automerge heads are never published in the header. Each current head binds the
+snapshot digest, wrapped key, identity, generation and eviction deadline. One
+ML-DSA-65 signed manifest authenticates the ordered inventory of all current
+heads. Live operations compare against the verified lease-scoped inventory;
+a partial document rollback cannot be certified by a later write.
 
 Each document also keeps a bounded history of its changes: which address
 changed, when, on whose behalf, and which value version replaced which.
 History never contains a secret value, and it is trimmed per document kind so
 a busy cache cannot grow without bound. The history is its own ciphertext in
 the same envelope as the record document, under the same key and covered by
-the same signed commit, so reading records never decrypts it, a write appends
+the same authenticated head, so reading records never decrypts it, a write appends
 to it without rebuilding it inside the record document, and listing history
 never decrypts a value. History listing requires the scoped `List` permission.
 An entry made by another application is shown with its principal and declared
@@ -169,14 +171,28 @@ context redacted unless the reader holds the `manage-permissions` grant.
 One worker thread owns the Turso connection, exclusive `factorseal.lock`, and
 lease-scoped installation root/index capability. It unwraps only the requested
 document DEK and the signing capability while processing an operation. A mutation
-uses one transaction to compare-and-swap the document generation, append its
-encrypted state, append a signed protected commit, and advance the global head.
-The protected commit chain is periodically compacted to the current state of
-every document; it is a tamper check, not an audit log. The separate value-free
-history log retains entries according to its document kind's limits.
+uses one transaction to compare-and-swap the document generation, replace its
+encrypted snapshot and current head, and replace the signed global manifest.
+The trusted in-memory inventory advances only after commit. There is exactly one
+snapshot and one head per document. The separate value-free history retains
+entries according to its document kind's limits; personal replication history
+also remains in the encrypted envelope, including its existing retained values.
 
-The store re-verifies these storage and protected-chain invariants whenever
-the vault is opened.
+Opening a schema-v6 store verifies one manifest signature, the complete head and
+row inventory, and every current ciphertext digest. Before migrating schema v5,
+the store authenticates the entire legacy signed chain and every retained
+snapshot, including superseded generations. It then atomically replaces them
+with current heads and a manifest without changing current ciphertext or keys.
+Schema v3 first goes through its existing authenticated v5 conversion.
+
+Turso reuses freed pages during ordinary writes. There is no idle compaction
+scheduler. Legacy migration performs a one-time VACUUM only when unused pages
+occupy at least 64 MiB and at least half the database. Its pending flag is covered
+by the manifest signature, so interrupted cleanup resumes on the next open and
+is cleared only after successful repacking and complete state verification.
+Large deletions can leave a physical high-water mark; ordinary writes reuse it.
+These checks detect partial rollback and tampering, but do not detect a coherent
+rollback of the entire vault directory.
 
 ## Interfaces and document kinds
 
@@ -238,10 +254,11 @@ on its protocol streams, a sealed service is reported to SecretSpec as
 When a project lacks a cache permission, Factorseal creates a pending permission
 with a stable opaque ID and retains it for seven days. Pending permissions are
 also written to the encrypted vault, local to the device like grants, so a
-request still waiting for review survives the vault sealing and is offered
-again after the next unseal. Equivalent requests reuse the ID; a request's
-expiry is fixed when it is created. Grant, deny, or later revoke it
-through one command family:
+request still waiting for review survives the vault sealing. Desktop offers a
+request only while the app that made it waits for the answer, so after an
+unseal it shows again when the app asks again. Equivalent requests reuse the
+ID; a request's expiry is fixed when it is created. Grant, deny, or later
+revoke it through one command family:
 
 ```console
 $ factorseal permissions list
@@ -272,16 +289,18 @@ With the headless agent, SecretSpec writes use these signed project permissions.
 With Desktop on Linux, each write uses the secure input dialog described below.
 The provider checks the host's input capability before choosing the flow;
 cancelling or failing a desktop dialog ends the write. Desktop on macOS and
-Windows has no secure input dialog, so writes there use the signed project
-permissions too: each write without a permission asks in Desktop's approval
-popup. The popup offers "This write only", its default for a write, which the
-vault removes when it authorizes that write (or after five minutes if the write
-never comes), so the next write asks again. "1 hour" and "Until revoked" instead
-cover later writes of that entry for the chosen duration, and "1 hour" is the
-default for a write that expires: SecretSpec's cache writes such an entry again
-each time it expires, so a single-use approval would ask at every refresh. A single-use
-permission is removed before the value is written, so a write that then fails
-needs a new approval.
+Windows has no secure input dialog, so writes there use signed project
+permissions too, approved in Desktop's approval popup or through the CLI.
+
+A SecretSpec write can be approved for one write only. The vault removes that
+permission when it authorizes the write, or after five minutes if unused, so the
+next write asks again. Desktop calls this choice "This write only"; the CLI calls
+it `once`. It is the default for a plain write. Longer approvals cover later
+writes of the entry for the chosen duration. Expiring cache writes default to
+one hour in Desktop, or the requested duration in the CLI (one hour if absent),
+because SecretSpec refreshes them automatically when they expire. They can
+still be approved once. A single-use permission is removed before storing the
+value, so a write that then fails needs a new approval.
 
 Granting requires one configured unlock group and creates only the requested
 permission for the declared project. Before asking for the factor, Factorseal
@@ -399,9 +418,9 @@ Factorseal is designed so that:
   boundary;
 - an application receives a secret only after its transport-derived identity
   matches a suitable grant;
-- snapshots authenticated by signed commits detect content tampering, missing
-  generations, divergent writers, and inconsistent partial rollback when newer
-  protected state remains;
+- snapshots and the complete current inventory authenticated by a signed
+  manifest detect content tampering, missing documents, and inconsistent partial
+  rollback when newer protected state remains;
 - a deleted or overwritten value is absent from the next persisted snapshot,
   and the superseded generation's key is replaced. This is logical deletion,
   not cryptographic erasure: a root holder may recover earlier values from

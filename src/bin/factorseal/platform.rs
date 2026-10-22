@@ -126,6 +126,29 @@ pub(super) fn native_client(
 }
 
 #[cfg(target_os = "linux")]
+pub(super) fn check_vault_socket(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
+    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
+    LinuxVaultOptions::new(socket).validate()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn check_vault_socket(root: &Path, socket: Option<&Path>) -> Result<(), CliError> {
+    let socket = socket.map_or_else(|| root.join(DEFAULT_UNIX_SOCKET), Path::to_owned);
+    MacosVaultOptions::new(socket).validate()?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Linux and macOS socket checks are fallible at the shared call site"
+)]
+pub(super) fn check_vault_socket(_root: &Path, _socket: Option<&Path>) -> Result<(), CliError> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 pub(super) fn serve_vault(
     _device: &VaultMetadata,
     service: &Arc<VaultService>,

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use secret_service_protocol::Session as ProtocolSession;
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::{OwnedObjectPath, OwnedVariant};
 use zbus::{fdo, interface};
 
 use super::agent::Agent;
@@ -163,11 +163,11 @@ impl Service {
     async fn open_session(
         &self,
         algorithm: String,
-        input: OwnedValue,
+        input: OwnedVariant,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
-    ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
+    ) -> fdo::Result<(OwnedVariant, OwnedObjectPath)> {
         let input = session_input(&algorithm, input)?;
         let (session, output) = ProtocolSession::open(&algorithm, &input).map_err(failed)?;
         let owner = sender(&header)?;
@@ -249,7 +249,7 @@ impl Service {
     async fn input_for_ipc(
         &self,
         attributes: HashMap<String, String>,
-        channel: zbus::zvariant::OwnedFd,
+        channel: zbus::OwnedFd,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretServiceError> {
@@ -746,7 +746,7 @@ impl Prompt {
     pub(super) async fn completed(
         emitter: &SignalEmitter<'_>,
         dismissed: bool,
-        result: OwnedValue,
+        result: OwnedVariant,
     ) -> zbus::Result<()>;
 }
 
@@ -769,7 +769,7 @@ fn unlocked_objects(
 }
 
 impl Prompt {
-    pub(super) fn result(&self, dismissed: bool) -> fdo::Result<OwnedValue> {
+    pub(super) fn result(&self, dismissed: bool) -> fdo::Result<OwnedVariant> {
         let objects = if dismissed {
             Vec::new()
         } else {

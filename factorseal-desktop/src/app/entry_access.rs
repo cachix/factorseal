@@ -68,16 +68,16 @@ impl DesktopView {
     ) -> Div {
         let mut panel = v_flex().gap_3().child(
             div()
-                .text_lg()
+                .text_heading()
                 .font_semibold()
-                .child(text("access-heading", "Access")),
+                .child(text("access", "Access")),
         );
         if contents.permissions_loading {
-            return panel.child(text("access-loading", "Loading access…"));
+            return panel.child(text("loading-access", "Loading access…"));
         }
         if let Some(error) = &contents.permissions_error {
             return panel.child(text(
-                "access-error",
+                "could-not-load-access",
                 format!("Could not load access: {error}"),
             ));
         }
@@ -118,7 +118,6 @@ impl DesktopView {
                 ));
             }
             let mut card = v_flex()
-                .id(("access-grant", count))
                 .gap_2()
                 .child(Self::render_detail_rows("details", details, cx));
             if matches!(permission.state, PermissionState::Granted { .. }) {
@@ -128,11 +127,11 @@ impl DesktopView {
                     Some(PermissionTarget::Entry { .. } | PermissionTarget::ProjectEntry { .. })
                 );
                 if inherited {
-                    card = card.child(div().text_sm().text_color(cx.theme().muted_foreground).child(text("inherited-note", "Revoking this grant removes its access to every entry in its scope.")));
+                    card = card.child(div().text_body().text_color(cx.theme().muted_foreground).child(text("revoking-this-grant-removes", "Revoking this grant removes its access to every entry in its scope.")));
                 }
                 card = card.child(
-                    Button::new(("revoke-entry-access", count))
-                        .small()
+                    button(("revoke-entry-access", count))
+                        .icon(IconName::CircleX)
                         .label(if inherited {
                             "Revoke inherited grant"
                         } else {
@@ -147,7 +146,7 @@ impl DesktopView {
         }
         if count == 0 {
             panel = panel.child(text(
-                "access-none",
+                "no-recorded-access-grants",
                 "No recorded access grants apply to this entry.",
             ));
         }

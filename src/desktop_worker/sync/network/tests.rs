@@ -2,11 +2,13 @@ use super::*;
 use crate::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret};
 use crate::vault::{Provenance, VaultStore};
 use crate::{DocumentKind, SecretAddress, UnsealLeasePolicy, Vault, VaultService};
+use std::sync::atomic::{AtomicUsize, Ordering};
 struct Device {
     root: tempfile::TempDir,
     service: Arc<VaultService>,
     inner: Arc<Inner>,
     task: tokio::task::JoinHandle<()>,
+    join_callbacks: Arc<AtomicUsize>,
 }
 impl Device {
     async fn new(item: Option<&PersonalSecret>) -> Self {
@@ -37,6 +39,8 @@ impl Device {
             .unwrap(),
         );
         let host = Arc::clone(&service);
+        let join_callbacks = Arc::new(AtomicUsize::new(0));
+        let joins = Arc::clone(&join_callbacks);
         let endpoint = Endpoint::builder(presets::Minimal)
             .alpns(vec![ALPN.to_vec(), PAIR_ALPN.to_vec(), GROUP_ALPN.to_vec()])
             .bind()
@@ -45,7 +49,12 @@ impl Device {
         let inner = Arc::new(Inner {
             endpoint,
             root: root.path().into(),
-            host: Arc::new(move |command| command.execute(&host).map_err(err)),
+            host: Arc::new(move |command| {
+                if matches!(&command, Command::Join { .. }) {
+                    joins.fetch_add(1, Ordering::Relaxed);
+                }
+                command.execute(&host).map_err(err)
+            }),
             group: Mutex::new(None),
             courier: Mutex::new(None),
             spare: Mutex::new(Some(
@@ -64,6 +73,7 @@ impl Device {
             service,
             inner,
             task,
+            join_callbacks,
         }
     }
     fn know(&self, other: &Self) {
@@ -433,4 +443,46 @@ async fn introduction_cancellation_keeps_membership_unconfigured_and_can_change_
             .is_none()
     );
     b.pair(&a).await;
+}
+
+#[tokio::test]
+async fn invitation_transport_timeout_does_not_call_the_joining_host() {
+    let inviter = Device::new(None).await;
+    let joiner = Device::new(None).await;
+    joiner.know(&inviter);
+    inviter
+        .inner
+        .action(Action::Invite("Inviter".into()))
+        .await
+        .unwrap();
+    let invitation = inviter
+        .inner
+        .view
+        .lock()
+        .unwrap()
+        .state
+        .invitation
+        .clone()
+        .unwrap();
+
+    // Leave the endpoint bound but stop serving invitation requests. This
+    // exercises the actual RPC timeout without relying on public discovery.
+    inviter.task.abort();
+    let error = joiner
+        .inner
+        .action(Action::Join {
+            ticket: invitation.ticket().unwrap(),
+            name: "Joiner".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error, "deadline has elapsed");
+    assert_eq!(joiner.join_callbacks.load(Ordering::Relaxed), 0);
+    assert!(
+        !joiner
+            .service
+            .personal_sync_pairing_status()
+            .unwrap()
+            .joining
+    );
 }

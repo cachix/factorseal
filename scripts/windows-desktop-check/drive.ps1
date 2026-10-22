@@ -2,7 +2,7 @@
 # kept open by a seal, grants or denies the approval popup, or presses a named
 # button or Escape in it. -Title picks another popup by the end of its title,
 # such as 'Browser access' for the browser extension's prompt, or the main
-# window ('FactorSeal Desktop') to press one of its buttons. UI Automation
+# window ('FactorSeal') to press one of its buttons. UI Automation
 # finds the controls; the clicks and keystrokes are real input, since the
 # popup accepts approval only after a mouse click inside it and one second
 # without changes. Every click first checks that the target window is in the
@@ -175,10 +175,10 @@ $auto = [System.Windows.Automation.AutomationElement]
 $scope = [System.Windows.Automation.TreeScope]
 if (-not (Get-Process -Id $DesktopPid -ErrorAction SilentlyContinue)) { Fail "Desktop $DesktopPid is not running" }
 
-# The main window is titled "FactorSeal Desktop"; the popup's title ends in
+# The main window is titled "FactorSeal"; the popup's title ends in
 # "Secret access" (see observe.ps1).
 function FindWindow {
-    $suffix = if ($Title) { $Title } elseif ($Action -eq 'unlock') { 'FactorSeal Desktop' } else { 'Secret access' }
+    $suffix = if ($Title) { $Title } elseif ($Action -eq 'unlock') { 'FactorSeal' } else { 'Secret access' }
     $hwnd = [Input]::Find($DesktopPid, $suffix)
     if ($hwnd -eq [IntPtr]::Zero) { return $null }
     $auto::FromHandle($hwnd)
@@ -187,13 +187,15 @@ function FindWindow {
 # A name with * matches as a wildcard, as the browser prompt's account
 # buttons are named "title · username". -Button skips text with the same
 # name, such as the browser prompt's title "Save login" above its button; it
-# also takes links, such as Settings' "Back to your vault".
+# also takes links, such as Settings' "Back to your vault", and tabs, such as
+# the sidebar's "Settings".
 function Find($window, [string]$name, [switch]$Button) {
     $condition = [System.Windows.Automation.Condition]::TrueCondition
     if ($Button) {
         $condition = New-Object System.Windows.Automation.OrCondition(
             (New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
-            (New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::Hyperlink)))
+            (New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::Hyperlink)),
+            (New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)))
     }
     if ($name.Contains('*')) {
         foreach ($element in $window.FindAll($scope::Descendants, $condition)) { if ($element.Current.Name -like $name) { return $element } }
@@ -381,7 +383,7 @@ switch ($Action) {
 }
 $password = $null
 
-if (($Action -in 'grant', 'deny', 'press', 'escape') -and $Title -ne 'FactorSeal Desktop' -and -not $NoWait) {
+if (($Action -in 'grant', 'deny', 'press', 'escape') -and $Title -ne 'FactorSeal' -and -not $NoWait) {
     # The popup closes once no request is left. The main window stays.
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while ((FindWindow) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }

@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"
-repository = "https://github.com/domenkozar/factorseal"
+repository = "https://github.com/cachix/factorseal"
 publish = false
 
 [features]
@@ -16,32 +16,43 @@ apple-credential-exchange = []
 anyhow = "1.0"
 bip39 = { version = "2.2", features = ["zeroize"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+data-encoding = "2.11.1"
 directories = "6.0"
 factorseal = { path = "..", default-features = false, features = ["vault-client", "key-protection", "transfer", "secret-service-host", "diagnostics", "personal-sync-network", "browser"] }
 fs2 = "0.4.3"
 gethostname = "1.1.0"
 getrandom = "0.3.3"
-# Compatible rendering fixes pending https://github.com/gpui-ce/gpui-ce/pull/256.
-gpui = { package = "gpui-ce", git = "https://github.com/domenkozar/gpui-ce.git", rev = "85f7f16b3ac1542b70cb4c24a59fd70f71730ab1" }
+hmac = "0.12.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+# Rendering fixes from https://github.com/gpui-ce/gpui-ce/pull/256 plus
+# the oo7 0.7 requirement for https://github.com/linux-credentials/oo7/pull/610.
+gpui = { package = "gpui-ce", git = "https://github.com/domenkozar/gpui-ce.git", rev = "afc7a95c8971c3d829a2fe8a2646ed3c436ca2b4" }
 # CE's component fork with the current platform/deferred API compatibility fixes.
 gpui-component = { package = "gpui_ce_components", git = "https://github.com/domenkozar/gpui-kit.git", rev = "c7440f24e3c392beefe759aeb7989bd4ea4ffd4e" }
 gpui-component-assets = { package = "gpui_ce_components_assets", git = "https://github.com/domenkozar/gpui-kit.git", rev = "c7440f24e3c392beefe759aeb7989bd4ea4ffd4e" }
-gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/domenkozar/gpui-ce.git", rev = "85f7f16b3ac1542b70cb4c24a59fd70f71730ab1", features = ["font-kit", "x11", "wayland"] }
-gpui-tray = { version = "=0.1.2", default-features = false, features = ["gpui-ce", "menu-state"] }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/domenkozar/gpui-ce.git", rev = "afc7a95c8971c3d829a2fe8a2646ed3c436ca2b4", features = ["font-kit", "x11", "wayland"] }
+gpui-tray = { version = "=0.2.0", default-features = false, features = ["gpui-ce", "menu-state"] }
+jiff = "0.2.35"
 rfd = { version = "0.15.4", default-features = false, features = ["async-std", "xdg-portal"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+rqrr = { version = "0.11.0", default-features = false }
 sentry = { version = "0.49.2", default-features = false, features = ["backtrace"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+sha1 = "0.10.6"
+sha2 = "0.10.9"
 native-theme = "=0.5.7"
+percent-encoding = "2.3.2"
 tempfile = "3.23"
 toml = "1.1"
 smol = "2.0"
+url = "2.5"
 zeroize = "1.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "settings"] }
-zbus = { version = "5.14.0", default-features = false, features = ["tokio", "blocking-api"] }
+ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "screenshot", "settings"] }
+zbus = { version = "6.0.0", default-features = false, features = ["tokio", "proxy", "service", "object-manager", "tracing"] }
+tokio = { version = "1.47.1", features = ["time"] }
 detect-desktop-environment = "=1.3.0"
 futures-util = "0.3"
 native-theme-gtk = "=0.1.1"
@@ -49,12 +60,21 @@ native-theme-qt = "=0.1.0"
 notify = "=8.2.0"
 xdg = "=3.0.0"
 
-[dev-dependencies]
-gpui = { package = "gpui-ce", git = "https://github.com/domenkozar/gpui-ce.git", rev = "85f7f16b3ac1542b70cb4c24a59fd70f71730ab1", features = ["test-support"] }
-
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6.2"
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView", "NSWindow"] }
+raw-window-handle = "0.6.2"
+
+[dev-dependencies]
+gpui = { package = "gpui-ce", git = "https://github.com/domenkozar/gpui-ce.git", rev = "afc7a95c8971c3d829a2fe8a2646ed3c436ca2b4", features = ["test-support"] }
+qrcode = { version = "0.14.1", default-features = false }
 
 [lints.rust]
 unsafe_code = "deny"

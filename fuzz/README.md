@@ -13,6 +13,9 @@ cargo +nightly run --locked --manifest-path fuzz/Cargo.toml --bin seed-corpus --
 cargo +nightly fuzz run metadata -- -max_total_time=60 -max_len=1048576 -rss_limit_mb=2048 -timeout=10
 ```
 
+The native harness enables the `std` feature of Turso's `branches` dependency
+so its abort implementation remains compatible with current nightly compilers.
+
 Install the nightly toolchain first. The commands follow the
 [cargo-fuzz workflow](https://rust-fuzz.github.io/book/cargo-fuzz.html).
 The default address sanitizer, overflow checks and debug assertions remain
@@ -25,7 +28,7 @@ enabled. `--dev` can reduce local build time for a smoke run.
 | document | Automerge snapshots, legacy migration, record decoding, personal entry JSON |
 | history | History JSON, record versions, sequence and partition validation |
 | envelope | Snapshot headers, AEAD rejection, root-wrapped keys, TPM/Hello envelopes and TPM response codec |
-| commit_chain | Commit JSON, transcript digest and ML-DSA signature verification |
+| commit_chain | Legacy commit and current head/manifest JSON, transcript digests and ML-DSA signature verification |
 | secret_service | DH negotiation, public-key bounds, IV and CBC/PKCS#7 parsing |
 | archive | Encrypted and plaintext archive JSON, KDF limits and base64 components |
 | transfer | Bitwarden JSON, 1Password/KeePass CSV and personal records |
