@@ -12,7 +12,10 @@
 //
 // Clicks and typing in pages and in the extension popup go through
 // Input.dispatch*, which the page sees as trusted (isTrusted), as the save
-// flow requires.
+// flow requires. A fill starts from the FactorSeal button the extension puts
+// in a login field, and a save from the question it shows on the page; both
+// are extension pages framed into the site's page, pressed in their own
+// targets.
 import {execFile} from 'node:child_process';
 import {readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -171,12 +174,32 @@ async function connect(description) {
     };
     b.openPopup = async () => {
         await b.closePopup();
-        await b.extension(`chrome.windows.getLastFocused().then(w => chrome.action.openPopup({windowId: w.id}))`);
+        // Chrome opens the popup only for a focused window.
+        await b.extension(`chrome.windows.getLastFocused().then(w => chrome.windows.update(w.id, {focused: true})).then(w => chrome.action.openPopup({windowId: w.id}))`);
         const target = await until('the extension popup', async () => (await targets()).find(t => t.url === popupUrl && t.attached === false));
         const session = await attach(target.targetId);
         await until('the popup to render', () => evaluate(session, `document.readyState === 'complete'`));
         return {session, targetId: target.targetId};
     };
+    // The extension's pages inside a site's page: its field buttons
+    // (field.html) and its notices (notice.html, ?save for the question
+    // after a submission). Each is a target of its own. The extension accepts
+    // a press only while the frame is visible and in front at its place.
+    const frames = async page => (await targets()).filter(t => t.type === 'iframe'
+        && t.url.startsWith(`chrome-extension://${extensionId}/${page}`));
+    b.frameShown = async page => (await frames(page)).length > 0;
+    b.pressFrame = async (page, button) => {
+        const frame = await until(`the extension's ${page}`, async () => (await frames(page))[0], 10000);
+        const session = await attach(frame.targetId);
+        try {
+            await until(`${page} to render`, () => evaluate(session, `(() => { const b = document.getElementById(${JSON.stringify(button)}); return !!b && !b.closest('[hidden]'); })()`), 5000);
+            await evaluate(session, `document.getElementById(${JSON.stringify(button)}).click()`);
+        } finally { await send('Target.detachFromTarget', {sessionId: session}).catch(() => {}); }
+    };
+    // Asks to fill as a person does: the button in the login field.
+    b.askFill = () => b.pressFrame('field.html', 'fill');
+    // Answers the page's "Save this login in FactorSeal?".
+    b.answerSave = (answer = 'save') => b.pressFrame('notice.html?save', answer);
     b.popupStatus = popup => evaluate(popup.session, `document.getElementById('status').textContent`);
     b.popupOpen = async popup => (await targets()).some(t => t.targetId === popup.targetId);
     // The popup disables its buttons while a request is pending.
@@ -471,6 +494,8 @@ await step('save', async () => {
     await b.type(tab.session, '[name=username]', username);
     await b.type(tab.session, '[name=password]', secret);
     await b.click(tab.session, 'button[type=submit]');
+    report(`${prefix(b)}save: no prompt before the page's question is answered`, await staysQuiet(2000));
+    await b.answerSave();
     const found = await waitPrompt().catch(async error => {
         const facts = await extension(`chrome.windows.getLastFocused({populate: true}).then(w => JSON.stringify({status, focused: w.focused, activeTab: w.tabs.find(t => t.active)?.url}))`);
         throw new Error(`${error.message}; extension: ${facts}; page: ${JSON.stringify(await tab.fields())}; front: ${(await b.foreground()).title}`);
@@ -489,13 +514,14 @@ if (!other) {
         needsSave();
         await tab.open(`${site}/`);
         await b.focus();
-        // The stored login is offered on load; deny that first.
-        await waitPrompt();
-        await prompt('deny');
+        report('resubmit unchanged: no prompt on load', await staysQuiet(3000));
         await b.type(tab.session, '[name=username]', username);
         await b.type(tab.session, '[name=password]', secret);
         await b.click(tab.session, 'button[type=submit]');
+        await b.answerSave();
         report('resubmit unchanged: no save prompt', await staysQuiet(4000));
+        const status = await until('the answer', () => extension(`status === 'already_saved' && status`), 5000).catch(() => extension('status'));
+        report('resubmit unchanged: already saved', status === 'already_saved', status);
     });
 
     // A registration form (with a password confirmation) saves a new login,
@@ -510,6 +536,7 @@ if (!other) {
         await b.type(tab.session, '[name=password]', secret);
         await b.type(tab.session, '[name=confirmation]', secret);
         await b.click(tab.session, 'button[type=submit]');
+        await b.answerSave();
         await waitPrompt();
         await reads('register', ['Save login', site, `Username: ${email}`, 'Password: ••••••••']);
         await prompt('press', ['-Name', 'Save login']);
@@ -521,6 +548,7 @@ if (!other) {
                 async () => report('register: Desktop lists it without reopening', false, `${before} items before, ${await personalCount()} after`));
         await tab.open(`${site}/`);
         await b.focus();
+        await b.askFill();
         await waitPrompt();
         await prompt('press', ['-Name', `* · ${email}`]);
         const fields = await b.filled();
@@ -536,12 +564,10 @@ if (!other) {
     const offerUpdate = async (newPassword, what) => {
         await tab.open(`${updateSite}/`);
         await b.focus();
-        // The stored logins are offered on load; deny that first.
-        await waitPrompt();
-        await prompt('deny');
         await b.type(tab.session, '[name=username]', updated.username);
         await b.type(tab.session, '[name=password]', newPassword);
         await b.click(tab.session, 'button[type=submit]');
+        await b.answerSave();
         await waitPrompt();
         const names = await screenReader();
         const offer = `Update password: ${updated.name} · ${updated.username}`;
@@ -591,6 +617,7 @@ if (!other) {
         // In front before the page loads: Desktop may be, after Settings.
         await b.focus();
         await tab.open(`${site}/`);
+        await b.askFill();
         await waitPrompt();
         await b.hold();
         const chosen = Date.now();
@@ -615,6 +642,8 @@ if (!other) {
         // Settings may still be open from an earlier step.
         if (!(await mainWindow('show', ['-Name', await disconnectButton(), '-Seconds', '2'])).error) return;
         await mainWindow('press', ['-Name', 'Settings']);
+        // Paired profiles are listed in Settings' browser section.
+        await mainWindow('press', ['-Name', 'Browser extensions']);
         const shown = await mainWindow('show', ['-Name', await disconnectButton()]);
         if (shown.error) throw new Error(`Settings: ${shown.error}`);
     };
@@ -647,6 +676,7 @@ if (!other) {
         report('held too long: the extension is told it expired', status === 'unauthorized', status);
         await tab.open(`${site}/`);
         await b.focus();
+        await b.askFill();
         await waitPrompt();
         await prompt('press', account);
         const fields = await b.filled();
@@ -686,6 +716,7 @@ if (!other) {
         // opens it: the extension asks only for a focused window.
         await b.focus();
         await tab.open(`${site}/`);
+        await b.askFill();
         report('disconnected in Settings: the old profile gets no prompt', await staysQuiet(4000));
         const fields = await tab.fields();
         report('disconnected in Settings: nothing is filled', !fields.username && !fields.password);
@@ -700,6 +731,8 @@ if (!other) {
         needsSave();
         await tab.open(`${site}/`);
         await b.focus();
+        report('fill: no prompt on load', await staysQuiet(3000));
+        await b.askFill();
         const found = await waitPrompt();
         report('fill: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
         await reads('fill', ['Fill a login', site, 'Choose one account to fill once. The browser will check the original page again.',
@@ -709,6 +742,10 @@ if (!other) {
         report('fill: fields filled', fields.username === username && fields.password === secret);
         report('fill: not submitted', fields.url === `${site}/`);
         report('fill: the browser gets the focus back', await b.focusedBack());
+        // The site logs in with the login FactorSeal just filled.
+        await b.click(tab.session, 'button[type=submit]');
+        await sleep(2000);
+        report('fill: submitting it asks nothing', !(await b.frameShown('notice.html?save')) && await staysQuiet(2000));
     });
 
     for (const [how, action] of [['Deny', 'deny'], ['Escape', 'escape']]) {
@@ -716,6 +753,7 @@ if (!other) {
             needsSave();
             await tab.open(`${site}/`);
             await b.focus();
+            await b.askFill();
             await waitPrompt();
             await prompt(action);
             await until('the denial', () => extension(`status === 'denied'`), 5000);
@@ -731,35 +769,36 @@ if (!other) {
     await step('no match', async () => {
         await tab.open(`${origin('nomatch')}/`);
         await b.focus();
+        await b.askFill();
         report('no match: no prompt while unsealed', await staysQuiet(4000));
         report('no match: the browser keeps the focus', await b.inFront());
         const popup = await b.openPopup();
-        const status = await until('a status', () => b.popupStatus(popup), 5000);
+        // Past "Checking for matching logins…": the answer, not the progress.
+        const status = await until('an answer', async () => { const s = await b.popupStatus(popup); return s && !s.endsWith('…') && s; }, 10000)
+            .catch(() => b.popupStatus(popup));
         report('no match: popup says so', status === 'No matching login found.', status);
         await b.closePopup();
     });
 
-    await step('Check this page', async () => {
+    await step('Fill this page', async () => {
         await tab.open(`${origin('formless')}/`, 'formless');
         await b.focus();
         let popup = await b.openPopup();
-        await b.press(popup, 'retry');
+        await b.press(popup, 'fill');
         const status = await until('a status', () => b.popupStatus(popup), 10000);
-        report('Check this page: no form is reported', status === 'No complete login form found on this page.', status);
-        report('Check this page: popup stays open without a form', await b.popupOpen(popup));
+        report('Fill this page: no form is reported', status === 'No complete login form found on this page.', status);
+        report('Fill this page: popup stays open without a form', await b.popupOpen(popup));
         await b.closePopup();
         needsSave();
         await tab.open(`${site}/`);
         await b.focus();
-        await waitPrompt();
-        await prompt('deny');
         popup = await b.openPopup();
-        await b.press(popup, 'retry');
+        await b.press(popup, 'fill');
         await sleep(1000);
-        report('Check this page: popup closes with a form', !(await b.popupOpen(popup)));
+        report('Fill this page: popup closes with a form', !(await b.popupOpen(popup)));
         await b.focus();
         await waitPrompt();
-        report('Check this page: the page is checked again', true);
+        report('Fill this page: Desktop offers the login', true);
         await prompt('deny');
     });
 
@@ -768,6 +807,7 @@ if (!other) {
         await vault('seal');
         await b.focus();
         await tab.open(`${site}/`);
+        await b.askFill();
         const found = await waitPrompt();
         report('sealed fill: prompt opens', true, `foreground=${found.foreground} on_screen=${found.on_screen}`);
         report('sealed fill: prompt lies on one screen', found.on_screen === 'True', found.bounds);
@@ -811,6 +851,7 @@ if (!other) {
         await t.open(`${site}/`);
         await b.focus(t);
         await submit(t, `${username}-${name}`, `${secret}-${name}`);
+        await b.pressFrame('notice.html?save', 'save');
         await waitPrompt();
     };
     const nothingStored = async (name, site) => {
@@ -837,6 +878,19 @@ if (!other) {
         await prompt('deny');
         await until('the denial', () => extension(`status === 'denied'`), 5000);
         await nothingStored('save denied', site);
+    });
+
+    // "Not now" forgets the submitted login without asking Desktop.
+    await step('save not now', async () => {
+        const site = origin('savelater');
+        await b.focus();
+        await tab.open(`${site}/`);
+        await b.focus();
+        await submit(tab, `${username}-later`, `${secret}-later`);
+        await b.answerSave('later');
+        report('save not now: Desktop is not asked', await staysQuiet(3000));
+        report('save not now: the question goes away', await until('the question to close', async () => !(await b.frameShown('notice.html?save')), 5000).then(() => true, () => false));
+        await nothingStored('save not now', site);
     });
 
     await step('save tab closed', async () => {
@@ -908,6 +962,7 @@ if (!other) {
         submittedValues.push(corrected);
         await b.type(tab.session, '[name=password]', '-corrected');
         await b.click(tab.session, 'button[type=submit]');
+        await b.answerSave();
         await waitPrompt();
         await prompt('press', ['-Name', 'Save login']);
         await until('the save', () => extension(`status === 'saved'`), 15000);
@@ -923,7 +978,7 @@ if (!other) {
             await b.focus();
             await fill();
             await b.click(tab.session, 'button[type=submit]');
-            report(`no save offered: ${what}`, await staysQuiet(3000));
+            report(`no save offered: ${what}`, await staysQuiet(3000) && !(await b.frameShown('notice.html?save')));
         };
         await quietAfter('passwords that do not match', `${origin('mismatch')}/register`, 'register', async () => {
             submittedValues.push(`${username}@mismatch.test`, `${secret}-one`, `${secret}-two`);
@@ -958,6 +1013,7 @@ if (!other) {
     const waitingFill = async c => {
         await c.focus();
         await c.tab.open(`${site}/`);
+        await c.askFill();
         await waitPrompt();
     };
     const afterRestart = async (name, c) => {
@@ -970,6 +1026,7 @@ if (!other) {
         report(`${name}: the profile stays paired`, await c.paired());
         await c.focus();
         await c.tab.open(`${site}/`);
+        await c.askFill();
         await waitPrompt(15000);
         const names = await screenReader();
         report(`${name}: a new request asks to fill, not to pair`, names.includes('Fill a login') && !names.includes('Pair browser profile'));
@@ -1022,9 +1079,11 @@ if (!other) {
             // opens the page: the extension asks only for a focused window.
             await first.focus();
             await first.tab.open(`${site}/`);
+            await first.askFill();
             await waitPrompt();
             await second.focus();
             await second.tab.open(`${site}/`);
+            await second.askFill();
             await until(`${second.name} to be told Desktop is busy`, () => second.extension(`status === 'busy'`), 10000)
                 .catch(async error => { throw new Error(`${error.message}; its status: ${await second.extension('status')}; prompt open: ${await promptOpen()}`); });
             report(`${name}: the second browser is told Desktop is busy`, true);
@@ -1047,7 +1106,7 @@ if (!other) {
             // The waiting browser's own request, asked again, gets its own prompt.
             await second.focus();
             const popup = await second.openPopup();
-            await second.press(popup, 'retry');
+            await second.press(popup, 'fill');
             await second.focus();
             await waitPrompt();
             await prompt('press', account);
