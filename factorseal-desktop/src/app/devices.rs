@@ -1,7 +1,7 @@
 use super::totp::unix_now;
 use super::{
     App, Arc, Button, Context, DesktopRuntime, DesktopView, Div, Input, SecretInputState, Snapshot,
-    VaultSelection, div, h_flex, px, v_flex,
+    VaultSelection, div, h_flex, px, text, v_flex,
 };
 use crate::appearance::TypeScale as _;
 use crate::branding::Glyph;
@@ -243,14 +243,14 @@ impl DesktopView {
         v_flex().w_full().child(
             v_flex().w_full().max_w(gpui::rems(28.)).gap_5()
                 .child(v_flex().gap_2()
-                    .child(div().text_title().font_semibold().child("Name this device"))
+                    .child(div().text_title().font_semibold().child(text("name-this-device", "Name this device")))
                     .child(div().text_lead().text_color(theme.muted_foreground)
-                        .child("Choose a name you’ll recognize when pairing and syncing your personal secrets.")))
+                        .child(text("choose-a-name-you", "Choose a name you’ll recognize when pairing and syncing your personal secrets."))))
                 .child(v_flex().gap_2()
-                    .child(div().text_body().font_medium().child("Device name"))
+                    .child(div().text_body().font_medium().child(text("device-name", "Device name")))
                     .child(crate::controls::hover_field("device-name-field", Input::new(&self.device_name)))
                     .child(div().text_caption().text_color(theme.muted_foreground)
-                        .child("We’ve filled in your computer’s hostname. You can change it.")))
+                        .child(text("we-ve-filled-in", "We’ve filled in your computer’s hostname. You can change it."))))
                 .when_some(self.devices_notice.clone(), |panel, error| {
                     panel.child(div().text_body().text_color(theme.danger).child(error))
                 })
@@ -289,33 +289,46 @@ impl DesktopView {
             }
             devices.sort_by_key(|device| device.endpoint);
             devices.dedup_by_key(|device| device.endpoint);
-            panel = panel.child(div().font_semibold().child(format!("Connect these {} devices?", devices.len())))
-                .child(div().text_body().child("Personal secrets and retained history from both vaults will be shared with all reader devices below. Device-specific secrets stay local."));
-            let mut list = v_flex().rounded_lg().border_1().border_color(theme.border);
-            for device in devices {
+            panel = panel.child(div().font_semibold().child(text("connect-these-devices", format!("Connect these {} devices?", devices.len()))))
+                .child(div().text_body().child(text("personal-secrets-and-retained", "Personal secrets and retained history from both vaults will be shared with all reader devices below. Device-specific secrets stay local.")));
+            let mut list = v_flex()
+                .id("review-devices")
+                .role(gpui::Role::List)
+                .aria_label("Devices to connect")
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border);
+            for (index, device) in devices.into_iter().enumerate() {
+                let local = device.endpoint == self.devices.endpoint;
                 list = list.child(
                     h_flex()
+                        .id(("review-device", index))
+                        .role(gpui::Role::ListItem)
+                        .aria_label(if local {
+                            format!("{}, this device", device.name)
+                        } else {
+                            device.name.clone()
+                        })
                         .px_4()
                         .py_2()
                         .gap_2()
-                        .child(div().flex_1().child(device.name))
-                        .when(device.endpoint == self.devices.endpoint, |row| {
+                        .child(div().flex_1().child(text("name", device.name)))
+                        .when(local, |row| {
                             row.child(
                                 div()
                                     .text_caption()
                                     .text_color(theme.muted_foreground)
-                                    .child("This device"),
+                                    .child(text("this-device", "This device")),
                             )
                         }),
                 );
             }
             panel = panel
                 .child(list)
-                .child(
-                    div()
-                        .text_body()
-                        .child("Compare this code on both devices before approving."),
-                )
+                .child(div().text_body().child(text(
+                    "compare-this-code-on",
+                    "Compare this code on both devices before approving.",
+                )))
                 .child(
                     div()
                         .text_title()
@@ -380,7 +393,10 @@ impl DesktopView {
         };
         if countdown(invitation.expires(), unix_now()).is_none() {
             return panel
-                .child(div().text_body().child("This pairing code has expired."))
+                .child(div().text_body().child(text(
+                    "this-pairing-code-has",
+                    "This pairing code has expired.",
+                )))
                 .child(
                     button("renew-pairing-code")
                         .primary()
@@ -402,7 +418,10 @@ impl DesktopView {
                     .text_body()
                     .text_center()
                     .text_color(theme.muted_foreground)
-                    .child("Scan this code with the other device, or copy it and paste it there."),
+                    .child(text(
+                        "scan-this-code-with",
+                        "Scan this code with the other device, or copy it and paste it there.",
+                    )),
             )
     }
     #[allow(clippy::too_many_lines)]
@@ -423,7 +442,7 @@ impl DesktopView {
         } else {
             match screen {
                 PairingScreen::Choose => v_flex().gap_3().w_full()
-                    .child(div().text_body().child("Start on either device. Connecting combines the personal secrets of every device you approve."))
+                    .child(div().text_body().child(text("start-on-either-device", "Start on either device. Connecting combines the personal secrets of every device you approve.")))
                     .child(button("choose-show-code").primary().icon(Glyph::QrCode).label("Show pairing code")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.device_pairing = Some(PairingScreen::Show);
@@ -434,8 +453,8 @@ impl DesktopView {
                         .on_click(cx.listener(|view, _, _, cx| { view.device_pairing = Some(PairingScreen::Paste); cx.notify(); }))),
                 PairingScreen::Show => self.render_device_code(cx),
                 PairingScreen::Paste => v_flex().gap_3().w_full()
-                    .child(div().text_body().child("Paste the pairing code from the other device. You’ll review all affected devices before anything is connected."))
-                    .child(div().font_medium().child("Pairing code"))
+                    .child(div().text_body().child(text("paste-the-pairing-code", "Paste the pairing code from the other device. You’ll review all affected devices before anything is connected.")))
+                    .child(div().font_medium().child(text("pairing-code", "Pairing code")))
                     .child(self.pairing_ticket.clone())
                     .child(button("use-pairing-code").primary().icon(IconName::ArrowRight).label("Review connection").disabled(busy)
                         .on_click(cx.listener(|view, _, _, cx| {
@@ -452,7 +471,7 @@ impl DesktopView {
                 div()
                     .text_body()
                     .text_color(theme.danger)
-                    .child(error.clone()),
+                    .child(text("error", error.clone())),
             );
         }
         let approved_here = self.pairing_approved_here();
@@ -494,13 +513,17 @@ impl DesktopView {
                         h_flex()
                             .justify_between()
                             .items_center()
-                            .child(div().text_heading().font_semibold().child(title))
+                            .child(
+                                div()
+                                    .text_heading()
+                                    .font_semibold()
+                                    .child(text("pairing-title", title)),
+                            )
                             .when_some(left.clone(), |row, left| {
                                 row.child(
-                                    div()
-                                        .text_body()
-                                        .text_color(theme.muted_foreground)
-                                        .child(format!("Expires in {left}")),
+                                    div().text_body().text_color(theme.muted_foreground).child(
+                                        text("expires-in-left", format!("Expires in {left}")),
+                                    ),
                                 )
                             }),
                     )
@@ -572,6 +595,11 @@ impl DesktopView {
             } else {
                 "Connect a device"
             })
+            .accessibility_label(if state.request.is_some() || state.invitation.is_some() {
+                "View connection"
+            } else {
+                "Connect a device"
+            })
             .on_click(cx.listener(|view, _, window, cx| {
                 view.device_pairing = Some(if view.devices.state.joining {
                     PairingScreen::Paste
@@ -589,7 +617,7 @@ impl DesktopView {
             return Some(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Loading devices…"),
+                    .child(text("loading-devices", "Loading devices…")),
             );
         }
         self.needs_device_name(cx)
@@ -648,10 +676,10 @@ impl DesktopView {
             .gap_4()
             .when(renaming, |panel| panel.child(self.render_device_rename(cx)))
             .when(state.conflicts > 0, |panel| {
-                panel.child(div().p_3().rounded_lg().bg(theme.secondary).child(format!(
+                panel.child(div().p_3().rounded_lg().bg(theme.secondary).child(text("items-need-conflict-resolution", format!(
                     "{} items need conflict resolution",
                     state.conflicts
-                )))
+                ))))
             })
             .child(
                 h_flex()
@@ -667,7 +695,7 @@ impl DesktopView {
                             .w(gpui::rems(140. / 16.))
                             .flex_none()
                             .text_color(theme.muted_foreground)
-                            .child("Access"),
+                            .child(text("access", "Access")),
                     )
                     .child(div().flex_1().child(row.access())),
             )
@@ -694,7 +722,7 @@ impl DesktopView {
                     div()
                         .text_body()
                         .text_color(theme.muted_foreground)
-                        .child("Connect another device to start syncing your personal secrets."),
+                        .child(text("connect-another-device-to", "Connect another device to start syncing your personal secrets.")),
                 )
             })
             .when_some(
