@@ -83,7 +83,10 @@ impl DesktopView {
         {
             count += 1;
             let mut details = vec![
-                ("Application", permission.principal.application_id.clone()),
+                (
+                    "Application",
+                    display_executable(&permission.principal.application_id),
+                ),
                 (
                     "Operation",
                     permission_operation_label(permission.operation).to_owned(),
