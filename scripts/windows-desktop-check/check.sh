@@ -26,8 +26,9 @@
 #       On the test vault, write a new SecretSpec key through the provider as
 #       SecretSpec would, approve it with the default lifetime (in the popup,
 #       or with `factorseal permissions approve` in a console), and check that
-#       the default was "this write only": the grant covers one write, is
-#       gone after it, and the next write asks again.
+#       the default was "this write only" (the popup is read through UI
+#       Automation): the grant covers one write, is gone after it, and the
+#       next write asks again.
 #
 # --test-vault targets the throwaway vault in %LOCALAPPDATA%\FactorSeal-check
 # and the Desktop running on it instead of the default vault. Needs the native
@@ -366,6 +367,20 @@ write-once)
     echo "first write:   asked for approval ($id)"
 
     if [ "$via" = popup ]; then
+        # The popup's text is exposed to UI Automation, so read what it asks
+        # instead of trusting a screenshot. Desktop opens the popup once its
+        # watcher sees the request, which can trail the write's answer.
+        for _ in $(seq 10); do
+            tree=$(powershell uia-dump.ps1 -DesktopPid "$pid" || true)
+            grep -q "Text name='wants to write secrets" <<<"$tree" && break
+            sleep 1
+        done
+        grep -q "Text name='SecretSpec'" <<<"$tree" &&
+            grep -q "Text name='wants to write secrets" <<<"$tree" ||
+            die "the popup does not say SecretSpec is asking to write"
+        grep -q "RadioButton name='This write only' .* selected=True" <<<"$tree" ||
+            die "the popup did not select This write only"
+        echo "popup:         SecretSpec asks to write; This write only is selected"
         result=$(powershell drive.ps1 -Action grant -DesktopPid "$pid" -PasswordFile "$test_password" || true)
         sed 's/^/driver:        /' <<<"$result"
         grep -q '^popup_closed=True' <<<"$result" || die "the driver could not grant the request"
