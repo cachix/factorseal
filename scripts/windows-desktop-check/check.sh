@@ -12,8 +12,10 @@
 #       --then drives the popup afterwards (test vault only); grant also runs
 #       the grant check.
 #       --seal seals the vault while the request waits; the popup must stay
-#       open. grant then unlocks from the popup; deny denies while sealed and
-#       unlocks from the main window, and the request must stay denied.
+#       open. grant then unlocks from the popup, sends the request again (the
+#       broker has stopped waiting by then, so Desktop shows it as expired)
+#       and grants it; deny denies while sealed and unlocks from the main
+#       window, and the request must stay denied.
 #   check.sh grant --key KEY [--test-vault]
 #       After approving in the popup, resend the request and check that it
 #       succeeds without a new popup and that the grant is capped at 300 s.
@@ -293,10 +295,17 @@ popup)
             drive unlock-popup
             grep -q '^unlocked=True' <<<"$result" || die "the popup did not unlock the vault"
             wait_state unsealed || die "the vault is still sealed after unlocking in the popup"
+            # The broker stopped waiting long ago, so Desktop shows the request
+            # as expired. Send it again, as a person would rerun the program,
+            # and grant while the broker waits for the answer.
+            send "$key" >"$out/resend.txt" &
+            resend=$!
+            sleep 1
         fi
     fi
     drive "$then"
     grep -q '^popup_closed=True' <<<"$result" || die "the driver could not $then the request"
+    [ -z "${resend:-}" ] || wait "$resend" || true
     if [ "$seal" = yes ] && [ "$then" = deny ]; then
         # Denied while sealed: Desktop sends the denial after the next unlock.
         drive unlock
