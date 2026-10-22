@@ -98,7 +98,17 @@ fn spawn_program(
         .collect();
     let security = SECURITY_CAPABILITIES {
         AppContainerSid: identity.package.raw(),
-        Capabilities: capabilities.as_mut_ptr(),
+        // An empty Vec's as_mut_ptr() is a non-null dangling pointer, not
+        // NULL. CreateProcessW rejects that combined with CapabilityCount ==
+        // 0 with ERROR_INVALID_PARAMETER -- confirmed against a real Windows
+        // host, since the parser helper (unlike the network helper) always
+        // has zero capabilities and unit tests mock the spawn boundary
+        // rather than calling the real Win32 API.
+        Capabilities: if capabilities.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            capabilities.as_mut_ptr()
+        },
         CapabilityCount: u32::try_from(capabilities.len()).map_err(io::Error::other)?,
         Reserved: 0,
     };

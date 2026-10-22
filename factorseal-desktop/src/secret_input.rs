@@ -167,6 +167,7 @@ pub(crate) struct SecretInputState {
     blur_subscription: Option<gpui::Subscription>,
     focus: FocusHandle,
     placeholder: SharedString,
+    accessibility_id: Option<SharedString>,
     selection: Range<usize>,
     marked: Option<Range<usize>>,
     reversed: bool,
@@ -228,6 +229,7 @@ impl SecretInputState {
             blur_subscription: None,
             focus: cx.focus_handle().tab_stop(true),
             placeholder: "".into(),
+            accessibility_id: None,
             selection: 0..0,
             marked: None,
             reversed: false,
@@ -264,6 +266,12 @@ impl SecretInputState {
     }
     pub(crate) fn placeholder(mut self, value: &'static str) -> Self {
         self.placeholder = value.into();
+        self
+    }
+    /// Stable identifier for accessibility clients, such as UI Automation's
+    /// `AutomationId` on Windows. The field's contents are never exposed.
+    pub(crate) fn accessibility_id(mut self, id: &'static str) -> Self {
+        self.accessibility_id = Some(id.into());
         self
     }
     pub(crate) fn value(&self) -> Zeroizing<String> {
@@ -555,7 +563,20 @@ impl Render for SecretInputState {
         } else {
             cx.theme().foreground
         };
+        // The text is drawn on a canvas and no value is set on the accessible
+        // node, so assistive technology learns the field's role and name
+        // (its placeholder) but never its contents.
         let input = div()
+            .id(&self.focus)
+            .role(if self.masked {
+                gpui::Role::PasswordInput
+            } else {
+                gpui::Role::TextInput
+            })
+            .aria_label(self.placeholder.clone())
+            .when_some(self.accessibility_id.clone(), |this, id| {
+                this.accessibility_id(id)
+            })
             .w_full()
             .text_body()
             .rounded_md()
