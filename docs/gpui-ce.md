@@ -8,7 +8,7 @@ one GPUI CE package. The previous core and oo7 Git patches are removed.
 ## Component compatibility
 
 Components and assets are pinned to Git revision
-`3e4c7552c755168158486bdd1e60f51882029a24` on `domenkozar/gpui-kit`, the head of
+`540da44d442e7e5be870e44a02858d95fd74b153` on `domenkozar/gpui-kit`, the head of
 [upstream compatibility PR #6](https://github.com/gpui-ce/gpui-component/pull/6).
 The port is based on current upstream main
 `c08206932417f863062d2ab70cc2854c6ca04238`. No local component sources are needed.
@@ -23,12 +23,17 @@ backend visual lines and cluster geometry. Custom text renderers retain their
 own layout node so automatic inline flow cannot bypass their measurement.
 
 The PR is a draft. The non-WebView upstream workspace type-checks on Linux,
-including Story and examples. Base library tests report 1,210 passed and 17
-failed; Component tests report 554 passed, 12 failed, and one ignored. The
+including Story and examples. The initial full upstream run reported 1,210 Base tests passed and 17 failed;
+Component reported 554 passed, 12 failed, and one ignored. The
 remaining failures include layout/scrolling, text wrapping/reveal, measurement
 caches, and test-backend behavior. They have not all been classified as
 fixture-only and must be resolved before upstream merge. The two real-Parley
 wrapping and caret regression tests pass. WebView checking requires WebKitGTK.
+
+A follow-up migrates native-menu icon loading to GPUI 0.3's `AssetRegistry`,
+fixing macOS and Windows compilation after `App::asset_source` was removed.
+All seven native-menu tests pass on Linux, including icon resolution tests
+previously restricted to macOS and Windows. Native CI must verify the backends.
 
 After the PR is merged, prefer the upstream merge commit or a compatible
 published component release. Update the Cargo revision and Nix hash together.

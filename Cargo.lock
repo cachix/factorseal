@@ -4047,7 +4047,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components"
 version = "0.2.0"
-source = "git+https://github.com/domenkozar/gpui-kit.git?rev=3e4c7552c755168158486bdd1e60f51882029a24#3e4c7552c755168158486bdd1e60f51882029a24"
+source = "git+https://github.com/domenkozar/gpui-kit.git?rev=540da44d442e7e5be870e44a02858d95fd74b153#540da44d442e7e5be870e44a02858d95fd74b153"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4093,7 +4093,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_assets"
 version = "0.2.0"
-source = "git+https://github.com/domenkozar/gpui-kit.git?rev=3e4c7552c755168158486bdd1e60f51882029a24#3e4c7552c755168158486bdd1e60f51882029a24"
+source = "git+https://github.com/domenkozar/gpui-kit.git?rev=540da44d442e7e5be870e44a02858d95fd74b153#540da44d442e7e5be870e44a02858d95fd74b153"
 dependencies = [
  "anyhow",
  "gpui-ce",
@@ -4107,7 +4107,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_base"
 version = "0.2.0"
-source = "git+https://github.com/domenkozar/gpui-kit.git?rev=3e4c7552c755168158486bdd1e60f51882029a24#3e4c7552c755168158486bdd1e60f51882029a24"
+source = "git+https://github.com/domenkozar/gpui-kit.git?rev=540da44d442e7e5be870e44a02858d95fd74b153#540da44d442e7e5be870e44a02858d95fd74b153"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -4147,7 +4147,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_macros"
 version = "0.2.0"
-source = "git+https://github.com/domenkozar/gpui-kit.git?rev=3e4c7552c755168158486bdd1e60f51882029a24#3e4c7552c755168158486bdd1e60f51882029a24"
+source = "git+https://github.com/domenkozar/gpui-kit.git?rev=540da44d442e7e5be870e44a02858d95fd74b153#540da44d442e7e5be870e44a02858d95fd74b153"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

@@ -1,10 +1,10 @@
 { lib }:
 
 {
-  "gpui_ce_components-0.2.0" = "sha256-27ajLs6rPeMCnbh3SDkFo2KjdxVWSeOOS0hiHAo2O0w=";
-  "gpui_ce_components_base-0.2.0" = "sha256-27ajLs6rPeMCnbh3SDkFo2KjdxVWSeOOS0hiHAo2O0w=";
-  "gpui_ce_components_macros-0.2.0" = "sha256-27ajLs6rPeMCnbh3SDkFo2KjdxVWSeOOS0hiHAo2O0w=";
-  "gpui_ce_components_assets-0.2.0" = "sha256-27ajLs6rPeMCnbh3SDkFo2KjdxVWSeOOS0hiHAo2O0w=";
+  "gpui_ce_components-0.2.0" = "sha256-Ru7I/e5f3A6xRFSb9HG+FASTIJJhx4BIzCu4nMrKNNI=";
+  "gpui_ce_components_base-0.2.0" = "sha256-Ru7I/e5f3A6xRFSb9HG+FASTIJJhx4BIzCu4nMrKNNI=";
+  "gpui_ce_components_macros-0.2.0" = "sha256-Ru7I/e5f3A6xRFSb9HG+FASTIJJhx4BIzCu4nMrKNNI=";
+  "gpui_ce_components_assets-0.2.0" = "sha256-Ru7I/e5f3A6xRFSb9HG+FASTIJJhx4BIzCu4nMrKNNI=";
   "ashpd-0.13.13" = "sha256-UhjCQekSm+sfDXW8yRBGAE8aFGrBkYhF1otCJ9hZp5Y=";
   "credential-exchange-format-0.4.0" = "sha256-hO6KBtHuPZLlE77UF02Ya8ybXF6DYBd4F3mkWKnfvFY=";
   "age-0.12.1" = "sha256-CNYGypRocOTPj454fLOr0xGA2zFj54PKPEC6opGE9f4=";
