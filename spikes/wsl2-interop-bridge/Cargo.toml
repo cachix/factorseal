@@ -1,0 +1,41 @@
+[workspace]
+
+[package]
+name = "wsl2-interop-bridge-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "identity-probe-listener"
+path = "src/bin/identity_probe_listener.rs"
+
+[[bin]]
+name = "identity-probe-client"
+path = "src/bin/identity_probe_client.rs"
+
+[[bin]]
+name = "capability-delegator"
+path = "src/bin/capability_delegator.rs"
+
+[[bin]]
+name = "capability-receiver"
+path = "src/bin/capability_receiver.rs"
+
+[dependencies]
+getrandom = "0.3.3"
+hex = "0.4.3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+sha2 = "0.10.9"
+
+[lints.rust]
+unsafe_code = "deny"
