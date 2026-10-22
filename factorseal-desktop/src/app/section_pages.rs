@@ -178,6 +178,9 @@ impl DesktopView {
             let current = (self.section_opened || !self.shortcuts.compact) && Some(row) == selected;
             list = list.child(
                 Self::list_row(("section-row", index), current, cx)
+                    .aria_label(
+                        detail.map_or_else(|| title.clone(), |detail| format!("{title}, {detail}")),
+                    )
                     .child(
                         icon_tile(2., &theme)
                             .child(row.icon().size(rems(1.)).text_color(theme.foreground)),
@@ -225,7 +228,7 @@ impl DesktopView {
                         div()
                             .text_body()
                             .text_color(theme.muted_foreground)
-                            .child(detail),
+                            .child(text("detail", detail)),
                     )
                 },
             ))
@@ -237,7 +240,7 @@ impl DesktopView {
             .text_title()
             .font_semibold()
             .truncate()
-            .child(title.into())
+            .child(text("section-title", title.into()))
     }
 
     pub(super) fn render_section_pane(&self, cx: &mut Context<Self>) -> Div {
