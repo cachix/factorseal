@@ -24,14 +24,12 @@ gethostname = "1.1.0"
 getrandom = "0.3.3"
 hmac = "0.12.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
-# Rendering fixes from https://github.com/gpui-ce/gpui-ce/pull/256 plus
-# the oo7 0.7 requirement for https://github.com/linux-credentials/oo7/pull/610.
-gpui = { package = "gpui-ce", git = "https://github.com/domenkozar/gpui-ce.git", rev = "afc7a95c8971c3d829a2fe8a2646ed3c436ca2b4" }
-# CE's component fork with the current platform/deferred API compatibility fixes.
-gpui-component = { package = "gpui_ce_components", git = "https://github.com/domenkozar/gpui-kit.git", rev = "c7440f24e3c392beefe759aeb7989bd4ea4ffd4e" }
-gpui-component-assets = { package = "gpui_ce_components_assets", git = "https://github.com/domenkozar/gpui-kit.git", rev = "c7440f24e3c392beefe759aeb7989bd4ea4ffd4e" }
-gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/domenkozar/gpui-ce.git", rev = "afc7a95c8971c3d829a2fe8a2646ed3c436ca2b4", features = ["font-kit", "x11", "wayland"] }
-gpui-tray = { version = "=0.2.0", default-features = false, features = ["gpui-ce", "menu-state"] }
+gpui = { package = "gpui-ce", version = "0.3.0" }
+# GPUI CE 0.3 compatibility PR, pinned until upstream merges or releases it.
+gpui-component = { package = "gpui_ce_components", git = "https://github.com/domenkozar/gpui-kit.git", rev = "3e4c7552c755168158486bdd1e60f51882029a24" }
+gpui-component-assets = { package = "gpui_ce_components_assets", git = "https://github.com/domenkozar/gpui-kit.git", rev = "3e4c7552c755168158486bdd1e60f51882029a24" }
+gpui_platform = { package = "gpui_ce_platform", version = "0.3.0", features = ["font-kit", "x11", "wayland"] }
+gpui-tray = { version = "=0.3.0", default-features = false, features = ["gpui-ce", "menu-state"] }
 jiff = "0.2.35"
 rfd = { version = "0.15.4", default-features = false, features = ["async-std", "xdg-portal"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
@@ -72,6 +70,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSVi
 raw-window-handle = "0.6.2"
 
 [dev-dependencies]
+gpui_ce_parley = { version = "0.3.0", default-features = false }
 qrcode = { version = "0.14.1", default-features = false }
 
 [lints.rust]

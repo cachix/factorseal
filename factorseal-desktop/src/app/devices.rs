@@ -722,21 +722,21 @@ fn qr(modules: Vec<Vec<bool>>) -> impl gpui::IntoElement {
     gpui::canvas(
         |_, _, _| (),
         move |bounds, (), window, _| {
-            window.paint_quad(gpui::fill(bounds, gpui::white()));
+            window.paint_quad(gpui::PaintQuad::new(bounds).background(gpui::white()));
             for (y, row) in modules.iter().enumerate() {
                 for (x, dark) in row.iter().enumerate() {
                     if *dark {
-                        window.paint_quad(gpui::fill(
-                            gpui::Bounds::new(
+                        window.paint_quad(
+                            gpui::PaintQuad::new(gpui::Bounds::new(
                                 bounds.origin
                                     + gpui::point(
                                         px((x + 4) as f32 * module),
                                         px((y + 4) as f32 * module),
                                     ),
                                 gpui::size(px(module), px(module)),
-                            ),
-                            gpui::black(),
-                        ));
+                            ))
+                            .background(gpui::black()),
+                        );
                     }
                 }
             }

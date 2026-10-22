@@ -6,9 +6,7 @@ scrollbar_thumb_opacity = 0.32
 scrollbar_thumb_hover_opacity = 0.56
 radius = 7.0
 radius_lg = 12.0
-tile_radius = 12.0
 shadow = false
-tile_shadow = false
 
 [dark]
 canvas = 0x151515

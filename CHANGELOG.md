@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Update Desktop to stable GPUI CE 0.3 and gpui-tray 0.3, adapting text
+  shaping, selection, and window activation to the new APIs. Use the upstream
+  component compatibility PR through a pinned Git dependency.
+
 - Add a one-time password to a Desktop item from its QR code.
   Scan the code on screen, drop an image of it anywhere in the
   vault, or press Ctrl+V (Cmd+V on macOS) with a copied screenshot,

@@ -109,9 +109,7 @@ struct Definition {
     scrollbar_thumb_hover_opacity: f32,
     radius: f32,
     radius_lg: f32,
-    tile_radius: f32,
     shadow: bool,
-    tile_shadow: bool,
 }
 
 static DEFINITION: LazyLock<Definition> = LazyLock::new(|| {
@@ -219,8 +217,6 @@ pub(crate) fn apply(theme: &mut Theme) {
     theme.radius = px(definition.radius);
     theme.radius_lg = px(definition.radius_lg);
     theme.shadow = definition.shadow;
-    theme.tile_shadow = definition.tile_shadow;
-    theme.tile_radius = px(definition.tile_radius);
 }
 
 #[cfg(test)]
