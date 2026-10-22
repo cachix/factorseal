@@ -2786,6 +2786,7 @@ impl DesktopView {
                     ))
                     .child(
                         Input::new(label)
+                            .aria_label("Field name")
                             .appearance(false)
                             .flex_1()
                             .text_body()
@@ -2825,7 +2826,7 @@ impl DesktopView {
         let size = editor.slots.borrow().get(&key).map(|slot| slot.size);
         let dragged = DraggedRow {
             key,
-            label: label_text.into(),
+            label: label_text.clone().into(),
             size,
         };
         let view = cx.entity().downgrade();
@@ -2908,6 +2909,7 @@ impl DesktopView {
                             IconName::EyeOff
                         })
                         .tooltip(if masked { "Reveal" } else { "Hide" })
+                        .accessibility_label(if masked { "Reveal" } else { "Hide" })
                         .on_click(cx.listener(move |view, _, _, cx| {
                             view.toggle_editor_reveal(key, cx);
                         })),
@@ -2933,6 +2935,7 @@ impl DesktopView {
                             .ghost()
                             .icon(Glyph::Trash)
                             .tooltip("Remove field")
+                            .accessibility_label("Remove field")
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 view.editor_remove(key, cx);
                             })),
@@ -2947,6 +2950,8 @@ impl DesktopView {
         let value_group: SharedString = format!("editor-value-{key}").into();
         let value_box = div()
             .id(("editor-value", key))
+            .role(gpui::Role::Group)
+            .aria_label(label_text.clone())
             .group(value_group.clone())
             .relative()
             .w_full()
