@@ -465,7 +465,8 @@ fn error_banner(message: String, color: Hsla) -> Div {
             .rounded_lg()
             .bg(color.opacity(0.1))
             .text_color(color)
-            .child(message),
+            // An ID exposes the message to accessibility clients.
+            .child(gpui::Text::new("error-message".into(), message.into())),
     ))
 }
 
@@ -952,6 +953,22 @@ fn link_showing(
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| cx.open_url(href))
         .child(shown.into())
+}
+
+/// An authenticated executable path as a person reads it. Windows reports
+/// caller images in the verbatim form (`\\?\C:\...`, `\\?\UNC\host\...`),
+/// and that exact string is part of the caller identity grants are bound
+/// to, so only the display drops the prefix.
+fn display_executable(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\")
+        && rest.as_bytes().get(1) == Some(&b':')
+    {
+        return rest.to_owned();
+    }
+    path.to_owned()
 }
 
 fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static str {
@@ -1617,6 +1634,7 @@ impl DesktopView {
     fn render_report_issue_button(&self, cx: &mut Context<Self>) -> Button {
         button("report-issue")
             .icon(gpui_component::Icon::default().path(branding::BUG_ASSET))
+            .accessibility_label("Report an issue")
             .ghost()
             .small()
             .disabled(self.issue_report_busy)
@@ -4841,9 +4859,30 @@ mod tests {
     use factorseal::{DocumentKind, SecretSpecAddress, SecretSpecCoordinates};
 
     use super::{
-        category_badge, category_documentation, category_guidance, hardware_backend_label,
-        password_strength_error, secret_spec_address_label,
+        category_badge, category_documentation, category_guidance, display_executable,
+        hardware_backend_label, password_strength_error, secret_spec_address_label,
     };
+
+    #[test]
+    fn executables_are_shown_without_the_verbatim_prefix() {
+        assert_eq!(
+            display_executable(r"\\?\C:\Program Files\FactorSeal\factorseal.exe"),
+            r"C:\Program Files\FactorSeal\factorseal.exe"
+        );
+        assert_eq!(
+            display_executable(r"\\?\UNC\server\share\factorseal.exe"),
+            r"\\server\share\factorseal.exe"
+        );
+        assert_eq!(
+            display_executable("/usr/bin/factorseal"),
+            "/usr/bin/factorseal"
+        );
+        // A verbatim path that is not a drive path keeps its prefix.
+        assert_eq!(
+            display_executable(r"\\?\Volume{1}\factorseal.exe"),
+            r"\\?\Volume{1}\factorseal.exe"
+        );
+    }
 
     fn personal_entries(items: &[(&str, bool)]) -> Vec<factorseal::VaultEntryMetadata> {
         items

@@ -1,6 +1,5 @@
-# Saves a screenshot of FactorSeal Desktop's approval popup as a PNG. The
-# popup's text is not exposed to UI Automation, so this is how a check sees
-# what the popup says. The popup is raised and kept topmost for the capture,
+# Saves a screenshot of FactorSeal Desktop's approval popup as a PNG, to see
+# how it looks; uia-dump.ps1 reads what it says. The popup is raised and kept topmost for the capture,
 # since an always-on-top app (such as a pinned terminal) would otherwise
 # cover it, then released. Prints saved=PATH or error=REASON.
 param(
