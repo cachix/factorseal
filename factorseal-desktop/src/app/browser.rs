@@ -377,6 +377,7 @@ impl DesktopView {
                         theme.muted_foreground
                     };
                     h_flex()
+                        .id(gpui::ElementId::Name(browser.name().into()))
                         .items_center()
                         .gap_3()
                         .px_4()
@@ -393,7 +394,7 @@ impl DesktopView {
                         .child(
                             v_flex()
                                 .min_w_0()
-                                .child(div().font_semibold().child(browser.name()))
+                                .child(div().font_semibold().child(text("name", browser.name())))
                                 .child(
                                     h_flex()
                                         .items_center()
