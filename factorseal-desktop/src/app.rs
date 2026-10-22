@@ -1,6 +1,5 @@
 use self::shortcuts::OpenSettings;
 use crate::secret_input::SecretInputState;
-#[cfg(target_os = "linux")]
 mod access;
 mod approval_window;
 mod breadcrumb;
@@ -30,19 +29,17 @@ mod window_activation;
 #[cfg(target_os = "windows")]
 mod windows_screen;
 
+/// Work for the access popup. Only the Linux Secret Service adapter sends the
+/// keyring variants; pending permissions come from polling on every platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum AccessEvent {
-    #[cfg(target_os = "linux")]
     Finished(factorseal::SecretServiceAccessContext),
-    #[cfg(target_os = "linux")]
     Input(factorseal::SecretServiceInputRequest),
-    #[cfg(target_os = "linux")]
     Unlock {
         context: factorseal::SecretServiceAccessContext,
         objects: Vec<String>,
     },
-    #[cfg(target_os = "linux")]
     Request(factorseal::SecretServiceAccessRequest),
-    #[cfg(target_os = "linux")]
     Permissions(Vec<factorseal::Permission>),
 }
 use std::{cell::Cell, rc::Rc, sync::Arc};
@@ -109,11 +106,19 @@ struct DesktopWindow {
     view: Arc<std::sync::Mutex<Option<gpui::Entity<DesktopView>>>>,
     handle: Option<AnyWindowHandle>,
     visible: bool,
+    /// When the window last lost the focus. Clicking the tray icon makes the
+    /// taskbar active first on Windows, so a window that was in front is no
+    /// longer focused when the click arrives.
+    deactivated_at: Option<std::time::Instant>,
     snapshot: Snapshot,
     refresh_generation: u64,
 }
 
 impl Global for DesktopWindow {}
+
+/// How long after losing the focus the window still counts as in front for
+/// a tray icon click.
+const TRAY_CLICK_FOCUS_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 struct RuntimeGlobal(Arc<DesktopRuntime>);
 
@@ -899,7 +904,6 @@ fn highlighted_text(text: String, query: &str, color: Hsla) -> StyledText {
     StyledText::new(text).with_highlights(highlights)
 }
 
-#[cfg(target_os = "linux")]
 fn hex_digest(digest: &[u8; 32]) -> String {
     use std::fmt::Write as _;
     let mut output = String::with_capacity(64);
@@ -950,7 +954,6 @@ fn link_showing(
         .child(shown.into())
 }
 
-#[cfg(target_os = "linux")]
 fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static str {
     match scope {
         Some(factorseal::DocumentKind::LinuxSecretService) => "System keyring",
@@ -1712,9 +1715,14 @@ impl DesktopView {
             },
         );
         let window_activation = cx.observe_window_activation(window, |view, window, cx| {
-            if window.is_window_active() && matches!(view.snapshot, Snapshot::Sealed { .. }) {
-                view.focus_password = true;
-                cx.notify();
+            if window.is_window_active() {
+                if matches!(view.snapshot, Snapshot::Sealed { .. }) {
+                    view.focus_password = true;
+                    cx.notify();
+                }
+            } else if cx.has_global::<DesktopWindow>() {
+                // Recorded for the tray icon's toggle.
+                cx.global_mut::<DesktopWindow>().deactivated_at = Some(std::time::Instant::now());
             }
         });
         Self {
@@ -4238,7 +4246,6 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
     cx.global_mut::<DesktopStatus>().unsealed = matches!(snapshot, Snapshot::Unsealed { .. });
     refresh_tray(cx);
     sync_secret_service(snapshot, cx);
-    #[cfg(target_os = "linux")]
     access::update(snapshot, cx);
     if matches!(snapshot, Snapshot::Unsealed { .. }) {
         crate::timing::finish_unlock("ui_updated", "ok");
@@ -4406,11 +4413,15 @@ fn toggle_desktop_window(cx: &mut App) {
     let desktop = cx.global::<DesktopWindow>();
     let visible = desktop.visible;
     let handle = desktop.handle;
-    let focused = handle.is_some_and(|handle| {
-        handle
-            .update(cx, |_, window, _| window.is_window_active())
-            .unwrap_or(false)
-    });
+    let just_deactivated = desktop
+        .deactivated_at
+        .is_some_and(|at| at.elapsed() < TRAY_CLICK_FOCUS_GRACE);
+    let focused = just_deactivated
+        || handle.is_some_and(|handle| {
+            handle
+                .update(cx, |_, window, _| window.is_window_active())
+                .unwrap_or(false)
+        });
     if visible && focused {
         hide_desktop(cx);
     } else {
@@ -4724,6 +4735,7 @@ pub(crate) fn setup(
         view: Arc::clone(&view_holder),
         handle: None,
         visible: false,
+        deactivated_at: None,
         snapshot: initial.clone(),
         refresh_generation: 0,
     });
@@ -4762,10 +4774,7 @@ pub(crate) fn setup(
         }
     })
     .detach();
-    #[cfg(target_os = "linux")]
     access::setup(access_requests, cx);
-    #[cfg(not(target_os = "linux"))]
-    drop(access_requests);
     if !background {
         cx.activate(true);
     }
@@ -4811,7 +4820,6 @@ fn sync_secret_service(snapshot: &Snapshot, cx: &mut App) {
 /// A hidden window cannot answer an unlock prompt. Complete pending prompts
 /// as dismissed so waiting clients get an answer instead of a hang.
 fn dismiss_secret_service_prompts(cx: &mut App) {
-    #[cfg(target_os = "linux")]
     if access::is_open(cx) {
         return;
     }
