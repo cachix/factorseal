@@ -463,6 +463,11 @@ impl DesktopView {
                                                     } else {
                                                         "Add to favorites"
                                                     })
+                                                    .accessibility_label(if item.favorite {
+                                                        "Remove from favorites"
+                                                    } else {
+                                                        "Add to favorites"
+                                                    })
                                                     .on_click(cx.listener(|view, _, _, cx| {
                                                         view.toggle_personal_favorite(cx);
                                                     })),
@@ -1040,13 +1045,19 @@ impl DesktopView {
             .on_mouse_down(gpui::MouseButton::Left, edit_on_double_click)
             .child(item_editor::field_label(
                 icon.size(rems(1.)).text_color(muted),
-                div().min_w_0().truncate().child(label.to_owned()),
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(text("label", label.to_owned())),
                 muted,
             ))
             .child(
                 item_editor::field_body()
                     .child(
                         item_editor::field_value()
+                            .id(("personal-value", index))
+                            .role(gpui::Role::Group)
+                            .aria_label(label.to_owned())
                             .children(code)
                             .when(show_input, |value| value.child(input.clone())),
                     )
@@ -1102,7 +1113,9 @@ impl DesktopView {
             has_code,
             website,
         } = actions;
-        let labeled = |button: Button, label: &'static str| button.tooltip(label);
+        // Icon-only buttons are named by their tooltip.
+        let labeled =
+            |button: Button, label: &'static str| button.tooltip(label).accessibility_label(label);
         item_editor::field_actions()
             .when(!empty, |row| {
                 row.child(on_hover(
