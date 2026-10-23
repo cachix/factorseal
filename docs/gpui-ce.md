@@ -1,73 +1,80 @@
 # GPUI Community Edition integration
 
-FactorSeal uses GPUI CE for its core, native platform, components, assets, and
-tray. The dependency aliases preserve existing `gpui`, `gpui_component`,
-`gpui_component_assets`, and `gpui_platform` imports.
+Desktop uses the crates.io releases `gpui-ce` 0.3.0, `gpui_ce_platform` 0.3.0,
+and `gpui-tray` 0.3.0. The dependency aliases preserve the application's `gpui`
+and `gpui_platform` imports. Core, platform, components, assets, and tray resolve
+one GPUI CE package. The previous core and oo7 Git patches are removed.
 
-## Pinned sources
+## Component compatibility
 
-| Dependency | Revision |
-| --- | --- |
-| [GPUI CE](https://github.com/gpui-ce/gpui-ce) | `05d89e953701a89fedac9b17b3042154bdf74afe` |
-| [CE component compatibility branch](https://github.com/domenkozar/gpui-kit/tree/factorseal/gpui-ce-05d89e95) | `c7440f24e3c392beefe759aeb7989bd4ea4ffd4e` |
-| [gpui-tray 0.1.1](https://github.com/domenkozar/gpui-tray) | `db57d965a7187563644c5028bb1a17d36486b919` |
+Components and assets are pinned to Git revision
+`540da44d442e7e5be870e44a02858d95fd74b153` on `domenkozar/gpui-kit`, the head of
+[upstream compatibility PR #6](https://github.com/gpui-ce/gpui-component/pull/6).
+The port is based on current upstream main
+`c08206932417f863062d2ab70cc2854c6ca04238`. No local component sources are needed.
+Nix records the Git source hash in `nix/cargo-output-hashes.nix`.
 
-The component branch starts at the CE-maintained
-[gpui-component fork](https://github.com/gpui-ce/gpui-component), revision
-`f7fbbbb2b34dc131414ddeafee904102631b92ea`. Its compatibility commit removes the
-obsolete `runtime_shaders` feature and renames `Deferred::with_priority` calls
-to `Deferred::priority`. It can be replaced by an upstream revision containing
-those changes once that revision has been validated against the pinned core.
+The PR updates dependency requirements and adapts the inspector, content masks,
+painting, shaping, activation, and profiling APIs. It removes the duplicate
+`StyledExt::refine_style` method in favor of GPUI's `Styled` method. The editor's
+internal wrapper preserves boundary, atomic-element, and indentation behavior
+while measuring through the 0.3 shaper, including fallback fonts. Rich text uses
+backend visual lines and cluster geometry. Custom text renderers retain their
+own layout node so automatic inline flow cannot bypass their measurement.
 
-The desktop selects gpui-tray's `gpui-ce,menu-state` features and disables its
-default Zed GPUI backend. Workspace patches for crates.io `gpui-ce`,
-`gpui_ce_platform`, and `gpui_ce_macros` keep transitive dependencies on the same
-Git revision. Cargo package identity matters: patching `gpui` to a package
-named `gpui-ce` does not make Longbridge's original component packages use CE.
+The PR is a draft. The non-WebView upstream workspace type-checks on Linux,
+including Story and examples. The initial full upstream run reported 1,210 Base tests passed and 17 failed;
+Component reported 554 passed, 12 failed, and one ignored. The
+remaining failures include layout/scrolling, text wrapping/reveal, measurement
+caches, and test-backend behavior. They have not all been classified as
+fixture-only and must be resolved before upstream merge. The two real-Parley
+wrapping and caret regression tests pass. WebView checking requires WebKitGTK.
 
-CE includes `Window::set_visible`, so the previous Zed visibility fork is no
-longer needed. The existing tray and window lifecycle logic remains in place.
+A follow-up migrates native-menu icon loading to GPUI 0.3's `AssetRegistry`,
+fixing macOS and Windows compilation after `App::asset_source` was removed.
+All seven native-menu tests pass on Linux, including icon resolution tests
+previously restricted to macOS and Windows. Native CI must verify the backends.
 
-## Application adaptations
+After the PR is merged, prefer the upstream merge commit or a compatible
+published component release. Update the Cargo revision and Nix hash together.
 
-- Convert native and brand RGB colors with `gpui::rgb_to_hsla`.
-- Import `gpui::ColorExt` for alpha multiplication with `opacity`.
-- Use the CE color type's `lightness` field in the decorative unlock animation.
-- Forward text-style letter spacing to secret-field `TextRun` values.
+## Desktop adaptations
 
-The new SVG dependency chain no longer contains `rustybuzz`, so its obsolete
-maintenance exception is removed. Nix Cargo output hashes cover the CE core,
-component fork, tray, and shader generator Git sources.
+Protected inputs still shape only bullets when masked. Visible multiline
+fields use one `ShapedText` layout for hard breaks and soft wrapping, including
+selection bounds and caret hit testing. Single-line inputs use GPUI's caret API
+directly. The font fallback check uses the public font-family list, and window
+restoration uses `Window::activate`.
+
+Current upstream Root mounts dialog and notification layers automatically.
+Desktop no longer mounts those layers itself. Removed tile-specific theme fields
+are also removed from the application theme definition.
+
+GPUI's stable Linux platform uses oo7 0.6 with zbus 5. FactorSeal's own D-Bus
+interfaces, the ashpd patch, and gpui-tray use zbus 6. Desktop does not call
+GPUI's credential-storage methods. Moving oo7 to zbus 6 is a separate upstream
+migration and no longer requires a GPUI fork here. The component asset HTTP
+update removes rustls-pemfile and its obsolete maintenance exception.
 
 ## Validation
 
-Validation on Linux:
+The final Git-pinned checkout passed the Linux Desktop tests: 200 passed, with
+one live Sentry test ignored. Regression coverage uses Parley with bundled IBM
+Plex to check Unicode/multiline caret hit testing and masked input. Atomic
+inline-element wrapping is tested in the upstream PR.
 
-- `cargo build --locked -p factorseal-desktop`: passed.
-- `cargo test --locked -p factorseal-desktop`: 56 passed, one live Sentry test
-  ignored.
-- `cargo clippy --locked -p factorseal-desktop --all-targets --all-features -- -D warnings`:
-  passed.
-- Formatting, the dependency-policy check with cargo-audit 0.22.2, and all seven
-  dependency-policy tests passed.
-- `cargo tree` confirms the core, components, assets, tray, and platform resolve
-  the same CE revision.
-- Nix evaluation and the new core/component/shader Git dependency derivations
-  passed, including source hash verification. The full vendor download was
-  stopped; a full Nix desktop build has not been run.
-- An isolated Niri/Wayland instance with an uninitialized temporary vault and
-  Secret Service hosting disabled passed background startup, tray activation,
-  menu open/hide, close-to-tray, five additional hide/show cycles, and tray quit.
-  The setup screen rendered correctly before and after restoration; both
-  screenshots were byte-identical. The process exited successfully and its
-  tray service disappeared. No vault initialization or unlock was performed.
+Workspace Clippy with all targets/features and warnings denied passes, as do
+formatting, the dependency audit (six explicit maintenance exceptions), eight
+dependency-policy tests, and Desktop Nix derivation evaluation. The Nix source
+hash was obtained by fetching the published Git commit.
 
-The Windows desktop and test targets passed `cargo xwin check` using LLVM 21.1.8.
-The local cross environment used unwrapped Clang, `llvm-lib`, and a resource
-compiler wrapper that adds the crate root to manifest lookup paths. CE's
-`GPUI_RENDER_ALLOW_MISSING_DXBC=1` was set for this check-only build; Windows
-release builds must run on Windows to produce the required DXBC shaders. The
-check reported an existing dead-code warning for the non-Linux permission
-helpers `approve_permissions` and `deny_permission`.
+An isolated nested Wayland session rendered the setup screen and exited
+normally on window close with an empty runtime log. It used a temporary root
+and isolated settings with `--no-tray --no-secret-service`; no vault was created
+or unlocked. The local screenshot is
+`/tmp/factorseal-components-git-smoke/desktop.png`.
 
-Windows runtime and macOS require native CI validation.
+Native macOS/Windows checks, a full Nix package build, tray lifecycle
+interaction, and the 29 remaining upstream regressions require further
+validation. Upstream CI also has failing jobs that need triage. The draft PR
+records those limits explicitly.

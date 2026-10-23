@@ -146,11 +146,11 @@ pub(crate) fn installed_or_bundled_font(
     bundled: &'static str,
     cx: &App,
 ) -> gpui::SharedString {
-    let text_system = cx.text_system();
-    let resolved = text_system.resolve_font(&gpui::font(family.clone()));
-    if text_system
-        .get_font_for_id(resolved)
-        .is_some_and(|font| font.family == family)
+    if cx
+        .text_system()
+        .all_font_names()
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(&family))
     {
         family
     } else {
@@ -664,8 +664,6 @@ pub(crate) fn apply_native_theme(
     theme.radius = gpui::px(defaults.border.corner_radius);
     theme.radius_lg = gpui::px(defaults.border.corner_radius_lg);
     theme.shadow = defaults.border.shadow_enabled;
-    theme.tile_shadow = native.card.border.shadow_enabled;
-    theme.tile_radius = gpui::px(native.card.border.corner_radius);
     sync_component_colors(theme);
 }
 

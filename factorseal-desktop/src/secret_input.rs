@@ -7,12 +7,29 @@ use crate::controls::text_field;
 use factorseal::security::LockedBytes;
 use gpui::{
     App, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, KeyDownEvent, MouseButton, Pixels, Point, SharedString, TextRun, UTF16Selection,
-    Window, WrappedLine, canvas, div, prelude::*, px, rems,
+    Focusable, KeyDownEvent, MouseButton, Pixels, Point, ShapedText, SharedString, TextRun,
+    UTF16Selection, Window, canvas, div, prelude::*, px, rems,
 };
 use gpui_component::{ActiveTheme as _, input::InputEvent};
 use std::ops::{Deref, Range};
 use zeroize::Zeroizing;
+
+fn line_x_for_index(line: &gpui::ShapedLine, index: usize) -> Pixels {
+    line.platform_layout
+        .caret_bounds(
+            gpui::CaretPosition::attached_to_next_cluster(index.min(line.len())),
+            line.font_size,
+        )
+        .map_or(line.width, |bounds| bounds.origin.x)
+}
+
+fn line_index_for_x(line: &gpui::ShapedLine, x: Pixels) -> usize {
+    let height = line.font_size.max(px(1.));
+    line.platform_layout
+        .caret_from_pixel_point(gpui::point(x, height / 2.), height)
+        .unwrap_or_else(|caret| caret)
+        .index
+}
 
 fn rendered_text(value: &str, masked: bool) -> String {
     if masked {
@@ -44,53 +61,16 @@ fn shaped_text(value: &str, masked: bool, wrap: bool) -> String {
 
 const LINE_HEIGHT: gpui::Rems = rems(20. / 16.);
 
-fn line_origins(lines: &[WrappedLine], line_height: Pixels) -> Vec<(usize, Pixels)> {
-    let mut start = 0;
-    let mut top = px(0.);
+fn wrapped_position(lines: &ShapedText, index: usize, line_height: Pixels) -> Point<Pixels> {
     lines
-        .iter()
-        .map(|line| {
-            let origin = (start, top);
-            start += line.len() + 1;
-            top += line.size(line_height).height;
-            origin
-        })
-        .collect()
-}
-
-fn wrapped_position(lines: &[WrappedLine], index: usize, line_height: Pixels) -> Point<Pixels> {
-    let origins = line_origins(lines, line_height);
-    let line = origins
-        .iter()
-        .rposition(|(start, _)| *start <= index)
-        .unwrap_or(0);
-    let Some(((start, top), layout)) = origins.get(line).zip(lines.get(line)) else {
-        return Point::default();
-    };
-    layout
-        .position_for_index(index - start, line_height)
+        .visual_position_for_byte_index(index, line_height)
         .unwrap_or_default()
-        + gpui::point(px(0.), *top)
 }
 
-fn wrapped_index_for_point(
-    lines: &[WrappedLine],
-    point: Point<Pixels>,
-    line_height: Pixels,
-) -> usize {
-    let origins = line_origins(lines, line_height);
-    let line = origins
-        .iter()
-        .zip(lines)
-        .position(|((_, top), layout)| point.y < *top + layout.size(line_height).height)
-        .unwrap_or(lines.len().saturating_sub(1));
-    let Some(((start, top), layout)) = origins.get(line).zip(lines.get(line)) else {
-        return 0;
-    };
-    start
-        + layout
-            .closest_index_for_position(point - gpui::point(px(0.), *top), line_height)
-            .unwrap_or_else(|index| index)
+fn wrapped_index_for_point(lines: &ShapedText, point: Point<Pixels>, line_height: Pixels) -> usize {
+    lines
+        .closest_byte_index_for_pixel_point(point, line_height)
+        .unwrap_or_else(|index| index)
 }
 
 const MAX_BYTES: usize = 64 * 1024;
@@ -172,7 +152,7 @@ pub(crate) struct SecretInputState {
     reversed: bool,
     last_layout: Option<(gpui::ShapedLine, Point<Pixels>)>,
     wrap: bool,
-    last_wrapped: Option<(Vec<WrappedLine>, Point<Pixels>, Pixels)>,
+    last_wrapped: Option<(ShapedText, Point<Pixels>, Pixels)>,
 }
 pub(crate) struct CancelEdit;
 pub(crate) struct PasteItem(pub(crate) gpui::ClipboardItem);
@@ -321,7 +301,7 @@ impl SecretInputState {
         let Some((line, origin)) = &self.last_layout else {
             return self.secret.text.len();
         };
-        let index = line.closest_index_for_x(point.x - origin.x);
+        let index = line_index_for_x(line, point.x - origin.x);
         if !self.masked {
             return index.min(self.secret.text.len());
         }
@@ -615,7 +595,6 @@ impl Render for SecretInputState {
                                 text,
                                 style.font_size.to_pixels(window.rem_size()),
                                 &[run],
-                                None,
                             )
                         },
                         move |bounds, line, window, cx| {
@@ -625,11 +604,14 @@ impl Render for SecretInputState {
                                 |index| rendered_index(&input.secret.text, index, input.masked);
                             let selection = display_index(input.selection.start)
                                 ..display_index(input.selection.end);
-                            let caret = line.x_for_index(if input.reversed {
-                                selection.start
-                            } else {
-                                selection.end
-                            });
+                            let caret = line_x_for_index(
+                                &line,
+                                if input.reversed {
+                                    selection.start
+                                } else {
+                                    selection.end
+                                },
+                            );
                             let offset = if focus.is_focused(window) {
                                 (caret - bounds.size.width + px(2.)).max(px(0.))
                             } else {
@@ -638,29 +620,23 @@ impl Render for SecretInputState {
                             let origin = bounds.origin - gpui::point(offset, px(0.));
                             if focus.is_focused(window) {
                                 if selection.is_empty() {
-                                    window.paint_quad(gpui::fill(
-                                        Bounds::new(
+                                    window.paint_quad(
+                                        gpui::PaintQuad::new(Bounds::new(
                                             origin + gpui::point(caret, px(0.)),
                                             gpui::size(px(1.), bounds.size.height),
-                                        ),
-                                        cx.theme().foreground,
-                                    ));
+                                        ))
+                                        .background(cx.theme().foreground),
+                                    );
                                 } else {
-                                    window.paint_quad(gpui::fill(
-                                        Bounds::from_corners(
-                                            origin
-                                                + gpui::point(
-                                                    line.x_for_index(selection.start),
-                                                    px(0.),
-                                                ),
-                                            origin
-                                                + gpui::point(
-                                                    line.x_for_index(selection.end),
-                                                    bounds.size.height,
-                                                ),
-                                        ),
-                                        cx.theme().selection,
-                                    ));
+                                    for selected_bounds in line
+                                        .platform_layout
+                                        .selection_bounds(selection, bounds.size.height)
+                                    {
+                                        window.paint_quad(
+                                            gpui::PaintQuad::new(selected_bounds + origin)
+                                                .background(cx.theme().selection),
+                                        );
+                                    }
                                 }
                             }
                             window.handle_input(
@@ -722,60 +698,44 @@ impl SecretInputState {
                         Some(bounds.size.width),
                         None,
                     )
-                    .map(|lines| lines.into_iter().collect::<Vec<_>>())
-                    .unwrap_or_default()
+                    .ok()
             },
             move |bounds, lines, window, cx| {
+                let Some(lines) = lines else {
+                    return;
+                };
                 let input = entity.read(cx);
                 let focus = input.focus.clone();
                 if focus.is_focused(window) {
-                    let start = wrapped_position(&lines, input.selection.start, line_height);
-                    let end = wrapped_position(&lines, input.selection.end, line_height);
-                    let width = bounds.size.width;
-                    let mut highlight = |from: Point<Pixels>, to: Point<Pixels>, color| {
-                        window.paint_quad(gpui::fill(
-                            Bounds::from_corners(bounds.origin + from, bounds.origin + to),
-                            color,
-                        ));
-                    };
                     if input.selection.is_empty() {
-                        highlight(
-                            end,
-                            end + gpui::point(px(1.), line_height),
-                            cx.theme().foreground,
-                        );
-                    } else if start.y == end.y {
-                        highlight(
-                            start,
-                            end + gpui::point(px(0.), line_height),
-                            cx.theme().selection,
+                        let caret = wrapped_position(&lines, input.selection.end, line_height);
+                        window.paint_quad(
+                            gpui::PaintQuad::new(Bounds::new(
+                                bounds.origin + caret,
+                                gpui::size(px(1.), line_height),
+                            ))
+                            .background(cx.theme().foreground),
                         );
                     } else {
-                        let selection = cx.theme().selection;
-                        highlight(start, gpui::point(width, start.y + line_height), selection);
-                        highlight(
-                            gpui::point(px(0.), start.y + line_height),
-                            gpui::point(width, end.y),
-                            selection,
-                        );
-                        highlight(
-                            gpui::point(px(0.), end.y),
-                            end + gpui::point(px(0.), line_height),
-                            selection,
-                        );
+                        for selected_bounds in
+                            lines.selection_bounds(input.selection.clone(), line_height)
+                        {
+                            window.paint_quad(
+                                gpui::PaintQuad::new(selected_bounds + bounds.origin)
+                                    .background(cx.theme().selection),
+                            );
+                        }
                     }
                 }
                 window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
-                for (line, (_, top)) in lines.iter().zip(line_origins(&lines, line_height)) {
-                    let _ = line.paint(
-                        bounds.origin + gpui::point(px(0.), top),
-                        line_height,
-                        gpui::TextAlign::Left,
-                        Some(bounds),
-                        window,
-                        cx,
-                    );
-                }
+                let _ = lines.paint(
+                    bounds.origin,
+                    line_height,
+                    gpui::TextAlign::Left,
+                    Some(bounds),
+                    window,
+                    cx,
+                );
                 entity.update(cx, |input, _| {
                     input.last_wrapped = Some((lines, bounds.origin, line_height));
                 });
@@ -795,6 +755,67 @@ impl SecretInputState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text_system() -> std::sync::Arc<gpui::TextSystem> {
+        let system = std::sync::Arc::new(gpui::TextSystem::new(std::sync::Arc::new(
+            gpui_ce_parley::ParleyTextSystem::without_system_fonts(),
+        )));
+        system
+            .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(
+                "../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
+            ))])
+            .unwrap();
+        system
+    }
+
+    #[test]
+    fn wrapped_carets_round_trip_across_unicode_and_hard_breaks() {
+        let system = gpui::WindowTextSystem::new(text_system());
+        let text = "abé🙂\nsecond line wraps here";
+        let lines = system
+            .shape_text(
+                text,
+                px(16.),
+                &[TextRun {
+                    len: text.len(),
+                    ..Default::default()
+                }],
+                Some(px(64.)),
+                None,
+            )
+            .unwrap();
+        assert!(lines.line_count() > 2);
+        for index in text
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([text.len()])
+        {
+            let point = wrapped_position(&lines, index, px(20.));
+            assert_eq!(wrapped_index_for_point(&lines, point, px(20.)), index);
+        }
+    }
+
+    #[test]
+    fn masked_carets_round_trip_without_shaping_the_secret() {
+        let system = gpui::WindowTextSystem::new(text_system());
+        let secret = "sëcret🙂";
+        let display = shaped_text(secret, true, false);
+        let line = system.shape_line(
+            display.clone().into(),
+            px(16.),
+            &[TextRun {
+                len: display.len(),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(line.text.as_ref(), "•".repeat(secret.chars().count()));
+        for index in (0..=secret.chars().count()).map(|index| index * "•".len()) {
+            assert_eq!(
+                line_index_for_x(&line, line_x_for_index(&line, index)),
+                index
+            );
+        }
+    }
 
     #[test]
     fn visible_and_masked_fields_preserve_unicode_positions_without_leaking_secrets() {

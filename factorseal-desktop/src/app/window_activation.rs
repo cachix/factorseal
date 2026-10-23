@@ -52,7 +52,7 @@ pub(super) fn show(window: &mut Window, remap_unfocused: bool) {
         window.set_visible(false);
     }
     window.set_visible(true);
-    window.activate_window();
+    window.activate();
 }
 
 #[cfg(target_os = "linux")]

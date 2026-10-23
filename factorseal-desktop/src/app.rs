@@ -4134,8 +4134,6 @@ impl Render for DesktopView {
         self.fill_from_one_time_link(window, cx);
         self.animate_item_editor(window, cx);
         self.open_leave_dialog(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
         window.set_rem_size(crate::appearance::rem_size(cx));
         if self.focus_password && !self.settings_open {
             self.focus_password = false;
@@ -4201,8 +4199,6 @@ impl Render for DesktopView {
                     div().absolute().inset_0().bg(theme.overlay),
                 ))
             })
-            .children(dialog_layer)
-            .children(notification_layer)
     }
 }
 
