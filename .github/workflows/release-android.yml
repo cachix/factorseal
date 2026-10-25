@@ -1,0 +1,108 @@
+name: Release Android bundle
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  bundle:
+    name: Google Play bundle
+    runs-on: ubuntu-latest
+    environment: android-release
+    defaults:
+      run:
+        working-directory: factorseal-mobile
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
+        with:
+          name: devenv
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
+
+      - name: Validate the release tag
+        id: release
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' ../Cargo.toml | head -n 1)"
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Release tag '$GITHUB_REF_NAME' must match Cargo.toml version 'v$version'" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check the release inputs
+        run: |
+          devenv shell -- cargo test --locked -p factorseal-mobile
+          devenv shell -- ./gradlew --no-daemon spotlessCheck :shared:testAndroidHostTest lint
+
+      - name: Build the signed bundle
+        id: bundle
+        env:
+          FACTORSEAL_UPLOAD_KEYSTORE_BASE64: ${{ secrets.FACTORSEAL_UPLOAD_KEYSTORE_BASE64 }}
+          FACTORSEAL_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.FACTORSEAL_UPLOAD_KEYSTORE_PASSWORD }}
+          FACTORSEAL_UPLOAD_KEY_ALIAS: ${{ secrets.FACTORSEAL_UPLOAD_KEY_ALIAS }}
+          FACTORSEAL_UPLOAD_KEY_PASSWORD: ${{ secrets.FACTORSEAL_UPLOAD_KEY_PASSWORD }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          missing=()
+          for name in FACTORSEAL_UPLOAD_KEYSTORE_BASE64 FACTORSEAL_UPLOAD_KEYSTORE_PASSWORD FACTORSEAL_UPLOAD_KEY_ALIAS FACTORSEAL_UPLOAD_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Configure these secrets in the android-release environment: ${missing[*]}" >&2
+            exit 1
+          fi
+          umask 077
+          keystore="$RUNNER_TEMP/upload.jks"
+          trap 'rm -f "$keystore"' EXIT
+          printf '%s' "$FACTORSEAL_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          FACTORSEAL_UPLOAD_KEYSTORE="$keystore" devenv shell -- ./gradlew --no-daemon :androidApp:bundleRelease
+          mkdir -p dist
+          bundle="dist/factorseal-$VERSION-google-play.aab"
+          cp androidApp/build/outputs/bundle/release/androidApp-release.aab "$bundle"
+          devenv shell -- jarsigner -verify "$bundle" | grep -x 'jar verified.' > /dev/null
+          (cd dist && sha256sum "$(basename "$bundle")" > "$(basename "$bundle").sha256")
+          echo "bundle=factorseal-mobile/$bundle" >> "$GITHUB_OUTPUT"
+          echo "checksum=factorseal-mobile/$bundle.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the bundle
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.bundle.outputs.bundle }}
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: factorseal-google-play-${{ github.run_id }}
+          path: |
+            ${{ steps.bundle.outputs.bundle }}
+            ${{ steps.bundle.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach the bundle to the draft GitHub release
+        if: github.event_name == 'push'
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.bundle.outputs.bundle }}
+          CHECKSUM: ${{ steps.bundle.outputs.checksum }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes --title "Factorseal $GITHUB_REF_NAME" ||
+            gh release view "$GITHUB_REF_NAME" > /dev/null
+          gh release upload "$GITHUB_REF_NAME" "$BUNDLE" "$CHECKSUM" --clobber
