@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<autofill-service xmlns:android="http://schemas.android.com/apk/res/android">
+    <compatibility-package
+        android:name="app.vanadium.browser"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.android.chrome"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.brave.browser"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.brave.browser_beta"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.brave.browser_nightly"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.chrome.beta"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.chrome.canary"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.chrome.dev"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.ecosia.android"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.microsoft.emmx"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.opera.browser"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.sec.android.app.sbrowser"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.sec.android.app.sbrowser.beta"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="com.vivaldi.browser"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="org.chromium.chrome"
+        android:maxLongVersionCode="10000000000" />
+    <compatibility-package
+        android:name="org.cromite.cromite"
+        android:maxLongVersionCode="10000000000" />
+</autofill-service>

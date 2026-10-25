@@ -1,0 +1,26 @@
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+nixpkgs:
+  permitted_unfree_packages:
+    - android-sdk-cmdline-tools
+    - android-sdk-platform-tools
+    - platform-tools
+    - android-sdk-tools
+    - android-sdk-emulator
+    - android-sdk-system-image-36-google_apis-x86_64
+    - system-image-36-google_apis-x86_64
+    - emulator
+    - tools
+    - android-sdk-build-tools
+    - build-tools
+    - android-sdk-platforms
+    - platforms
+    - android-sdk-ndk
+    - ndk
+    - cmdline-tools

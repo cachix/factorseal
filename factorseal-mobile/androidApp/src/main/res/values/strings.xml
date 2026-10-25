@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name" translatable="false">FactorSeal</string>
+    <string name="autofill_suggestion">Fill with FactorSeal</string>
+</resources>

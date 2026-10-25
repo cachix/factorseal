@@ -1,0 +1,2 @@
+-keep class com.cachix.factorseal.core.NativeCore { native <methods>; }
+-keep class com.cachix.factorseal.android.Biometrics { public static int authorize(javax.crypto.Cipher); }
