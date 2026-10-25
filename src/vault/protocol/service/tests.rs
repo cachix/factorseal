@@ -378,7 +378,7 @@ fn typed_actions_select_semantic_document_kinds() {
 /// The vault's own helper processes are identified by their executable
 /// digest. Restarting the same build must not write a generation, and an
 /// upgraded build must take the namespace over from the build it replaces.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 #[test]
 fn helper_process_grants_are_exclusive_and_free_when_unchanged() {
     use super::super::grant::GRANT_DOCUMENT_NAMESPACE;

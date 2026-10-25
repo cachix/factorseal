@@ -23,7 +23,9 @@ mod roundtrip;
 #[cfg(test)]
 mod tests;
 mod totp;
-pub use hybrid::{HybridIdentity, HybridRecipient, read_identity_file, read_recipient_file};
+pub use hybrid::{
+    HybridIdentity, HybridRecipient, parse_key_file, read_identity_file, read_recipient_file,
+};
 
 const FIELD_EXTENSION: &str = "org.factorseal.field";
 const ITEM_EXTENSION: &str = "org.factorseal.item";

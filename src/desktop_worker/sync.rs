@@ -1,4 +1,5 @@
-//! Management frames for inherited Desktop pipes only. Never application IPC.
+//! Management frames for inherited Desktop pipes and the in-process mobile
+//! courier. Never application IPC.
 use crate::personal::sync::{MemberId, PacketId, PairingInvitation, PairingRequest, VerifiedGroup};
 use crate::{VaultError, VaultResult, VaultService};
 use serde::{Deserialize, Serialize};
@@ -191,7 +192,7 @@ pub fn unavailable() -> VaultError {
     VaultError::Protocol("unlock the vault in this Desktop to manage devices".into())
 }
 
-#[cfg(feature = "personal-sync-network")]
+#[cfg(feature = "personal-sync-iroh")]
 pub mod network;
 
 #[cfg(test)]

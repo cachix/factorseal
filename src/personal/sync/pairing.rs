@@ -348,7 +348,7 @@ pub(crate) struct PairingState {
     pub approved: Option<[u8; 32]>,
 }
 
-#[cfg(feature = "personal-sync-network")]
+#[cfg(feature = "personal-sync-iroh")]
 impl PairingInvitation {
     /// Sensitive SVG for local display. Do not publish or log invitation QRs.
     pub fn qr_svg(&self) -> VaultResult<Zeroizing<String>> {
@@ -400,7 +400,7 @@ mod tests {
             .unwrap();
         assert!(request.verify(&invitation, &next, 101).is_err());
         assert!(PairingInvitation::from_ticket(&"x".repeat(257)).is_err());
-        #[cfg(feature = "personal-sync-network")]
+        #[cfg(feature = "personal-sync-iroh")]
         assert!(invitation.qr_svg().unwrap().contains("<svg"));
     }
 }
@@ -415,7 +415,7 @@ pub struct PairingStatus {
     pub joining: bool,
 }
 
-#[cfg(feature = "personal-sync-network")]
+#[cfg(feature = "personal-sync-iroh")]
 impl PairingInvitation {
     /// QR modules without a quiet zone, for in-memory UI drawing.
     pub fn qr_modules(&self) -> VaultResult<Vec<Vec<bool>>> {

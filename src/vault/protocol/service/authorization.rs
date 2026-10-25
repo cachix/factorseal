@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crate::vault::{DocumentKind, VaultResult};
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 use super::super::grant::store_exclusive_grant;
 use super::super::grant::{GrantTarget, PreparedGrant, prepare_grant, store_prepared_grants};
 use super::super::{CallerIdentity, GrantPermission, WireSecretAddress};
@@ -179,7 +179,7 @@ impl VaultService {
         self.authorize_network_manager_host(caller, now)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
     pub(crate) fn authorize_network_manager_host(
         &self,
         caller: &CallerIdentity,
@@ -200,7 +200,7 @@ impl VaultService {
         )
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
     pub(crate) fn authorize_secret_service_namespace(
         &self,
         caller: &CallerIdentity,
@@ -219,7 +219,7 @@ impl VaultService {
         )
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "secret-service-host", target_os = "linux"))]
     fn authorize_exclusive(
         &self,
         caller: &CallerIdentity,

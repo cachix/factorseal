@@ -37,6 +37,7 @@ payload is dropped immediately after decoding, before opening the key hierarchy.
 | --- | --- | --- |
 | Linux | `mmap`, inaccessible guard pages, `mlock`, `MADV_DONTDUMP`, `MADV_WIPEONFORK` | Existing Unix core-file suppression and nondumpable key-owner processes remain. Protected pages are excluded from core dumps and zero-filled in a fork child. |
 | macOS and other Unix targets | `mmap`, inaccessible guard pages, `mlock` | Existing Unix core-file suppression remains. This implementation does not claim Linux's per-mapping fork or dump controls on these targets. |
+| Android | `mmap`, inaccessible guard pages, `MADV_DONTDUMP`, and `mlock` within the fixed 64 KiB app quota | The quota fits only a few pages, so normal use routinely exceeds it. Allocations beyond it stay guarded and excluded from dumps but are not locked, and each one records a memory protection event. |
 | Windows | `VirtualAlloc` reservation with uncommitted guards; committed middle region protected by `VirtualLock` | Request WER `NOHEAP`, preserving existing WER flags. Failure to set/query the policy is an error. This does not override LocalDumps or prevent external/privileged dump tools. |
 | Other targets | Unsupported | Secret allocation returns an error. There is no silent pageable fallback. |
 
