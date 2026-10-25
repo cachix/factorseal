@@ -13,6 +13,7 @@ members = [
     "crates/network-manager-protocol",
     "crates/secret-service-protocol",
     "factorseal-desktop",
+    "factorseal-mobile/core",
 ]
 resolver = "2"
 exclude = ["fuzz"]
@@ -246,6 +247,12 @@ debug = 0
 
 [profile.release]
 debug = "line-tables-only"
+
+[profile.mobile]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
 
 # Password stretching intentionally uses production-strength Argon2 settings
 # in the desktop app. Optimize only its implementation in development builds

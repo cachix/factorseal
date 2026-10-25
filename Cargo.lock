@@ -3003,6 +3003,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "factorseal-mobile"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "factorseal",
+ "hardwareseal",
+ "hex",
+ "jni 0.21.1",
+ "ndk-context",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,169 @@
+{
+  "requests": [
+    {"type": "start", "directory": "/data/user/0/com.cachix.factorseal/no_backup/factorseal", "platform": "android"},
+    {"type": "status"},
+    {"type": "touch"},
+    {"type": "create", "groups": [["password"], ["biometric"]], "password": "orbit lantern velvet harbor quiet", "lease": {"idle-seconds": 300, "maximum-seconds": 28800}},
+    {"type": "unlock", "group": ["password"], "password": "orbit lantern velvet harbor quiet", "lease": {"idle-seconds": 300, "maximum-seconds": 28800}},
+    {"type": "unlock", "group": ["biometric"], "password": null, "lease": {"idle-seconds": 60, "maximum-seconds": 900}},
+    {"type": "seal"},
+    {"type": "rate-password", "password": "correct horse battery staple"},
+    {"type": "items"},
+    {"type": "item", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA"},
+    {"type": "reveal", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "section": "account", "field": "password"},
+    {"type": "codes", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA"},
+    {"type": "template", "kind": "login"},
+    {"type": "edit", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA"},
+    {
+      "type": "save",
+      "item": {
+        "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA",
+        "kind": "login",
+        "title": "GitHub",
+        "favorite": false,
+        "notes": null,
+        "sections": [
+          {
+            "id": "account",
+            "label": "Account",
+            "fields": [
+              {"id": "username", "label": "Username", "type": "text", "concealed": false, "filled": true, "value": "octocat", "link": null},
+              {"id": "password", "label": "Password", "type": "concealed", "concealed": true, "filled": true, "value": "correct horse battery staple", "link": null},
+              {"id": "url-0", "label": "Website", "type": "url", "concealed": false, "filled": true, "value": "https://github.com/login", "link": null},
+              {"id": "totp", "label": "One-time password", "type": "totp", "concealed": true, "filled": false, "value": "", "link": null}
+            ]
+          },
+          {
+            "id": "custom",
+            "label": "Custom fields",
+            "fields": [
+              {"id": "custom-0", "label": "Recovery", "type": "address", "concealed": false, "filled": true, "value": {"city": "Kyiv"}, "link": null}
+            ]
+          }
+        ]
+      },
+      "version": null
+    },
+    {"type": "favorite", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "favorite": true},
+    {"type": "delete", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "version": "3"},
+    {"type": "restore"},
+    {"type": "generate", "options": {"style": "words", "length": 20, "words": 12, "digits": true, "symbols": true}},
+    {"type": "setup-key", "value": "otpauth://totp/Example:alice?secret=gezdgnbvgy3tqojq&issuer=Example", "same-as": null},
+    {"type": "setup-key", "value": "otpauth://totp/Example:alice?secret=GEZDGNBVGY3TQOJQ&issuer=Example", "same-as": "gezd gnbv gy3t qojq"},
+    {"type": "sync-start", "name": "Pixel 9"},
+    {"type": "sync-stop"},
+    {"type": "sync-view"},
+    {"type": "sync-invite", "name": "Pixel 9"},
+    {"type": "sync-join", "ticket": "factorseal-sync:1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "name": "Pixel 9"},
+    {"type": "sync-approve", "request": "request-1"},
+    {"type": "sync-cancel"},
+    {"type": "sync-refresh"},
+    {"type": "classify", "text": "otpauth://totp/Example:alice?secret=gezdgnbvgy3tqojq&issuer=Example"},
+    {"type": "export", "format": "factorseal", "key": {"passphrase": "copper meadow lantern orbit quiet harbor"}},
+    {"type": "export", "format": "cxf-age", "key": {"key-file": "age1pq1examplerecipient"}},
+    {"type": "export", "format": "bitwarden-json", "key": null},
+    {"type": "import", "format": "factorseal", "file": "eyJ2ZXJzaW9uIjoyfQ==", "key": {"passphrase": "copper meadow lantern orbit quiet harbor"}},
+    {"type": "import", "format": "cxf-age", "file": "YWdlLWVuY3J5cHRpb24ub3Jn", "key": {"key-file": "AGE-SECRET-KEY-PQ-1EXAMPLE"}},
+    {"type": "import", "format": "bitwarden-json", "file": "e30=", "key": null},
+    {"type": "import", "format": "1password-csv", "file": "dGl0bGUK", "key": null},
+    {"type": "import", "format": "1password-1pux", "file": "UEsDBA==", "key": null},
+    {"type": "import", "format": "keepass-csv", "file": "dGl0bGUK", "key": null},
+    {"type": "import-commit", "replace": true},
+    {"type": "import-cancel"},
+    {"type": "logins", "site": {"web": "https://github.com/login"}},
+    {"type": "logins", "site": {"app": "com.github.android"}},
+    {"type": "fill", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "site": {"app": "com.github.android"}},
+    {"type": "save-login", "site": {"web": "https://github.com"}, "title": "github.com", "username": "octocat", "password": "correct horse battery staple"}
+  ],
+  "responses": [
+    {"type": "status", "vault": "unsealed", "groups": [["password"]], "backend": "android-trusted-environment", "paired": false, "idle-deadline": 1800000300, "absolute-deadline": 1800028800},
+    {"type": "rating", "score": 4, "strength": "strong", "acceptable": true},
+    {"type": "items", "items": [{"id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "title": "GitHub", "kind": "login", "username": "octocat", "website": "github.com", "updated-at": 1800000000, "favorite": false}]},
+    {
+      "type": "item",
+      "item": {
+        "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA",
+        "kind": "login",
+        "title": "GitHub",
+        "favorite": false,
+        "notes": null,
+        "notes-filled": false,
+        "website": "github.com",
+        "sections": [
+          {
+            "id": "account",
+            "label": "Account",
+            "fields": [
+              {"id": "username", "label": "Username", "type": "text", "concealed": false, "filled": true, "value": "octocat", "link": null},
+              {"id": "password", "label": "Password", "type": "concealed", "concealed": true, "filled": true, "value": null, "link": null},
+              {"id": "url-0", "label": "Website", "type": "url", "concealed": false, "filled": true, "value": "github.com/login", "link": "https://github.com/login"}
+            ]
+          }
+        ],
+        "version": "3"
+      }
+    },
+    {"type": "value", "value": "correct horse battery staple"},
+    {"type": "codes", "codes": [{"section": "account", "field": "totp", "value": "104648", "period": 30, "remaining": 17, "issuer": "GitHub", "account": "octocat"}]},
+    {
+      "type": "draft",
+      "item": {
+        "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA",
+        "kind": "login",
+        "title": "",
+        "favorite": false,
+        "notes": null,
+        "notes-filled": false,
+        "website": null,
+        "sections": [
+          {
+            "id": "account",
+            "label": "Account",
+            "fields": [
+              {"id": "username", "label": "Username", "type": "text", "concealed": false, "filled": false, "value": "", "link": null}
+            ]
+          }
+        ],
+        "version": null
+      }
+    },
+    {"type": "saved", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "version": "3"},
+    {"type": "deleted"},
+    {"type": "generated", "password": "orbit lantern velvet harbor quiet meadow", "strength": "strong"},
+    {"type": "setup-key", "value": "otpauth://totp/Example:alice?secret=GEZDGNBVGY3TQOJQ&issuer=Example", "issuer": "Example", "account": "alice", "same": false},
+    {
+      "type": "sync",
+      "running": true,
+      "paired": true,
+      "devices": [{"name": "Pixel 9", "local": true, "reader": false}],
+      "reachable": 1,
+      "last-exchange": 1800000000,
+      "pending": 0,
+      "conflicts": 0,
+      "readers": 0,
+      "invitation": {"ticket": "factorseal-sync:1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "modules": [[true, false], [false, true]], "expires": 1800000300},
+      "review": {"request": "request-1", "code": "482 913", "devices": [{"name": "Laptop", "local": false, "reader": false}], "verified": true, "waiting": false, "approved-here": false},
+      "joining": false,
+      "error": null
+    },
+    {"type": "scanned", "scan": {"type": "nothing"}},
+    {"type": "scanned", "scan": {"type": "pairing", "ticket": "factorseal-sync:1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
+    {"type": "scanned", "scan": {"type": "one-time-password", "value": "otpauth://totp/Example:alice?secret=GEZDGNBVGY3TQOJQ&issuer=Example", "issuer": "Example", "account": "alice"}},
+    {"type": "scanned", "scan": {"type": "unsupported"}},
+    {"type": "file", "name": "factorseal-backup.factorseal", "data": "eyJ2ZXJzaW9uIjoyfQ=="},
+    {"type": "import-review", "items": 12, "preserved": 1},
+    {"type": "imported", "added": 10, "replaced": 1, "kept": 1, "preserved": 1},
+    {"type": "logins", "linked": [{"id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "title": "GitHub", "username": "octocat"}], "others": [{"id": "01JB8W40AC3D5F7H9K1M3P5R7T", "title": "Example", "username": "alice"}]},
+    {"type": "credentials", "username": "octocat", "password": "correct horse battery staple"},
+    {"type": "login-saved", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "change": "updated"},
+    {"type": "error", "code": "password-rejected", "message": "Incorrect password. Please try again."}
+  ],
+  "enums": {
+    "error-code": ["not-started", "absent", "exists", "sealed", "password-required", "password-rejected", "weak-password", "cancelled", "denied", "ui-unavailable", "session-locked", "credential-invalidated", "hardware-unavailable", "policy-unsupported", "not-found", "changed", "conflict", "invalid", "nothing-to-restore", "sync", "failed"],
+    "field-type": ["text", "concealed", "url", "email", "phone", "date", "month-year", "totp", "multiline", "boolean", "card-number", "ssh-key", "address", "reference", "unknown"],
+    "kind": ["login", "secure-note", "card", "identity", "ssh-key", "api-credential", "passport", "bank-account", "document", "generic"],
+    "login-change": ["added", "updated", "unchanged"],
+    "strength": ["weak", "good", "strong"],
+    "vault-state": ["absent", "sealed", "unsealed"]
+  }
+}

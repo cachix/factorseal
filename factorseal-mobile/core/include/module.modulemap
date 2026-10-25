@@ -1,0 +1,4 @@
+module FactorSealCore {
+    header "factorseal.h"
+    export *
+}

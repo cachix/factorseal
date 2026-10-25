@@ -1,0 +1,42 @@
+[package]
+name = "factorseal-mobile"
+description = "The FactorSeal vault core embedded by the Android and iOS apps"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "Apache-2.0"
+repository = "https://github.com/cachix/factorseal"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+factorseal = { path = "../..", default-features = false, features = ["vault-store", "key-protection", "personal-sync-iroh", "personal-qr", "personal-tools", "transfer", "vault-client"] }
+data-encoding = "2.11.1"
+hex = "0.4.3"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.141"
+sha2 = "0.10.9"
+zeroize = "1.8.1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+hardwareseal = { version = "0.1.0", path = "../../crates/hardwareseal", features = ["android"] }
+jni = "0.21.1"
+ndk-context = "0.1.1"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+hardwareseal = { version = "0.1.0", path = "../../crates/hardwareseal", features = ["apple"] }
+
+[dev-dependencies]
+qrcode = { version = "0.14.1", default-features = false }
+tempfile = "3.20.0"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+missing_errors_doc = "allow"
