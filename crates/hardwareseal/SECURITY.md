@@ -26,7 +26,10 @@ intermediate copy taken from it.
   original physical TPM.
 - Android creates a non-exportable AES-256-GCM key in Android Keystore, rejects
   keys whose `KeyInfo` reports software-only storage, and authenticates the
-  envelope metadata as associated data.
+  envelope metadata as associated data. With the biometric policy, the key
+  requires Class 3 biometric authorization for every use, the host's
+  `BiometricPrompt` receives the initialized cipher as its `CryptoObject`, and
+  new biometric enrollment invalidates the key.
 - Apple stores the short secret as a device-only Data Protection Keychain item.
   Each seal writes its own item under a random identifier that the envelope
   carries, so an envelope always names the one secret it was created for. With
@@ -60,8 +63,9 @@ envelope is encrypted with a credential-bound symmetric PRF output.
   invalidation are typed authorization outcomes. Unknown native failures stay
   generic and never become authorization success.
 
-Linux and Android currently reject the biometric policy where the native
-operation cannot yet bind a cryptographic factor to each unseal.
+Linux currently rejects the biometric policy because the native operation
+cannot bind a cryptographic factor to each unseal. Android rejects it until the
+host registers an authorizer.
 
 ## Compliance
 

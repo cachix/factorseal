@@ -2,6 +2,7 @@
 
 use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JThrowable, JValue};
 use jni::{JNIEnv, JavaVM};
+use std::sync::OnceLock;
 use zeroize::Zeroizing;
 
 use crate::{AccessPolicy, AuthorizationError, Backend, Error, LABEL_HASH_BYTES};
@@ -14,9 +15,18 @@ const MAX_CIPHERTEXT_BYTES: usize = 256;
 const PURPOSE_ENCRYPT_DECRYPT: i32 = 3;
 const ENCRYPT_MODE: i32 = 1;
 const DECRYPT_MODE: i32 = 2;
+const AUTH_BIOMETRIC_STRONG: i32 = 2;
+
+pub type Authorizer = fn(&mut JNIEnv<'_>, &JObject<'_>) -> Result<(), Error>;
+
+static AUTHORIZER: OnceLock<Authorizer> = OnceLock::new();
+
+pub fn set_authorizer(authorizer: Authorizer) -> bool {
+    AUTHORIZER.set(authorizer).is_ok()
+}
 
 pub(super) fn open(label_hash: [u8; LABEL_HASH_BYTES], policy: AccessPolicy) -> Result<(), Error> {
-    if policy == AccessPolicy::Biometric {
+    if policy == AccessPolicy::Biometric && AUTHORIZER.get().is_none() {
         return Err(Error::PolicyNotSupported {
             policy,
             backend: Backend::AndroidKeystore,
@@ -29,13 +39,19 @@ pub(super) fn open(label_hash: [u8; LABEL_HASH_BYTES], policy: AccessPolicy) -> 
         }
         let store = key_store(env)?;
         let alias = alias(label_hash, policy);
-        let key = get_or_create_key(env, &store, &alias)?;
-        if let Err(error) = ensure_hardware_key(env, &key) {
+        let created = !contains_alias(env, &store, &alias)?;
+        if created {
+            create_key(env, &alias, policy)?;
+        }
+        let key = get_existing_key(env, &store, &alias)?;
+        if let Err(error) = ensure_hardware_key(env, &key, policy) {
             // `delete_alias` is itself a JNI call, and calling into JNI with a
             // pending exception aborts the process under CheckJNI. Take the
             // exception first, then clean up the rejected alias.
             let error = take_pending_exception(env).unwrap_or(error);
-            let _ = delete_alias(env, &store, &alias);
+            if created {
+                let _ = delete_alias(env, &store, &alias);
+            }
             return Err(error);
         }
         Ok(())
@@ -50,8 +66,8 @@ pub(super) fn seal(
     with_env(|env| {
         let alias = alias(label_hash, policy);
         let key_store = key_store(env)?;
-        let key = get_or_create_key(env, &key_store, &alias)?;
-        ensure_hardware_key(env, &key)?;
+        let key = get_or_create_key(env, &key_store, &alias, policy)?;
+        ensure_hardware_key(env, &key, policy)?;
 
         let cipher = cipher(env)?;
         call_method(
@@ -61,6 +77,7 @@ pub(super) fn seal(
             "(ILjava/security/Key;)V",
             &[JValue::Int(ENCRYPT_MODE), JValue::Object(&key)],
         )?;
+        authorize(env, &cipher, policy)?;
         update_aad(env, &cipher, label_hash, policy)?;
         let plaintext = env.byte_array_from_slice(secret).map_err(jni_error)?;
         let ciphertext = call_method(
@@ -100,7 +117,7 @@ pub(super) fn unseal(
             &key_store,
             &alias(expected_label_hash, expected_policy),
         )?;
-        ensure_hardware_key(env, &key)?;
+        ensure_hardware_key(env, &key, expected_policy)?;
 
         let cipher = cipher(env)?;
         let iv = env.byte_array_from_slice(parsed.iv).map_err(jni_error)?;
@@ -123,6 +140,7 @@ pub(super) fn unseal(
                 JValue::Object(&params),
             ],
         )?;
+        authorize(env, &cipher, expected_policy)?;
         update_aad(env, &cipher, expected_label_hash, expected_policy)?;
         let ciphertext = env
             .byte_array_from_slice(parsed.ciphertext)
@@ -301,11 +319,12 @@ fn get_or_create_key<'local>(
     env: &mut JNIEnv<'local>,
     store: &JObject<'local>,
     alias: &str,
+    policy: AccessPolicy,
 ) -> Result<JObject<'local>, Error> {
     if contains_alias(env, store, alias)? {
         return get_existing_key(env, store, alias);
     }
-    create_key(env, alias)?;
+    create_key(env, alias, policy)?;
     get_existing_key(env, store, alias)
 }
 
@@ -356,7 +375,7 @@ fn get_existing_key<'local>(
     Ok(key)
 }
 
-fn create_key(env: &mut JNIEnv<'_>, alias: &str) -> Result<(), Error> {
+fn create_key(env: &mut JNIEnv<'_>, alias: &str, policy: AccessPolicy) -> Result<(), Error> {
     let algorithm = env.new_string("AES").map_err(jni_error)?;
     let provider = env.new_string("AndroidKeyStore").map_err(jni_error)?;
     let algorithm_object = JObject::from(algorithm);
@@ -392,6 +411,22 @@ fn create_key(env: &mut JNIEnv<'_>, alias: &str) -> Result<(), Error> {
     call_builder_strings(env, &builder, "setBlockModes", "GCM")?;
     call_builder_strings(env, &builder, "setEncryptionPaddings", "NoPadding")?;
     call_builder_bool(env, &builder, "setRandomizedEncryptionRequired", true)?;
+    if policy == AccessPolicy::Biometric {
+        let sdk = sdk_version(env)?;
+        call_builder_bool(env, &builder, "setUserAuthenticationRequired", true)?;
+        if sdk >= 24 {
+            call_builder_bool(env, &builder, "setInvalidatedByBiometricEnrollment", true)?;
+        }
+        if sdk >= 30 {
+            env.call_method(
+                &builder,
+                "setUserAuthenticationParameters",
+                "(II)Landroid/security/keystore/KeyGenParameterSpec$Builder;",
+                &[JValue::Int(0), JValue::Int(AUTH_BIOMETRIC_STRONG)],
+            )
+            .map_err(jni_error)?;
+        }
+    }
 
     let spec = env
         .call_method(
@@ -403,19 +438,36 @@ fn create_key(env: &mut JNIEnv<'_>, alias: &str) -> Result<(), Error> {
         .map_err(jni_error)?
         .l()
         .map_err(jni_error)?;
-    env.call_method(
-        &generator,
-        "init",
-        "(Ljava/security/spec/AlgorithmParameterSpec;)V",
-        &[JValue::Object(&spec)],
-    )
-    .map_err(jni_error)?;
-    env.call_method(generator, "generateKey", "()Ljavax/crypto/SecretKey;", &[])
+    let generated = env
+        .call_method(
+            &generator,
+            "init",
+            "(Ljava/security/spec/AlgorithmParameterSpec;)V",
+            &[JValue::Object(&spec)],
+        )
+        .and_then(|_| env.call_method(&generator, "generateKey", "()Ljavax/crypto/SecretKey;", &[]))
         .map(drop)
-        .map_err(jni_error)
+        .map_err(jni_error);
+    match take_pending_exception(env) {
+        Some(Error::Hardware(class))
+            if policy == AccessPolicy::Biometric
+                && class == "java.security.InvalidAlgorithmParameterException" =>
+        {
+            Err(Error::PolicyNotSupported {
+                policy,
+                backend: Backend::AndroidKeystore,
+            })
+        }
+        Some(error) => Err(error),
+        None => generated,
+    }
 }
 
-fn ensure_hardware_key(env: &mut JNIEnv<'_>, key: &JObject<'_>) -> Result<(), Error> {
+fn ensure_hardware_key(
+    env: &mut JNIEnv<'_>,
+    key: &JObject<'_>,
+    policy: AccessPolicy,
+) -> Result<(), Error> {
     let algorithm = env
         .call_method(key, "getAlgorithm", "()Ljava/lang/String;", &[])
         .map_err(jni_error)?
@@ -441,21 +493,56 @@ fn ensure_hardware_key(env: &mut JNIEnv<'_>, key: &JObject<'_>) -> Result<(), Er
         .call_method(
             factory,
             "getKeySpec",
-            "(Ljava/security/Key;Ljava/lang/Class;)Ljava/security/spec/KeySpec;",
+            "(Ljavax/crypto/SecretKey;Ljava/lang/Class;)Ljava/security/spec/KeySpec;",
             &[JValue::Object(key), JValue::Object(&key_info_class_object)],
         )
         .map_err(jni_error)?
         .l()
         .map_err(jni_error)?;
-    let inside_hardware = env
-        .call_method(info, "isInsideSecureHardware", "()Z", &[])
+    let inside_hardware = key_info_flag(env, &info, "isInsideSecureHardware")?;
+    if !inside_hardware {
+        return Err(Error::NotAvailable);
+    }
+    if policy == AccessPolicy::Biometric
+        && !(key_info_flag(env, &info, "isUserAuthenticationRequired")?
+            && key_info_flag(
+                env,
+                &info,
+                "isUserAuthenticationRequirementEnforcedBySecureHardware",
+            )?)
+    {
+        return Err(Error::PolicyNotSupported {
+            policy,
+            backend: Backend::AndroidKeystore,
+        });
+    }
+    Ok(())
+}
+
+fn key_info_flag(env: &mut JNIEnv<'_>, info: &JObject<'_>, method: &str) -> Result<bool, Error> {
+    env.call_method(info, method, "()Z", &[])
         .map_err(jni_error)?
         .z()
-        .map_err(jni_error)?;
-    if inside_hardware {
-        Ok(())
-    } else {
-        Err(Error::NotAvailable)
+        .map_err(jni_error)
+}
+
+fn authorize(
+    env: &mut JNIEnv<'_>,
+    cipher: &JObject<'_>,
+    policy: AccessPolicy,
+) -> Result<(), Error> {
+    match policy {
+        AccessPolicy::None => Ok(()),
+        AccessPolicy::Biometric => {
+            let authorizer = AUTHORIZER
+                .get()
+                .ok_or(Error::Authorization(AuthorizationError::UiUnavailable))?;
+            let result = authorizer(env, cipher);
+            match take_pending_exception(env) {
+                Some(error) => Err(error),
+                None => result,
+            }
+        }
     }
 }
 
