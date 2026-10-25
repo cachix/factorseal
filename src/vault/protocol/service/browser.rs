@@ -1,12 +1,10 @@
 //! Browser requests are delegated only by the authenticated Desktop manager.
 use crate::WireSecret;
 use crate::browser::{
-    Action, Candidate, OneTimePassword, PAIR_NAMESPACE, Signed, WorkerAction, WorkerReply, origin,
+    Action, Candidate, OneTimePassword, PAIR_NAMESPACE, Signed, WorkerAction, WorkerReply,
     random_id,
 };
-use crate::personal::{
-    PERSONAL_SECRET_NAMESPACE, PersonalFieldType, PersonalSecret, PersonalSecretKind,
-};
+use crate::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret};
 use crate::vault::{DocumentKind, Provenance, SecretAddress, VaultError, VaultResult, VaultStore};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -49,38 +47,6 @@ fn key_valid(key: &str) -> VaultResult<()> {
     }
     Ok(())
 }
-fn fields(item: &PersonalSecret) -> Option<(&str, &str)> {
-    let fields: Vec<_> = item.sections.iter().flat_map(|s| &s.fields).collect();
-    let usernames: Vec<_> = fields.iter().filter(|f| f.id == "username").collect();
-    let passwords: Vec<_> = fields.iter().filter(|f| f.id == "password").collect();
-    if usernames.len() != 1 || passwords.len() != 1 {
-        return None;
-    }
-    Some((usernames[0].value.as_str()?, passwords[0].value.as_str()?))
-}
-fn matches(item: &PersonalSecret, site: &str) -> bool {
-    item.kind == PersonalSecretKind::Login
-        && !item.archived
-        && fields(item).is_some()
-        && item.sections.iter().flat_map(|s| &s.fields).any(|f| {
-            f.field_type == PersonalFieldType::Url
-                && f.value
-                    .as_str()
-                    .is_some_and(|s| origin(s).is_ok_and(|o| o == site))
-        })
-}
-fn login(title: String, site: &str, username: &str) -> PersonalSecret {
-    let mut item = PersonalSecret::template(PersonalSecretKind::Login, title);
-    for field in &mut item.sections[0].fields {
-        if field.id == "username" {
-            field.value = username.into();
-        }
-        if field.id == "url-0" {
-            field.value = site.into();
-        }
-    }
-    item
-}
 fn with_password(action: Action, item: Option<PersonalSecret>) -> VaultResult<PersonalSecret> {
     let Action::Save {
         origin: site,
@@ -92,16 +58,17 @@ fn with_password(action: Action, item: Option<PersonalSecret>) -> VaultResult<Pe
         return Err(denied());
     };
     let mut item = match item {
-        Some(item) if fields(&item).is_some_and(|(name, _)| name == username) => item,
-        Some(_) => return Err(denied()),
-        None => login(site.clone(), &site, &username),
-    };
-    let value = std::str::from_utf8(password.expose()).map_err(|_| denied())?;
-    for field in item.sections.iter_mut().flat_map(|s| &mut s.fields) {
-        if field.id == "password" {
-            field.value = value.into();
+        Some(item)
+            if item
+                .login_credentials()
+                .is_some_and(|(name, _)| name == username) =>
+        {
+            item
         }
-    }
+        Some(_) => return Err(denied()),
+        None => PersonalSecret::login(site.clone(), &site, &username),
+    };
+    item.set_password(std::str::from_utf8(password.expose()).map_err(|_| denied())?);
     Ok(item)
 }
 fn with_one_time(
@@ -114,7 +81,7 @@ fn with_one_time(
     };
     let short = |text: &&String| text.len() <= 512;
     let mut item = item.unwrap_or_else(|| {
-        login(
+        PersonalSecret::login(
             one_time
                 .issuer
                 .as_ref()
@@ -254,10 +221,10 @@ impl BrowserState {
             return Err(VaultError::Conflict);
         }
         let item = PersonalSecret::decode_current(&secret).map_err(|_| denied())?;
-        if !matches(&item, &pending.origin) {
+        if !item.is_login_for(&pending.origin) {
             return Err(denied());
         }
-        let (username, password) = fields(&item).ok_or_else(denied)?;
+        let (username, password) = item.login_credentials().ok_or_else(denied)?;
         if username.len() > 4096 || password.len() > 4096 {
             return Err(VaultError::Protocol(
                 "login field exceeds browser limit".into(),
@@ -313,15 +280,16 @@ impl BrowserState {
                 let Ok(item) = PersonalSecret::decode_current(&secret) else {
                     continue;
                 };
-                if !matches(&item, site) {
+                if !item.is_login_for(site) {
                     continue;
                 }
-                let (username, _) = fields(&item).ok_or_else(denied)?;
+                let (username, _) = item.login_credentials().ok_or_else(denied)?;
                 if let Some((submitted_username, password)) = saving {
                     if username != submitted_username {
                         continue;
                     }
-                    if fields(&item)
+                    if item
+                        .login_credentials()
                         .is_some_and(|(_, stored)| stored.as_bytes() == password.expose())
                     {
                         return Ok(WorkerReply::AlreadySaved);
@@ -335,7 +303,7 @@ impl BrowserState {
                 candidates.push(Candidate {
                     id: item.id.clone(),
                     title: item.title.clone(),
-                    username: username.into(),
+                    username: item.username().unwrap_or_default().into(),
                     digest: hex::encode(Sha256::digest(&secret)),
                     one_time: one_time
                         && item
@@ -406,7 +374,7 @@ impl BrowserState {
             return Err(VaultError::Conflict);
         }
         let item = PersonalSecret::decode_current(&bytes).map_err(|_| denied())?;
-        if !matches(&item, &pending.origin) {
+        if !item.is_login_for(&pending.origin) {
             return Err(denied());
         }
         Ok((command.action, Some(item)))

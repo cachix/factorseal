@@ -10,9 +10,9 @@ use super::generator::GeneratorTarget;
 use super::personal_history::Direction;
 use super::totp::{self, Totp, unix_now};
 use super::*;
-use crate::password_generator::Strength;
 use crate::runtime::PersonalWriteError;
 use crate::secret_input::{CancelEdit, PasteItem};
+use factorseal::personal::generator::Strength;
 use factorseal::personal::{CUSTOM_SECTION, CUSTOM_SECTION_LABEL};
 
 const NAME_MISSING: &str = "Give this item a name.";
@@ -169,7 +169,7 @@ struct TemplateField {
 }
 
 fn template_fields(kind: PersonalSecretKind) -> Vec<TemplateField> {
-    let template = personal_templates::new_item_template(kind);
+    let template = factorseal::personal::templates::new_item(kind);
     template
         .sections
         .iter()
@@ -364,7 +364,7 @@ impl<V> Draft<V> {
         notes: &str,
         make: &mut impl FnMut(Seed<'_>) -> V,
     ) -> Self {
-        let template = personal_templates::new_item_template(kind);
+        let template = factorseal::personal::templates::new_item(kind);
         let mut draft = Self::empty(kind);
         for section in template
             .sections
@@ -2366,7 +2366,7 @@ impl DesktopView {
         });
         if rated {
             let rating = cx.spawn(async move |view, cx| {
-                smol::Timer::after(crate::password_generator::RATING_PAUSE).await;
+                smol::Timer::after(generator::RATING_PAUSE).await;
                 let _ = view.update(cx, |view, cx| view.rate_editor_value(key, cx));
             });
             editor.ratings.insert(key, rating);

@@ -124,18 +124,6 @@ fn has_one_time_code(item: &PersonalSecret) -> bool {
         .any(|value| Totp::parse(value).is_some())
 }
 
-fn website_url(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.starts_with("https://") || value.starts_with("http://") {
-        Some(value.to_owned())
-    } else if !value.contains("://") && value.contains('.') && !value.contains(char::is_whitespace)
-    {
-        Some(format!("https://{value}"))
-    } else {
-        None
-    }
-}
-
 fn modified_text(updated_at: u64, zone: &jiff::tz::TimeZone) -> Option<String> {
     let seconds = i64::try_from(updated_at)
         .ok()
@@ -984,7 +972,7 @@ impl DesktopView {
     }
 
     pub(super) fn render_personal_strength(
-        strength: crate::password_generator::Strength,
+        strength: factorseal::personal::generator::Strength,
         cx: &mut Context<Self>,
     ) -> Div {
         div()
@@ -1006,7 +994,7 @@ impl DesktopView {
         let value = self.saved_personal_value(index).unwrap_or_default();
         let field_type = field.map(|field| &field.field_type);
         let website = (field_type == Some(&PersonalFieldType::Url))
-            .then(|| website_url(&value))
+            .then(|| factorseal::personal::website::url(&value))
             .flatten();
         let totp = (field_type == Some(&PersonalFieldType::Totp))
             .then(|| Totp::parse(&value))
@@ -1228,7 +1216,7 @@ mod tests {
     fn section_headings_skip_the_item_type_and_empty_sections() {
         let login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
         assert!(!has_section_groups(&login));
-        let mut identity = personal_templates::new_item_template(PersonalSecretKind::Identity);
+        let mut identity = factorseal::personal::templates::new_item(PersonalSecretKind::Identity);
         assert!(!has_section_groups(&identity));
         identity.sections[0].fields[0].value = "Alice".into();
         identity.sections[1].fields[1].value = "+380".into();
@@ -1237,7 +1225,7 @@ mod tests {
             section_heading(&identity, &identity.sections[0]),
             Some("Identification")
         );
-        let card = personal_templates::new_item_template(PersonalSecretKind::Card);
+        let card = factorseal::personal::templates::new_item(PersonalSecretKind::Card);
         assert_eq!(section_heading(&card, &card.sections[0]), None);
         assert_eq!(
             section_heading(&card, &card.sections[1]),
@@ -1303,23 +1291,6 @@ mod tests {
             reopen_after(Direction::Redo, "hetzner", false, &[]),
             Reopen::Stay
         );
-    }
-
-    #[test]
-    fn websites_open_only_as_web_addresses() {
-        assert_eq!(
-            website_url(" https://github.com "),
-            Some("https://github.com".into())
-        );
-        assert_eq!(
-            website_url("http://router.local"),
-            Some("http://router.local".into())
-        );
-        assert_eq!(website_url("github.com"), Some("https://github.com".into()));
-        assert_eq!(website_url("javascript:alert(1)"), None);
-        assert_eq!(website_url("file:///etc/passwd"), None);
-        assert_eq!(website_url("not a site"), None);
-        assert_eq!(website_url(""), None);
     }
 
     #[test]

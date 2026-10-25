@@ -3364,6 +3364,67 @@ mod browser_integration {
         );
         assert!(request(&service, &manager, WorkerAction::Lookup { request: next }).is_err());
     }
+    #[test]
+    fn browser_candidates_hide_concealed_usernames_but_still_fill_them() {
+        let (_dir, service, manager) = setup();
+        let detection = |sequence| {
+            signed(
+                sequence,
+                Action::Detect {
+                    origin: "https://example.com".into(),
+                    document: "doc".into(),
+                },
+            )
+        };
+        request(
+            &service,
+            &manager,
+            WorkerAction::Pair {
+                key: detection(1).key.clone(),
+            },
+        )
+        .unwrap();
+        let (_, candidates) = review(&service, &manager, &detection(1));
+        let mut item = stored(&service, &candidates[0].id);
+        item.sections[0].fields[0].concealed = true;
+        {
+            let state = service.state.lock_live(Instant::now()).unwrap();
+            state
+                .store()
+                .put_at(
+                    DocumentKind::LocalKeyring,
+                    crate::personal::PERSONAL_SECRET_NAMESPACE,
+                    &SecretAddress::new(&item.id, None).unwrap(),
+                    &item.encode().unwrap(),
+                    None,
+                    &Provenance::caller(&manager, None),
+                    100,
+                )
+                .unwrap();
+        }
+        let (ticket, mut candidates) = review(&service, &manager, &detection(2));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].username, "");
+        assert!(
+            !serde_json::to_string(&candidates)
+                .unwrap()
+                .contains("alice")
+        );
+        match request(
+            &service,
+            &manager,
+            WorkerAction::Release {
+                ticket: ticket.clone(),
+                candidate: candidates.remove(0),
+                confirmation: signed(3, Action::Confirm { nonce: ticket }),
+            },
+        )
+        .unwrap()
+        {
+            WorkerReply::Fill { username, .. } => assert_eq!(username.expose(), b"alice"),
+            _ => panic!("fill"),
+        }
+    }
     fn one_time(sequence: u32) -> Signed {
         signed(
             sequence,

@@ -288,6 +288,30 @@ impl PersonalSecret {
     }
 
     #[must_use]
+    pub fn login(title: String, website: &str, username: &str) -> Self {
+        let mut item = Self::template(PersonalSecretKind::Login, title);
+        for field in &mut item.sections[0].fields {
+            match field.id.as_str() {
+                "username" => field.value = username.into(),
+                "url-0" => field.value = website.into(),
+                _ => {}
+            }
+        }
+        item
+    }
+
+    pub fn set_password(&mut self, password: &str) {
+        for field in self
+            .sections
+            .iter_mut()
+            .flat_map(|section| &mut section.fields)
+            .filter(|field| field.id == "password")
+        {
+            field.value = password.into();
+        }
+    }
+
+    #[must_use]
     pub fn username(&self) -> Option<&str> {
         self.sections
             .iter()
@@ -306,6 +330,42 @@ impl PersonalSecret {
             .filter(|field| field.field_type == PersonalFieldType::Url && !field.concealed)
             .filter_map(PersonalField::text)
             .find_map(website::host)
+    }
+
+    #[must_use]
+    pub fn login_credentials(&self) -> Option<(&str, &str)> {
+        Some((self.only_text("username")?, self.only_text("password")?))
+    }
+
+    fn only_text(&self, id: &str) -> Option<&str> {
+        let mut fields = self
+            .sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .filter(|field| field.id == id);
+        match (fields.next(), fields.next()) {
+            (Some(field), None) => field.text(),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_fillable_login(&self) -> bool {
+        self.kind == PersonalSecretKind::Login
+            && !self.archived
+            && self.login_credentials().is_some()
+    }
+
+    #[must_use]
+    pub fn is_login_for(&self, origin: &str) -> bool {
+        self.is_fillable_login()
+            && self
+                .sections
+                .iter()
+                .flat_map(|section| &section.fields)
+                .filter(|field| field.field_type == PersonalFieldType::Url)
+                .filter_map(PersonalField::text)
+                .any(|value| website::origin(value).as_deref() == Some(origin))
     }
 
     #[must_use]
@@ -819,6 +879,39 @@ mod tests {
     }
 
     #[test]
+    fn a_login_is_for_the_exact_origin_of_one_of_its_websites() {
+        let mut login = PersonalSecret::template(PersonalSecretKind::Login, "Login".into());
+        login.sections[0].fields[0].value = "alice".into();
+        login.sections[0].fields[1].value = "secret".into();
+        login.sections[0].fields[2].value = "https://Example.com/sign-in".into();
+        login.sections[0].fields.push(PersonalField::new(
+            "url-1",
+            "Website",
+            PersonalFieldType::Url,
+            "https://accounts.example.org",
+        ));
+        assert_eq!(login.login_credentials(), Some(("alice", "secret")));
+        assert!(login.is_login_for("https://example.com"));
+        assert!(login.is_login_for("https://accounts.example.org"));
+        assert!(!login.is_login_for("https://login.example.com"));
+        assert!(!login.is_login_for("http://example.com"));
+        login.archived = true;
+        assert!(!login.is_login_for("https://example.com"));
+        login.archived = false;
+        login.sections[0].fields.push(PersonalField::new(
+            "password",
+            "Password",
+            PersonalFieldType::Concealed,
+            "other",
+        ));
+        assert_eq!(login.login_credentials(), None);
+        assert!(!login.is_login_for("https://example.com"));
+        login.sections[0].fields.pop();
+        login.kind = PersonalSecretKind::Generic;
+        assert!(!login.is_login_for("https://example.com"));
+    }
+
+    #[test]
     fn card_templates_export_by_field_id_and_renamed_login_fields_are_not_lost() {
         let mut card = PersonalSecret::template(PersonalSecretKind::Card, "Card".into());
         card.sections[0].fields[1].value = "001234".into();
@@ -1010,13 +1103,20 @@ mod tests {
     }
 }
 
+#[cfg(feature = "personal-tools")]
+pub mod generator;
 pub(crate) mod legacy;
 #[cfg(feature = "vault-store")]
 pub(crate) mod legacy_revision;
+#[cfg(feature = "personal-qr")]
+pub mod qr;
 #[cfg(feature = "vault-store")]
 pub mod replica;
 #[cfg(feature = "personal-sync")]
 pub mod sync;
+pub mod templates;
+#[cfg(feature = "personal-tools")]
+pub mod totp;
 pub mod website;
 
 /// Legacy namespace reserved for personal items.
@@ -1050,7 +1150,7 @@ struct PersonalHeader<'a> {
     version: Option<u16>,
 }
 
-pub(crate) fn zeroize_json_strings(value: &mut serde_json::Value) {
+pub fn zeroize_json_strings(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(value) => value.zeroize(),
         serde_json::Value::Array(values) => {

@@ -7,7 +7,6 @@ mod controls;
 mod crash_reporting;
 mod instance;
 mod motion;
-mod password_generator;
 mod runtime;
 mod secret_input;
 mod settings;

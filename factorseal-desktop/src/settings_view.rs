@@ -614,8 +614,8 @@ mod tests {
 
     #[test]
     fn resetting_appearance_keeps_other_settings() {
-        let generator = crate::password_generator::Options {
-            style: crate::password_generator::Style::Random,
+        let generator = factorseal::personal::generator::Options {
+            style: factorseal::personal::generator::Style::Random,
             length: 32,
             words: 18,
             digits: false,

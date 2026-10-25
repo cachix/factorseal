@@ -21,7 +21,7 @@ pub(crate) struct DesktopSettings {
     pub(crate) automatic_crash_reports: bool,
     pub(crate) idle_seconds: u64,
     pub(crate) maximum_seconds: u64,
-    pub(crate) generator: crate::password_generator::Options,
+    pub(crate) generator: factorseal::personal::generator::Options,
     pub(crate) window: Option<WindowPlacement>,
     pub(crate) page: Option<Page>,
 }
@@ -68,7 +68,7 @@ impl Default for DesktopSettings {
             automatic_crash_reports: true,
             idle_seconds: 300,
             maximum_seconds: 28_800,
-            generator: crate::password_generator::Options::default(),
+            generator: factorseal::personal::generator::Options::default(),
             window: None,
             page: None,
         }
@@ -209,8 +209,8 @@ mod tests {
             automatic_crash_reports: false,
             idle_seconds: 60,
             maximum_seconds: 3600,
-            generator: crate::password_generator::Options {
-                style: crate::password_generator::Style::Random,
+            generator: factorseal::personal::generator::Options {
+                style: factorseal::personal::generator::Style::Random,
                 length: 32,
                 words: 18,
                 digits: false,

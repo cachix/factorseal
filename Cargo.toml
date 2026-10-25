@@ -20,7 +20,7 @@ exclude = ["fuzz"]
 [features]
 fuzzing = ["vault-store", "key-protection", "vault-client", "transfer", "personal-sync", "dep:secret-service-protocol", "hardwareseal/fuzzing"]
 default = ["vault", "cli", "hardware", "secretspec-provider", "personal-sync-network", "browser"]
-browser = ["vault", "dep:ed25519-dalek", "dep:url"]
+browser = ["vault", "dep:ed25519-dalek"]
 vault-client = ["dep:interprocess", "dep:nix", "dep:nt-token"]
 vault-store = [
     "personal",
@@ -67,7 +67,9 @@ cli = [
     "transfer",
 ]
 diagnostics = ["dep:directories", "transfer"]
-personal = ["dep:anyhow", "dep:uuid"]
+personal = ["dep:anyhow", "dep:url", "dep:uuid"]
+personal-qr = ["personal", "dep:rqrr"]
+personal-tools = ["personal", "key-protection", "dep:bip39", "dep:data-encoding", "dep:hmac", "dep:percent-encoding", "dep:sha1"]
 personal-sync-network = ["personal-sync", "helper-isolation", "dep:iroh", "dep:qrcode", "dep:image", "dep:reqwest", "dep:rustls", "dep:webpki-roots", "tokio/net", "tokio/rt-multi-thread", "tokio/io-util"]
 helper-isolation = ["vault-client", "dep:ciborium", "dep:seccompiler", "dep:landlock"]
 personal-sync = ["vault-store", "key-protection", "dep:hpke", "dep:aes-gcm-hpke", "dep:tempfile"]
@@ -128,12 +130,14 @@ async-trait = { version = "0.1.89", optional = true }
 # Validate bundle counter encoding and lengths before expansion; upstream PR #1540.
 automerge = { git = "https://github.com/domenkozar/automerge.git", rev = "78cf972a705661b572f7427ff404600e05331b5e", version = "0.11.0", optional = true }
 base64 = "0.22.1"
+bip39 = { version = "2.2", features = ["zeroize"], optional = true }
 ciborium = { version = "0.2.2", optional = true }
 clap = { version = "4.5.41", features = ["derive", "env"], optional = true }
 clap_complete = { version = "4.6.9", features = ["unstable-dynamic"], optional = true }
 clap_complete_nushell = { version = "4.6.2", optional = true }
 ctrlc = { version = "3.5.1", features = ["termination"], optional = true }
 csv = { version = "1.3", optional = true }
+data-encoding = { version = "2.11.1", optional = true }
 directories = { version = "6.0.0", optional = true }
 getrandom = "0.3.3"
 getrandom_04 = { package = "getrandom", version = "0.4.3", features = ["sys_rng"], optional = true }
@@ -153,6 +157,7 @@ percent-encoding = { version = "2.3.2", optional = true }
 polyval = { version = "0.6.2", features = ["zeroize"], optional = true }
 pbkdf2 = { version = "0.12.2", optional = true }
 rpassword = { version = "7.4.0", optional = true }
+rqrr = { version = "0.11.0", default-features = false, optional = true }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"], optional = true }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"], optional = true }
 secretspec-ipc = { git = "https://github.com/cachix/secretspec.git", rev = "b809ee66bd78d466227e805721ac9efcbcabae1f", package = "secretspec-ipc", optional = true }
@@ -160,6 +165,7 @@ secret-service-protocol = { path = "crates/secret-service-protocol", optional = 
 network-manager-protocol = { path = "crates/network-manager-protocol", optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"
+sha1 = { version = "0.10.6", optional = true }
 sha2 = "0.10.9"
 thiserror = "2.0.12"
 tempfile = { version = "3.20.0", optional = true }
@@ -177,6 +183,7 @@ zxcvbn = { version = "3.1.1", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+qrcode = { version = "0.14.1", default-features = false }
 tempfile = "3.20.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]

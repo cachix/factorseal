@@ -9,7 +9,8 @@ type TemplateField = (&'static str, &'static str, T);
 type TemplateSection<'a> = (&'static str, &'static str, &'a [TemplateField]);
 
 #[allow(clippy::too_many_lines)]
-pub(super) fn new_item_template(kind: K) -> PersonalSecret {
+#[must_use]
+pub fn new_item(kind: K) -> PersonalSecret {
     if matches!(kind, K::Generic | K::Document) {
         return PersonalSecret::template(kind, String::new());
     }
@@ -203,11 +204,8 @@ mod tests {
     #[test]
     fn every_creation_template_round_trips() {
         for kind in K::ALL {
-            let item = new_item_template(kind);
-            assert_ne!(
-                item.sections,
-                [] as [factorseal::personal::PersonalSection; 0]
-            );
+            let item = new_item(kind);
+            assert_ne!(item.sections, [] as [PersonalSection; 0]);
             assert_eq!(
                 item,
                 PersonalSecret::decode_current(&item.encode().unwrap()).unwrap()
