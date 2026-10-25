@@ -1,0 +1,1 @@
+password,vault,manager,one-time code,2fa,totp,authenticator,secure enclave,sync,ssh

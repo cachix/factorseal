@@ -23,6 +23,8 @@ backup made on one can be restored on the other.
   cargo-ndk.
 - `iosApp/`: the iOS entry point, described by an XcodeGen `project.yml`.
 - `scripts/icons.py`: regenerates the icon drawables from the Desktop icons.
+- `fastlane/metadata/`: the Google Play and App Store listing text and images,
+  in the folders fastlane reads.
 
 ## Android
 
@@ -106,3 +108,6 @@ iOS they also stay off your other devices. The app switcher shows a blank
 screen instead of the vault. Autofill trusts the website address only from
 known browsers with a matching signing certificate and matches every other app
 by its package name.
+
+The [privacy policy](PRIVACY.md) lists what leaves the phone and who can see
+it. Its address goes into both store listings.
