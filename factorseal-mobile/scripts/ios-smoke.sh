@@ -13,6 +13,7 @@ fi
 
 "$root/gradlew" -p "$root" --no-daemon :shared:iosSimulatorArm64Test -Pfactorseal.simulator="$device"
 
+"$root/scripts/build-ios-core.sh" Debug
 xcodegen --spec "$root/iosApp/project.yml"
 xcodebuild -project "$root/iosApp/FactorSeal.xcodeproj" -scheme FactorSeal -configuration Debug \
   -destination "id=$device" -derivedDataPath "$output" CODE_SIGNING_ALLOWED=NO build

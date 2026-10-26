@@ -80,12 +80,14 @@ Building for iOS needs a Mac with Xcode, Rust with the `aarch64-apple-ios` and
 `aarch64-apple-ios-sim` targets, JDK 21 and XcodeGen:
 
 ```console
+$ ./scripts/build-ios-core.sh
 $ xcodegen --spec iosApp/project.yml
 $ open iosApp/FactorSeal.xcodeproj
 ```
 
-Xcode builds the Rust core with `scripts/build-ios-core.sh` and the shared app
-with Gradle before compiling the Swift entry point. Set your team under Signing
+Xcode looks for the Rust core before it runs any build step, so build it once
+first. After that Xcode rebuilds it with `scripts/build-ios-core.sh` and the
+shared app with Gradle before compiling the Swift entry point. Set your team under Signing
 & Capabilities to run on a device. The shared iOS code also compiles on Linux:
 
 ```console
