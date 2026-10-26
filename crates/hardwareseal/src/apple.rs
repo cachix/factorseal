@@ -126,8 +126,9 @@ fn stored_accounts(policy: AccessPolicy) -> Result<Vec<String>, Error> {
         .class(ItemClass::generic_password())
         .service(SERVICE)
         .load_attributes(true)
-        .limit(Limit::All)
-        .ignore_legacy_keychains();
+        .limit(Limit::All);
+    #[cfg(target_os = "macos")]
+    search.ignore_legacy_keychains();
     if policy == AccessPolicy::None {
         // A non-biometric delete must not prompt because another protector uses
         // biometric items under the same service.
