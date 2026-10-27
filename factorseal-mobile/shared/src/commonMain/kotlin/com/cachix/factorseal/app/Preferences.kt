@@ -15,6 +15,7 @@ data class Preferences(
     val reducedMotion: Boolean = false,
     val generator: GeneratorOptions = GeneratorOptions(),
     val deviceName: String? = null,
+    val offerAutofill: Boolean = true,
 ) {
     val lease: Lease get() = Lease(idleSeconds, maximumSeconds)
 

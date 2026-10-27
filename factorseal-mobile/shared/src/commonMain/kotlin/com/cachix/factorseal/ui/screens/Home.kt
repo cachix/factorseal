@@ -50,6 +50,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import com.cachix.factorseal.app.Autofill
 import com.cachix.factorseal.app.FactorSeal
 import com.cachix.factorseal.app.Page
 import com.cachix.factorseal.app.icon
@@ -57,6 +58,9 @@ import com.cachix.factorseal.app.label
 import com.cachix.factorseal.core.Kind
 import com.cachix.factorseal.core.Summary
 import com.cachix.factorseal.resources.Res
+import com.cachix.factorseal.resources.autofill_chrome
+import com.cachix.factorseal.resources.autofill_line
+import com.cachix.factorseal.resources.autofill_offer
 import com.cachix.factorseal.resources.back
 import com.cachix.factorseal.resources.back_up_vault
 import com.cachix.factorseal.resources.clear_search
@@ -78,6 +82,7 @@ import com.cachix.factorseal.resources.new_item
 import com.cachix.factorseal.resources.no_matching_items
 import com.cachix.factorseal.resources.no_personal_secrets
 import com.cachix.factorseal.resources.no_personal_secrets_line
+import com.cachix.factorseal.resources.not_now
 import com.cachix.factorseal.resources.personal_secrets
 import com.cachix.factorseal.resources.seal
 import com.cachix.factorseal.resources.search_results
@@ -85,6 +90,7 @@ import com.cachix.factorseal.resources.search_secrets
 import com.cachix.factorseal.resources.settings
 import com.cachix.factorseal.resources.transfer_credentials
 import com.cachix.factorseal.resources.try_different_search
+import com.cachix.factorseal.resources.turn_on
 import com.cachix.factorseal.resources.unsealed
 import com.cachix.factorseal.resources.wordmark
 import com.cachix.factorseal.ui.components.Back
@@ -97,6 +103,7 @@ import com.cachix.factorseal.ui.components.FieldHeight
 import com.cachix.factorseal.ui.components.Icon
 import com.cachix.factorseal.ui.components.IconButton
 import com.cachix.factorseal.ui.components.IconTile
+import com.cachix.factorseal.ui.components.InfoBox
 import com.cachix.factorseal.ui.components.ListHeader
 import com.cachix.factorseal.ui.components.ListRow
 import com.cachix.factorseal.ui.components.Mark
@@ -105,6 +112,7 @@ import com.cachix.factorseal.ui.components.Text
 import com.cachix.factorseal.ui.components.TextInput
 import com.cachix.factorseal.ui.components.Variant
 import com.cachix.factorseal.ui.components.fieldFrame
+import com.cachix.factorseal.ui.theme.Medium
 import com.cachix.factorseal.ui.theme.Semibold
 import com.cachix.factorseal.ui.theme.Shapes
 import com.cachix.factorseal.ui.theme.Theme
@@ -315,6 +323,9 @@ private fun Home(app: FactorSeal) {
                 SidebarItem(stringResource(Res.string.back_up_vault), Res.drawable.icon_hard_drive, onClick = { app.open(Page.Transfer(backup = true)) })
                 SidebarItem(stringResource(Res.string.settings), Res.drawable.icon_settings, onClick = { app.open(Page.Settings) })
             }
+            app.host.autofill
+                ?.takeIf { app.preferences.offerAutofill }
+                ?.let { AutofillOffer(it, onDismiss = { app.update(app.preferences.copy(offerAutofill = false)) }) }
         }
         Column(Modifier.padding(horizontal = 12.dp)) {
             Divider()
@@ -334,6 +345,23 @@ private fun Home(app: FactorSeal) {
                     icon = Res.drawable.glyph_lock,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun AutofillOffer(
+    autofill: Autofill,
+    onDismiss: () -> Unit,
+) {
+    if (autofillEnabled(autofill)) return
+    InfoBox(fill = Theme.colors.surface) {
+        Text(stringResource(Res.string.autofill_offer), weight = Medium)
+        Text(stringResource(Res.string.autofill_line), color = Theme.colors.mutedForeground)
+        Text(stringResource(Res.string.autofill_chrome), color = Theme.colors.mutedForeground)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+            Button(stringResource(Res.string.not_now), onClick = onDismiss, size = ButtonSize.Small, variant = Variant.Ghost)
+            Button(stringResource(Res.string.turn_on), onClick = autofill::enable, size = ButtonSize.Small, variant = Variant.Primary)
         }
     }
 }

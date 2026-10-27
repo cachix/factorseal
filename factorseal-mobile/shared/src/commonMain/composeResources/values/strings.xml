@@ -319,6 +319,9 @@
     <string name="autofill_line">Fill and save logins in other apps and websites.</string>
     <string name="autofill_on">On</string>
     <string name="turn_on">Turn on</string>
+    <string name="autofill_offer">Fill passwords with FactorSeal</string>
+    <string name="autofill_chrome">In Chrome, also choose Autofill using another service under Settings, Autofill services.</string>
+    <string name="not_now">Not now</string>
     <plurals name="minutes">
         <item quantity="one">%1$d minute</item>
         <item quantity="other">%1$d minutes</item>

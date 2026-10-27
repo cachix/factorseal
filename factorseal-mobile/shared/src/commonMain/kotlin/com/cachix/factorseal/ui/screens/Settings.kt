@@ -187,12 +187,18 @@ private fun SectionContent(
 }
 
 @Composable
-private fun AutofillSetting(autofill: Autofill) {
+fun autofillEnabled(autofill: Autofill): Boolean {
     var enabled by remember(autofill) { mutableStateOf(autofill.enabled) }
     LifecycleResumeEffect(autofill) {
         enabled = autofill.enabled
         onPauseOrDispose {}
     }
+    return enabled
+}
+
+@Composable
+private fun AutofillSetting(autofill: Autofill) {
+    val enabled = autofillEnabled(autofill)
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SettingRow(stringResource(Res.string.autofill)) {
             if (enabled) {
