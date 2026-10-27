@@ -51,5 +51,6 @@ targets:
         embed: false
       - sdk: AVFoundation.framework
       - sdk: LocalAuthentication.framework
+      - sdk: Network.framework
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
