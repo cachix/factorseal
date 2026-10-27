@@ -44,8 +44,8 @@ targets:
           major=${version%%.*} rest=${version#*.}
           minor=${rest%%.*} patch=${rest#*.}
           plist="$TARGET_BUILD_DIR/$INFOPLIST_PATH"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $((major * 1000000 + minor * 1000 + patch))" "$plist"
+          plutil -replace CFBundleShortVersionString -string "$version" "$plist"
+          plutil -replace CFBundleVersion -string "$((major * 1000000 + minor * 1000 + patch))" "$plist"
     dependencies:
       - framework: ../build/ios/FactorSealCore.xcframework
         embed: false
