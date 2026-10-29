@@ -2904,6 +2904,7 @@ dependencies = [
  "ctrlc",
  "directories",
  "ed25519-dalek",
+ "embed-resource",
  "fs2",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
@@ -2964,6 +2965,7 @@ dependencies = [
  "data-encoding",
  "detect-desktop-environment",
  "directories",
+ "embed-resource",
  "factorseal",
  "fs2",
  "futures-util",
@@ -4669,7 +4671,7 @@ dependencies = [
 
 [[package]]
 name = "hardwareseal"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
