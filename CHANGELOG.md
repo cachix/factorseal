@@ -8,6 +8,14 @@ All notable changes to FactorSeal will be documented in this file.
   shaping, selection, and window activation to the new APIs. Use the upstream
   component compatibility PR through a pinned Git dependency.
 
+- Add FactorSeal for Android and iOS. The phone app keeps personal
+  secrets in a vault protected by the Android Keystore or the Secure
+  Enclave, unlocks with a password or biometrics, and syncs with
+  Desktop after pairing by QR code. It creates and edits every item
+  type, shows one-time codes, backs up, restores, imports and exports
+  in Desktop's formats, and fills and saves logins through Android
+  autofill. The iOS app has not been tested on a device yet.
+
 - Add a one-time password to a Desktop item from its QR code.
   Scan the code on screen, drop an image of it anywhere in the
   vault, or press Ctrl+V (Cmd+V on macOS) with a copied screenshot,

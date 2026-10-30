@@ -271,7 +271,15 @@ mod platform {
                 return Err(io::Error::last_os_error());
             }
             if libc::mlock(ptr.cast(), size) != 0 {
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                #[cfg(target_os = "android")]
+                if error.raw_os_error() == Some(libc::ENOMEM) {
+                    super::super::events::record(
+                        super::super::events::Kind::MemoryProtectionFailed,
+                    );
+                    return Ok(());
+                }
+                return Err(error);
             }
         }
         Ok(())

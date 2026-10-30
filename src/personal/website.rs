@@ -54,6 +54,31 @@ pub fn host(website: &str) -> Option<String> {
 }
 
 #[must_use]
+pub fn origin(website: &str) -> Option<String> {
+    let url = url::Url::parse(website).ok()?;
+    (url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then(|| url.origin().ascii_serialization())
+}
+
+#[must_use]
+pub fn url(website: &str) -> Option<String> {
+    let website = website.trim();
+    if website.starts_with("https://") || website.starts_with("http://") {
+        Some(website.to_owned())
+    } else if !website.contains("://")
+        && website.contains('.')
+        && !website.contains(char::is_whitespace)
+    {
+        Some(format!("https://{website}"))
+    } else {
+        None
+    }
+}
+
+#[must_use]
 pub fn is_public_host(host: &str) -> bool {
     let labels: Vec<_> = host.split('.').collect();
     let Some(suffix) = labels.last() else {
@@ -134,5 +159,47 @@ mod tests {
         assert!(!is_public_host("GitHub.com"));
         assert!(!is_public_host("github.com/"));
         assert!(is_public_host("github.com"));
+    }
+
+    #[test]
+    fn websites_open_only_as_web_addresses() {
+        assert_eq!(
+            url(" https://github.com ").as_deref(),
+            Some("https://github.com")
+        );
+        assert_eq!(
+            url("http://router.local").as_deref(),
+            Some("http://router.local")
+        );
+        assert_eq!(url("github.com").as_deref(), Some("https://github.com"));
+        assert_eq!(url("javascript:alert(1)"), None);
+        assert_eq!(url("file:///etc/passwd"), None);
+        assert_eq!(url("not a site"), None);
+        assert_eq!(url(""), None);
+    }
+
+    #[test]
+    fn origin_is_the_exact_https_scheme_host_and_port() {
+        assert_eq!(
+            origin("https://EXAMPLE.com:443/path?q=1").as_deref(),
+            Some("https://example.com")
+        );
+        assert_ne!(
+            origin("https://example.com:444"),
+            origin("https://example.com")
+        );
+        assert_ne!(
+            origin("https://login.example.com"),
+            origin("https://example.com")
+        );
+        for website in [
+            "http://example.com",
+            "https://u:p@example.com",
+            "data:text/html,hi",
+            "https://",
+            "example.com",
+        ] {
+            assert_eq!(origin(website), None, "{website}");
+        }
     }
 }

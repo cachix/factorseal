@@ -15,7 +15,6 @@ mod niri;
 mod personal_actions;
 mod personal_detail;
 mod personal_history;
-mod personal_templates;
 mod placement;
 mod qr_codes;
 mod section_pages;
@@ -1393,7 +1392,7 @@ struct DesktopView {
     generator_target: Option<generator::GeneratorTarget>,
     generator_anchor: generator::GeneratorAnchor,
     generator_focus: gpui::FocusHandle,
-    password_strength: Option<crate::password_generator::Strength>,
+    password_strength: Option<factorseal::personal::generator::Strength>,
     password_rating: Option<Task<()>>,
     clipboard_notice: Option<u64>,
     clipboard_notice_leaving: bool,
@@ -1891,15 +1890,15 @@ impl DesktopView {
 
     fn rate_password_later(&mut self, cx: &mut Context<Self>) {
         self.password_rating = Some(cx.spawn(async move |view, cx| {
-            smol::Timer::after(crate::password_generator::RATING_PAUSE).await;
+            smol::Timer::after(generator::RATING_PAUSE).await;
             let _ = view.update(cx, Self::rate_password);
         }));
     }
 
     fn rate_password(&mut self, cx: &mut Context<Self>) {
         let password = self.password.read(cx).value();
-        self.password_strength =
-            (!password.is_empty()).then(|| crate::password_generator::Strength::of(&password));
+        self.password_strength = (!password.is_empty())
+            .then(|| factorseal::personal::generator::Strength::of(&password));
         cx.notify();
     }
 

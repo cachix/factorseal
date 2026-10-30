@@ -49,7 +49,7 @@ long it retains the returned secret.
 | Windows | TPM 2.0; Windows Hello PRF for biometric secrets | Fingerprint, face, or PIN |
 | macOS | Data Protection Keychain | Touch ID |
 | iPhone/iPad | Data Protection Keychain | Face ID / Touch ID |
-| Android | Hardware-backed Keystore AES-256-GCM | Unsupported; host bridge pending |
+| Android | Hardware-backed Keystore AES-256-GCM | Class 3 biometrics through a host `BiometricPrompt` |
 
 ### Linux and Windows
 
@@ -96,9 +96,15 @@ hardwareseal = { version = "0.1", features = ["android"] }
 ```
 
 The embedding runtime must initialize `ndk-context`, as `android-activity` does.
-The backend requires StrongBox or TEE-backed Keystore keys and supports
-`AccessPolicy::None`. Biometric operations remain unsupported until the
-host-side `BiometricPrompt` bridge is implemented.
+The backend requires StrongBox or TEE-backed Keystore keys.
+
+`AccessPolicy::Biometric` also requires the host to register a prompt with
+`set_android_authorizer` before opening a protector. Biometric keys need Class 3
+biometrics for every seal and unseal, and changes to biometric enrollment
+invalidate them. The authorizer receives each initialized `javax.crypto.Cipher`.
+It must show `BiometricPrompt` with that cipher as its `CryptoObject` and return
+once the user finishes. Run Keystore operations away from the UI thread because
+authorization blocks.
 
 On Apple and Android, omitting the platform feature causes `Protector::open`
 to return `Error::NotAvailable`.

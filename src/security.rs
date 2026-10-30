@@ -10,9 +10,12 @@ pub mod events;
 pub(crate) mod regular;
 
 #[cfg(any(
-    feature = "key-protection",
-    feature = "vault-client",
-    feature = "vault-store"
+    feature = "browser",
+    feature = "helper-isolation",
+    all(
+        feature = "vault-client",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    )
 ))]
 pub(crate) mod bounded;
 #[cfg(any(

@@ -1,0 +1,14 @@
+FactorSeal keeps your passwords and other personal secrets in a vault on your phone. The vault key stays in the phone's secure hardware. You unlock it with your password, your fingerprint or face, or both.
+
+• Logins, notes, cards, identities, SSH keys, API credentials, passports, bank accounts and documents
+• Fill and save logins in apps and browsers with Android autofill. Websites only get logins saved for their exact address.
+• One-time codes, added from a QR code or a setup link
+• A password generator for random passwords and word phrases
+• Sync with FactorSeal Desktop and your other devices after pairing them with a QR code. Sync sends only encrypted changes between your devices.
+• Import from Bitwarden, 1Password and KeePass, and make encrypted backups that Desktop can restore
+• Seals the vault when the screen locks, after an idle timeout and at a maximum unlock time
+• Clears copied secrets from the clipboard after 30 seconds
+
+There is no FactorSeal account. Your vault lives only on your devices.
+
+FactorSeal is open source under the Apache 2.0 license. It has not had an independent security audit yet.

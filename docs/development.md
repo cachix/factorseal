@@ -40,6 +40,9 @@ The feature split is intentional:
 - `vault-store`: Automerge documents, encrypted envelopes, Turso, and
   `VaultService`;
 - `key-protection`: factor nesting and the injectable enclave boundary;
+- `personal-sync-iroh`: the iroh courier and pairing manager in the host's own
+  process, without the sandboxed network helper that `personal-sync-network`
+  adds for Desktop;
 - `vault`: the full desktop service and platform adapters;
 - `hardware`, `cli`, and `secretspec-provider`: native enclave adapter, product
   CLI, and SecretSpec endpoint respectively.

@@ -294,10 +294,12 @@ and exchange encrypted personal-item changes through an iroh courier. Once
 configured, the courier can continue transferring ciphertext while Desktop
 remains open and the vault is sealed. Applying changes requires the vault worker
 to be unsealed. Project secrets, application grants, and device keys remain local.
+The [mobile app](../factorseal-mobile/README.md) pairs the same way and scans
+QR codes with the camera.
 
-Sync is experimental. Mobile camera integration, peer application receipts, a
-conflict-resolution chooser, and controller transfer and removal UI are still
-missing. A connected peer does not confirm that it has applied your changes.
+Sync is experimental. Peer application receipts, a conflict-resolution chooser,
+and controller transfer and removal UI are still missing. A connected peer does
+not confirm that it has applied your changes.
 Personal history includes old and deleted values, and newly enrolled readers
 receive that history. Sync does not replace a portable backup.
 

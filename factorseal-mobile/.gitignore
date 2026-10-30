@@ -1,0 +1,10 @@
+/.android
+/.devenv
+/.gradle
+/.kotlin
+/local.properties
+build/
+.idea/
+*.iml
+/iosApp/FactorSeal.xcodeproj
+xcuserdata/

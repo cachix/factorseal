@@ -10,6 +10,8 @@ use zeroize::Zeroizing;
 #[cfg(all(feature = "android", any(test, target_os = "android")))]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod android;
+#[cfg(all(feature = "android", target_os = "android"))]
+pub use android::{Authorizer as AndroidAuthorizer, set_authorizer as set_android_authorizer};
 #[cfg(all(feature = "apple", target_vendor = "apple"))]
 mod apple;
 #[cfg(feature = "apple")]

@@ -11,7 +11,7 @@ inspection or code execution inside an unlocked process.
 | Linux | `RLIMIT_CORE=0`; dedicated owners use `PR_SET_DUMPABLE=0`; anonymous page-aligned `mlock` allocations with inaccessible guards, `MADV_DONTDUMP`, and `MADV_WIPEONFORK` | Subprocess tests query process limits and lock failure; `/proc/self/smaps` verifies lock/dump flags; a fork test verifies child copies are zero. Linux 4.14+ is required for wipe-on-fork. IPC-only clients remain inspectable for `/proc/PID/exe` authentication. |
 | macOS | `RLIMIT_CORE=0`; `mmap`, `mprotect` guards and `mlock` | Native tests require successful allocation and zeroing. Distribution signing/hardened runtime and OS task-port policy remain the debugger boundary; no claim of same-user debugger isolation in development builds. Forked copies are not covered by the parent's memory lock. |
 | Windows | WER `NOHEAP`; `VirtualAlloc` guarded allocations, `VirtualLock`, and WER excluded-memory registration | Native subprocess test queries WER flags; allocation and guard-state tests run on Windows. Requires Windows 10 1703+. This does not override administrator full-dump policy or third-party dump tools. |
-| Android/iOS core | Unix locked allocation, guards, and Android dump exclusion where available | Allocation errors propagate to the embedder. Physical mobile acceptance and host lifecycle/process hardening remain separate; no claim of native mobile production assurance. |
+| Android/iOS core | Unix locked allocation, guards, and Android dump exclusion where available. Android caps app memory locks at 64 KiB, which normal use routinely exceeds. Allocations beyond that quota keep their guards and dump exclusion without the lock and record a memory protection event. | Other allocation errors propagate to the embedder. Physical mobile acceptance and host lifecycle/process hardening remain separate; no claim of native mobile production assurance. |
 
 Root and index capabilities share one dedicated locked page during a lease.
 Each live document DEK or unwrapped software signing seed uses another page, released at
@@ -40,7 +40,9 @@ macOS and Windows CI serialize tests because their default lock budgets are
 small. Secret and archive buffers require lock quotas proportional to their
 size; the 128 MiB password workspace is deliberately not covered by that
 budget. See [memory hardening](../acceptance/memory-hardening.md) for deployment limits. A configured lock limit
-too small for an operation is an explicit failure, not degraded protection.
+too small for an operation is an explicit failure, not degraded protection,
+except on Android, where apps cannot raise the fixed limit and unlocked buffers
+are routine.
 
 Platform references:
 [mlock](https://man7.org/linux/man-pages/man2/munlock.2.html),

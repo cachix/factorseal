@@ -9,7 +9,7 @@ pub(crate) mod pairing;
 pub use pairing::{PairingInvitation, PairingRequest, PairingStatus};
 mod identity;
 pub use authority::{GroupCertificate, MergeApproval, TransportBinding, VerifiedGroup};
-#[cfg(feature = "personal-sync-network")]
+#[cfg(feature = "personal-sync-iroh")]
 pub mod network;
 mod packet;
 mod spool;

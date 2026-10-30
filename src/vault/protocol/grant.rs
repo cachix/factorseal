@@ -19,7 +19,7 @@ const GRANT_VERSION: u8 = 3;
 pub(super) const GRANT_DOCUMENT_NAMESPACE: &[u8] = b"factorseal/vault-grants/v3";
 const GRANT_TARGET_DOMAIN: &[u8] = b"factorseal/grant-target/v3\0";
 const PERMISSION_REGISTRY_VERSION: u8 = 1;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 const EXCLUSIVE_HOLDER_VERSION: u8 = 1;
 
 /// Permission persisted in one caller grant.
@@ -50,7 +50,7 @@ struct AccessGrant {
 
 /// Which executable currently holds an exclusive grant on one target, so the
 /// next holder can remove exactly the grants it supersedes.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExclusiveHolder {
@@ -280,7 +280,7 @@ pub(super) fn store_prepared_grants(
 /// generation, so a superseded build keeps no access, and nothing is written
 /// when `caller` already holds exactly these permissions, so a restart does
 /// not cost a generation. The grants never expire.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 pub(super) fn store_exclusive_grant(
     store: &VaultStore,
     caller: &CallerIdentity,
@@ -391,7 +391,7 @@ pub(super) fn store_exclusive_grant(
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "secret-service-host", target_os = "linux"))]
 fn exclusive_holder_address(target_digest: [u8; 32]) -> VaultResult<SecretAddress> {
     SecretAddress::new(
         format!("holder/{}", URL_SAFE_NO_PAD.encode(target_digest)),

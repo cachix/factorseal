@@ -31,6 +31,7 @@ rustPlatform.buildRustPackage {
       ../assets
       ../crates
       ../factorseal-desktop
+      ../factorseal-mobile/core
       ../src
     ];
   };

@@ -1,0 +1,1 @@
+Passwords in a hardware-backed vault that syncs with FactorSeal Desktop.

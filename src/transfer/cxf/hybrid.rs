@@ -92,7 +92,7 @@ pub fn read_identity_file(path: &Path) -> anyhow::Result<HybridIdentity> {
     parse_key_file(&bytes)
 }
 
-fn parse_key_file<T: FromStr<Err = &'static str>>(bytes: &[u8]) -> anyhow::Result<T> {
+pub fn parse_key_file<T: FromStr<Err = &'static str>>(bytes: &[u8]) -> anyhow::Result<T> {
     let text = std::str::from_utf8(bytes).context("age key file must be UTF-8")?;
     let mut lines = text
         .lines()

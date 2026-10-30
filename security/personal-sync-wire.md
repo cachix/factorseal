@@ -4,6 +4,8 @@ The `personal-sync` and `personal-sync-network` features connect the vault worke
 Desktop pairing management and an iroh ciphertext courier. Desktop starts
 networking when pairing begins, or resumes an existing transport identity on
 startup. Sync management remains absent from application IPC.
+`personal-sync-iroh` provides the same courier and pairing manager without the
+sandboxed network helper, for hosts that run them in their own process.
 
 ## Automerge and personal scope
 
@@ -180,7 +182,7 @@ pinned (or joining is pending), the legacy raw `configure_personal_sync` API is
 disabled. A membership change invalidates prepared old-epoch ciphertext and
 queues all existing personal histories for publication to the new recipients.
 
-`personal-sync-network` adds an iroh 1.2 courier library using ALPN
+`personal-sync-iroh` adds an iroh 1.2 courier library using ALPN
 `factorseal/personal-sync/1`. The embedding host supplies the endpoint and owns
 its secret, lifetime, connection limits and address discovery. The standalone library starts no listener by itself; Desktop owns one after
 sync setup. The courier owns only public authorization and the ciphertext spool;
@@ -229,7 +231,7 @@ subsequent ciphertext forwarding does not require unlocking.
 An invitation lasts five minutes and contains a random 256-bit bearer secret,
 the controller fingerprint, inviting endpoint, current certificate digest and
 expiry. The 136-byte payload has a versioned URL-safe base64 ticket under 256
-characters. `personal-sync-network` can render that ticket as an SVG QR. Public
+characters. `personal-sync-iroh` can render that ticket as an SVG QR. Public
 reader keys are fetched separately. Tickets and SVGs are sensitive: owned ticket,
 serialization and SVG buffers are wiped on drop where supported; QR library
 intermediates and deserializer allocations are not all wiped or page-locked.

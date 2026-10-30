@@ -202,12 +202,14 @@ outside the separately built CLI key owner's dependency graph.
   erasure claim. The experimental `personal-sync` feature provides root-wrapped
   reader keys, authenticated encrypted change packets, durable publication and
   incoming merge/conflict handling through lease-bound host-management APIs.
-  The optional `personal-sync-network` library adds a keyless iroh courier and
-  controller-signed transport membership. Desktop now offers QR/ticket pairing
-  and explicit code approval through inherited private worker pipes. Its courier
+  The optional `personal-sync-iroh` library adds a keyless iroh courier and
+  controller-signed transport membership, and `personal-sync-network` runs it in
+  the sandboxed network helper. Desktop now offers QR/ticket pairing and
+  explicit code approval through inherited private worker pipes. Its courier
   continues while sealed if Desktop remains open; it starts after sync setup.
-  Paired counts and reachability do not claim remote application. Mobile camera
-  integration, peer application receipts, a conflict-resolution chooser,
+  The mobile apps run the courier in their own process without the sandboxed
+  network helper. Paired counts and reachability do not claim remote
+  application. Peer application receipts, a conflict-resolution chooser,
   controller transfer and removal UI remain unimplemented.
   See the [implemented boundary](security/personal-sync-wire.md) for bounds,
   experimental cryptography, retained metadata, and integration requirements.

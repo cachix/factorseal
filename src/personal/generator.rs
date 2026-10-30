@@ -3,10 +3,9 @@ use std::ops::RangeInclusive;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-pub(crate) const LENGTHS: RangeInclusive<u8> = 8..=64;
-pub(crate) const WORD_COUNTS: RangeInclusive<u8> = 12..=24;
-pub(crate) const WORD_STEP: u8 = 3;
-pub(crate) const RATING_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
+pub const LENGTHS: RangeInclusive<u8> = 8..=64;
+pub const WORD_COUNTS: RangeInclusive<u8> = 12..=24;
+pub const WORD_STEP: u8 = 3;
 
 const LOWERCASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
 const UPPERCASE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -15,7 +14,7 @@ const SYMBOLS: &[u8] = b"!#$%&*+-=?@^_";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Style {
+pub enum Style {
     Random,
     #[default]
     Words,
@@ -23,12 +22,12 @@ pub(crate) enum Style {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct Options {
-    pub(crate) style: Style,
-    pub(crate) length: u8,
-    pub(crate) words: u8,
-    pub(crate) digits: bool,
-    pub(crate) symbols: bool,
+pub struct Options {
+    pub style: Style,
+    pub length: u8,
+    pub words: u8,
+    pub digits: bool,
+    pub symbols: bool,
 }
 
 impl Default for Options {
@@ -44,13 +43,15 @@ impl Default for Options {
 }
 
 impl Options {
-    pub(crate) fn is_valid(self) -> bool {
+    #[must_use]
+    pub fn is_valid(self) -> bool {
         LENGTHS.contains(&self.length)
             && WORD_COUNTS.contains(&self.words)
             && (self.words - WORD_COUNTS.start()).is_multiple_of(WORD_STEP)
     }
 
-    pub(crate) fn strength(self) -> Strength {
+    #[must_use]
+    pub fn strength(self) -> Strength {
         let bits = match self.style {
             Style::Words => f64::from(self.words) * 11. * 32. / 33.,
             Style::Random => {
@@ -79,15 +80,16 @@ impl Options {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Strength {
+pub enum Strength {
     Weak,
     Good,
     Strong,
 }
 
 impl Strength {
-    pub(crate) fn of(password: &str) -> Self {
-        match factorseal::security::password_score(password) {
+    #[must_use]
+    pub fn of(password: &str) -> Self {
+        match crate::security::password_score(password) {
             0..=2 => Self::Weak,
             3 => Self::Good,
             _ => Self::Strong,
@@ -104,15 +106,8 @@ impl Strength {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Weak => "Weak",
-            Self::Good => "Good",
-            Self::Strong => "Strong",
-        }
-    }
-
-    pub(crate) fn level(self) -> usize {
+    #[must_use]
+    pub fn level(self) -> usize {
         match self {
             Self::Weak => 1,
             Self::Good => 2,
@@ -121,7 +116,7 @@ impl Strength {
     }
 }
 
-pub(crate) fn generate(options: Options) -> Result<Zeroizing<String>, getrandom::Error> {
+pub fn generate(options: Options) -> Result<Zeroizing<String>, getrandom::Error> {
     generate_with(options, getrandom::fill)
 }
 

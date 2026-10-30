@@ -12,7 +12,10 @@ mod algorithm;
 pub mod browser;
 #[cfg(any(feature = "key-protection", feature = "vault-store"))]
 mod crypto;
-#[cfg(all(feature = "vault-client", feature = "key-protection"))]
+#[cfg(any(
+    all(feature = "vault-client", feature = "key-protection"),
+    feature = "personal-sync"
+))]
 pub mod desktop_worker;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;

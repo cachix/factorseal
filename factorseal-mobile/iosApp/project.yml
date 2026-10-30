@@ -1,0 +1,56 @@
+name: FactorSeal
+options:
+  bundleIdPrefix: com.cachix
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+targets:
+  FactorSeal:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cachix.factorseal
+        PRODUCT_NAME: FactorSeal
+        INFOPLIST_FILE: Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        CODE_SIGN_STYLE: Automatic
+        FRAMEWORK_SEARCH_PATHS: $(inherited) $(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
+        OTHER_LDFLAGS: $(inherited) -framework FactorSealKit -lc++
+        EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+    preBuildScripts:
+      - name: Build the Rust core
+        basedOnDependencyAnalysis: false
+        script: |
+          cd "$SRCROOT/.."
+          ./scripts/build-ios-core.sh "$CONFIGURATION"
+      - name: Build the shared app
+        basedOnDependencyAnalysis: false
+        script: |
+          cd "$SRCROOT/.."
+          ./gradlew --no-daemon :shared:embedAndSignAppleFrameworkForXcode
+    postBuildScripts:
+      - name: Set the version from Cargo.toml
+        basedOnDependencyAnalysis: false
+        script: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$SRCROOT/../../Cargo.toml" | head -n 1)
+          major=${version%%.*} rest=${version#*.}
+          minor=${rest%%.*} patch=${rest#*.}
+          plist="$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+          plutil -replace CFBundleShortVersionString -string "$version" "$plist"
+          plutil -replace CFBundleVersion -string "$((major * 1000000 + minor * 1000 + patch))" "$plist"
+    dependencies:
+      - framework: ../build/ios/FactorSealCore.xcframework
+        embed: false
+      - sdk: AVFoundation.framework
+      - sdk: LocalAuthentication.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework

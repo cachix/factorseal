@@ -21,15 +21,7 @@ pub(crate) fn random_id() -> VaultResult<String> {
 }
 
 pub fn origin(value: &str) -> VaultResult<String> {
-    let url = url::Url::parse(value).map_err(|_| invalid())?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return Err(invalid());
-    }
-    Ok(url.origin().ascii_serialization())
+    crate::personal::website::origin(value).ok_or_else(invalid)
 }
 fn invalid() -> VaultError {
     VaultError::Protocol("invalid browser request".into())

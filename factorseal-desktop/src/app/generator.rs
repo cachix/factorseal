@@ -6,9 +6,11 @@ use gpui_component::{
 };
 
 use super::*;
-use crate::password_generator::{
+use factorseal::personal::generator::{
     LENGTHS, Options, Strength, Style, WORD_COUNTS, WORD_STEP, generate,
 };
+
+pub(super) const RATING_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GeneratorTarget {
@@ -62,6 +64,14 @@ fn closest(range: std::ops::RangeInclusive<u8>, step: u8, value: f32) -> u8 {
         .unwrap_or_default()
 }
 
+fn strength_label(strength: Strength) -> &'static str {
+    match strength {
+        Strength::Weak => "Weak",
+        Strength::Good => "Good",
+        Strength::Strong => "Strong",
+    }
+}
+
 pub(super) fn strength_meter(strength: Strength, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let color = match strength {
@@ -90,7 +100,7 @@ pub(super) fn strength_meter(strength: Strength, cx: &App) -> impl IntoElement {
                 .w(rems(3.5))
                 .text_body()
                 .text_color(theme.muted_foreground)
-                .child(strength.label()),
+                .child(strength_label(strength)),
         )
 }
 

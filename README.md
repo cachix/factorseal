@@ -35,6 +35,9 @@ on Linux and Windows or Apple's Secure Enclave on macOS.
   create encrypted FactorSeal archives for portable backup and restore.
 - **Experimental personal sync:** pair devices in Desktop and exchange encrypted
   personal-item changes. See the [sync limitations](docs/usage.md#personal-sync-experimental).
+- **Android and iOS:** the [mobile app](factorseal-mobile/README.md) protects
+  personal secrets with the phone's secure hardware, syncs them with Desktop,
+  and fills logins through Android autofill.
 
 An experimental [browser extension](extensions/browser/README.md) detects login
 forms and fills credentials after Desktop approval. Usable passkeys, auto-type,
@@ -103,6 +106,7 @@ end-to-end SecretSpec conformance remain outstanding. See the
 
 - [Usage guide](docs/usage.md): unlock, CLI, personal records, imports, sync, diagnostics.
 - [Desktop](factorseal-desktop/README.md): graphical host and desktop integration.
+- [Mobile](factorseal-mobile/README.md): Android and iOS app, development and release.
 - [Architecture](docs/architecture.md): key hierarchy, storage, IPC, integrations, lifecycle.
 - [Development](docs/development.md): build, test, and release requirements.
 - [Packaging](packaging/README.md): platform packages and installation.
