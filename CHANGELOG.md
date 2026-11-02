@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Write Desktop and mobile text in plain words and drop the tagline
+  from the footer. The Desktop footer now has a labeled Report an
+  issue button.
+
 - Add the factorseal.dev website to the repository, built on the shared Cachix
   site kit. Its landing page has working previews of Desktop, the access
   prompt, the browser extension, and the mobile app, and its documentation is
