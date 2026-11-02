@@ -991,18 +991,27 @@ fn a_backup_restores_every_item_into_another_vault() {
         &target,
         &json!({"type": "import", "format": "factorseal", "file": file["data"], "key": {"passphrase": PASSPHRASE}}),
     );
-    assert_eq!(
-        review,
-        json!({"type": "import-review", "items": 2, "preserved": 0})
+    assert_eq!(review["type"], "import-review");
+    assert_eq!(review["items"].as_array().unwrap().len(), 2);
+    assert!(
+        review["items"].as_array().unwrap().iter().all(
+            |item| item["existing"] == false && item["retained"].as_array().unwrap().is_empty()
+        )
     );
-    let imported = send(&target, &json!({"type": "import-commit", "replace": false}));
+    let imported = send(
+        &target,
+        &json!({"type": "import-commit", "review": review["review"], "choices": vec!["add"; review["items"].as_array().unwrap().len()]}),
+    );
     assert_eq!(
         imported,
-        json!({"type": "imported", "added": 2, "replaced": 0, "kept": 0, "preserved": 0})
+        json!({"type": "imported", "added": 2, "replaced": 0, "kept": 0, "skipped": 0, "preserved": 0})
     );
     assert_eq!(titles(&target), ["GitHub", "GitLab"]);
     assert_eq!(
-        send(&target, &json!({"type": "import-commit", "replace": false}))["code"],
+        send(
+            &target,
+            &json!({"type": "import-commit", "review": review["review"], "choices": vec!["add"; review["items"].as_array().unwrap().len()]})
+        )["code"],
         "not-found"
     );
 }
@@ -1040,8 +1049,15 @@ fn credentials_move_between_vaults_in_every_export_format() {
             &target,
             &json!({"type": "import", "format": format, "file": file["data"], "key": import}),
         );
-        assert_eq!(review["items"], 1, "{format}: {review}");
-        let imported = send(&target, &json!({"type": "import-commit", "replace": false}));
+        assert_eq!(
+            review["items"].as_array().unwrap().len(),
+            1,
+            "{format}: {review}"
+        );
+        let imported = send(
+            &target,
+            &json!({"type": "import-commit", "review": review["review"], "choices": vec!["add"; review["items"].as_array().unwrap().len()]}),
+        );
         assert_eq!(imported["added"], 1, "{format}: {imported}");
         assert_eq!(titles(&target), ["GitHub"], "{format}");
     }
@@ -1058,29 +1074,155 @@ fn imports_keep_or_replace_existing_items_and_can_be_cancelled() {
         &json!({"type": "export", "format": "factorseal", "key": {"passphrase": PASSPHRASE}}),
     );
     let import = json!({"type": "import", "format": "factorseal", "file": file["data"], "key": {"passphrase": PASSPHRASE}});
-    send(&core, &import);
+    let review = send(&core, &import);
     assert_eq!(
-        send(&core, &json!({"type": "import-commit", "replace": false}))["kept"],
+        send(
+            &core,
+            &json!({"type": "import-commit", "review": review["review"], "choices": vec!["add"; review["items"].as_array().unwrap().len()]})
+        )["skipped"],
         1
     );
-    send(&core, &import);
+    let summaries = send(&core, &json!({"type": "items"}));
+    let id = summaries["items"][0]["id"].clone();
+    let mut item = send(&core, &json!({"type": "item", "id": id}))["item"].clone();
+    item["title"] = json!("Changed locally");
+    send(
+        &core,
+        &json!({"type":"save", "item":draft(&item), "version":item["version"]}),
+    );
+    let review = send(&core, &import);
     assert_eq!(
-        send(&core, &json!({"type": "import-commit", "replace": true}))["replaced"],
+        send(
+            &core,
+            &json!({"type": "import-commit", "review": review["review"], "choices": vec!["replace"; review["items"].as_array().unwrap().len()]})
+        )["replaced"],
         1
     );
-    send(&core, &import);
+    let review = send(&core, &import);
     assert_eq!(
-        send(&core, &json!({"type": "import-cancel"}))["type"],
+        send(
+            &core,
+            &json!({"type": "import-cancel", "review": review["review"]})
+        )["type"],
         "status"
     );
     assert_eq!(
-        send(&core, &json!({"type": "import-commit", "replace": false}))["code"],
+        send(
+            &core,
+            &json!({"type": "import-commit", "review": review["review"], "choices": vec!["add"; review["items"].as_array().unwrap().len()]})
+        )["code"],
         "not-found"
     );
-    send(&core, &import);
+    let review = send(&core, &import);
     send(&core, &json!({"type": "seal"}));
     assert_eq!(
-        send(&core, &json!({"type": "import-commit", "replace": false}))["code"],
+        send(
+            &core,
+            &json!({"type": "import-commit", "review": review["review"], "choices": vec!["add"; review["items"].as_array().unwrap().len()]})
+        )["code"],
+        "sealed"
+    );
+}
+
+#[test]
+fn import_choices_skip_items_and_stale_review_messages_do_not_affect_the_current_review() {
+    use data_encoding::BASE64;
+    let directory = tempfile::tempdir().unwrap();
+    let core = core(directory.path());
+    create(&core);
+    let mut file = json!({"items": [
+        {"id": "one", "type": 1, "name": "GitHub", "login": {"username": "ada", "password": "original"}},
+        {"id": "two", "type": 1, "name": "Skip me", "passwordHistory": [{"password": "old", "lastUsedDate": "2024-01-01"}]}
+    ]});
+    let import = json!({"type": "import", "format": "bitwarden-json", "file": BASE64.encode(&serde_json::to_vec(&file).unwrap()), "key": null});
+    let old = send(&core, &import);
+    let current = send(&core, &import);
+    assert_ne!(old["review"], current["review"]);
+    assert_eq!(current["items"][1]["retained"], json!(["password-history"]));
+    send(
+        &core,
+        &json!({"type": "import-cancel", "review": old["review"]}),
+    );
+    let stale = send(
+        &core,
+        &json!({"type": "import-commit", "review": old["review"], "choices": ["add", "add"]}),
+    );
+    assert_eq!(stale["code"], "not-found");
+    assert_eq!(titles(&core), [] as [String; 0]);
+    let committed = send(
+        &core,
+        &json!({"type": "import-commit", "review": current["review"], "choices": ["add", "skip"]}),
+    );
+    assert_eq!(
+        committed,
+        json!({"type": "imported", "added": 1, "replaced": 0, "kept": 0, "skipped": 1, "preserved": 0})
+    );
+    assert_eq!(titles(&core), ["GitHub"]);
+    file["items"][0]["login"]["password"] = json!("incoming password");
+    let import = json!({"type": "import", "format": "bitwarden-json", "file": BASE64.encode(&serde_json::to_vec(&file).unwrap()), "key": null});
+    let review = send(&core, &import);
+    assert_eq!(review["items"][0]["existing"], true);
+    assert_eq!(review["items"][1]["existing"], false);
+    let items = send(&core, &json!({"type": "items"}));
+    let id = items["items"][0]["id"].clone();
+    let mut item = send(&core, &json!({"type": "item", "id": id}))["item"].clone();
+    item["title"] = json!("Edited while reviewing");
+    let saved = send(
+        &core,
+        &json!({"type": "save", "item": draft(&item), "version": item["version"]}),
+    );
+    assert_eq!(saved["type"], "saved");
+    let rejected = send(
+        &core,
+        &json!({"type": "import-commit", "review": review["review"], "choices": ["replace", "add"]}),
+    );
+    assert_eq!(rejected["code"], "conflict");
+    assert_eq!(titles(&core), ["Edited while reviewing"]);
+}
+
+#[test]
+fn import_comparisons_reveal_only_requested_values_and_expire_with_the_review() {
+    use data_encoding::BASE64;
+    let directory = tempfile::tempdir().unwrap();
+    let core = core(directory.path());
+    create(&core);
+    let import = |password: &str| {
+        json!({"type":"import", "format":"bitwarden-json", "key":null,
+        "file":BASE64.encode(&serde_json::to_vec(&json!({"items":[{"id":"one", "name":"Example", "type":1, "login":{"password":password}}]})).unwrap())})
+    };
+    let first = send(&core, &import("before-secret"));
+    send(
+        &core,
+        &json!({"type":"import-commit", "review":first["review"], "choices":["add"]}),
+    );
+    let review = send(&core, &import("after-secret"));
+    assert!(!review.to_string().contains("before-secret"));
+    assert!(!review.to_string().contains("after-secret"));
+    let details = |id: Value, revealed: Vec<usize>| json!({"type":"import-details", "review":id, "item":0, "revealed":revealed});
+    let hidden = send(&core, &details(review["review"].clone(), vec![]));
+    assert_eq!(hidden["comparisons"][0]["current"]["concealed"], true);
+    assert_eq!(hidden["comparisons"][0]["current"]["value"], Value::Null);
+    assert_eq!(hidden["comparisons"][0]["incoming"]["value"], Value::Null);
+    let shown = send(&core, &details(review["review"].clone(), vec![0]));
+    assert_eq!(shown["comparisons"][0]["current"]["value"], "before-secret");
+    assert_eq!(shown["comparisons"][0]["incoming"]["value"], "after-secret");
+    let newer = send(&core, &import("newer-secret"));
+    assert_eq!(
+        send(&core, &details(review["review"].clone(), vec![0]))["code"],
+        "not-found"
+    );
+    send(
+        &core,
+        &json!({"type":"import-cancel", "review":newer["review"]}),
+    );
+    assert_eq!(
+        send(&core, &details(newer["review"].clone(), vec![0]))["code"],
+        "not-found"
+    );
+    let review = send(&core, &import("sealed-secret"));
+    send(&core, &json!({"type":"seal"}));
+    assert_eq!(
+        send(&core, &details(review["review"].clone(), vec![0]))["code"],
         "sealed"
     );
 }
@@ -1242,14 +1384,24 @@ fn conversation(core: &Core) -> Vec<Value> {
     exchange(
         json!({"type": "save-login", "site": {"app": "com.github.android"}, "title": "GitHub", "username": "octocat", "password": "a new password"}),
     );
+    let comparison_file = exchange(json!({"type":"export", "format":"bitwarden-json", "key":null}));
+    let comparison = exchange(
+        json!({"type":"import", "format":"bitwarden-json", "file":comparison_file["data"], "key":null}),
+    );
+    exchange(
+        json!({"type":"import-details", "review":comparison["review"], "item":0, "revealed":[]}),
+    );
+    exchange(json!({"type":"import-cancel", "review":comparison["review"]}));
     exchange(json!({"type": "delete", "id": id, "version": saved["version"]}));
     exchange(json!({"type": "item", "id": id}));
     exchange(json!({"type": "sync-view"}));
     let file = exchange(json!({"type": "export", "format": "bitwarden-json", "key": null}));
-    exchange(
+    let review = exchange(
         json!({"type": "import", "format": "bitwarden-json", "file": file["data"], "key": null}),
     );
-    exchange(json!({"type": "import-commit", "replace": false}));
+    exchange(
+        json!({"type": "import-commit", "review": review["review"], "choices": vec!["add"; review["items"].as_array().unwrap().len()]}),
+    );
     for text in [
         "",
         &format!("factorseal-sync:1:{}", "A".repeat(40)),
