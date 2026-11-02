@@ -3965,7 +3965,7 @@ fn assert_import_version_is_checked(
     source: &VaultEntryMetadata,
 ) {
     use crate::personal::PersonalSecret;
-    let current_version = crate::VaultArchiveEntry::version_of(&item.encode().unwrap(), None);
+    let current_version = crate::vault::import_entry_version(&item.encode().unwrap(), None);
     let mut replacement = PersonalSecret::decode_current(&item.encode().unwrap()).unwrap();
     replacement.title = "Stale replacement".into();
     let response = service.handle(

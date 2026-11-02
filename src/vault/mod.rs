@@ -879,6 +879,17 @@ impl SecretAddress {
     }
 }
 
+#[cfg(any(
+    feature = "vault-store",
+    all(feature = "key-protection", feature = "vault-client")
+))]
+pub(crate) fn import_entry_version(value: &[u8], evict_at: Option<u64>) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(value);
+    digest.update(evict_at.unwrap_or_default().to_le_bytes());
+    digest.finalize().into()
+}
+
 #[cfg(any(feature = "vault-store", test))]
 fn update_digest_string(digest: &mut Sha256, value: &str) {
     digest.update((value.len() as u64).to_be_bytes());

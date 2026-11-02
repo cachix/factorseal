@@ -349,7 +349,7 @@ impl VaultService {
                 )?;
                 if let Some(expected) = expected_version
                     && existing.as_ref().map(|secret| {
-                        crate::VaultArchiveEntry::version_of(&secret.value, secret.expires_at)
+                        crate::vault::import_entry_version(&secret.value, secret.expires_at)
                     }) != Some(expected)
                 {
                     return Err(VaultError::Conflict.into());
@@ -801,7 +801,7 @@ fn import_secret_service_item(
             .ok_or(VaultError::Conflict)?;
         let encoded =
             PortableItem::new(current.clone(), super::WireSecret::from_locked(secret)).encode()?;
-        if crate::VaultArchiveEntry::version_of(encoded.expose(), None) != expected {
+        if crate::vault::import_entry_version(encoded.expose(), None) != expected {
             return Err(VaultError::Conflict);
         }
     }

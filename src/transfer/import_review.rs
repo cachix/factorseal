@@ -49,7 +49,7 @@ fn key(metadata: &VaultEntryMetadata) -> EntryKey {
 }
 
 fn version(entry: &VaultArchiveEntry) -> [u8; 32] {
-    VaultArchiveEntry::version_of(entry.value.expose(), entry.evict_at)
+    crate::vault::import_entry_version(entry.value.expose(), entry.evict_at)
 }
 
 fn personal(entry: &VaultArchiveEntry) -> anyhow::Result<Option<PersonalSecret>> {
