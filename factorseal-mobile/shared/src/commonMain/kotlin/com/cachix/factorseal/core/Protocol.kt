@@ -161,6 +161,7 @@ data class Section(
 
 @Serializable
 data class Item(
+    val retained: List<RetainedData> = emptyList(),
     val id: String,
     val kind: Kind,
     val title: String,
@@ -540,14 +541,19 @@ sealed interface Request {
     ) : Request
 
     @Serializable
+    @SerialName("import-details")
+    data class ImportDetails(val review: Long, val item: Int, val revealed: List<Int>) : Request
+
+    @Serializable
     @SerialName("import-commit")
     data class ImportCommit(
-        val replace: Boolean,
+        val review: Long,
+        val choices: List<ImportChoice>,
     ) : Request
 
     @Serializable
     @SerialName("import-cancel")
-    data object ImportCancel : Request
+    data class ImportCancel(val review: Long) : Request
 
     @Serializable
     @SerialName("logins")
@@ -683,9 +689,13 @@ sealed interface Response {
     @Serializable
     @SerialName("import-review")
     data class ImportReview(
-        val items: Int,
-        val preserved: Int,
+        val review: Long,
+        val items: List<ImportItem>,
     ) : Response
+
+    @Serializable
+    @SerialName("import-details")
+    data class ImportDetails(val comparisons: List<ImportComparison>) : Response
 
     @Serializable
     @SerialName("imported")
@@ -693,6 +703,7 @@ sealed interface Response {
         val added: Int,
         val replaced: Int,
         val kept: Int,
+        val skipped: Int,
         val preserved: Int,
     ) : Response
 
@@ -749,3 +760,58 @@ sealed interface Scan {
     @SerialName("unsupported")
     data object Unsupported : Scan
 }
+
+@Serializable
+enum class ImportChoice {
+    @SerialName("skip")
+    Skip,
+
+    @SerialName("add")
+    Add,
+
+    @SerialName("replace")
+    Replace,
+}
+
+@Serializable
+enum class RetainedData {
+    @SerialName("passkeys")
+    Passkeys,
+
+    @SerialName("password-history")
+    PasswordHistory,
+
+    @SerialName("website-matching")
+    WebsiteMatching,
+
+    @SerialName("password-reprompt")
+    PasswordReprompt,
+
+    @SerialName("field-types")
+    FieldTypes,
+
+    @SerialName("other")
+    Other,
+}
+
+@Serializable
+data class ImportChange(val type: String, val field: String? = null)
+
+@Serializable
+data class ImportItem(
+    val title: String,
+    val username: String? = null,
+    val website: String? = null,
+    val kind: String? = null,
+    val existing: Boolean,
+    val changes: List<ImportChange>,
+    val retained: List<RetainedData>,
+)
+
+@Serializable
+data class ImportValue(val value: String? = null, val concealed: Boolean, val filled: Boolean, val context: String? = null) {
+    override fun toString(): String = "ImportValue([REDACTED])"
+}
+
+@Serializable
+data class ImportComparison(val change: ImportChange, val section: String? = null, val current: ImportValue, val incoming: ImportValue)
