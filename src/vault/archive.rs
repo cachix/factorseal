@@ -39,16 +39,6 @@ pub struct VaultArchiveEntry {
     pub evict_at: Option<u64>,
 }
 
-impl VaultArchiveEntry {
-    pub(crate) fn version_of(value: &[u8], evict_at: Option<u64>) -> [u8; 32] {
-        use sha2::{Digest as _, Sha256};
-        let mut digest = Sha256::new();
-        digest.update(value);
-        digest.update(evict_at.unwrap_or_default().to_le_bytes());
-        digest.finalize().into()
-    }
-}
-
 /// Decrypted contents of a portable FactorSeal archive.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
