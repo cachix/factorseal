@@ -7,6 +7,8 @@ import androidx.compose.ui.Modifier
 import com.cachix.factorseal.core.CoreBridge
 import com.cachix.factorseal.core.ErrorCode
 import com.cachix.factorseal.core.Factor
+import com.cachix.factorseal.core.ImportChoice
+import com.cachix.factorseal.core.ImportItem
 import com.cachix.factorseal.core.Kind
 import com.cachix.factorseal.core.Platform
 import com.cachix.factorseal.core.Request
@@ -64,6 +66,8 @@ private class FakeCore(
                 Response.Error(ErrorCode.PasswordRejected, "Incorrect password. Please try again.")
             }
         }
+
+        is Request.ImportCancel -> status()
 
         Request.Seal -> {
             state = VaultState.Sealed
@@ -175,6 +179,34 @@ private fun TestScope.wait(duration: Duration) {
 }
 
 class FactorSealTest {
+    @Test
+    fun import_selection_lives_with_the_session_and_leaving_cancels_it() = runTest {
+        val (app, core, _) = unlocked()
+        app.open(Page.TransferForm(backup = false, import = true))
+        val review = Response.ImportReview(7, listOf(ImportItem("Example", existing = false, changes = emptyList(), retained = emptyList())))
+        app.importSession = ImportSession(review)
+        app.importSession!!.choices[0] = ImportChoice.Skip
+        app.foreground()
+        runCurrent()
+        assertEquals(listOf(ImportChoice.Skip), app.importSession!!.choices.toList())
+        app.back()
+        runCurrent()
+        assertNull(app.importSession)
+        assertEquals(listOf(7L), core.requests.filterIsInstance<Request.ImportCancel>().map { it.review })
+    }
+
+    @Test
+    fun sealing_drops_import_reviews_results_and_errors() = runTest {
+        val (app, _, _) = unlocked()
+        app.importSession = ImportSession(Response.ImportReview(7, emptyList()))
+        app.importResult = Response.Imported(1, 0, 0, 0, 0)
+        app.importError = Message.Raw("failed")
+        app.expired()
+        assertNull(app.importSession)
+        assertNull(app.importResult)
+        assertNull(app.importError)
+    }
+
     @Test
     fun without_a_vault_the_app_offers_setup_and_creating_opens_it() = runTest {
         val (app, core, _) = fixture()

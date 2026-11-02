@@ -1,3 +1,7 @@
+use factorseal::transfer::{
+    UnusableData,
+    import_plan::{ImportChange, ImportChoice},
+};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -143,10 +147,18 @@ pub enum Request {
         file: Secret,
         key: Option<TransferKey>,
     },
-    ImportCommit {
-        replace: bool,
+    ImportDetails {
+        review: u64,
+        item: usize,
+        revealed: Vec<usize>,
     },
-    ImportCancel,
+    ImportCommit {
+        review: u64,
+        choices: Vec<ImportChoice>,
+    },
+    ImportCancel {
+        review: u64,
+    },
     Logins {
         site: Site,
     },
@@ -228,13 +240,17 @@ pub enum Response {
         data: Revealed,
     },
     ImportReview {
-        items: usize,
-        preserved: usize,
+        review: u64,
+        items: Vec<ImportItem>,
+    },
+    ImportDetails {
+        comparisons: Vec<ImportComparison>,
     },
     Imported {
         added: usize,
         replaced: usize,
         kept: usize,
+        skipped: usize,
         preserved: usize,
     },
     Logins {
@@ -355,6 +371,7 @@ pub enum LoginChange {
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Item {
+    pub retained: Vec<UnusableData>,
     pub id: String,
     pub kind: Kind,
     pub title: String,
@@ -544,4 +561,32 @@ pub enum Scan {
         account: Option<String>,
     },
     Unsupported,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ImportItem {
+    pub title: String,
+    pub username: Option<String>,
+    pub website: Option<String>,
+    pub kind: Option<String>,
+    pub existing: bool,
+    pub changes: Vec<ImportChange>,
+    pub retained: Vec<UnusableData>,
+}
+
+#[derive(Serialize)]
+pub struct ImportValue {
+    pub value: Option<Revealed>,
+    pub concealed: bool,
+    pub filled: bool,
+    pub context: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ImportComparison {
+    pub change: ImportChange,
+    pub section: Option<String>,
+    pub current: ImportValue,
+    pub incoming: ImportValue,
 }
