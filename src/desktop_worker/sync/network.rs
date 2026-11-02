@@ -291,9 +291,11 @@ impl Inner {
             }
 
             Action::Join { ticket, name } => {
-                let invitation = PairingInvitation::from_ticket(&ticket).map_err(err)?;
+                let invitation = PairingInvitation::from_ticket(&ticket).map_err(|_| {
+                    "This is not a pairing code. Copy it again from the other device.".to_owned()
+                })?;
                 if invitation.endpoint() == *self.endpoint.id().as_bytes() {
-                    return Err("This pairing code belongs to this device. Use the code from your other device.".into());
+                    return Err("This pairing code is from this device. Use the code from the other device.".into());
                 }
                 let peer = self.address(invitation.endpoint())?;
                 let Response::Group(group) = rpc(
@@ -303,7 +305,7 @@ impl Inner {
                 )
                 .await?
                 else {
-                    return Err("invitation is unavailable or expired".into());
+                    return Err("This pairing code expired or was cancelled. Make a new one on the other device.".into());
                 };
                 // Worker validates the exact QR anchor before persisting a request.
                 self.host(Command::Join {
@@ -524,6 +526,42 @@ impl Inner {
             });
         }
     }
+    async fn offered_group(
+        &self,
+        remote: &[u8; 32],
+        ticket: Option<Ticket>,
+    ) -> Result<Option<VerifiedGroup>, String> {
+        let group = if let Some(group) = self.group() {
+            group
+        } else {
+            let Reply::State(state) = self.host(Command::State).await? else {
+                return Err("unavailable".into());
+            };
+            let Some(introduction) = state.introduction else {
+                return Ok(None);
+            };
+            introduction.verified().map_err(err)?
+        };
+        if group.permits(remote) {
+            return Ok(Some(group));
+        }
+        let Reply::State(state) = self.host(Command::State).await? else {
+            return Err("unavailable".into());
+        };
+        let (Some(invitation), Some(offered)) = (state.invitation, ticket) else {
+            return Ok(None);
+        };
+        if Sha256::digest(offered.0.as_bytes())
+            != Sha256::digest(invitation.ticket().map_err(err)?.as_bytes())
+        {
+            return Ok(None);
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(err)?
+            .as_secs();
+        Ok(invitation.check(&group, now).is_ok().then_some(group))
+    }
     async fn serve_pair(&self, connection: &Connection) -> Result<(), String> {
         let remote = *connection.remote_id().as_bytes();
         let (mut send, mut recv) = connection.accept_bi().await.map_err(err)?;
@@ -550,42 +588,10 @@ impl Inner {
                 self.install(next.clone())?;
                 Response::Group(PublicGroup::new(&next).map_err(err)?)
             }
-            Request::Group(ticket) => {
-                let group = if let Some(group) = self.group() {
-                    group
-                } else {
-                    let Reply::State(state) = self.host(Command::State).await? else {
-                        return Err("unavailable".into());
-                    };
-                    state
-                        .introduction
-                        .ok_or("no introduction")?
-                        .verified()
-                        .map_err(err)?
-                };
-                if !group.permits(&remote) {
-                    let Reply::State(state) = self.host(Command::State).await? else {
-                        return Err("unavailable".into());
-                    };
-                    let invitation = state.invitation.ok_or("no invitation")?;
-                    let offered = ticket.ok_or("invitation required")?;
-                    if Sha256::digest(offered.0.as_bytes())
-                        != Sha256::digest(invitation.ticket().map_err(err)?.as_bytes())
-                    {
-                        return Err("invalid invitation".into());
-                    }
-                    invitation
-                        .check(
-                            &group,
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .map_err(err)?
-                                .as_secs(),
-                        )
-                        .map_err(err)?;
-                }
-                Response::Group(PublicGroup::new(&group).map_err(err)?)
-            }
+            Request::Group(ticket) => match self.offered_group(&remote, ticket).await? {
+                Some(group) => Response::Group(PublicGroup::new(&group).map_err(err)?),
+                None => Response::Rejected,
+            },
             Request::Stage(request) => {
                 if request.endpoint() != remote {
                     return Err("endpoint mismatch".into());

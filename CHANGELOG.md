@@ -4,6 +4,12 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Make Devices clearer on Desktop and mobile. Naming this device
+  is its own step, each way to pair says what it does, pairing has
+  a Back button, and this device shows when it last synced. Device
+  text is shorter and plainer, and pairing codes that are mistyped,
+  expired or cancelled now say so.
+
 - Add the factorseal.dev website to the repository, built on the shared Cachix
   site kit. Its landing page has working previews of Desktop, the access
   prompt, the browser extension, and the mobile app, and its documentation is
