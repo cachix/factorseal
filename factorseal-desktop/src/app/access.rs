@@ -394,7 +394,7 @@ fn open(event: AccessEvent, cx: &mut App) {
 fn window_options(layered: bool, cx: &App) -> WindowOptions {
     super::approval_window::options(
         layered,
-        "FactorSeal — Secret access",
+        "Secret access · FactorSeal",
         "dev.factorseal.Access",
         crate::appearance::rem_size(cx) * 37.,
         cx,
@@ -1133,7 +1133,7 @@ impl Render for AccessView {
                     card = card.child(detail("Requested item", unlock_target_label(object), cx));
                 }
                 card = card.child(div().text_body().child(
-                    "Item names and contents stay encrypted until unlock. Unlocking does not grant permission to read secrets.",
+                    "Item names and contents stay encrypted while sealed. Unlocking does not give apps access to them.",
                 ));
             } else if project_coordinates(context).is_none()
                 && !context.attributes.contains_key("project")
@@ -1312,7 +1312,7 @@ impl Render for AccessView {
                         .border_1()
                         .border_color(theme.border)
                         .child(div().text_caption().text_color(theme.muted_foreground).child(
-                            "Project labels and launchers come from the requesting app. The executable's identity is verified by the operating system, and access is granted to it.",
+                            "The project name comes from the app that asks. Access is given to the program itself, which the system checks.",
                         )),
                 )
             });

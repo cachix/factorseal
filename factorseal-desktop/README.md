@@ -248,8 +248,7 @@ The first command prints the storage directory. Reports live under `diagnostics`
 in Factorseal's state directory on Linux, or its cache directory on macOS and
 Windows, outside the vault root. Set
 `FACTORSEAL_DIAGNOSTICS_DIR` to use another location. Automatic submission requires
-a configured Sentry DSN, as described below. The bug button immediately before
-“Your secrets stay here”, or Report an issue in Settings under Diagnostics once
+a configured Sentry DSN, as described below. Report an issue in the footer, or in Settings under Diagnostics once
 the vault is unsealed, opens a form for describing what happened, what was expected, and
 steps to reproduce. A nonempty description (up to 4,000 characters)
 is required. Send report submits the description with the current Desktop

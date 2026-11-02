@@ -258,7 +258,7 @@ impl SettingsView {
 
     fn save(&mut self, settings: DesktopSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.error = if settings.idle_seconds > settings.maximum_seconds {
-            Some("Idle lock timeout must not exceed maximum unlock duration.")
+            Some("The inactivity time cannot be longer than the maximum time unsealed.")
         } else if let Err(error) = appearance::update(settings, cx) {
             factorseal::diagnostics::event("desktop", "save_settings", "error");
             eprintln!("could not save desktop settings: {error:#}");
@@ -407,10 +407,14 @@ impl SettingsView {
 
     fn security_rows(&self, cx: &App) -> Vec<Div> {
         vec![
-            Self::setting("Idle lock timeout", self.select("Idle lock timeout", 4), cx),
             Self::setting(
-                "Maximum unlock duration",
-                self.select("Maximum unlock duration", 5),
+                "Seal after inactivity",
+                self.select("Seal after inactivity", 4),
+                cx,
+            ),
+            Self::setting(
+                "Maximum time unsealed",
+                self.select("Maximum time unsealed", 5),
                 cx,
             ),
         ]
@@ -433,13 +437,13 @@ impl SettingsView {
 
     fn diagnostics_text() -> [&'static str; 3] {
         [
-            "Crash reports include recent operations, timings, and backtraces. Secret values and panic messages are excluded. Local reports remain available for export.",
+            "Crash reports include recent actions, timings and backtraces, but never secret values or panic messages. Saved reports can still be exported.",
             if crate::crash_reporting::configured() {
-                "Sentry is configured. Automatic submission sends Desktop and vault-worker crash reports in the background, including pending reports after a restart."
+                "When automatic reporting is on, crash reports from Desktop and its vault helper are sent in the background, including reports saved before a restart."
             } else {
-                "Automatic submission is unavailable in this session. Reports stay local."
+                "Reports cannot be sent right now. They stay on this computer."
             },
-            "Report an issue opens a form for describing what went wrong. Send report submits your description and recent diagnostic logs, even when automatic crash reporting is off.",
+            "Report an issue opens a form where you describe what went wrong. Sending it includes recent logs, even when automatic crash reports are off.",
         ]
     }
 

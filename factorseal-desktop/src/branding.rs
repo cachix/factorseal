@@ -26,7 +26,6 @@ pub(crate) const PHONE_ASSET: &str = "factorseal-phone.svg";
 pub(crate) const PENCIL_ASSET: &str = "factorseal-pencil.svg";
 pub(crate) const GRIP_ASSET: &str = "factorseal-grip.svg";
 pub(crate) const KEYBOARD_ASSET: &str = "factorseal-keyboard.svg";
-pub(crate) const TAGLINE: &str = "Your secrets stay here.";
 
 #[derive(Clone, Copy)]
 pub(crate) enum Glyph {
