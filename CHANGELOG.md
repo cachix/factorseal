@@ -4,6 +4,12 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Make Devices clearer on Desktop and mobile. Naming this device
+  is its own step, each way to pair says what it does, pairing has
+  a Back button, and this device shows when it last synced. Device
+  text is shorter and plainer, and pairing codes that are mistyped,
+  expired or cancelled now say so.
+
 - Update Desktop to stable GPUI CE 0.3 and gpui-tray 0.3, adapting text
   shaping, selection, and window activation to the new APIs. Use the upstream
   component compatibility PR through a pinned Git dependency.

@@ -291,9 +291,11 @@ impl Inner {
             }
 
             Action::Join { ticket, name } => {
-                let invitation = PairingInvitation::from_ticket(&ticket).map_err(err)?;
+                let invitation = PairingInvitation::from_ticket(&ticket).map_err(|_| {
+                    "This is not a pairing code. Copy it again from the other device.".to_owned()
+                })?;
                 if invitation.endpoint() == *self.endpoint.id().as_bytes() {
-                    return Err("This pairing code belongs to this device. Use the code from your other device.".into());
+                    return Err("This pairing code is from this device. Use the code from the other device.".into());
                 }
                 let peer = self.address(invitation.endpoint())?;
                 let Response::Group(group) = rpc(
@@ -303,7 +305,7 @@ impl Inner {
                 )
                 .await?
                 else {
-                    return Err("invitation is unavailable or expired".into());
+                    return Err("This pairing code expired or was cancelled. Make a new one on the other device.".into());
                 };
                 // Worker validates the exact QR anchor before persisting a request.
                 self.host(Command::Join {
