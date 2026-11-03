@@ -251,6 +251,14 @@ impl DesktopView {
         let Some(row) = self.selected_section(cx) else {
             return pane;
         };
+        if matches!(row, SectionRow::Transfer { .. } | SectionRow::Backup { .. })
+            && let Some(review) = &self.import_review
+        {
+            return pane
+                .h_full()
+                .min_h_0()
+                .child(self.render_import_review(review, cx));
+        }
         let (title, detail) = self.section_row_text(row, cx);
         let content = match row {
             SectionRow::Settings(_) => {
@@ -313,11 +321,25 @@ impl DesktopView {
             .child(content)
     }
 
+    fn render_section_detail(&self, cx: &mut Context<Self>) -> Div {
+        let pane = self.render_section_pane(cx);
+        if self.import_review.is_some()
+            && matches!(
+                self.selected_section(cx),
+                Some(SectionRow::Transfer { .. } | SectionRow::Backup { .. })
+            )
+        {
+            pane
+        } else {
+            self.scroll_detail(pane)
+        }
+    }
+
     pub(super) fn render_section_layout(&self, compact: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         if compact {
             let page = if self.section_opened {
-                self.scroll_detail(self.render_section_pane(cx))
+                self.render_section_detail(cx)
             } else {
                 self.render_section_list(cx)
             };
@@ -351,7 +373,7 @@ impl DesktopView {
                     .h_full()
                     .child(crate::motion::enter(
                         format!("section-{:?}", self.selected_section(cx)),
-                        self.scroll_detail(self.render_section_pane(cx)),
+                        self.render_section_detail(cx),
                     )),
             )
     }

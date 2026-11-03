@@ -299,6 +299,7 @@ impl VaultService {
                 mut value,
                 evict_at,
                 replace_existing,
+                expected_version,
             } => {
                 require_live_manager(&state, caller, clock, valid_until)?;
                 validate_evict_at(evict_at, now)?;
@@ -309,6 +310,7 @@ impl VaultService {
                         &value,
                         evict_at,
                         replace_existing,
+                        expected_version,
                         &provenance,
                         now,
                     )?;
@@ -339,12 +341,19 @@ impl VaultService {
                             .to_vec(),
                     )?;
                 }
-                let existing = state.store().get_at(
+                let existing = state.store().export_at(
                     entry.document_kind,
                     &entry.partition,
                     &entry.address,
                     now,
                 )?;
+                if let Some(expected) = expected_version
+                    && existing.as_ref().map(|secret| {
+                        crate::VaultArchiveEntry::version_of(&secret.value, secret.expires_at)
+                    }) != Some(expected)
+                {
+                    return Err(VaultError::Conflict.into());
+                }
                 let status = if existing.is_some() && !replace_existing {
                     super::VaultEntryImportStatus::KeptExisting
                 } else {
@@ -766,6 +775,7 @@ fn import_secret_service_item(
     value: &super::WireSecret,
     evict_at: Option<u64>,
     replace_existing: bool,
+    expected_version: Option<[u8; 32]>,
     provenance: &Provenance,
     now: u64,
 ) -> VaultResult<super::VaultEntryImportStatus> {
@@ -782,6 +792,19 @@ fn import_secret_service_item(
         .items
         .iter()
         .position(|item| item.id == portable.item.id);
+    if let Some(expected) = expected_version {
+        let current = existing
+            .and_then(|position| index.items.get(position))
+            .ok_or(VaultError::Conflict)?;
+        let secret = store
+            .get_at(entry.document_kind, &entry.partition, &entry.address, now)?
+            .ok_or(VaultError::Conflict)?;
+        let encoded =
+            PortableItem::new(current.clone(), super::WireSecret::from_locked(secret)).encode()?;
+        if crate::VaultArchiveEntry::version_of(encoded.expose(), None) != expected {
+            return Err(VaultError::Conflict);
+        }
+    }
     if existing.is_some() && !replace_existing {
         return Ok(super::VaultEntryImportStatus::KeptExisting);
     }
