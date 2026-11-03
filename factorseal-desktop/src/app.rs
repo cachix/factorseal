@@ -480,10 +480,7 @@ enum SetupField {
 
 fn setup_password_error(password: &str, confirmation: &str) -> Option<(SetupField, String)> {
     if password.is_empty() {
-        return Some((
-            SetupField::Password,
-            "Choose a non-empty password.".to_owned(),
-        ));
+        return Some((SetupField::Password, "Enter a password.".to_owned()));
     }
     if let Some(error) = password_strength_error(password) {
         return Some((SetupField::Password, error));
@@ -498,9 +495,7 @@ fn setup_password_error(password: &str, confirmation: &str) -> Option<(SetupFiel
 
 const fn unlock_step_description(step: UnlockStep, biometric: bool) -> &'static str {
     match step {
-        UnlockStep::Verifying if biometric => {
-            "Complete the device authorization prompt if one appears."
-        }
+        UnlockStep::Verifying if biometric => "Confirm on this device if it asks.",
         UnlockStep::Verifying => "Checking your password with this device’s hardware.",
         UnlockStep::Starting => "Starting the vault service.",
         UnlockStep::Loading => "Loading your secrets.",
@@ -532,7 +527,7 @@ fn setup_protection_description(cx: &App) -> Div {
             ))
             .child("protect your vault. Both are required to unlock it.")
     } else {
-        h_flex().child("Choose how this device should authorize access to your secrets.")
+        h_flex().child("Choose how to unlock this vault.")
     }
 }
 
@@ -1112,7 +1107,7 @@ fn category_guidance(kind: factorseal::DocumentKind) -> CategoryGuidance {
         },
         factorseal::DocumentKind::LocalKeyring => CategoryGuidance {
             title: "Application keyrings",
-            description: "Durable, namespace-isolated credentials stored through FactorSeal's Rust API.",
+            description: "Secrets that apps save through FactorSeal's Rust API, kept apart per app.",
             instructions: const {
                 &[
                     step(
@@ -1127,7 +1122,7 @@ fn category_guidance(kind: factorseal::DocumentKind) -> CategoryGuidance {
         },
         factorseal::DocumentKind::Authorization => CategoryGuidance {
             title: "Access",
-            description: "Review applications requesting or holding access to FactorSeal secrets.",
+            description: "See which apps ask for or have access to your secrets.",
             instructions: const {
                 &[
                     command_step("List permissions.", "factorseal permissions list"),
@@ -1594,13 +1589,7 @@ impl DesktopView {
                     .border_color(theme.border)
                     .text_caption()
                     .text_color(theme.muted_foreground)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(self.render_report_issue_button(cx))
-                            .child(branding::TAGLINE),
-                    )
+                    .child(self.render_report_issue_button(cx))
                     .child(link(
                         "footer-security-link",
                         security_label,
@@ -1613,10 +1602,10 @@ impl DesktopView {
     fn render_report_issue_button(&self, cx: &mut Context<Self>) -> Button {
         button("report-issue")
             .icon(gpui_component::Icon::default().path(branding::BUG_ASSET))
+            .label("Report an issue")
             .ghost()
             .small()
             .disabled(self.issue_report_busy)
-            .tooltip("Report an issue")
             .on_click(cx.listener(|view, _, window, cx| {
                 view.report_issue(window, cx);
             }))
@@ -2790,11 +2779,11 @@ impl DesktopView {
             "Vault is sealed"
         };
         let description = match &self.snapshot {
-            Snapshot::Unlocking { group, step, .. } => unlock_step_description(
+            Snapshot::Unlocking { group, step, .. } => Some(unlock_step_description(
                 *step,
                 group.requires(factorseal::UnlockFactorKind::Biometric),
-            ),
-            _ => "Unlock to make your secrets available to authorized applications.",
+            )),
+            _ => None,
         };
         let password_field = if unlocking {
             // Preserve the form's height without leaving an editable secret field.
@@ -2818,14 +2807,16 @@ impl DesktopView {
                     .pb_2()
                     .child(crate::unlock_animation::vault_mark(&theme, unlocking))
                     .child(div().text_title().font_semibold().child(title))
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .text_center()
-                            .text_lead()
-                            .min_h(rems(40. / 16.))
-                            .child(description),
-                    ),
+                    .when_some(description, |header, description| {
+                        header.child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .text_center()
+                                .text_lead()
+                                .min_h(rems(40. / 16.))
+                                .child(description),
+                        )
+                    }),
             )
             .when(has_multiple_groups, |element| {
                 element
@@ -3453,9 +3444,9 @@ impl DesktopView {
         if self.transfer_use_recipient {
             panel = panel
                 .child(div().whitespace_normal().child(if is_import {
-                    "Choose the private age identity matching the recipient used for this export. The key file must be unencrypted and private to your account."
+                    "Choose the private age key that matches this export. The key file must not be encrypted, and only your account may read it."
                 } else {
-                    "Choose the recipient's public age post-quantum key. Only the matching private key can decrypt this export. Compatible with age 1.3 and later."
+                    "Choose the public age key you are sending to. Only its private key can open the file. Needs age 1.3 or later."
                 }))
                 .child(
                     button("choose-transfer-key")
@@ -3483,7 +3474,7 @@ impl DesktopView {
             (false, true) => {
                 "Bring Personal credentials from another password manager or an encrypted transfer file."
             }
-            (false, false) => "Move Personal credentials to another device or password manager.",
+            (false, false) => "Export your personal secrets to another password manager.",
         };
         let format = self.transfer_format;
         let use_recipient = format == TransferFormat::CxfAge && self.transfer_use_recipient;
@@ -3576,11 +3567,11 @@ impl DesktopView {
                             .whitespace_normal()
                             .text_color(theme.muted_foreground)
                             .child(if format == TransferFormat::CxfAge {
-                                "Uses the open CXF credential format with age encryption. The receiving manager needs CXF support and may require a separate decryption step."
+                                "Uses the CXF format, encrypted with age. The other password manager must support CXF and may ask you to decrypt the file first."
                             } else if is_import {
                                 "Enter the passphrase used when this backup was created. Restored data is protected by this device's vault keys."
                             } else {
-                                "Includes durable vault items, but not provider caches, application authorizations, history, or device keys. Choose a separate passphrase for this portable backup."
+                                "Includes your saved items, but not provider caches, app permissions, history or device keys. Use a passphrase that is different from your vault password."
                             }),
                     )
                     .when(format == TransferFormat::CxfAge, |panel| panel.child(self.render_cxf_key_options(is_import, cx)))
@@ -3609,7 +3600,7 @@ impl DesktopView {
                             .child(if is_import {
                                 "Personal items retain typed fields and sections. Unknown source data is kept with the encrypted item. 1PUX files are imported as separate document items."
                             } else {
-                                "Only Personal secrets are exported. Password-manager interchange files are plaintext and are not protected by FactorSeal after they are written."
+                                "Only personal secrets are exported. The file is not encrypted, so anyone who gets it can read them."
                             }),
                     )
                     .when(!is_import, |panel| {
@@ -3902,13 +3893,6 @@ impl DesktopView {
                             .text_title()
                             .font_semibold()
                             .child("Create your vault"),
-                    )
-                    .child(
-                        div()
-                            .text_center()
-                            .text_color(theme.muted_foreground)
-                            .text_lead()
-                            .child("A local home for your secrets, applications, and projects."),
                     ),
             )
             .child(
@@ -4007,13 +3991,7 @@ impl DesktopView {
                 .text_center()
                 .child(brand_mark(56., theme.foreground))
                 .child(Spinner::new().with_size(Size::Large).color(theme.primary))
-                .child(div().text_title().font_semibold().child("Sealing vault…"))
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(theme.muted_foreground)
-                        .child("Closing access and removing vault keys from memory."),
-                ),
+                .child(div().text_title().font_semibold().child("Sealing vault…")),
             Snapshot::Unsealed { .. } => div(),
             Snapshot::Error(error) => vault_card(&theme)
                 .items_center()

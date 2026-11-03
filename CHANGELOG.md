@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Write Desktop and mobile text in plain words and drop the tagline
+  from the footer. The Desktop footer now has a labeled Report an
+  issue button.
+
 - Update Desktop to stable GPUI CE 0.3 and gpui-tray 0.3, adapting text
   shaping, selection, and window activation to the new APIs. Use the upstream
   component compatibility PR through a pinned Git dependency.

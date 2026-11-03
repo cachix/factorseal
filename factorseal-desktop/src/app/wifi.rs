@@ -25,7 +25,7 @@ impl DesktopView {
             }
             let theme = cx.theme();
             let mut content = v_flex().gap_3()
-                .child("Move saved passwords from NetworkManager and your current keyring into FactorSeal. Use this when FactorSeal is your only Wi-Fi secret agent. Existing connections stay active; one-time passwords are left unchanged.")
+                .child("Move saved passwords from NetworkManager and your current keyring into FactorSeal. Use this when FactorSeal is your only Wi-Fi secret agent. Your connections keep working, and one-time passwords are not touched.")
                 .child(button("migrate-wifi-passwords")
                     .primary()
                     .icon(Glyph::Transfer)
@@ -94,7 +94,7 @@ impl DesktopView {
             let result = receiver
                 .await
                 .map_err(|_| {
-                    "Wi-Fi migration stopped. Verified copies remain in the vault; retry to finish."
+                    "Wi-Fi migration stopped. Copies already checked stay in the vault. Try again to finish."
                         .to_owned()
                 })
                 .and_then(|result| result.map_err(|error| error.to_string()));

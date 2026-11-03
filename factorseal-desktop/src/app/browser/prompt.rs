@@ -144,7 +144,7 @@ fn open(request: &Prompt, snapshot: &Snapshot, cx: &mut App) {
     let options = |layered, cx: &App| {
         super::super::approval_window::options(
             layered,
-            "FactorSeal — Browser access",
+            "Browser access · FactorSeal",
             "dev.factorseal.BrowserAccess",
             px(640.),
             cx,
