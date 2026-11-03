@@ -155,6 +155,7 @@ impl DesktopView {
         let runtime = Arc::clone(&self.runtime);
         let refresh = matches!(action, Action::Refresh);
         let approved = matches!(action, Action::Approve(_));
+        let cancelled = matches!(action, Action::Cancel);
         let starts = matches!(action, Action::Invite(_) | Action::Join { .. });
         cx.spawn(async move |view, cx| {
             let result = smol::unblock(move || {
@@ -176,6 +177,9 @@ impl DesktopView {
                         }
                         if approved {
                             view.device_pairing = None;
+                        }
+                        if cancelled && view.device_pairing.is_some() {
+                            view.device_pairing = Some(PairingScreen::Choose);
                         }
                         view.devices = devices;
                     }
@@ -229,7 +233,10 @@ impl DesktopView {
     fn can_cancel_pairing(&self) -> bool {
         !self.devices_busy || self.devices.state.request.is_none() || self.pairing_approved_here()
     }
-    fn withdraw_pairing(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn cancel_device_pairing(&mut self, cx: &mut Context<Self>) {
+        if !self.can_cancel_pairing() {
+            return;
+        }
         let state = &self.devices.state;
         let pending = state.invitation.is_some() || state.request.is_some();
         if !self.pairing_approved_here() {
@@ -239,12 +246,6 @@ impl DesktopView {
                 self.device_action(Action::Cancel, cx);
             }
         }
-    }
-    pub(super) fn cancel_device_pairing(&mut self, cx: &mut Context<Self>) {
-        if !self.can_cancel_pairing() {
-            return;
-        }
-        self.withdraw_pairing(cx);
         self.close_device_pairing(cx);
     }
     fn can_go_back_in_pairing(&self, screen: PairingScreen) -> bool {
@@ -252,11 +253,17 @@ impl DesktopView {
         screen != PairingScreen::Choose && state.request.is_none() && !state.joining
     }
     fn back_to_pairing_choice(&mut self, cx: &mut Context<Self>) {
-        self.withdraw_pairing(cx);
+        if self.devices_busy {
+            return;
+        }
         self.pairing_ticket.update(cx, SecretInputState::clear);
         self.devices_notice = None;
-        self.device_pairing = Some(PairingScreen::Choose);
-        cx.notify();
+        if self.devices.state.invitation.is_some() {
+            self.device_action(Action::Cancel, cx);
+        } else {
+            self.device_pairing = Some(PairingScreen::Choose);
+            cx.notify();
+        }
     }
     fn paste_pairing_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.device_pairing = Some(PairingScreen::Paste);
@@ -631,6 +638,7 @@ impl DesktopView {
                                         .ghost()
                                         .icon(IconName::ChevronLeft)
                                         .label("Back")
+                                        .disabled(self.devices_busy)
                                         .on_click(cx.listener(|view, _, _, cx| {
                                             view.back_to_pairing_choice(cx);
                                         })),

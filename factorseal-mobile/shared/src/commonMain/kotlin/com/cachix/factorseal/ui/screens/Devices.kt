@@ -429,6 +429,7 @@ private fun PairingDialog(
         request: Request,
         done: () -> Unit = {},
     ) {
+        if (busy) return
         busy = true
         problem = null
         scope.launch {
@@ -450,10 +451,9 @@ private fun PairingDialog(
                 Button(
                     stringResource(Res.string.back),
                     onClick = {
-                        if (invitation != null) scope.launch { runCatching { app.syncing(Request.SyncCancel) } }
-                        problem = null
-                        onScreen(Pairing.Choose)
+                        act(Request.SyncCancel) { onScreen(Pairing.Choose) }
                     },
+                    enabled = !busy,
                     variant = Variant.Ghost,
                     icon = Res.drawable.icon_chevron_left,
                 )
