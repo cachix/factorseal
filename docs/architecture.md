@@ -313,10 +313,9 @@ and digest from caller-declared project, profile, base directory, and reason.
 They require a terminal and never approve by default. A vault with multiple
 unlock groups asks which one to use only after the user chooses Approve.
 
-Factorseal currently pins the SecretSpec IPC API to an unpublished Git revision.
-Release packaging still depends on publishing and pinning that API, then
-passing installed end-to-end conformance on Linux,
-macOS, and Windows.
+Factorseal pins the SecretSpec IPC API and installed conformance client to the
+stable v0.21.1 release commit. Release packaging still depends on passing
+installed end-to-end conformance on Linux, macOS, and Windows.
 
 ### Linux Secret Service
 

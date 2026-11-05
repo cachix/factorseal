@@ -9615,8 +9615,8 @@ dependencies = [
 
 [[package]]
 name = "secretspec-ipc"
-version = "0.20.0"
-source = "git+https://github.com/cachix/secretspec.git?rev=b809ee66bd78d466227e805721ac9efcbcabae1f#b809ee66bd78d466227e805721ac9efcbcabae1f"
+version = "0.21.1"
+source = "git+https://github.com/cachix/secretspec.git?rev=5a8927d2b800c604fee72970ffbd137c57820fd5#5a8927d2b800c604fee72970ffbd137c57820fd5"
 dependencies = [
  "async-trait",
  "serde",

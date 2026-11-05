@@ -130,8 +130,7 @@ The shared core, native transports, lifecycle monitors, CLI, Secret Service,
 SecretSpec endpoint, developer package builders, and physical-host acceptance
 runners are implemented. Before an MVP release, Factorseal still needs:
 
-- the SecretSpec IPC API published and installed end-to-end conformance on all
-  desktop targets;
+- installed SecretSpec end-to-end conformance on all desktop targets;
 - signed and notarized release artifacts;
 - native lifecycle and physical TPM/Secure Enclave acceptance across the
   release matrix, including Windows prompt and modern Windows Hello behavior;
