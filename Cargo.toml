@@ -7,11 +7,6 @@ rust-version = "1.91"
 license = "Apache-2.0"
 repository = "https://github.com/cachix/factorseal"
 
-# Matching upstream source for the installed client and conformance tooling.
-[package.metadata.secretspec]
-git = "https://github.com/cachix/secretspec.git"
-rev = "5a8927d2b800c604fee72970ffbd137c57820fd5"
-
 [workspace]
 members = [
     "crates/hardwareseal",

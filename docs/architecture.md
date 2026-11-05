@@ -314,8 +314,9 @@ They require a terminal and never approve by default. A vault with multiple
 unlock groups asks which one to use only after the user chooses Approve.
 
 Factorseal uses the published secretspec-ipc 0.21.1 crate from crates.io. The
-installed client and conformance tooling use the matching v0.21.1 release commit. Release packaging still depends on passing
-installed end-to-end conformance on Linux, macOS, and Windows.
+installed client and conformance tooling derive the matching release tag from
+the crate version. Release packaging still depends on passing installed
+end-to-end conformance on Linux, macOS, and Windows.
 
 ### Linux Secret Service
 

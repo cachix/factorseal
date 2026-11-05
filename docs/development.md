@@ -54,8 +54,8 @@ provides `nixosModules.factorseal` and a NixOS VM test with a virtual TPM.
 SecretSpec provider tests exercise every advertised provider method over the
 wire, including convention and native addresses, missing values, and rejected
 cross-project access. Linux CI also runs upstream transport conformance against
-the built Factorseal executable using the matching release revision in
-`package.metadata.secretspec` in `Cargo.toml`:
+the built Factorseal executable using the release tag matching the
+`secretspec-ipc` version in `Cargo.toml`:
 
 ```console
 $ devenv shell -- cargo build -p factorseal --all-features --bins

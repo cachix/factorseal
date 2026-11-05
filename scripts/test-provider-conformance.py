@@ -17,20 +17,24 @@ def run(*args, **kwargs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--endpoint", required=True, type=pathlib.Path)
-    parser.add_argument("--source", type=pathlib.Path, help="existing pinned SecretSpec checkout")
+    parser.add_argument("--source", type=pathlib.Path, help="existing SecretSpec checkout with the matching release tag")
     args = parser.parse_args()
     endpoint = args.endpoint.resolve(strict=True)
-    upstream = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["metadata"]["secretspec"]
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["dependencies"]["secretspec-ipc"]["version"]
+    tag = f"v{version}"
     with tempfile.TemporaryDirectory(prefix="factorseal-conformance-") as temporary:
         temporary = pathlib.Path(temporary)
         source = args.source.resolve() if args.source else temporary / "secretspec"
         if not args.source:
             run("git", "init", "--quiet", str(source))
-            run("git", "-C", str(source), "fetch", "--quiet", "--depth=1", upstream["git"], upstream["rev"])
-            run("git", "-C", str(source), "checkout", "--quiet", "--detach", "FETCH_HEAD")
+            run("git", "-C", str(source), "fetch", "--quiet", "--depth=1", "https://github.com/cachix/secretspec.git",
+                f"refs/tags/{tag}:refs/tags/{tag}")
+            run("git", "-C", str(source), "checkout", "--quiet", "--detach", tag)
         revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-        if revision != upstream["rev"]:
-            parser.error("SecretSpec checkout does not match Cargo.toml's conformance revision")
+        release_revision = subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", f"refs/tags/{tag}^{{commit}}"], text=True).strip()
+        if revision != release_revision:
+            parser.error("SecretSpec checkout does not match the dependency's release tag")
         target = ROOT / "target" / "secretspec-conformance"
         run("cargo", "build", "--locked", "--target-dir", str(target),
             "-p", "secretspec-ipc-conformance", "--bin", "secretspec-ipc-conformance",

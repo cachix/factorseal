@@ -1,23 +1,25 @@
 {
   lib,
   rustPlatform,
-  fetchurl,
+  fetchFromGitHub,
 }:
 
 let
   manifest = builtins.fromTOML (builtins.readFile ../Cargo.toml);
-  rev = manifest.package.metadata.secretspec.rev;
+  version = manifest.dependencies.secretspec-ipc.version;
 in
 rustPlatform.buildRustPackage {
   pname = "secretspec";
-  version = "0.21.1";
+  inherit version;
 
   # Keep the installed client on the release matching Factorseal's
   # crates.io Secret Provider Protocol dependency. nixpkgs 0.18 predates external
   # provider discovery and cannot exercise this integration.
-  src = fetchurl {
-    url = "https://github.com/cachix/secretspec/archive/${rev}.tar.gz";
-    hash = "sha256-lohAGcwL3DdKy7bkCx0guyjDW59Ses2aKup+zI5UXUo=";
+  src = fetchFromGitHub {
+    owner = "cachix";
+    repo = "secretspec";
+    tag = "v${version}";
+    hash = "sha256-8OC1WS8VWTSwUJlT/qWx9CCPmO90G2OWJxEKZGUgXqM=";
   };
 
   cargoHash = "sha256-48k3UKeT8qjRRLrf5yqmxULIynD6FgXiW063VEoTqmU=";
