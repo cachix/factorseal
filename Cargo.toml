@@ -191,7 +191,7 @@ tempfile = "3.20.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = { version = "0.5.0", default-features = false, optional = true }
 landlock = { version = "0.4.7", optional = true }
-zbus = { version = "6.0.0", default-features = false, features = ["tokio", "proxy", "service", "object-manager", "tracing"], optional = true }
+zbus = { version = "6.2.1", default-features = false, features = ["tokio", "proxy", "service", "object-manager", "tracing"], optional = true }
 nix = { version = "0.31.3", features = ["socket", "user", "process", "resource", "poll"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -277,7 +277,7 @@ opt-level = 3
 
 [patch.crates-io]
 # zbus 6 port: https://github.com/bilelmoussaoui/ashpd/pull/491
-# Backported to retain the stable 0.13 portal APIs.
+# Retained for GPUI and oo7, which still require the 0.13 portal APIs.
 ashpd = { git = "https://github.com/domenkozar/ashpd.git", rev = "718c60e4786923916860daacec69295be7cef8bb" }
 # Windows route discovery without WMI: https://github.com/n0-computer/net-tools/pull/226
 netwatch = { git = "https://github.com/domenkozar/net-tools.git", rev = "0b252c90a768cae2aacba8d304e1de5a4ed062db" }

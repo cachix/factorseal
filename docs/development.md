@@ -79,17 +79,18 @@ its dedicated thread so async embedders do not enter a nested Tokio runtime.
 The desktop activation poll uses an async timer, and test services run on a
 runtime that remains active between synchronous probes.
 
-The shared ashpd 0.13.13 dependency now uses a pinned backport of the
+Desktop's settings watcher and screenshot capture use released ashpd 0.14.0
+with zbus 6.2.1. GPUI's portals and oo7's Secret portal still require ashpd
+0.13.13, so that version retains the pinned backport of the
 [zbus 6 migration](https://github.com/bilelmoussaoui/ashpd/pull/491) in
-`domenkozar/ashpd`. Desktop's settings watcher, GPUI's portals, and oo7's
-Secret portal all use that source. The backport retains the stable 0.13.13
-API and compatibility fixes while the upstream migration targets main.
-The `async-io` feature now selects zbus's built-in runtime; it remains usable
+`domenkozar/ashpd`. Remove the patch after those parents support ashpd 0.14.
+The `async-io` feature selects zbus's built-in runtime; it remains usable
 from GPUI's background executor. Its native I/O requires rustix 1.1.5, which
 is also selected in the fuzz lockfile.
 
 Stable GPUI CE 0.3 uses oo7 0.6 with zbus 5. The previous GPUI and oo7 Git
-patches are removed; migrating oo7 to zbus 6 remains separate upstream work.
+patches are removed. oo7 0.7 already uses zbus 6; adoption in GPUI CE is
+tracked by [PR #388](https://github.com/gpui-ce/gpui-ce/pull/388).
 Desktop does not call GPUI's credential-storage APIs. gpui-tray 0.3 uses zbus 6.
 See [GPUI CE integration](gpui-ce.md) for the component compatibility Git pin
 and its validation limits.
@@ -99,10 +100,10 @@ Desktop still pulls in zbus 5 and the unmaintained standalone `zvariant`,
 
 | Path | Remaining migration |
 | --- | --- |
-| GPUI CE 0.3 → oo7 0.6 | Complete the upstream oo7 zbus 6 migration before updating GPUI's credential-storage dependency. |
-| rfd 0.15.4 → ashpd 0.11.1 | Migrate the older file-dialog portal path. The shared ashpd 0.13.13 path already uses zbus 6. |
+| GPUI CE 0.3 → oo7 0.6 | Adopt a GPUI CE release containing [PR #388](https://github.com/gpui-ce/gpui-ce/pull/388), which upgrades oo7 to 0.7 and ashpd to 0.14. |
+| rfd 0.15.4 → ashpd 0.11.1 | Replace the file-dialog integration separately; retain the existing rfd version for now. |
 | GPUI CE → accesskit_unix 0.22.1 → AT-SPI | Migrate accesskit_atspi_common, atspi-common, atspi-proxies, and zbus-lockstep/XML tooling together. |
-| GPUI CE → notify-rust 4.18.0 | Migrate notification calls to zbus 6. |
+| GPUI CE → notify-rust 4.18.2 | Migrate notification calls to zbus 6. |
 
 Use these commands to inspect the remaining paths after each parent upgrade:
 

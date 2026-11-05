@@ -4,6 +4,8 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Update Desktop portals to ashpd 0.14 and D-Bus integration to zbus 6.2.
+
 - Update Desktop to stable GPUI CE 0.3 and gpui-tray 0.3, adapting text
   shaping, selection, and window activation to the new APIs. Use the upstream
   component compatibility PR through a pinned Git dependency.
