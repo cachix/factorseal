@@ -52,9 +52,11 @@ are also removed from the application theme definition.
 
 GPUI's stable Linux platform uses oo7 0.6 with zbus 5. FactorSeal's own D-Bus
 interfaces, the ashpd patch, and gpui-tray use zbus 6. Desktop does not call
-GPUI's credential-storage methods. Moving oo7 to zbus 6 is a separate upstream
-migration and no longer requires a GPUI fork here. The component asset HTTP
-update removes rustls-pemfile and its obsolete maintenance exception.
+GPUI's credential-storage methods. oo7 0.7 already uses zbus 6;
+[GPUI CE PR #388](https://github.com/gpui-ce/gpui-ce/pull/388) updates GPUI's
+oo7 and ashpd requirements. Adopt a compatible release after that PR merges.
+The component asset HTTP update removes rustls-pemfile and its obsolete
+maintenance exception.
 
 ## Validation
 
