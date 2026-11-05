@@ -16,5 +16,4 @@
   "automerge-0.11.0" = "sha256-RRo6hDFB4JKGHOkG0aknmOnAc6pHHlw7Qjpe+EZ8juk=";
   "hexane-1.0.0-alpha.5" = "sha256-RRo6hDFB4JKGHOkG0aknmOnAc6pHHlw7Qjpe+EZ8juk=";
   "netwatch-0.19.3" = "sha256-ENNj4P7OSxA6no19kRoJK/eBUneLLhkAQgAa0ZhyrEU=";
-  "secretspec-ipc-0.21.1" = "sha256-8OC1WS8VWTSwUJlT/qWx9CCPmO90G2OWJxEKZGUgXqM=";
 }

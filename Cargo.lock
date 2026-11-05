@@ -9616,7 +9616,8 @@ dependencies = [
 [[package]]
 name = "secretspec-ipc"
 version = "0.21.1"
-source = "git+https://github.com/cachix/secretspec.git?rev=5a8927d2b800c604fee72970ffbd137c57820fd5#5a8927d2b800c604fee72970ffbd137c57820fd5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5b9989b8ab6839adfcf5910a6cb193f9e6097a9de4e8507ebec555caaca967d"
 dependencies = [
  "async-trait",
  "serde",

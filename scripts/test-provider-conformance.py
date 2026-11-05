@@ -20,17 +20,17 @@ def main():
     parser.add_argument("--source", type=pathlib.Path, help="existing pinned SecretSpec checkout")
     args = parser.parse_args()
     endpoint = args.endpoint.resolve(strict=True)
-    dependency = tomllib.loads((ROOT / "Cargo.toml").read_text())["dependencies"]["secretspec-ipc"]
+    upstream = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["metadata"]["secretspec"]
     with tempfile.TemporaryDirectory(prefix="factorseal-conformance-") as temporary:
         temporary = pathlib.Path(temporary)
         source = args.source.resolve() if args.source else temporary / "secretspec"
         if not args.source:
             run("git", "init", "--quiet", str(source))
-            run("git", "-C", str(source), "fetch", "--quiet", "--depth=1", dependency["git"], dependency["rev"])
+            run("git", "-C", str(source), "fetch", "--quiet", "--depth=1", upstream["git"], upstream["rev"])
             run("git", "-C", str(source), "checkout", "--quiet", "--detach", "FETCH_HEAD")
         revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-        if revision != dependency["rev"]:
-            parser.error("SecretSpec checkout does not match Cargo.toml's pinned revision")
+        if revision != upstream["rev"]:
+            parser.error("SecretSpec checkout does not match Cargo.toml's conformance revision")
         target = ROOT / "target" / "secretspec-conformance"
         run("cargo", "build", "--locked", "--target-dir", str(target),
             "-p", "secretspec-ipc-conformance", "--bin", "secretspec-ipc-conformance",

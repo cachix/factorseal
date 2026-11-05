@@ -6,14 +6,14 @@
 
 let
   manifest = builtins.fromTOML (builtins.readFile ../Cargo.toml);
-  rev = manifest.dependencies.secretspec-ipc.rev;
+  rev = manifest.package.metadata.secretspec.rev;
 in
 rustPlatform.buildRustPackage {
   pname = "secretspec";
   version = "0.21.1";
 
-  # Keep the installed client on the exact revision used by Factorseal's
-  # Secret Provider Protocol dependency. nixpkgs 0.18 predates external
+  # Keep the installed client on the release matching Factorseal's
+  # crates.io Secret Provider Protocol dependency. nixpkgs 0.18 predates external
   # provider discovery and cannot exercise this integration.
   src = fetchurl {
     url = "https://github.com/cachix/secretspec/archive/${rev}.tar.gz";
