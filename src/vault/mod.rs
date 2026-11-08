@@ -881,7 +881,7 @@ impl SecretAddress {
 
 #[cfg(any(
     feature = "vault-store",
-    all(feature = "key-protection", feature = "vault-client")
+    all(feature = "transfer", feature = "vault-client")
 ))]
 pub(crate) fn import_entry_version(value: &[u8], evict_at: Option<u64>) -> [u8; 32] {
     let mut digest = Sha256::new();
