@@ -1,0 +1,116 @@
+@font-face {
+  font-display: swap;
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400;
+  src: url('../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf') format('truetype');
+}
+
+@font-face {
+  font-display: swap;
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 500 700;
+  src: url('../../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf') format('truetype');
+}
+
+@font-face {
+  font-display: swap;
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  src: url('../../../assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf') format('truetype');
+}
+
+:root {
+  --fs-canvas: #f7f3ea;
+  --fs-surface: #fffcf6;
+  --fs-raised: #efeae1;
+  --fs-ink: #151515;
+  --fs-quiet: #68635b;
+  --fs-border: #d9d2c7;
+  --fs-secondary: #e9e3d9;
+  --fs-secondary-hover: #ddd6ca;
+  --fs-selection: #d7d0c5;
+  --fs-success: #2f6b4f;
+  --fs-danger: #a33d32;
+  --fs-warning: #a15c22;
+  --fs-primary-hover: #2b2b29;
+  --fs-primary-active: #000000;
+  --sl-font: 'IBM Plex Sans', system-ui, sans-serif;
+  --sl-font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --sl-color-accent-low: var(--fs-secondary);
+  --sl-color-accent: var(--fs-ink);
+  --sl-color-accent-high: var(--fs-ink);
+  --sl-color-text-accent: var(--fs-ink);
+  --sl-color-bg-accent: var(--fs-ink);
+  --sl-color-bg: var(--fs-canvas);
+  --sl-color-bg-nav: var(--fs-canvas);
+  --sl-color-bg-sidebar: var(--fs-canvas);
+  --sl-color-hairline-light: var(--fs-border);
+  --sl-color-hairline: var(--fs-border);
+  --sl-color-hairline-shade: var(--fs-selection);
+  --csk-button-primary-background: var(--fs-ink);
+  --csk-button-primary-color: var(--fs-canvas);
+  --csk-button-radius: 0.4375rem;
+  --csk-radius: 0.75rem;
+  --csk-landing-glow-primary: transparent;
+  --csk-landing-glow-secondary: transparent;
+}
+
+:root[data-theme='light'] {
+  --sl-color-white: #151515;
+  --sl-color-gray-1: #26241f;
+  --sl-color-gray-2: #3d3a35;
+  --sl-color-gray-3: #68635b;
+  --sl-color-gray-4: #9b958b;
+  --sl-color-gray-5: #d9d2c7;
+  --sl-color-gray-6: #efeae1;
+  --sl-color-gray-7: #f3eee5;
+  --sl-color-black: #f7f3ea;
+}
+
+:root[data-theme='dark'] {
+  --fs-canvas: #151515;
+  --fs-surface: #1d1d1b;
+  --fs-raised: #242421;
+  --fs-ink: #f7f3ea;
+  --fs-quiet: #b9b5ac;
+  --fs-border: #3b3934;
+  --fs-secondary: #292825;
+  --fs-secondary-hover: #34322e;
+  --fs-selection: #3c3933;
+  --fs-success: #81c995;
+  --fs-danger: #f28b82;
+  --fs-primary-hover: #e8e3da;
+  --fs-primary-active: #d8d2c8;
+  --sl-color-white: #f7f3ea;
+  --sl-color-gray-1: #e8e3da;
+  --sl-color-gray-2: #cfcac0;
+  --sl-color-gray-3: #b9b5ac;
+  --sl-color-gray-4: #85817a;
+  --sl-color-gray-5: #3b3934;
+  --sl-color-gray-6: #242421;
+  --sl-color-gray-7: #1d1d1b;
+  --sl-color-black: #151515;
+}
+
+:where(a, button, input, select, summary):focus-visible {
+  outline: 2px solid var(--sl-color-text-accent);
+  outline-offset: 4px;
+}
+
+::selection {
+  background: var(--fs-selection);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

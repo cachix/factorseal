@@ -4,6 +4,11 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Add the factorseal.dev website to the repository, built on the shared Cachix
+  site kit. Its landing page has working previews of Desktop, the access
+  prompt, the browser extension, and the mobile app, and its documentation is
+  rendered from the guides in this repository.
+
 - Update Desktop portals to ashpd 0.14 and D-Bus integration to zbus 6.2.
 
 - Update Desktop to stable GPUI CE 0.3 and gpui-tray 0.3, adapting text

@@ -1,0 +1,59 @@
+---
+import Mark from '../../Mark.astro';
+import Icon from '../Icon.astro';
+import NavItem from './NavItem.astro';
+
+interface Props {
+  personal: number;
+  keyring: number;
+  active?: string;
+  targets?: string[];
+}
+
+const { personal, keyring, active = 'personal', targets = [] } = Astro.props;
+const groups = [
+  {
+    label: 'SecretSpec',
+    items: [
+      { id: 'projects', icon: 'folder', label: 'Projects', count: 0 },
+      { id: 'cache', icon: 'memory-stick', label: 'Provider cache', count: 0 },
+    ],
+  },
+  {
+    label: 'System integrations',
+    expandable: true,
+    items: [
+      { id: 'wifi', icon: 'globe', label: 'Wi-Fi passwords', count: 0 },
+      { id: 'keyring', icon: 'fs:key', label: 'System keyring', count: keyring },
+      { id: 'app-keyrings', icon: 'layout-dashboard', label: 'Application keyrings', count: 0 },
+    ],
+  },
+];
+const pages = [
+  { id: 'devices', icon: 'network', label: 'Devices' },
+  { id: 'transfer', icon: 'fs:transfer', label: 'Transfer credentials' },
+  { id: 'backup', icon: 'hard-drive', label: 'Back up vault' },
+  { id: 'settings', icon: 'settings', label: 'Settings' },
+];
+---
+
+<aside class="fs-sidebar">
+  <div class="fs-brand"><Mark class="fs-brand__mark" />FactorSeal</div>
+  <div class="fs-search"><Icon name="fs:search" /><span>Search secrets</span></div>
+  <div class="fs-nav">
+    <NavItem id="personal" icon="user" label="Personal secrets" count={personal} active={active === 'personal'} interactive={targets.includes('personal')} />
+    {groups.map(({ label, expandable, items }) => (
+      <div class="fs-nav__group">
+        <span class="fs-nav__heading">{label}{expandable && <Icon name="chevron-right" />}</span>
+        {items.map(({ id, icon, label, count }) => <NavItem {id} {icon} {label} {count} active={active === id} interactive={targets.includes(id)} />)}
+      </div>
+    ))}
+  </div>
+  <div class="fs-nav fs-nav--pages">
+    {pages.map(({ id, icon, label }) => <NavItem {id} {icon} {label} active={active === id} interactive={targets.includes(id)} page />)}
+  </div>
+  <div class="fs-sidebar__footer">
+    <span class="fs-status"><i></i>Unsealed</span>
+    <slot name="seal"><span class="fs-button fs-button--small"><Icon name="fs:lock" />Seal</span></slot>
+  </div>
+</aside>

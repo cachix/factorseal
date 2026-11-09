@@ -1,0 +1,193 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import Button from '@cachix/site-kit/ui/Button.astro';
+import ButtonGroup from '@cachix/site-kit/ui/ButtonGroup.astro';
+import LandingHero from '@cachix/site-kit/ui/LandingHero.astro';
+import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
+import AccessDemo from '../components/landing/AccessDemo.astro';
+import BrowserDemo from '../components/landing/BrowserDemo.astro';
+import HeroDesktop from '../components/landing/HeroDesktop.astro';
+import Icon from '../components/landing/Icon.astro';
+import SyncDemo from '../components/landing/SyncDemo.astro';
+import { repository } from '../loaders/repo-docs';
+import android from '../assets/platforms/android.svg?raw';
+import linux from '../assets/platforms/linux.svg?raw';
+import macos from '../assets/platforms/macos.svg?raw';
+import windows from '../assets/platforms/windows.svg?raw';
+import { inlineSvg } from '../lib/svg';
+import '../styles/app.css';
+import '../styles/landing.css';
+
+const lead = 'A password manager that keeps your vault on your own devices, locked by their security chip. No account, no cloud vault, no subscription.';
+const releases = `${repository}/releases`;
+const platforms = [
+  { name: 'Linux', icon: linux },
+  { name: 'macOS', icon: macos },
+  { name: 'Windows', icon: windows },
+  { name: 'Android', icon: android },
+  { name: 'iOS', icon: macos },
+];
+const downloads = platforms.filter(({ name }) => name !== 'iOS');
+const quickstart = [
+  { title: 'Create your vault', body: 'Open FactorSeal and choose how it unlocks: a password, biometrics, or both.' },
+  { title: 'Bring your logins', body: 'Import them from Bitwarden, 1Password, or KeePass under Transfer credentials.' },
+  { title: 'Pair your phone', body: 'Open Devices, show a pairing code, and scan it with the mobile app.' },
+];
+const reasons = [
+  { icon: 'cloud-off', title: 'No account, no cloud', body: 'There is no FactorSeal account and no server that stores your vault. Your computer and phone sync with each other, encrypted end to end.' },
+  { icon: 'fs:lock', title: 'A stolen copy is useless', body: 'Your vault opens only with your password and the security chip inside your device. A copy taken from your computer cannot be opened anywhere else.' },
+  { icon: 'fs:key', title: 'Apps get one login, not your vault', body: 'The browser extension and other apps never hold your vault. They ask FactorSeal for one login, and you choose what they get.' },
+];
+const everyday = [
+  { icon: 'fs:card', title: 'Logins, cards, and notes', body: 'Also identities, SSH keys, passports, and bank accounts.' },
+  { icon: 'fs:clock', title: 'One-time codes', body: 'Scan a QR code on your screen and get codes without a separate app.' },
+  { icon: 'fs:generate', title: 'Password generator', body: 'Create strong passwords and passphrases.' },
+  { icon: 'fs:download', title: 'Import', body: 'Bring your logins from Bitwarden, 1Password, or KeePass.' },
+  { icon: 'hard-drive', title: 'Encrypted backups', body: 'Save a backup with its own passphrase and restore it on a new device.' },
+  { icon: 'code', title: 'Free and open source', body: 'Apache-2.0 licensed. Every line is on GitHub.' },
+];
+---
+
+<StarlightPage
+  frontmatter={{
+    title: 'Your secrets stay here.',
+    description: lead,
+    template: 'splash',
+    hero: { tagline: '' },
+    pagefind: false,
+    llmActions: false,
+  }}
+  hasSidebar={false}
+>
+  <div class="not-content landing">
+    <LandingHero class="hero-section" glow={false}>
+      <div class="landing-container hero-inner">
+        <div class="hero-copy">
+          <h1>Your secrets<br /><span>stay here.</span></h1>
+          <p class="hero-lead">{lead}</p>
+          <ButtonGroup class="hero-actions">
+            <Button href="#download" arrow>Get FactorSeal</Button>
+            <Button href={repository} variant="secondary" arrow>View on GitHub</Button>
+          </ButtonGroup>
+        </div>
+
+        <div class="hero-demo">
+          <HeroDesktop />
+          <a class="platform-support" href="#download">
+            {platforms.map(({ name, icon }) => <strong><span class="platform-icon" set:html={inlineSvg(icon)} />{name}</strong>)}
+          </a>
+        </div>
+      </div>
+    </LandingHero>
+
+    <section class="reasons-section" aria-labelledby="reasons-title">
+      <div class="landing-container">
+        <div class="section-heading centered">
+          <h2 id="reasons-title">Why FactorSeal</h2>
+          <p>Most password managers keep your vault on their servers and open all of it at once. FactorSeal works differently.</p>
+        </div>
+        <div class="reasons">
+          {reasons.map(({ icon, title, body }) => (
+            <article class="reason">
+              <span class="reason__icon"><Icon name={icon} /></span>
+              <h3>{title}</h3>
+              <p>{body}</p>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section class="showcase" aria-labelledby="sync-title">
+      <div class="landing-container">
+        <div class="section-heading centered">
+          <h2 id="sync-title">Sync without a cloud</h2>
+          <p>Pair your phone and computer by scanning a QR code, and they keep each other up to date. Changes travel encrypted, straight between your devices or through a relay that cannot read them. No FactorSeal server ever holds your vault. Sync is experimental.</p>
+          <a class="arrow-link csk-text-link" href="/mobile/">About the mobile app <span aria-hidden="true">→</span></a>
+        </div>
+        <SyncDemo />
+      </div>
+    </section>
+
+    <section class="showcase" aria-labelledby="browser-title">
+      <div class="landing-container">
+        <div class="section-heading centered">
+          <h2 id="browser-title">Fill logins without handing over your vault</h2>
+          <p>The extension adds a FactorSeal button to login fields. Pick the account in FactorSeal, and only that login is filled. After you sign in, it offers to save new logins.</p>
+          <a class="arrow-link csk-text-link" href="/browser-extension/">Set up the browser extension <span aria-hidden="true">→</span></a>
+        </div>
+        <BrowserDemo />
+      </div>
+    </section>
+
+    <section class="everyday-section" aria-labelledby="everyday-title">
+      <div class="landing-container">
+        <div class="section-heading centered">
+          <h2 id="everyday-title">Everything you'd expect</h2>
+        </div>
+        <ul class="everyday">
+          {everyday.map(({ icon, title, body }) => (
+            <li>
+              <span class="everyday__icon"><Icon name={icon} /></span>
+              <span><strong>{title}</strong>{body}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+
+    <section class="showcase" aria-labelledby="developers-title">
+      <div class="landing-container">
+        <div class="section-heading centered">
+          <h2 id="developers-title">For developers</h2>
+          <p>Programs ask FactorSeal for a secret, and you see the exact program and folder before it gets one. Allow it for an hour or until you revoke it. FactorSeal also works as a SecretSpec provider and, on Linux, as the system keyring.</p>
+          <a class="arrow-link csk-text-link" href="/usage/">Read the usage guide <span aria-hidden="true">→</span></a>
+        </div>
+        <AccessDemo />
+      </div>
+    </section>
+
+    <section id="download" aria-labelledby="download-title">
+      <div class="landing-container install-grid">
+        <div class="install-card">
+          <h2 id="download-title">Download</h2>
+          <div class="platforms" role="group" aria-label="Downloads">
+            {downloads.map(({ name, icon }) => (
+              <div class="platform" data-platform={name.toLowerCase()}>
+                <span class="platform-icon" aria-hidden="true" set:html={inlineSvg(icon)} />
+                <a class="platform-link csk-interactive-surface" href={releases}>{name}</a>
+              </div>
+            ))}
+          </div>
+          <div class="source-install">
+            <span class="section-kicker">Or build from source</span>
+            <TerminalFrame class="terminal" title="terminal">
+              <pre class="csk-terminal__body"><code><span class="prompt">$</span> nix run github:cachix/factorseal#factorseal-desktop</code></pre>
+            </TerminalFrame>
+            <a class="arrow-link csk-text-link" href="/development/">Build instructions <span aria-hidden="true">→</span></a>
+          </div>
+        </div>
+
+        <div class="install-card">
+          <h2>Quickstart</h2>
+          <ol class="quickstart">
+            {quickstart.map(({ title, body }) => (
+              <li><strong>{title}</strong><p>{body}</p></li>
+            ))}
+          </ol>
+        </div>
+      </div>
+    </section>
+  </div>
+</StarlightPage>
+
+<script>
+  const agent = navigator.userAgent;
+  const platform = /Android/.test(agent) ? 'android'
+    : /iPhone|iPad|iPod/.test(agent) || navigator.maxTouchPoints > 1 && /Mac/.test(agent) ? null
+      : /Windows/.test(agent) ? 'windows'
+        : /Mac/.test(agent) ? 'macos'
+          : /Linux|X11/.test(agent) ? 'linux' : null;
+
+  if (platform) document.querySelector(`.platform[data-platform="${platform}"]`)?.classList.add('is-current');
+</script>

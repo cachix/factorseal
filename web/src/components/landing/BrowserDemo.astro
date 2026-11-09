@@ -1,0 +1,76 @@
+---
+import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
+import appIcon from '../../../../assets/logo/factorseal-app-icon.svg?raw';
+import Mark from '../Mark.astro';
+import { inlineSvg } from '../../lib/svg';
+
+const site = 'github.com';
+const username = 'john.doe';
+const profileKey = '3f9a1c07b2e4d685';
+---
+
+<div class="fs-scaled browser-demo" data-browser data-popup="closed" data-step="idle">
+  <div class="browser-stage">
+    <TerminalFrame class="browser-frame">
+      <span slot="header-title" class="browser-address">{site}/login</span>
+      <button slot="header-end" type="button" class="browser-extension" data-extension aria-label="FactorSeal" set:html={inlineSvg(appIcon)} />
+      <div class="browser-page">
+        <div class="browser-signin">
+          <strong>Sign in</strong>
+          <div class="browser-form">
+            <span class="browser-label">Username</span>
+            <span class="browser-input"><span data-username data-value={username}></span><button type="button" class="browser-field-button" data-fill aria-label="Fill with FactorSeal"><Mark /></button></span>
+            <span class="browser-label">Password</span>
+            <span class="browser-input"><span data-password data-value={'•'.repeat(16)}></span><button type="button" class="browser-field-button" data-fill aria-label="Fill with FactorSeal"><Mark /></button></span>
+            <span class="browser-submit">Sign in</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="ext-popup" role="dialog" aria-label="FactorSeal extension">
+        <header><Mark />FactorSeal</header>
+        <div class="ext-popup__main">
+          <button type="button" class="primary" data-fill>Fill this page</button>
+          <button type="button" class="secondary" data-pause>Pause on this site</button>
+          <button type="button" class="secondary ext-idle">Save login from this page</button>
+          <button type="button" class="secondary ext-idle">Add one-time password</button>
+          <p class="ext-status ext-status--approval">Approve this request in Desktop.</p>
+          <p class="ext-status ext-status--releasing">Filling your login…</p>
+          <p class="ext-status ext-status--denied">Request denied.</p>
+          <button type="button" class="secondary ext-pending" data-cancel>Cancel request</button>
+          <details>
+            <summary>Browser profile</summary>
+            <p class="ext-fingerprint">Profile key: {profileKey}…</p>
+            <button type="button" class="secondary">Disconnect profile</button>
+          </details>
+        </div>
+      </div>
+    </TerminalFrame>
+
+    <div class="fs-dialog browser-prompt" role="group" aria-label="FactorSeal fill request">
+      <div class="fs-dialog__body">
+        <span class="fs-dialog__brand"><Mark small />FactorSeal</span>
+        <h4 class="fs-dialog__title">Fill a login</h4>
+        <div class="fs-dialog__card">
+          <strong>https://{site}</strong>
+          <span>Choose one account to fill once. The browser will check the original page again.</span>
+        </div>
+        <span class="fs-button fs-button--ghost fs-button--small fs-dialog__more">Technical details +</span>
+        <button type="button" class="fs-button fs-button--block browser-account" data-account>GitHub · {username}</button>
+      </div>
+      <div class="fs-dialog__footer">
+        <small class="browser-prompt__status--approval">Applies only to this request.</small>
+        <small class="browser-prompt__status--releasing">Checking the original page before filling…</small>
+        <span class="fs-dialog__actions">
+          <button type="button" class="fs-button fs-button--ghost" data-deny>Deny</button>
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  import { mountBrowser } from '../../scripts/browser';
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-browser]')) mountBrowser(root);
+</script>

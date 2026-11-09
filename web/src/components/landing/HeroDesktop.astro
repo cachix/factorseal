@@ -1,0 +1,233 @@
+---
+import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
+import Mark from '../Mark.astro';
+import Icon from './Icon.astro';
+import Sidebar from './desktop/Sidebar.astro';
+import { items, modified, totpSecret } from '../../data/vault';
+
+const first = 'github';
+const keyring = [
+  {
+    id: 'chromium',
+    title: 'Chromium Safe Storage',
+    item: 'item/301162742759bac4622546a6fc17b7e9',
+    access: undefined,
+  },
+  {
+    id: 'gh',
+    title: 'gh:github.com',
+    item: 'item/06f719e968dea3b34f723f7bfcdb1d5c',
+    access: [
+      ['Application', '/usr/bin/secret-tool'],
+      ['Operation', 'Read'],
+      ['Scope', 'This entry'],
+      ['Lifetime', 'Expires in 45 minutes'],
+      ['Project', 'service/gh:github.com'],
+      ['Project folder', '/home/john/dev/site'],
+    ],
+  },
+];
+const dots = (value: string) => '•'.repeat(value.length);
+const unlockSteps = [
+  'Unlock to make your secrets available to authorized applications.',
+  'Checking your password with this device’s hardware.',
+  'Starting the vault service.',
+  'Loading your secrets.',
+];
+---
+
+<div class="fs-hero-app" data-vault data-state="unsealed" data-page="personal" data-totp={totpSecret} data-unlock-steps={JSON.stringify(unlockSteps)}>
+  <TerminalFrame class="fs-window" title="FactorSeal">
+    <div class="fs-app" data-screen="vault">
+      <Sidebar personal={items.length} keyring={keyring.length} targets={['personal', 'keyring', 'devices', 'transfer']}>
+        <button slot="seal" type="button" class="fs-button fs-button--small" data-seal><Icon name="fs:lock" />Seal</button>
+      </Sidebar>
+
+      <section class="fs-column" data-view="personal">
+        <header class="fs-column__header">
+          <h3>Personal secrets</h3>
+          <span class="fs-button fs-button--primary fs-button--icon"><Icon name="plus" /></span>
+        </header>
+        <div class="fs-rows" role="listbox" aria-label="Personal secrets">
+          {items.map(({ id, title, icon, subtitle, favorite }) => (
+            <button type="button" class="fs-row" role="option" data-item={id} aria-selected={id === first ? 'true' : 'false'}>
+              <span class="fs-avatar"><Icon name={icon} /></span>
+              <span class="fs-row__text">
+                <strong>{favorite && <Icon name="star-fill" class="fs-star" />}{title}</strong>
+                <small>{subtitle}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section class="fs-detail" data-view="personal">
+        {items.map(({ id, title, kind, icon, favorite, sections }) => (
+          <article class="fs-item" data-panel={id} data-active={id === first || undefined}>
+            <header class="fs-item__header">
+              <span class="fs-avatar fs-avatar--large"><Icon name={icon} /></span>
+              <span class="fs-item__title"><h4>{title}<span class="fs-button fs-button--ghost fs-button--icon"><Icon name={favorite ? 'star-fill' : 'star'} /></span></h4><small>{kind}</small></span>
+              <span class="fs-item__actions">
+                <span class="fs-button"><Icon name="fs:pencil" />Edit</span>
+                <span class="fs-button fs-button--ghost fs-button--icon"><Icon name="ellipsis" /></span>
+              </span>
+            </header>
+            {sections.map(({ heading, fields }) => (
+              <div class="fs-fields">
+                {sections.length > 1 && heading && <h5>{heading}</h5>}
+                {fields.map(({ label, icon, value, concealed, totp }) => (
+                  <div class="fs-field" data-field>
+                    <span class="fs-field__label"><Icon name={icon} />{label}</span>
+                    {totp ? (
+                      <span class="fs-field__value fs-totp" data-totp-code>
+                        <b>––– –––</b>
+                        <svg class="fs-totp__ring" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.8" /><circle cx="8" cy="8" r="6.8" pathLength="30" data-totp-ring /></svg>
+                        <small data-totp-seconds></small>
+                      </span>
+                    ) : concealed ? (
+                      <span class="fs-field__value" data-concealed data-value={value}>{dots(value)}</span>
+                    ) : (
+                      <span class="fs-field__value">{value}</span>
+                    )}
+                    <span class="fs-field__actions">
+                      <button type="button" class="fs-button fs-button--ghost fs-button--icon" data-copy aria-label="Copy"><Icon name="copy" class="fs-copy" /><Icon name="check" class="fs-copied" /></button>
+                      {label === 'Website' && <a class="fs-button fs-button--ghost fs-button--icon" href={value} target="_blank" rel="noopener noreferrer" aria-label="Open"><Icon name="external-link" /></a>}
+                      {concealed && <button type="button" class="fs-button fs-button--ghost fs-button--icon" data-reveal aria-label="Reveal"><Icon name="eye" class="fs-eye" /><Icon name="eye-off" class="fs-eye-off" /></button>}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+            <span class="fs-add-field"><Icon name="plus" />Add field</span>
+            <small class="fs-modified">{modified}</small>
+          </article>
+        ))}
+      </section>
+
+      <section class="fs-column" data-view="keyring" hidden>
+        <header class="fs-column__header"><h3>System keyring</h3></header>
+        <div class="fs-rows" role="listbox" aria-label="System keyring">
+          {keyring.map(({ id, title, item }, index) => (
+            <button type="button" class="fs-row fs-row--plain" role="option" data-item={id} aria-selected={index === 0 ? 'true' : 'false'}>
+              <span class="fs-row__text"><strong>{title}</strong><small>{item}</small></span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section class="fs-detail fs-detail--wide" data-view="keyring" hidden>
+        {keyring.map(({ id, title, item, access }, index) => (
+          <article class="fs-entry" data-panel={id} data-active={index === 0 || undefined}>
+            <h4>{title}</h4>
+            <small>Secret value hidden</small>
+            <dl class="fs-table">
+              <div><dt>Type</dt><dd>System keyring</dd></div>
+              <div><dt>Namespace</dt><dd>factorseal/secret-service/v1</dd></div>
+              <div><dt>Item</dt><dd>{item}</dd></div>
+            </dl>
+            <section class="fs-entry__access">
+              <h4>Access</h4>
+              {access ? (
+                <div class="fs-entry__grant">
+                  <dl class="fs-table">
+                    {access.map(([label, value]) => <div><dt>{label}</dt><dd>{value}</dd></div>)}
+                  </dl>
+                  <span class="fs-button fs-button--block"><Icon name="circle-x" />Revoke access</span>
+                </div>
+              ) : (
+                <p>No recorded access grants apply to this entry.</p>
+              )}
+            </section>
+          </article>
+        ))}
+      </section>
+
+      <section class="fs-column" data-view="devices" hidden>
+        <header class="fs-column__header">
+          <h3>Devices</h3>
+          <span class="fs-button fs-button--primary fs-button--icon"><Icon name="plus" /></span>
+        </header>
+        <div class="fs-rows">
+          <span class="fs-row" aria-selected="true">
+            <span class="fs-avatar"><Icon name="network" /></span>
+            <span class="fs-row__text"><strong>john-laptop</strong><small>This device</small></span>
+          </span>
+        </div>
+      </section>
+
+      <section class="fs-detail fs-detail--wide" data-view="devices" hidden>
+        <article class="fs-device">
+          <header class="fs-item__header">
+            <span class="fs-avatar fs-avatar--large"><Icon name="network" /></span>
+            <span class="fs-item__title"><h4>john-laptop <span class="fs-button fs-button--ghost">Rename</span></h4><small>This device</small></span>
+          </header>
+          <dl class="fs-table fs-table--left"><div><dt>Access</dt><dd>Personal secrets</dd></div></dl>
+          <p>Connect another device to start syncing your personal secrets.</p>
+          <small>Sync runs automatically while FactorSeal is open, including when the vault is sealed.</small>
+        </article>
+      </section>
+
+      <section class="fs-column" data-view="transfer" hidden>
+        <header class="fs-column__header"><h3>Transfer credentials</h3></header>
+        <div class="fs-rows">
+          <span class="fs-row" aria-selected="true"><span class="fs-avatar"><Icon name="fs:download" /></span><span class="fs-row__text"><strong>Export credentials</strong></span></span>
+          <span class="fs-row"><span class="fs-avatar"><Icon name="fs:upload" /></span><span class="fs-row__text"><strong>Import credentials</strong></span></span>
+        </div>
+      </section>
+
+      <section class="fs-detail fs-detail--wide" data-view="transfer" hidden>
+        <article class="fs-transfer">
+          <header class="fs-item__header">
+            <span class="fs-avatar fs-avatar--large"><Icon name="fs:download" /></span>
+            <span class="fs-item__title"><h4>Export credentials</h4></span>
+          </header>
+          <p>Move Personal credentials to another device or password manager.</p>
+          <span class="fs-transfer__group">
+            <span class="fs-label">File type</span>
+            <span class="fs-segmented"><b>Encrypted transfer</b><span>Bitwarden JSON</span><span>1Password CSV</span><span>KeePass CSV</span></span>
+          </span>
+          <div class="fs-card">
+            <span class="fs-label">Encrypted credential file</span>
+            <p>Uses the open CXF credential format with age encryption. The receiving manager needs CXF support and may require a separate decryption step.</p>
+            <span class="fs-segmented"><b>Passphrase</b><span>Post-quantum key</span></span>
+            <span class="fs-field-label">Transfer passphrase<span class="fs-input">Archive passphrase</span></span>
+            <span class="fs-field-label">Confirm passphrase<span class="fs-input">Confirm archive passphrase</span></span>
+          </div>
+          <div class="fs-transfer__actions"><span class="fs-button fs-button--primary"><Icon name="fs:download" />Save transfer file</span></div>
+        </article>
+      </section>
+    </div>
+
+    <div class="fs-app fs-locked" data-screen="sealed">
+      <header class="fs-locked__bar">
+        <span class="fs-locked__brand"><Mark />FactorSeal</span>
+        <span class="fs-button"><Icon name="settings" />Settings</span>
+      </header>
+      <div class="fs-locked__card">
+        <div class="fs-locked__head">
+          <span class="fs-unlock-slot">
+            <Mark class="fs-locked__mark" />
+            <canvas class="fs-unlock-art" width="260" height="104" data-unlock-art aria-hidden="true"></canvas>
+          </span>
+          <h4><span data-sealed-title>Vault is sealed</span><span data-unlocking-title>Unlocking your vault…</span></h4>
+          <p data-unlock-step>{unlockSteps[0]}</p>
+        </div>
+        <span class="fs-locked__password">
+          <span class="fs-input fs-input--focus" data-password><span>FactorSeal password</span></span>
+          <span class="fs-button fs-button--ghost fs-button--icon"><Icon name="eye" /></span>
+        </span>
+        <button type="button" class="fs-button fs-button--primary fs-button--block" data-unlock><Icon name="loader-circle" class="fs-spinner" /><span data-sealed-title>Unlock vault</span><span data-unlocking-title>Unlocking…</span></button>
+      </div>
+      <footer class="fs-locked__footer">
+        <span><span class="fs-button fs-button--ghost fs-button--icon fs-button--small"><Icon name="fs:bug" /></span>Your secrets stay here.</span>
+        <span class="fs-locked__link">Protected by TPM</span>
+      </footer>
+    </div>
+  </TerminalFrame>
+</div>
+
+<script>
+  import { mountVault } from '../../scripts/vault';
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-vault]')) mountVault(root);
+</script>

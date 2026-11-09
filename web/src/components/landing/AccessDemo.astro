@@ -1,0 +1,86 @@
+---
+import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
+import Mark from '../Mark.astro';
+import Icon from './Icon.astro';
+
+const command = 'secret-tool lookup service gh:github.com';
+const token = 'gho_16C7e42F292c6912E7710c838347Ae178B4a';
+const app = '/usr/bin/secret-tool';
+const project = 'service/gh:github.com';
+const item = 'item/06f719e968dea3b34f723f7bfcdb1d5c';
+const folder = '/home/john/dev/site';
+---
+
+<div class="access-demo fs-scaled" data-access data-state="request" data-lifetime="hour">
+  <div class="access-stage">
+    <TerminalFrame class="access-terminal" title="john@laptop: ~/dev/site">
+      <pre class="access-terminal__body"><code><span class="prompt">$</span> {command}
+<span class="access-output access-output--granted">{token}</span><span class="access-output access-output--denied">secret-tool: FactorSeal keyring access was denied</span><span class="access-output access-output--done"><span class="prompt">$</span> </span><span class="access-cursor" aria-hidden="true"></span></code></pre>
+    </TerminalFrame>
+
+    <div class="fs-dialog access-dialog" role="group" aria-label="FactorSeal access request">
+      <div class="fs-dialog__body">
+        <span class="fs-dialog__brand"><Mark small />FactorSeal</span>
+        <div class="fs-dialog__app">
+          <span class="fs-avatar fs-avatar--app"><Icon name="square-terminal" /></span>
+          <span><strong>{app}</strong><small>wants to read secrets for {project}</small></span>
+        </div>
+        <div class="fs-dialog__card">
+          <small>Secrets</small>
+          <strong>{item}</strong>
+          <span class="fs-dialog__detail"><small>Folder</small><span>{folder}</span></span>
+        </div>
+        <span class="fs-button fs-button--ghost fs-button--small fs-dialog__more">Technical details +</span>
+      </div>
+      <div class="fs-dialog__footer">
+        <small>Applies only to the listed entries, app, folder, and operation. Manage access on each secret.</small>
+        <span class="fs-label">Allow access for</span>
+        <span class="fs-choice">
+          <button type="button" class="fs-button" data-lifetime-choice="hour" aria-pressed="true">1 hour</button>
+          <button type="button" class="fs-button" data-lifetime-choice="forever" aria-pressed="false">Until revoked</button>
+        </span>
+        <span class="fs-label access-password">Vault password</span>
+        <span class="fs-input fs-input--focus fs-input--filled access-password">••••••••••••••</span>
+        <span class="fs-dialog__actions">
+          <button type="button" class="fs-button fs-button--ghost" data-deny>Deny</button>
+          <button type="button" class="fs-button fs-button--primary" data-grant><span class="access-grant">Grant access</span><span class="access-authorizing">Authorizing…</span></button>
+        </span>
+      </div>
+    </div>
+
+    <TerminalFrame class="fs-window access-window" title="FactorSeal">
+      <div class="fs-app fs-app--single">
+        <article class="fs-entry" data-active>
+          <h4>gh:github.com</h4>
+          <small>Secret value hidden</small>
+          <dl class="fs-table">
+            <div><dt>Type</dt><dd>System keyring</dd></div>
+            <div><dt>Namespace</dt><dd>factorseal/secret-service/v1</dd></div>
+            <div><dt>Item</dt><dd>{item}</dd></div>
+          </dl>
+          <section class="fs-entry__access">
+            <h4>Access</h4>
+            <div class="fs-entry__grant access-granted">
+              <dl class="fs-table">
+                <div><dt>Application</dt><dd>{app}</dd></div>
+                <div><dt>Operation</dt><dd>Read</dd></div>
+                <div><dt>Scope</dt><dd>This entry</dd></div>
+                <div><dt>Lifetime</dt><dd><span class="access-hour">Expires in 60 minutes</span><span class="access-forever">Until revoked</span></dd></div>
+                <div><dt>Project</dt><dd>{project}</dd></div>
+                <div><dt>Project folder</dt><dd>{folder}</dd></div>
+              </dl>
+              <button type="button" class="fs-button fs-button--block" data-revoke><Icon name="circle-x" />Revoke access</button>
+            </div>
+            <p class="access-none">No recorded access grants apply to this entry.</p>
+          </section>
+        </article>
+      </div>
+    </TerminalFrame>
+  </div>
+</div>
+
+<script>
+  import { mountAccess } from '../../scripts/access';
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-access]')) mountAccess(root);
+</script>

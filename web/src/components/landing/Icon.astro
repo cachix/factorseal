@@ -1,0 +1,27 @@
+---
+import { inlineSvg } from '../../lib/svg';
+import { lucide } from './lucide';
+
+interface Props {
+  name: string;
+  class?: string;
+}
+
+const glyphs = import.meta.glob<string>('../../../../assets/logo/factorseal-*.svg', { query: '?raw', import: 'default', eager: true });
+const { name, class: className } = Astro.props;
+const classes = ['icon', className].filter(Boolean).join(' ');
+
+function render() {
+  if (name.startsWith('fs:')) {
+    const raw = glyphs[`../../../../assets/logo/factorseal-${name.slice(3)}.svg`];
+    if (!raw) throw new Error(`Unknown FactorSeal glyph: ${name}`);
+    return inlineSvg(raw, classes);
+  }
+  const icon = lucide[name];
+  if (!icon) throw new Error(`Unknown icon: ${name}`);
+  const { fill, body } = typeof icon === 'string' ? { fill: false, body: icon } : icon;
+  return `<svg class="${classes}" viewBox="0 0 24 24" fill="${fill ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${body}</svg>`;
+}
+---
+
+<Fragment set:html={render()} />

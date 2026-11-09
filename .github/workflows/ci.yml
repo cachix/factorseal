@@ -25,6 +25,28 @@ jobs:
       - name: Test dependency exception policy
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
+  website:
+    name: Website
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.node-version
+      - name: Build the website
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Check website links
+        uses: cachix/site-kit/check-links@1e9bb1e181430d4a8d632bc8c1487e16de946091
+        with:
+          working-directory: web
+          output-directory: dist
+          site: https://factorseal.dev
+
   linux:
     name: Linux
     runs-on: ubuntu-latest

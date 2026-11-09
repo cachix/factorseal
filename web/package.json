@@ -1,0 +1,35 @@
+{
+  "name": "factorseal-site",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro check && astro build",
+    "check:links": "cachix-site-check-links dist https://factorseal.dev",
+    "validate": "npm run build && npm run check:links",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^8.0.1",
+    "@astrojs/starlight": "^0.42.1",
+    "@cachix/site-kit": "https://codeload.github.com/cachix/site-kit/tar.gz/1e9bb1e181430d4a8d632bc8c1487e16de946091",
+    "astro": "^7.3.3",
+    "hast-util-select": "^6.0.4",
+    "rehype-parse": "^9.0.1",
+    "rehype-remark": "^10.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-stringify": "^11.0.0",
+    "starlight-blog": "^0.29.0",
+    "starlight-llm-actions": "^0.13.0",
+    "unified": "^11.0.5",
+    "unist-util-remove": "^4.0.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.9",
+    "typescript": "6.0.3"
+  }
+}

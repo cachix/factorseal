@@ -27,7 +27,7 @@ $ cargo fmt --all -- --check
 
 The macOS app bundle comes from `packaging/macos/Factorseal.xcodeproj`. Xcode
 runs `cargo build` through `packaging/macos/cargo-build.sh` and then assembles
-and signs the bundle. See [packaging](../packaging/README.md#macos-builds).
+and signs the bundle. See [packaging](../packaging/README.md).
 
 For Apple credential-exchange SDK and Rust interoperability checks on macOS 26+
 with Xcode 26+, run `bash scripts/test-apple-exchange.sh`. See the
