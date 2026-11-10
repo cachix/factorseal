@@ -4,6 +4,9 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Review imports on Desktop and mobile. Choose what to add. Existing items
+  stay unchanged unless you choose Replace.
+
 - Add the factorseal.dev website to the repository, built on the shared Cachix
   site kit. Its landing page has working previews of Desktop, the access
   prompt, the browser extension, and the mobile app, and its documentation is

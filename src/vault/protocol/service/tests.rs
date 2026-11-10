@@ -842,6 +842,7 @@ fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
                 value: WireSecret::new(item.encode().unwrap().to_vec()).unwrap(),
                 evict_at: None,
                 replace_existing: replace,
+                expected_version: None,
             })
             .unwrap(),
             101,
@@ -850,6 +851,7 @@ fn personal_import_addresses_identity_and_ignores_supplied_display_metadata() {
             matches!(response.result, Ok(VaultResponseBody::VaultEntryImported { status }) if status == expected)
         );
     }
+    assert_import_version_is_checked(&service, &manager, &item, &source);
     let response = service.handle(
         &manager,
         VaultRequest::new(VaultAction::ListVaultEntries {
@@ -925,6 +927,7 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
                     value: WireSecret::new(b"first".to_vec()).unwrap(),
                     evict_at: None,
                     replace_existing: false,
+                    expected_version: None,
                 })
                 .unwrap(),
                 101,
@@ -980,6 +983,7 @@ fn portable_entry_transfer_is_manager_only_and_honors_conflict_policy() {
                 value: WireSecret::new(b"second".to_vec()).unwrap(),
                 evict_at: None,
                 replace_existing,
+                expected_version: None,
             })
             .unwrap(),
             104,
@@ -2794,6 +2798,7 @@ fn export_obeys_record_delivery_expiry() {
             value: WireSecret::new(b"secret".to_vec()).unwrap(),
             evict_at: Some(150),
             replace_existing: false,
+            expected_version: None,
         })
         .unwrap(),
         100,
@@ -3951,4 +3956,50 @@ fn an_expiring_cache_write_is_marked_so_prompts_do_not_default_to_once() {
         .find(|permission| permission.id != expiring.id)
         .unwrap();
     assert!(plain.defaults_to_single_use());
+}
+
+fn assert_import_version_is_checked(
+    service: &VaultService,
+    manager: &CallerIdentity,
+    item: &crate::personal::PersonalSecret,
+    source: &VaultEntryMetadata,
+) {
+    use crate::personal::PersonalSecret;
+    let current_version = crate::vault::import_entry_version(&item.encode().unwrap(), None);
+    let mut replacement = PersonalSecret::decode_current(&item.encode().unwrap()).unwrap();
+    replacement.title = "Stale replacement".into();
+    let response = service.handle(
+        manager,
+        VaultRequest::new(VaultAction::ImportVaultEntry {
+            entry: source.clone(),
+            value: WireSecret::new(replacement.encode().unwrap().to_vec()).unwrap(),
+            evict_at: None,
+            replace_existing: true,
+            expected_version: Some([0; 32]),
+        })
+        .unwrap(),
+        101,
+    );
+    assert_eq!(
+        response.result.unwrap_err().code,
+        VaultResponseErrorCode::Conflict
+    );
+    let response = service.handle(
+        manager,
+        VaultRequest::new(VaultAction::ImportVaultEntry {
+            entry: source.clone(),
+            value: WireSecret::new(item.encode().unwrap().to_vec()).unwrap(),
+            evict_at: None,
+            replace_existing: true,
+            expected_version: Some(current_version),
+        })
+        .unwrap(),
+        101,
+    );
+    assert!(matches!(
+        response.result,
+        Ok(VaultResponseBody::VaultEntryImported {
+            status: VaultEntryImportStatus::Replaced
+        })
+    ));
 }

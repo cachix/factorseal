@@ -9,6 +9,7 @@ mod devices;
 mod entry_access;
 mod error_notice;
 mod generator;
+mod import_review;
 mod item_editor;
 #[cfg(target_os = "linux")]
 mod niri;
@@ -225,7 +226,7 @@ struct TransferCompletion {
 }
 
 enum TransferOperation {
-    Prepared(crate::runtime::PreparedImport),
+    Prepared(crate::runtime::ReviewedImport),
     Exported(TransferCompletion),
 }
 
@@ -1416,7 +1417,10 @@ struct DesktopView {
     transfer_use_recipient: bool,
     transfer_key_file: Option<std::path::PathBuf>,
     transfer_busy: bool,
-    transfer_replace_existing: bool,
+    import_review: Option<import_review::ImportReview>,
+    import_complete: Option<(bool, crate::runtime::TransferSummary)>,
+    import_search: gpui::Entity<InputState>,
+    transfer_generation: u64,
     transfer_plaintext_confirmed: bool,
     transfer_notice: Option<TransferNotice>,
     #[cfg(feature = "apple-credential-exchange")]
@@ -1666,6 +1670,16 @@ impl DesktopView {
         let password_confirmation =
             cx.new(|cx| SecretInputState::new(window, cx).placeholder("Confirm password"));
         let vault_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search secrets"));
+        let import_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search items"));
+        let import_search_changed =
+            cx.subscribe(&import_search, |view, search, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if let Some(review) = &mut view.import_review {
+                        review.filter(&search.read(cx).value());
+                    }
+                    cx.notify();
+                }
+            });
         let item_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
         let archive_passphrase =
             cx.new(|cx| SecretInputState::new(window, cx).placeholder("Archive passphrase"));
@@ -1781,7 +1795,10 @@ impl DesktopView {
             transfer_use_recipient: false,
             transfer_key_file: None,
             transfer_busy: false,
-            transfer_replace_existing: false,
+            import_review: None,
+            import_complete: None,
+            import_search,
+            transfer_generation: 0,
             transfer_plaintext_confirmed: false,
             transfer_notice: None,
             #[cfg(feature = "apple-credential-exchange")]
@@ -1798,6 +1815,7 @@ impl DesktopView {
                 confirmation_events,
                 password_change,
                 vault_search_change,
+                import_search_changed,
                 settings_changed,
                 settings_report,
                 use_generated_password,
@@ -2090,6 +2108,10 @@ impl DesktopView {
     }
 
     fn clear_secret_inputs(&mut self, cx: &mut Context<Self>) {
+        self.import_review = None;
+        self.import_complete = None;
+        self.transfer_busy = false;
+        self.transfer_generation = self.transfer_generation.wrapping_add(1);
         self.opening = self.opening.wrapping_add(1);
         self.clear_personal_detail();
         self.copied_personal_field = None;
@@ -2244,7 +2266,6 @@ impl DesktopView {
             self.transfer_notice = None;
             self.transfer_key_file = None;
             self.transfer_plaintext_confirmed = false;
-            self.transfer_replace_existing = false;
             self.transfer_is_import = false;
             self.transfer_format = if selection == VaultSelection::BackupVault {
                 TransferFormat::FactorSeal
@@ -2330,7 +2351,6 @@ impl DesktopView {
             self.transfer_format = TransferFormat::CxfAge;
         }
         self.transfer_key_file = None;
-        self.transfer_replace_existing = false;
         self.transfer_plaintext_confirmed = false;
         self.transfer_notice = None;
         cx.notify();
@@ -2365,7 +2385,7 @@ impl DesktopView {
 
     #[allow(clippy::too_many_lines)]
     fn start_transfer(&mut self, is_import: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.transfer_busy {
+        if self.transfer_busy || self.import_review.is_some() {
             return;
         }
         let Snapshot::Unsealed { metadata, .. } = &self.snapshot else {
@@ -2442,7 +2462,11 @@ impl DesktopView {
         }
         self.transfer_busy = true;
         self.transfer_notice = None;
-        let replace_existing = self.transfer_replace_existing;
+        self.import_complete = None;
+        self.import_search
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.transfer_generation = self.transfer_generation.wrapping_add(1);
+        let generation = self.transfer_generation;
         let runtime = Arc::clone(&self.runtime);
         cx.spawn(async move |view, cx| {
             let dialog = rfd::AsyncFileDialog::new()
@@ -2457,7 +2481,15 @@ impl DesktopView {
                 dialog.pick_file().await
             } else {
                 dialog
-                    .set_file_name(format!("factorseal-{}.{}", if format.is_native() { "backup" } else { "credentials" }, format.extension()))
+                    .set_file_name(format!(
+                        "factorseal-{}.{}",
+                        if format.is_native() {
+                            "backup"
+                        } else {
+                            "credentials"
+                        },
+                        format.extension()
+                    ))
                     .save_file()
                     .await
             };
@@ -2468,10 +2500,8 @@ impl DesktopView {
                 });
                 return;
             };
-            let path = chosen.path().to_owned();
-            let operation_path = path.clone();
-            let commit_runtime = Arc::clone(&runtime);
-            let commit_metadata = metadata.clone();
+            let operation_path = chosen.path().to_owned();
+            let file_name = chosen.file_name();
             let result = smol::unblock(move || {
                 let key = key_file.as_deref().map_or(
                     TransferKey::Passphrase(&passphrase),
@@ -2492,7 +2522,9 @@ impl DesktopView {
                 if is_import {
                     let bytes =
                         read_transfer_file(&operation_path).map_err(|error| error.to_string())?;
-                    DesktopRuntime::prepare_import(&bytes, format, key).map(TransferOperation::Prepared)
+                    DesktopRuntime::prepare_import(&bytes, format, key)
+                        .and_then(|prepared| runtime.review_import(&metadata, prepared))
+                        .map(TransferOperation::Prepared)
                 } else {
                     let output = if format.is_native() {
                         runtime.export_native_archive(&metadata, &passphrase)?
@@ -2509,36 +2541,23 @@ impl DesktopView {
                 }
             })
             .await;
-            let result = match result {
-                Ok(TransferOperation::Prepared(prepared)) => {
-                    let preview = format!(
-                        "{} items are ready to {}. {} contain data without full functional support.\n\nExisting items will be {}. Keep the old vault until you have verified important logins and verification codes.",
-                        prepared.len(), if format.is_native() { "restore" } else { "import" }, prepared.preserved_only(),
-                        if replace_existing { "replaced" } else { "kept" },
-                    );
-                    let decision = rfd::AsyncMessageDialog::new()
-                        .set_title(if format.is_native() { "Review restore" } else { "Review import" })
-                        .set_description(preview)
-                        .set_buttons(rfd::MessageButtons::OkCancel)
-                        .show().await;
-                    if decision != rfd::MessageDialogResult::Ok {
-                        let _ = view.update(cx, |view, cx| {
-                            view.transfer_busy = false;
-                            view.transfer_notice = None;
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    smol::unblock(move || {
-                        let (summary, contents) = commit_runtime.commit_import(&commit_metadata, prepared, replace_existing)?;
-                        Ok(TransferCompletion { summary: Some(summary), contents: Some(contents), path })
-                    }).await
-                }
-                Ok(TransferOperation::Exported(completion)) => Ok(completion),
-                Err(error) => Err(error),
-            };
             let _ = view.update(cx, |view, cx| {
-                view.finish_transfer(is_import, format.is_native(), result);
+                if view.transfer_generation != generation || !view.is_unsealed() {
+                    return;
+                }
+                match result {
+                    Ok(TransferOperation::Prepared(prepared)) => {
+                        view.open_import_review(import_review::ImportReview::new(
+                            prepared,
+                            format.is_native(),
+                            Some(file_name),
+                        ));
+                    }
+                    Ok(TransferOperation::Exported(completion)) => {
+                        view.finish_transfer(is_import, format.is_native(), Ok(completion));
+                    }
+                    Err(error) => view.finish_transfer(is_import, format.is_native(), Err(error)),
+                }
                 cx.notify();
             });
         })
@@ -2566,30 +2585,9 @@ impl DesktopView {
                     *contents_error = None;
                 }
                 let message = if let Some(summary) = completion.summary {
-                    let mut message = format!(
-                        "{} {} items: {} added, {} replaced, {} kept existing.",
-                        if is_backup { "Restored" } else { "Imported" },
-                        summary.processed(),
-                        summary.added,
-                        summary.replaced,
-                        summary.kept_existing
-                    );
-                    if summary.preserved_only > 0 {
-                        use std::fmt::Write as _;
-                        let _ = write!(
-                            message,
-                            " {} source items contain data preserved without full functional support. Keep the old vault until you have verified important credentials.",
-                            summary.preserved_only
-                        );
-                    }
-                    message
-                } else if is_import {
-                    if is_backup {
-                        "Restore complete."
-                    } else {
-                        "Import complete."
-                    }
-                    .to_owned()
+                    self.import_complete = Some((is_backup, summary));
+                    self.transfer_notice = None;
+                    return;
                 } else {
                     format!(
                         "{} saved to {}.",
@@ -3473,6 +3471,12 @@ impl DesktopView {
 
     #[allow(clippy::too_many_lines)]
     fn render_transfer_detail(&self, is_backup: bool, cx: &mut Context<Self>) -> Div {
+        if let Some(review) = &self.import_review {
+            return self.render_import_review(review, cx);
+        }
+        if let Some((restore, summary)) = self.import_complete {
+            return Self::render_import_complete(restore, summary, cx);
+        }
         let theme = cx.theme().clone();
         let is_import = self.transfer_is_import;
         let description = match (is_backup, is_import) {
@@ -3481,26 +3485,12 @@ impl DesktopView {
                 "Save an encrypted backup of your Personal secrets, project secrets, and system-keyring items."
             }
             (false, true) => {
-                "Bring Personal credentials from another password manager or an encrypted transfer file."
+                "Choose an export from your password manager. You can review every item before anything is saved."
             }
             (false, false) => "Move Personal credentials to another device or password manager.",
         };
         let format = self.transfer_format;
         let use_recipient = format == TransferFormat::CxfAge && self.transfer_use_recipient;
-        let replace_control = {
-            let view = cx.entity().downgrade();
-            Checkbox::new("replace-import-conflicts")
-                .checked(self.transfer_replace_existing)
-                .label("Replace existing items")
-                .disabled(self.transfer_busy)
-                .on_click(move |checked, _, cx| {
-                    let _ = view.update(cx, |view, cx| {
-                        view.transfer_replace_existing = *checked;
-                        view.transfer_notice = None;
-                        cx.notify();
-                    });
-                })
-        };
         let plaintext_control = {
             let view = cx.entity().downgrade();
             Checkbox::new("confirm-plaintext-export")
@@ -3621,13 +3611,6 @@ impl DesktopView {
                     }),
             );
         }
-        if is_import {
-            form = form.child(
-                controls::toggle_frame("replace-import-conflicts-frame", replace_control)
-                    .disabled(self.transfer_busy)
-                    .without_focus_ring(),
-            );
-        }
         form = form
             .when_some(self.transfer_notice.clone(), |form, notice| match notice {
                 TransferNotice::Success(message) => form.child(
@@ -3647,25 +3630,6 @@ impl DesktopView {
                     .items_center()
                     .justify_end()
                     .gap_3()
-                    .when(self.transfer_busy, |row| {
-                        row.child(
-                            h_flex()
-                                .gap_2()
-                                .text_color(theme.muted_foreground)
-                                .child(Spinner::new().small())
-                                .child(if is_import {
-                                    if is_backup {
-                                        "Restore in progress…"
-                                    } else {
-                                        "Import in progress…"
-                                    }
-                                } else if is_backup {
-                                    "Preparing backup…"
-                                } else {
-                                    "Preparing export…"
-                                }),
-                        )
-                    })
                     .child(
                         button(if is_import {
                             "start-secret-import"
@@ -3680,7 +3644,15 @@ impl DesktopView {
                         })
                         .loading(self.transfer_busy)
                         .disabled(self.transfer_busy)
-                        .label(if is_import {
+                        .label(if self.transfer_busy {
+                            if is_import {
+                                "Reading file…"
+                            } else if is_backup {
+                                "Preparing backup…"
+                            } else {
+                                "Preparing export…"
+                            }
+                        } else if is_import {
                             "Choose file and review"
                         } else if is_backup {
                             "Save backup"
@@ -4128,6 +4100,16 @@ impl DesktopView {
 
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(review) = &mut self.import_review
+            && std::mem::take(&mut review.focus_search)
+        {
+            self.import_search
+                .update(cx, |search, cx| search.set_value("", window, cx));
+            let search = self.import_search.clone();
+            window.defer(cx, move |window, cx| {
+                search.update(cx, |search, cx| search.focus(window, cx));
+            });
+        }
         self.ensure_new_item_editor(window, cx);
         self.apply_qr_scan(window, cx);
         self.fill_from_one_time_link(window, cx);

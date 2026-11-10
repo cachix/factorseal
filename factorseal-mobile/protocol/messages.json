@@ -68,8 +68,10 @@
     {"type": "import", "format": "1password-csv", "file": "dGl0bGUK", "key": null},
     {"type": "import", "format": "1password-1pux", "file": "UEsDBA==", "key": null},
     {"type": "import", "format": "keepass-csv", "file": "dGl0bGUK", "key": null},
-    {"type": "import-commit", "replace": true},
-    {"type": "import-cancel"},
+    {"type": "import-commit", "review": 1, "choices": ["add", "replace", "skip"]},
+    {"type": "import-cancel", "review": 1},
+    {"type": "import-details", "review": 1, "item": 0, "revealed": []},
+    {"type": "import-details", "review": 1, "item": 0, "revealed": [0]},
     {"type": "logins", "site": {"web": "https://github.com/login"}},
     {"type": "logins", "site": {"app": "com.github.android"}},
     {"type": "fill", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "site": {"app": "com.github.android"}},
@@ -88,6 +90,7 @@
         "favorite": false,
         "notes": null,
         "notes-filled": false,
+        "retained": [],
         "website": "github.com",
         "sections": [
           {
@@ -114,6 +117,7 @@
         "favorite": false,
         "notes": null,
         "notes-filled": false,
+        "retained": [],
         "website": null,
         "sections": [
           {
@@ -151,8 +155,9 @@
     {"type": "scanned", "scan": {"type": "one-time-password", "value": "otpauth://totp/Example:alice?secret=GEZDGNBVGY3TQOJQ&issuer=Example", "issuer": "Example", "account": "alice"}},
     {"type": "scanned", "scan": {"type": "unsupported"}},
     {"type": "file", "name": "factorseal-backup.factorseal", "data": "eyJ2ZXJzaW9uIjoyfQ=="},
-    {"type": "import-review", "items": 12, "preserved": 1},
-    {"type": "imported", "added": 10, "replaced": 1, "kept": 1, "preserved": 1},
+    {"type": "import-review", "review": 1, "items": [{"title": "GitHub", "username": "octocat", "website": "github.com", "kind": "Login", "existing": true, "changes": [{"type": "field", "field": "Password"}], "retained": ["passkeys"]}]},
+    {"type": "import-details", "comparisons": [{"change": {"type": "field", "field": "Password"}, "section": "Account", "current": {"value": null, "concealed": true, "filled": true, "context": null}, "incoming": {"value": null, "concealed": true, "filled": true, "context": null}}]},
+    {"type": "imported", "added": 10, "replaced": 1, "kept": 1, "skipped": 2, "preserved": 1},
     {"type": "logins", "linked": [{"id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "title": "GitHub", "username": "octocat"}], "others": [{"id": "01JB8W40AC3D5F7H9K1M3P5R7T", "title": "Example", "username": "alice"}]},
     {"type": "credentials", "username": "octocat", "password": "correct horse battery staple"},
     {"type": "login-saved", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "change": "updated"},

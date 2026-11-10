@@ -607,6 +607,11 @@ impl DesktopView {
     }
 
     fn move_selection(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(review) = &self.import_review {
+            review.scroll(forward);
+            cx.notify();
+            return;
+        }
         if self.move_search_cursor(forward, cx) {
             return;
         }
@@ -636,6 +641,10 @@ impl DesktopView {
     }
 
     fn open_selected(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if self.import_review.is_some() {
+            cx.propagate();
+            return;
+        }
         let entries = self.visible_list(cx);
         let sections = self.shown_section_rows(cx);
         let cursor = self
@@ -685,6 +694,11 @@ impl DesktopView {
     }
 
     fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_review.is_some() {
+            self.cancel_import_review(cx);
+            self.shortcuts.root.focus(window, cx);
+            return;
+        }
         if !self.settings_open && self.unsealed_contents().is_none() {
             cx.propagate();
             return;
