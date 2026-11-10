@@ -1,0 +1,25 @@
+---
+import Icon from '../Icon.astro';
+
+interface Props {
+  id: string;
+  icon: string;
+  label: string;
+  count?: number;
+  active: boolean;
+  interactive: boolean;
+  page?: boolean;
+}
+
+const { id, icon, label, count, active, interactive, page = false } = Astro.props;
+const Tag = interactive ? 'button' : 'span';
+---
+
+<Tag
+  class:list={['fs-nav__item', { 'fs-nav__item--page': page }]}
+  data-state-target={interactive ? id : undefined}
+  aria-current={active ? 'page' : undefined}
+  type={interactive ? 'button' : undefined}
+>
+  <Icon name={icon} /><span class="fs-nav__label">{label}</span>{count !== undefined && <span class="fs-count">{count}</span>}
+</Tag>

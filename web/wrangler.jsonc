@@ -1,0 +1,12 @@
+{
+  "$schema": "https://unpkg.com/wrangler@4.141.0/config-schema.json",
+  "name": "factorseal",
+  "compatibility_date": "2026-10-01",
+  "main": "./worker.js",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/*", "!/_astro/*"]
+  }
+}

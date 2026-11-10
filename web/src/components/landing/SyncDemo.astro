@@ -1,0 +1,86 @@
+---
+import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
+import Icon from './Icon.astro';
+import Sidebar from './desktop/Sidebar.astro';
+import { items } from '../../data/vault';
+
+const rows = [
+  ...items.filter(({ favorite }) => favorite),
+  ...items.filter(({ favorite }) => !favorite).sort((a, b) => a.title.localeCompare(b.title)),
+];
+---
+
+<div class="sync" data-sync data-entries={items.map(({ id }) => id).join(' ')} data-online>
+  <div class="sync-stage">
+    <div class="sync-desktop fs-scaled">
+      <TerminalFrame class="fs-window" title="FactorSeal">
+        <div class="fs-app sync-app">
+          <Sidebar personal={0} keyring={2} />
+          <section class="fs-column">
+            <header class="fs-column__header">
+              <h3>Personal secrets</h3>
+              <button type="button" class="fs-button fs-button--primary fs-button--icon" aria-label="Add a login on the computer" data-sync-add="desktop"><Icon name="plus" /></button>
+            </header>
+            <div class="fs-rows">
+              {rows.map(({ id, title, icon, subtitle, favorite }) => (
+                <div class="sync-slot" data-entry={id}>
+                  <div>
+                    <span class="fs-row">
+                      <span class="fs-avatar"><Icon name={icon} /></span>
+                      <span class="fs-row__text">
+                        <strong>{favorite && <Icon name="star-fill" class="fs-star" />}{title}</strong>
+                        <small>{subtitle}</small>
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      </TerminalFrame>
+    </div>
+
+    <div class="sync-lane" data-sync-lane aria-hidden="true"></div>
+    <template data-sync-capsule><span class="sync-packet" aria-hidden="true"><Icon name="fs:lock" /><span></span></span></template>
+
+    <div class="sync-mobile" data-sync-phone>
+      <div class="phone">
+        <div class="phone__screen">
+          <div class="sync-statusbar">
+            <span>9:41</span>
+            <Icon name="wifi" class="sync-wifi-on" />
+            <Icon name="wifi-off" class="sync-wifi-off" />
+          </div>
+          <header class="m-bar"><span class="m-back"><Icon name="chevron-left" />Back</span></header>
+          <header class="m-title"><h4>Personal secrets</h4><button type="button" class="m-add" aria-label="Add a login on the phone" data-sync-add="phone"><Icon name="plus" /></button></header>
+          {rows.map(({ id, title, icon, subtitle, favorite }) => (
+            <div class="sync-slot" data-entry={id}>
+              <div>
+                <span class="m-row">
+                  <span class="m-avatar"><Icon name={icon} /></span>
+                  <span class="m-row__text">
+                    <strong>{favorite && <Icon name="star-fill" class="m-star" />}{title}</strong>
+                    <small>{subtitle}</small>
+                  </span>
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sync-controls">
+    <button type="button" class="sync-toggle" data-sync-wifi aria-pressed="true">
+      <Icon name="wifi" />Phone Wi-Fi<span class="sync-switch"><i></i></span>
+    </button>
+  </div>
+</div>
+
+<script>
+  import { mountSync } from '../../scripts/sync';
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-sync]')) mountSync(root);
+</script>

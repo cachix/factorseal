@@ -1,0 +1,14 @@
+---
+import mark from '../../../assets/logo/factorseal-mark.svg?raw';
+import micro from '../../../assets/logo/factorseal-mark-micro.svg?raw';
+import { inlineSvg } from '../lib/svg';
+
+interface Props {
+  class?: string;
+  small?: boolean;
+}
+
+const { class: className, small = false } = Astro.props;
+---
+
+<Fragment set:html={inlineSvg(small ? micro : mark, className)} />
