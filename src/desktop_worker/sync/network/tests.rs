@@ -227,15 +227,15 @@ async fn approved_pairing_and_sealed_courier_deliver_after_sender_disconnects() 
     for (one, two) in [(&a, &b), (&a, &c), (&b, &a), (&b, &c), (&c, &a), (&c, &b)] {
         one.know(two);
     }
-    assert!(
+    assert!(matches!(
         rpc(
             &c.inner.endpoint,
             a.inner.endpoint.addr(),
             Request::Group(None)
         )
-        .await
-        .is_err()
-    );
+        .await,
+        Ok(Response::Rejected)
+    ));
     a.pair(&b).await;
     b.service.seal().unwrap();
     assert!(b.service.personal_sync_status().is_err());
@@ -443,6 +443,41 @@ async fn introduction_cancellation_keeps_membership_unconfigured_and_can_change_
             .is_none()
     );
     b.pair(&a).await;
+}
+
+#[tokio::test]
+async fn cancelled_invitation_is_rejected_instead_of_dropped() {
+    let inviter = Device::new(None).await;
+    let joiner = Device::new(None).await;
+    joiner.know(&inviter);
+    inviter
+        .inner
+        .action(Action::Invite("Inviter".into()))
+        .await
+        .unwrap();
+    let invitation = inviter
+        .inner
+        .view
+        .lock()
+        .unwrap()
+        .state
+        .invitation
+        .clone()
+        .unwrap();
+    inviter.inner.action(Action::Cancel).await.unwrap();
+    let error = joiner
+        .inner
+        .action(Action::Join {
+            ticket: invitation.ticket().unwrap(),
+            name: "Joiner".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "This pairing code expired or was cancelled. Make a new one on the other device."
+    );
+    assert_eq!(joiner.join_callbacks.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
