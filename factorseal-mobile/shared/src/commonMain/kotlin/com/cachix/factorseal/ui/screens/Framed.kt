@@ -89,21 +89,17 @@ import com.cachix.factorseal.resources.password
 import com.cachix.factorseal.resources.placeholder_confirm_password
 import com.cachix.factorseal.resources.placeholder_password
 import com.cachix.factorseal.resources.protected_by
-import com.cachix.factorseal.resources.sealing_description
 import com.cachix.factorseal.resources.sealing_vault
 import com.cachix.factorseal.resources.settings
 import com.cachix.factorseal.resources.setup_protection_choose
 import com.cachix.factorseal.resources.setup_protection_password
-import com.cachix.factorseal.resources.setup_subtitle
 import com.cachix.factorseal.resources.show_details
 import com.cachix.factorseal.resources.show_password
 import com.cachix.factorseal.resources.step_biometric
 import com.cachix.factorseal.resources.step_loading
 import com.cachix.factorseal.resources.step_verifying
-import com.cachix.factorseal.resources.tagline
 import com.cachix.factorseal.resources.try_again
 import com.cachix.factorseal.resources.unknown_cause
-import com.cachix.factorseal.resources.unlock_description
 import com.cachix.factorseal.resources.unlock_vault
 import com.cachix.factorseal.resources.unlocking
 import com.cachix.factorseal.resources.unlocking_title
@@ -207,12 +203,6 @@ fun Footer(app: FactorSeal) {
             verticalArrangement = Arrangement.Center,
             itemVerticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                stringResource(Res.string.tagline),
-                Modifier.padding(vertical = 6.dp, horizontal = 0.dp),
-                style = Type.caption,
-                color = Theme.colors.mutedForeground,
-            )
             ProtectionLink(app)
         }
     }
@@ -268,7 +258,7 @@ fun Framed(
                 }
             }
         }
-        if (WindowInsets.ime.getBottom(LocalDensity.current) == 0) Footer(app)
+        if (!app.settingsOpen && WindowInsets.ime.getBottom(LocalDensity.current) == 0) Footer(app)
     }
 }
 
@@ -379,9 +369,9 @@ private fun CardHeader(
     ) {
         mark()
         Text(title, style = Type.title, align = TextAlign.Center)
-        if (line != null) {
+        if (line != null || reserve) {
             Text(
-                line,
+                line.orEmpty(),
                 if (reserve) Modifier.heightIn(min = 48.dp) else Modifier,
                 style = Type.lead,
                 color = Theme.colors.mutedForeground,
@@ -420,7 +410,7 @@ fun SetupScreen(app: FactorSeal) {
     }
     Framed(app, width = 520.dp) {
         VaultCard {
-            CardHeader(stringResource(Res.string.create_your_vault), stringResource(Res.string.setup_subtitle)) { Mark(72.dp) }
+            CardHeader(stringResource(Res.string.create_your_vault), null) { Mark(72.dp) }
             InfoBox {
                 Text(
                     stringResource(if (methods.size > 1) Res.string.setup_protection_choose else Res.string.setup_protection_password),
@@ -511,11 +501,13 @@ fun ProgressScreen(
                     style = Type.title,
                     align = TextAlign.Center,
                 )
-                Text(
-                    stringResource(if (creating) Res.string.creating_description else Res.string.sealing_description),
-                    color = Theme.colors.mutedForeground,
-                    align = TextAlign.Center,
-                )
+                if (creating) {
+                    Text(
+                        stringResource(Res.string.creating_description),
+                        color = Theme.colors.mutedForeground,
+                        align = TextAlign.Center,
+                    )
+                }
             }
         }
     }
@@ -548,14 +540,17 @@ fun SealedScreen(
         VaultCard {
             CardHeader(
                 stringResource(if (busy) Res.string.unlocking_title else Res.string.vault_is_sealed),
-                stringResource(
-                    when {
-                        phase.step == null -> Res.string.unlock_description
-                        phase.step == UnlockStep.Loading -> Res.string.step_loading
-                        phase.biometric -> Res.string.step_biometric
-                        else -> Res.string.step_verifying
-                    },
-                ),
+                if (busy) {
+                    stringResource(
+                        when {
+                            phase.step == UnlockStep.Loading -> Res.string.step_loading
+                            phase.biometric -> Res.string.step_biometric
+                            else -> Res.string.step_verifying
+                        },
+                    )
+                } else {
+                    null
+                },
                 reserve = true,
             ) { UnlockMark(busy) }
             if (groups.size > 1) {

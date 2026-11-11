@@ -4,6 +4,10 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Write Desktop and mobile text in plain words and drop the tagline
+  from the footer. The Desktop footer now has a labeled Report an
+  issue button.
+
 - Make Devices clearer on Desktop and mobile. Naming this device
   is its own step, each way to pair says what it does, pairing has
   a Back button, and this device shows when it last synced. Device

@@ -1,6 +1,5 @@
 <resources>
     <string name="wordmark">FactorSeal</string>
-    <string name="tagline">Your secrets stay here.</string>
     <string name="back_to_vault">Back to your vault</string>
     <string name="back">Back</string>
     <string name="settings">Settings</string>
@@ -13,9 +12,8 @@
     <string name="backend_windows_tpm">Windows TPM</string>
 
     <string name="create_your_vault">Create your vault</string>
-    <string name="setup_subtitle">A local home for your secrets.</string>
     <string name="setup_protection_password">Your password and this device's hardware protect your vault. Both are required to unlock it.</string>
-    <string name="setup_protection_choose">Choose how this device should authorize access to your secrets.</string>
+    <string name="setup_protection_choose">Choose how to unlock this vault.</string>
     <string name="how_protection_works">How device protection works</string>
     <string name="method_password">Password</string>
     <string name="method_biometric">Biometric approval</string>
@@ -28,24 +26,22 @@
     <string name="show_password">Show password</string>
     <string name="hide_password">Hide password</string>
     <string name="create_vault">Create vault</string>
-    <string name="error_empty_password">Choose a non-empty password.</string>
+    <string name="error_empty_password">Enter a password.</string>
     <string name="error_password_mismatch">The passwords do not match.</string>
     <string name="creating_vault">Creating vault…</string>
     <string name="creating_description">Protecting your vault with this device's hardware.</string>
 
     <string name="vault_is_sealed">Vault is sealed</string>
     <string name="unlocking_title">Unlocking your vault…</string>
-    <string name="unlock_description">Unlock to make your secrets available.</string>
     <string name="choose_unlock">Choose how to unlock this vault.</string>
     <string name="unlocking">Unlocking…</string>
     <string name="unlock_vault">Unlock vault</string>
     <string name="continue_with_biometrics">Continue with biometrics</string>
-    <string name="step_biometric">Complete the device authorization prompt if one appears.</string>
+    <string name="step_biometric">Confirm on this device if it asks.</string>
     <string name="step_verifying">Checking your password with this device’s hardware.</string>
     <string name="step_loading">Loading your secrets.</string>
     <string name="missing_unlock_password">Enter the password required by this unlock method.</string>
     <string name="sealing_vault">Sealing vault…</string>
-    <string name="sealing_description">Closing access and removing vault keys from memory.</string>
     <string name="vault_unavailable">Vault unavailable</string>
     <string name="could_not_seal">Could not seal the vault: %1$s</string>
     <string name="hardware_unavailable">This device does not have the secure hardware FactorSeal needs to protect your vault.</string>
@@ -105,7 +101,7 @@
     <string name="restore_lead">Restore saved vault items from a FactorSeal backup.</string>
     <string name="backup_lead">Save an encrypted backup of your Personal secrets.</string>
     <string name="import_lead">Bring Personal credentials from another password manager or an encrypted transfer file.</string>
-    <string name="export_lead">Move Personal credentials to another device or password manager.</string>
+    <string name="export_lead">Export your personal secrets to another password manager.</string>
     <string name="file_type">File type</string>
     <string name="encrypted_transfer">Encrypted transfer</string>
     <string name="format_bitwarden_json">Bitwarden JSON</string>
@@ -114,13 +110,13 @@
     <string name="format_keepass_csv">KeePass CSV</string>
     <string name="encrypted_backup">Encrypted backup</string>
     <string name="encrypted_credential_file">Encrypted credential file</string>
-    <string name="cxf_explanation">Uses the open CXF credential format with age encryption. The receiving manager needs CXF support and may require a separate decryption step.</string>
+    <string name="cxf_explanation">Uses the CXF format, encrypted with age. The other password manager must support CXF and may ask you to decrypt the file first.</string>
     <string name="restore_explanation">Enter the passphrase used when this backup was created. Restored data is protected by this device's vault keys.</string>
-    <string name="backup_explanation">Includes durable vault items, but not provider caches, application authorizations, history, or device keys. Choose a separate passphrase for this portable backup.</string>
+    <string name="backup_explanation">Includes your saved items, but not provider caches, app permissions, history or device keys. Use a passphrase that is different from your vault password.</string>
     <string name="passphrase">Passphrase</string>
     <string name="post_quantum_key">Post-quantum key</string>
-    <string name="private_key_explanation">Choose the private age identity matching the recipient used for this export. The key file must be unencrypted and private to your account.</string>
-    <string name="public_key_explanation">Choose the recipient's public age post-quantum key. Only the matching private key can decrypt this export. Compatible with age 1.3 and later.</string>
+    <string name="private_key_explanation">Choose the private age key that matches this export. The key file must not be encrypted, and only your account may read it.</string>
+    <string name="public_key_explanation">Choose the public age key you are sending to. Only its private key can open the file. Needs age 1.3 or later.</string>
     <string name="choose_private_key">Choose private key file</string>
     <string name="choose_public_key">Choose public key file</string>
     <string name="backup_passphrase">Backup passphrase</string>
@@ -129,7 +125,7 @@
     <string name="placeholder_archive_passphrase">Archive passphrase</string>
     <string name="placeholder_confirm_archive_passphrase">Confirm archive passphrase</string>
     <string name="import_explanation">Personal items retain typed fields and sections. Unknown source data is kept with the encrypted item. 1PUX files are imported as separate document items.</string>
-    <string name="export_explanation">Only Personal secrets are exported. Password-manager interchange files are plaintext and are not protected by FactorSeal after they are written.</string>
+    <string name="export_explanation">Only personal secrets are exported. The file is not encrypted, so anyone who gets it can read them.</string>
     <string name="understand_plaintext">I understand this file will contain readable secrets</string>
     <string name="replace_existing">Replace existing items</string>
     <string name="choose_file_and_review">Choose file and review</string>
@@ -320,10 +316,10 @@
     <string name="security">Security</string>
     <string name="reduced_motion">Reduced motion</string>
     <string name="reset_to_defaults">Reset to defaults</string>
-    <string name="idle_lock_timeout">Idle lock timeout</string>
-    <string name="maximum_unlock_duration">Maximum unlock duration</string>
+    <string name="idle_lock_timeout">Seal after inactivity</string>
+    <string name="maximum_unlock_duration">Maximum time unsealed</string>
     <string name="applies_next_unlock">Applies the next time you unlock the vault.</string>
-    <string name="idle_exceeds_maximum">Idle lock timeout must not exceed maximum unlock duration.</string>
+    <string name="idle_exceeds_maximum">The inactivity time cannot be longer than the maximum time unsealed.</string>
     <string name="fill_a_login">Fill a login</string>
     <string name="other_logins">Other logins</string>
     <string name="no_logins_to_fill">No logins to fill</string>

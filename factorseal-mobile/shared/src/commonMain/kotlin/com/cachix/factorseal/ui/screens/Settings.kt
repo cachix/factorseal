@@ -97,7 +97,7 @@ fun FramedSettings(app: FactorSeal) {
     }
     val open = section
     if (open == null) {
-        SettingsList(app, footer = false) { section = it }
+        SettingsList(app, footer = true) { section = it }
     } else {
         Column(Modifier.fillMaxSize()) {
             BackRow(app, onBack = { section = null })
