@@ -1699,6 +1699,39 @@ impl DesktopView {
                 _ => {}
             },
         );
+        let device_name = Self::device_name_input(window, cx);
+        let device_name_submit = cx.subscribe_in(
+            &device_name,
+            window,
+            |view, _, event: &InputEvent, _, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    view.submit_device_name(cx);
+                }
+            },
+        );
+        let pairing_ticket =
+            cx.new(|cx| SecretInputState::new(window, cx).placeholder("Paste pairing code"));
+        let pairing_ticket_submit = cx.subscribe_in(
+            &pairing_ticket,
+            window,
+            |view, _, event: &InputEvent, _, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    view.submit_pairing_code(cx);
+                }
+            },
+        );
         let window_activation = cx.observe_window_activation(window, |view, window, cx| {
             if window.is_window_active() && matches!(view.snapshot, Snapshot::Sealed { .. }) {
                 view.focus_password = true;
@@ -1761,10 +1794,9 @@ impl DesktopView {
             selected_device: 0,
             section_opened: false,
             devices_notice: None,
-            device_name: Self::device_name_input(window, cx),
+            device_name,
             device_renaming: false,
-            pairing_ticket: cx
-                .new(|cx| SecretInputState::new(window, cx).placeholder("Paste pairing code")),
+            pairing_ticket,
             transfer_format: TransferFormat::default(),
             transfer_is_import: false,
             transfer_use_recipient: false,
@@ -1790,6 +1822,8 @@ impl DesktopView {
                 settings_changed,
                 settings_report,
                 use_generated_password,
+                device_name_submit,
+                pairing_ticket_submit,
                 window_activation,
             ],
         }

@@ -156,8 +156,7 @@ impl DesktopView {
         let header = Self::list_header(self.section_list_title(), cx).when(
             self.selected_vault_item == Some(VaultSelection::Devices)
                 && !self.settings_open
-                && !self.device_list(cx).is_empty()
-                && !self.needs_device_name(cx),
+                && !self.device_list(cx).is_empty(),
             |header| header.child(self.connect_device_button(cx)),
         );
         let rows = self.section_rows(cx);
@@ -197,6 +196,13 @@ impl DesktopView {
                     .on_click(cx.listener(move |view, _, _, cx| view.open_section(row, cx))),
             );
         }
+        let invite = self.shortcuts.compact
+            && self.selected_vault_item == Some(VaultSelection::Devices)
+            && !self.settings_open
+            && self.only_this_device(cx);
+        let list = list.when(invite, |list| {
+            list.child(div().p_4().child(self.render_connect_first_device(cx)))
+        });
         v_flex()
             .size_full()
             .child(header)
@@ -242,12 +248,6 @@ impl DesktopView {
 
     pub(super) fn render_section_pane(&self, cx: &mut Context<Self>) -> Div {
         let pane = v_flex().w_full().gap_4().p_6();
-        if self.selected_vault_item == Some(VaultSelection::Devices)
-            && !self.settings_open
-            && let Some(placeholder) = self.render_device_placeholder(cx)
-        {
-            return pane.child(placeholder);
-        }
         let Some(row) = self.selected_section(cx) else {
             return pane;
         };
@@ -298,9 +298,8 @@ impl DesktopView {
                         .ghost()
                         .flex_none()
                         .label("Rename")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.device_renaming = true;
-                            cx.notify();
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.start_device_rename(window, cx);
                         })),
                 )
             });
@@ -314,6 +313,17 @@ impl DesktopView {
     }
 
     pub(super) fn render_section_layout(&self, compact: bool, cx: &mut Context<Self>) -> Div {
+        if self.selected_vault_item == Some(VaultSelection::Devices)
+            && !self.settings_open
+            && let Some(setup) = self.render_device_setup(cx)
+        {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .h_full()
+                .child(self.scroll_detail(setup));
+        }
         let theme = cx.theme().clone();
         if compact {
             let page = if self.section_opened {

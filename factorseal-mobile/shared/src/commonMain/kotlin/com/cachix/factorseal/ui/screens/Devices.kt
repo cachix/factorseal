@@ -3,6 +3,9 @@ package com.cachix.factorseal.ui.screens
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,9 +30,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -54,7 +61,7 @@ import com.cachix.factorseal.resources.access
 import com.cachix.factorseal.resources.access_personal
 import com.cachix.factorseal.resources.access_storage
 import com.cachix.factorseal.resources.approval_sent
-import com.cachix.factorseal.resources.approved_here
+import com.cachix.factorseal.resources.back
 import com.cachix.factorseal.resources.cancel
 import com.cachix.factorseal.resources.close
 import com.cachix.factorseal.resources.codes_match
@@ -69,8 +76,9 @@ import com.cachix.factorseal.resources.could_not_verify
 import com.cachix.factorseal.resources.create_pairing_code
 import com.cachix.factorseal.resources.creating_code
 import com.cachix.factorseal.resources.device_name
-import com.cachix.factorseal.resources.device_name_hint
+import com.cachix.factorseal.resources.device_name_empty
 import com.cachix.factorseal.resources.device_name_invalid
+import com.cachix.factorseal.resources.device_name_too_long
 import com.cachix.factorseal.resources.devices
 import com.cachix.factorseal.resources.expires_in
 import com.cachix.factorseal.resources.glyph_paste
@@ -78,10 +86,13 @@ import com.cachix.factorseal.resources.glyph_qr_code
 import com.cachix.factorseal.resources.glyph_refresh
 import com.cachix.factorseal.resources.icon_arrow_right
 import com.cachix.factorseal.resources.icon_check
+import com.cachix.factorseal.resources.icon_chevron_left
+import com.cachix.factorseal.resources.icon_chevron_right
 import com.cachix.factorseal.resources.icon_close
 import com.cachix.factorseal.resources.icon_copy
 import com.cachix.factorseal.resources.icon_network
 import com.cachix.factorseal.resources.icon_plus
+import com.cachix.factorseal.resources.last_synced
 import com.cachix.factorseal.resources.loading_devices
 import com.cachix.factorseal.resources.name_this_device
 import com.cachix.factorseal.resources.name_this_device_lead
@@ -90,8 +101,10 @@ import com.cachix.factorseal.resources.not_a_pairing_code
 import com.cachix.factorseal.resources.pairing_choose
 import com.cachix.factorseal.resources.pairing_code
 import com.cachix.factorseal.resources.pairing_code_expired
-import com.cachix.factorseal.resources.pairing_paste
+import com.cachix.factorseal.resources.pairing_paste_detail
+import com.cachix.factorseal.resources.pairing_scan_detail
 import com.cachix.factorseal.resources.pairing_scan_hint
+import com.cachix.factorseal.resources.pairing_show_detail
 import com.cachix.factorseal.resources.paste_pairing_code
 import com.cachix.factorseal.resources.rename
 import com.cachix.factorseal.resources.review_connection
@@ -101,6 +114,11 @@ import com.cachix.factorseal.resources.scan_pairing_code
 import com.cachix.factorseal.resources.show_pairing_code
 import com.cachix.factorseal.resources.sync_now
 import com.cachix.factorseal.resources.sync_runs
+import com.cachix.factorseal.resources.synced_days_ago
+import com.cachix.factorseal.resources.synced_hours_ago
+import com.cachix.factorseal.resources.synced_just_now
+import com.cachix.factorseal.resources.synced_minutes_ago
+import com.cachix.factorseal.resources.synced_never
 import com.cachix.factorseal.resources.syncing
 import com.cachix.factorseal.resources.this_device
 import com.cachix.factorseal.resources.view_connection
@@ -110,6 +128,7 @@ import com.cachix.factorseal.ui.components.Caption
 import com.cachix.factorseal.ui.components.Dialog
 import com.cachix.factorseal.ui.components.Divider
 import com.cachix.factorseal.ui.components.FieldError
+import com.cachix.factorseal.ui.components.Icon
 import com.cachix.factorseal.ui.components.IconButton
 import com.cachix.factorseal.ui.components.IconTile
 import com.cachix.factorseal.ui.components.InfoBox
@@ -129,6 +148,9 @@ import com.cachix.factorseal.ui.theme.Theme
 import com.cachix.factorseal.ui.theme.Type
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.jetbrains.compose.resources.DrawableResource
+import org.jetbrains.compose.resources.StringResource
+import org.jetbrains.compose.resources.pluralStringResource
 import org.jetbrains.compose.resources.stringResource
 import kotlin.time.Clock
 
@@ -140,7 +162,70 @@ private fun Device.access(): String = stringResource(if (reader) Res.string.acce
 @Composable
 private fun Device.detail(): String = if (local) stringResource(Res.string.this_device) else access()
 
-private fun deviceName(field: TextFieldState): String? = field.text.toString().trim().takeIf(::validDeviceName)
+internal fun deviceNameProblem(name: String): StringResource? = when {
+    name.isBlank() -> Res.string.device_name_empty
+    name.encodeToByteArray().size > 80 -> Res.string.device_name_too_long
+    !validDeviceName(name) -> Res.string.device_name_invalid
+    else -> null
+}
+
+private fun Response.Sync?.pending(): Boolean = this?.review != null || this?.invitation != null || this?.joining == true
+
+private fun Response.Sync?.firstScreen(): Pairing = when {
+    this?.joining == true -> Pairing.Paste
+    this?.invitation != null -> Pairing.Show
+    else -> Pairing.Choose
+}
+
+internal enum class SyncAge { Minutes, Hours, Days }
+
+internal fun syncAge(
+    last: Long,
+    now: Long,
+): Pair<SyncAge, Int>? {
+    val elapsed = (now - last).coerceAtLeast(0)
+    return when {
+        elapsed < 60 -> null
+        elapsed < 3_600 -> SyncAge.Minutes to (elapsed / 60).toInt()
+        elapsed < 86_400 -> SyncAge.Hours to (elapsed / 3_600).toInt()
+        else -> SyncAge.Days to (elapsed / 86_400).toInt()
+    }
+}
+
+@Composable
+private fun lastSynced(
+    last: Long?,
+    now: Long,
+): String {
+    if (last == null) return stringResource(Res.string.synced_never)
+    val (unit, count) = syncAge(last, now) ?: return stringResource(Res.string.synced_just_now)
+    val plural =
+        when (unit) {
+            SyncAge.Minutes -> Res.plurals.synced_minutes_ago
+            SyncAge.Hours -> Res.plurals.synced_hours_ago
+            SyncAge.Days -> Res.plurals.synced_days_ago
+        }
+    return pluralStringResource(plural, count, count)
+}
+
+private fun Response.Sync.onlyThisDevice(): Boolean = devices.isNotEmpty() && devices.all { it.local }
+
+@Composable
+private fun ConnectFirstDevice(
+    pending: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(stringResource(Res.string.connect_another), color = Theme.colors.mutedForeground)
+        Button(
+            stringResource(if (pending) Res.string.view_connection else Res.string.connect_a_device),
+            onClick = onClick,
+            variant = Variant.Primary,
+            icon = Res.drawable.icon_plus,
+        )
+    }
+}
 
 @Composable
 fun DevicesPage(app: FactorSeal) {
@@ -154,18 +239,10 @@ fun DevicesPage(app: FactorSeal) {
             return@MainPage
         }
         ListHeader(stringResource(Res.string.devices)) {
-            val pending = sync?.review != null || sync?.invitation != null || sync?.joining == true
             IconButton(
                 Res.drawable.icon_plus,
-                stringResource(if (pending) Res.string.view_connection else Res.string.connect_a_device),
-                onClick = {
-                    pairing =
-                        when {
-                            sync?.joining == true -> Pairing.Paste
-                            sync?.invitation != null -> Pairing.Show
-                            else -> Pairing.Choose
-                        }
-                },
+                stringResource(if (sync.pending()) Res.string.view_connection else Res.string.connect_a_device),
+                onClick = { pairing = sync.firstScreen() },
                 variant = Variant.Primary,
             )
         }
@@ -179,6 +256,9 @@ fun DevicesPage(app: FactorSeal) {
                         RowText(device.name, device.detail())
                     }
                 }
+                if (sync.onlyThisDevice()) {
+                    ConnectFirstDevice(sync.pending(), onClick = { pairing = sync.firstScreen() }, Modifier.padding(16.dp))
+                }
             }
         }
     }
@@ -190,7 +270,8 @@ private fun NameDevice(app: FactorSeal) {
     val name = remember { TextFieldState(app.host.deviceName) }
     var problem by remember { mutableStateOf<Message?>(null) }
     fun submit() {
-        val text = deviceName(name) ?: return run { problem = message(Res.string.device_name_invalid) }
+        val text = name.text.toString().trim()
+        deviceNameProblem(text)?.let { return run { problem = message(it) } }
         app.update(app.preferences.copy(deviceName = text))
     }
     Column(
@@ -211,7 +292,6 @@ private fun NameDevice(app: FactorSeal) {
                 keyboard = KeyboardOptions(capitalization = KeyboardCapitalization.Words, imeAction = ImeAction.Done),
                 onSubmit = ::submit,
             )
-            Caption(stringResource(Res.string.device_name_hint))
             FieldError(problem?.text())
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -233,10 +313,18 @@ fun DevicePage(
     val sync = app.sync
     val device = sync?.devices?.firstOrNull { it.name == name } ?: sync?.devices?.firstOrNull { it.local && name == app.preferences.deviceName }
     var renaming by remember { mutableStateOf(false) }
+    var pairing by remember { mutableStateOf<Pairing?>(null) }
     var busy by remember { mutableStateOf(false) }
     var problem by remember { mutableStateOf<Message?>(null) }
     val scope = rememberCoroutineScope()
     val alone = sync?.devices.orEmpty().none { !it.local }
+    var now by remember { mutableLongStateOf(Clock.System.now().epochSeconds) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            now = Clock.System.now().epochSeconds
+        }
+    }
     MainPage {
         BackRow(app)
         if (device == null || sync == null) return@MainPage
@@ -249,20 +337,26 @@ fun DevicePage(
         ) {
             PageHeader(Res.drawable.icon_network, device.name, detail = device.detail()) {
                 if (device.local && alone && !renaming) {
-                    Button(stringResource(Res.string.rename), onClick = { renaming = true }, variant = Variant.Ghost)
+                    Button(stringResource(Res.string.rename), onClick = {
+                        problem = null
+                        renaming = true
+                    }, variant = Variant.Ghost)
                 }
             }
             if (renaming) {
                 val field = remember { TextFieldState(device.name) }
+                val focus = remember { FocusRequester() }
+                LaunchedEffect(Unit) { focus.requestFocus() }
                 fun save() {
-                    val text = deviceName(field) ?: return run { problem = message(Res.string.device_name_invalid) }
+                    val text = field.text.toString().trim()
+                    deviceNameProblem(text)?.let { return run { problem = message(it) } }
                     problem = null
                     renaming = false
                     app.update(app.preferences.copy(deviceName = text))
                     app.replace(Page.Device(text))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TextInput(field, stringResource(Res.string.device_name), Modifier.weight(1f), onSubmit = ::save)
+                    TextInput(field, stringResource(Res.string.device_name), Modifier.weight(1f).focusRequester(focus), onSubmit = ::save)
                     Button(stringResource(Res.string.save), onClick = ::save, variant = Variant.Primary, icon = Res.drawable.icon_check)
                     IconButton(Res.drawable.icon_close, stringResource(Res.string.cancel), onClick = {
                         problem = null
@@ -272,11 +366,12 @@ fun DevicePage(
                 FieldError(problem?.text())
             }
             if (sync.conflicts > 0) {
-                InfoBox(fill = Theme.colors.secondary) { Text(stringResource(Res.string.conflicts, sync.conflicts)) }
+                InfoBox(fill = Theme.colors.secondary) { Text(pluralStringResource(Res.plurals.conflicts, sync.conflicts, sync.conflicts)) }
             }
             KeyValueRow(stringResource(Res.string.access), device.access())
+            if (device.local && !alone) KeyValueRow(stringResource(Res.string.last_synced), lastSynced(sync.lastExchange, now))
             if (alone) {
-                Text(stringResource(Res.string.connect_another), color = Theme.colors.mutedForeground)
+                ConnectFirstDevice(sync.pending(), onClick = { pairing = sync.firstScreen() })
             } else {
                 Button(
                     stringResource(if (busy) Res.string.syncing else Res.string.sync_now),
@@ -292,9 +387,10 @@ fun DevicePage(
                 )
             }
             sync.error?.let { Text(it, color = Theme.colors.danger) }
-            Caption(stringResource(Res.string.sync_runs))
+            if (!alone) Caption(stringResource(Res.string.sync_runs))
         }
     }
+    pairing?.let { screen -> PairingDialog(app, screen, onScreen = { pairing = it }, onClose = { pairing = null }) }
 }
 
 @Composable
@@ -333,6 +429,7 @@ private fun PairingDialog(
         request: Request,
         done: () -> Unit = {},
     ) {
+        if (busy) return
         busy = true
         problem = null
         scope.launch {
@@ -350,11 +447,15 @@ private fun PairingDialog(
         title = stringResource(if (review != null) Res.string.review_connection else Res.string.connect_a_device),
         onDismiss = onClose,
         leading = {
-            if (showing) {
+            if (screen != Pairing.Choose && review == null && !sync.joining) {
                 Button(
-                    stringResource(Res.string.copy_pairing_code),
-                    onClick = { app.copy(invitation.ticket) },
-                    icon = Res.drawable.icon_copy,
+                    stringResource(Res.string.back),
+                    onClick = {
+                        act(Request.SyncCancel) { onScreen(Pairing.Choose) }
+                    },
+                    enabled = !busy,
+                    variant = Variant.Ghost,
+                    icon = Res.drawable.icon_chevron_left,
                 )
             }
         },
@@ -386,31 +487,19 @@ private fun PairingDialog(
 
             screen == Pairing.Choose -> {
                 Text(stringResource(Res.string.pairing_choose))
-                Button(
-                    stringResource(Res.string.show_pairing_code),
-                    onClick = {
-                        onScreen(Pairing.Show)
-                        act(Request.SyncInvite(name))
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    variant = Variant.Primary,
-                    icon = Res.drawable.glyph_qr_code,
-                )
-                Button(
-                    stringResource(Res.string.scan_pairing_code),
-                    onClick = { scanning = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    icon = Res.drawable.glyph_qr_code,
-                )
-                Button(
-                    stringResource(Res.string.paste_pairing_code),
-                    onClick = { onScreen(Pairing.Paste) },
-                    modifier = Modifier.fillMaxWidth(),
-                    icon = Res.drawable.glyph_paste,
-                )
+                PairingChoice(Res.drawable.glyph_qr_code, stringResource(Res.string.show_pairing_code), stringResource(Res.string.pairing_show_detail)) {
+                    onScreen(Pairing.Show)
+                    act(Request.SyncInvite(name))
+                }
+                PairingChoice(Res.drawable.glyph_qr_code, stringResource(Res.string.scan_pairing_code), stringResource(Res.string.pairing_scan_detail)) {
+                    scanning = true
+                }
+                PairingChoice(Res.drawable.glyph_paste, stringResource(Res.string.paste_pairing_code), stringResource(Res.string.pairing_paste_detail)) {
+                    onScreen(Pairing.Paste)
+                }
             }
 
-            screen == Pairing.Show -> ShowBody(invitation, now, busy) { act(Request.SyncInvite(name)) }
+            screen == Pairing.Show -> ShowBody(invitation, now, busy, onCopy = { invitation?.let { app.copy(it.ticket) } }) { act(Request.SyncInvite(name)) }
 
             else -> PasteBody(busy, ::join)
         }
@@ -433,10 +522,41 @@ private fun PairingDialog(
 }
 
 @Composable
+private fun PairingChoice(
+    icon: DrawableResource,
+    title: String,
+    detail: String,
+    onClick: () -> Unit,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val colors = Theme.colors
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(Shapes.tile)
+            .border(1.dp, colors.border, Shapes.tile)
+            .background(if (pressed) colors.selection else Color.Transparent)
+            .clickable(interaction, indication = null, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconTile(icon)
+        Column(Modifier.weight(1f)) {
+            Text(title, weight = Semibold)
+            Caption(detail)
+        }
+        Icon(Res.drawable.icon_chevron_right, tint = colors.mutedForeground)
+    }
+}
+
+@Composable
 private fun ShowBody(
     invitation: Invitation?,
     now: Long,
     busy: Boolean,
+    onCopy: () -> Unit,
     onCreate: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -463,6 +583,7 @@ private fun ShowBody(
             else -> {
                 QrCode(invitation.modules, stringResource(Res.string.pairing_code), Modifier.widthIn(max = 320.dp).fillMaxWidth())
                 Text(stringResource(Res.string.pairing_scan_hint), color = Theme.colors.mutedForeground, align = TextAlign.Center)
+                Button(stringResource(Res.string.copy_pairing_code), onClick = onCopy, icon = Res.drawable.icon_copy)
             }
         }
     }
@@ -474,14 +595,21 @@ private fun PasteBody(
     onJoin: (String) -> Unit,
 ) {
     val ticket = remember { TextFieldState() }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
     fun submit() {
         val text = ticket.text.toString()
         ticket.clearText()
         if (text.isNotBlank()) onJoin(text)
     }
-    Text(stringResource(Res.string.pairing_paste))
     Labeled(stringResource(Res.string.pairing_code)) {
-        SecretInput(state = ticket, placeholder = stringResource(Res.string.paste_pairing_code), revealed = false, onSubmit = ::submit)
+        SecretInput(
+            state = ticket,
+            placeholder = stringResource(Res.string.paste_pairing_code),
+            revealed = false,
+            modifier = Modifier.focusRequester(focus),
+            onSubmit = ::submit,
+        )
     }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Button(
@@ -530,11 +658,7 @@ private fun ReviewBody(
     } else {
         Button(
             stringResource(
-                when {
-                    review.approvedHere -> Res.string.approved_here
-                    review.waiting -> Res.string.waiting_for_other
-                    else -> Res.string.codes_match
-                },
+                if (review.approvedHere || review.waiting) Res.string.waiting_for_other else Res.string.codes_match,
             ),
             onClick = onApprove,
             modifier = Modifier.fillMaxWidth(),
