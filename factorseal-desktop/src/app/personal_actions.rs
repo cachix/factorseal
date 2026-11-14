@@ -196,6 +196,7 @@ impl DesktopView {
                         .xsmall()
                         .icon(IconName::Close)
                         .tooltip("Dismiss")
+                        .accessibility_label("Dismiss")
                         .on_click(cx.listener(move |view, _, _, cx| {
                             view.dismiss_change_toast(id, cx);
                         })),
@@ -223,6 +224,7 @@ impl DesktopView {
                         .xsmall()
                         .icon(IconName::Close)
                         .tooltip("Dismiss")
+                        .accessibility_label("Dismiss")
                         .on_click(cx.listener(move |view, _, _, cx| {
                             view.dismiss_clipboard_notice(copy, cx);
                         })),
