@@ -1,7 +1,8 @@
 # Drives FactorSeal Desktop like a person: unlocks the main window or a popup
 # kept open by a seal, grants or denies the approval popup, or presses a named
-# button or Escape in it. -Title picks another popup by the end of its title,
-# such as 'Browser access' for the browser extension's prompt, or the main
+# button or Escape in it. -Title picks another popup by its name, the title
+# before " · FactorSeal", such as 'Browser access' for the browser extension's
+# prompt, or the main
 # window ('FactorSeal') to press one of its buttons. UI Automation
 # finds the controls; the clicks and keystrokes are real input, since the
 # popup accepts approval only after a mouse click inside it and one second
