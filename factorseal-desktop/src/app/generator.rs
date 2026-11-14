@@ -307,6 +307,11 @@ impl Render for PasswordGenerator {
                             } else {
                                 "Show password"
                             })
+                            .accessibility_label(if self.revealed {
+                                "Hide password"
+                            } else {
+                                "Show password"
+                            })
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.reveal(!view.revealed, cx);
                             })),
@@ -316,6 +321,7 @@ impl Render for PasswordGenerator {
                             .ghost()
                             .icon(IconName::Redo)
                             .tooltip("Generate another")
+                            .accessibility_label("Generate another")
                             .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
                     ),
             )
@@ -397,6 +403,7 @@ impl DesktopView {
                     .icon(Glyph::Generate)
                     .when(!icon_only, |button| button.label("Generate"))
                     .tooltip(tooltip)
+                    .accessibility_label(tooltip)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.toggle_generator(target, window, cx);
                     })),

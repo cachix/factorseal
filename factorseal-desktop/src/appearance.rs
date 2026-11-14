@@ -145,6 +145,26 @@ pub(crate) fn initialize(cx: &mut App) {
     }
 }
 
+/// Default preferences for views rendered in GPUI tests, without reading
+/// settings from disk or probing the system theme.
+#[cfg(test)]
+pub(crate) fn initialize_for_test(cx: &mut App) {
+    cx.set_global(crate::theming::ThemeState {
+        backend: None,
+        summary: String::new(),
+        error: None,
+        monitor_status: String::new(),
+        automatic_refreshes: 0,
+        last_change_source: None,
+    });
+    cx.set_global(Preferences {
+        settings: crate::settings::DesktopSettings::default(),
+        path: None,
+        system_theme: Theme::global(cx).clone(),
+        system_input: crate::theming::input_background(cx),
+    });
+}
+
 fn apply_selected(cx: &mut App) -> Result<()> {
     let preferences = cx.global::<Preferences>();
     let (mut theme, input) = resolve(
