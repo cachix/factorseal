@@ -1,0 +1,7 @@
+// The application icon of the Windows executables, embedded by build.rs.
+// Windows shows an executable's first icon in Explorer, the taskbar and
+// Alt+Tab; GPUI also loads icon 1 for its windows.
+//
+// factorseal-app-icon.ico holds factorseal-app-icon.svg rendered at 16, 20,
+// 24, 32, 40, 48, 64 and 256 pixels (with resvg), each stored as PNG.
+1 ICON "factorseal-app-icon.ico"
