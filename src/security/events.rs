@@ -16,9 +16,21 @@ pub enum Kind {
     IntegrityFailure,
     VaultSealed,
     MemoryProtectionFailed,
+    /// A connection failed before a response could be sent at all (read,
+    /// identify, or parse failed, or the response itself failed to send).
+    /// No detail is recorded, only that it happened -- see the value-free
+    /// design note above -- but a nonzero count is a signal worth
+    /// investigating with a diagnostic build, since a client only ever sees
+    /// an undifferentiated transport timeout for these.
+    ConnectionFailed,
+    /// A connecting peer's OS identity (SID/UID) didn't match this vault's
+    /// owner, rejected before the caller ever reached an authorization
+    /// check. Distinct from `AuthorizationDenied`, which is a known,
+    /// correctly-identified caller lacking a grant.
+    UntrustedCallerRejected,
 }
 
-const KINDS: [Kind; 10] = [
+const KINDS: [Kind; 12] = [
     Kind::AuthorizationDenied,
     Kind::ApprovalLimited,
     Kind::ApprovalCreated,
@@ -29,8 +41,10 @@ const KINDS: [Kind; 10] = [
     Kind::IntegrityFailure,
     Kind::VaultSealed,
     Kind::MemoryProtectionFailed,
+    Kind::ConnectionFailed,
+    Kind::UntrustedCallerRejected,
 ];
-static COUNTS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+static COUNTS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
