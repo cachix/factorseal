@@ -11,9 +11,29 @@ fn main() {
             println!("cargo:rustc-link-arg=/DELAYLOAD:{library}");
         }
     }
+    app_icon();
     // CryptoKit's Swift runtime lives in the OS shared cache. This must be on
     // the final executable, not just on hardwareseal's library/test targets.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
+}
+
+/// Gives the `factorseal` executable the application icon on Windows. Only a
+/// build on Windows embeds it: the WSL broker is cross-compiled from Linux,
+/// with no resource compiler, and needs no icon.
+fn app_icon() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || !std::env::var("HOST").is_ok_and(|host| host.contains("windows"))
+    {
+        return;
+    }
+    println!("cargo:rerun-if-changed=assets/logo/factorseal-app-icon.ico");
+    embed_resource::compile_for(
+        "assets/logo/factorseal-app-icon.rc",
+        ["factorseal"],
+        embed_resource::ParamsIncludeDirs(["assets/logo"]),
+    )
+    .manifest_required()
+    .expect("embedding the application icon");
 }
