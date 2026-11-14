@@ -40,14 +40,20 @@ public static class Input {
     // A visible top-level window of the process whose title ends as given.
     // UI Automation lists the popup under the main window when Windows makes
     // the main window its owner, so search the window list instead.
-    public static IntPtr Find(int pid, string suffix) {
+    // Desktop titles a popup "<name> · FactorSeal" (such as "Secret access ·
+    // FactorSeal") and its main window "FactorSeal": a window matches a name
+    // when its title is that name, or starts with it before " · ".
+    public static bool TitleMatches(string title, string name) {
+        return title == name || title.StartsWith(name + " \u00b7 ");
+    }
+    public static IntPtr Find(int pid, string name) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((hwnd, _) => {
             int owner;
             GetWindowThreadProcessId(hwnd, out owner);
             var title = new System.Text.StringBuilder(256);
             GetWindowText(hwnd, title, title.Capacity);
-            if (owner == pid && IsWindowVisible(hwnd) && title.ToString().EndsWith(suffix)) {
+            if (owner == pid && IsWindowVisible(hwnd) && TitleMatches(title.ToString(), name)) {
                 found = hwnd;
                 return false;
             }

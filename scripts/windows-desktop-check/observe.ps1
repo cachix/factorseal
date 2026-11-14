@@ -59,11 +59,11 @@ public static class Win {
     public static int Pid(IntPtr hwnd) { int pid; GetWindowThreadProcessId(hwnd, out pid); return pid; }
 
     // The popup is the Desktop process's visible top-level window titled
-    // "... Secret access"; the main window is titled "FactorSeal".
+    // "Secret access · FactorSeal"; the main window is titled "FactorSeal".
     public static IntPtr FindPopup(int pid) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((hwnd, _) => {
-            if (Pid(hwnd) == pid && IsWindowVisible(hwnd) && Title(hwnd).EndsWith("Secret access")) {
+            if (Pid(hwnd) == pid && IsWindowVisible(hwnd) && Title(hwnd).StartsWith("Secret access \u00b7 ")) {
                 found = hwnd;
                 return false;
             }

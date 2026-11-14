@@ -6,7 +6,8 @@
 param(
     [Parameter(Mandatory = $true)][int]$DesktopPid,
     [Parameter(Mandatory = $true)][string]$Out,
-    # The end of the popup's title: "Browser access" for browser requests.
+    # The popup's name, its title before " · FactorSeal": "Browser access" for
+    # browser requests.
     [string]$Title = 'Secret access'
 )
 $ErrorActionPreference = 'Stop'
@@ -31,14 +32,20 @@ public static class Shot {
 
     // Found by title, not through UI Automation, which lists a popup owned
     // by the main window under it rather than at the top level.
-    public static IntPtr FindPopup(int pid, string suffix) {
+    // Desktop titles a popup "<name> · FactorSeal" (such as "Secret access ·
+    // FactorSeal") and its main window "FactorSeal": a window matches a name
+    // when its title is that name, or starts with it before " · ".
+    public static bool TitleMatches(string title, string name) {
+        return title == name || title.StartsWith(name + " \u00b7 ");
+    }
+    public static IntPtr FindPopup(int pid, string name) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((hwnd, _) => {
             int owner;
             GetWindowThreadProcessId(hwnd, out owner);
             var title = new StringBuilder(256);
             GetWindowText(hwnd, title, title.Capacity);
-            if (owner == pid && IsWindowVisible(hwnd) && title.ToString().EndsWith(suffix)) {
+            if (owner == pid && IsWindowVisible(hwnd) && TitleMatches(title.ToString(), name)) {
                 found = hwnd;
                 return false;
             }
