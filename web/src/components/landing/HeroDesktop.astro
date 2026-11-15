@@ -227,7 +227,8 @@ const unlockSteps = [
 </div>
 
 <script>
+  import { mountOnPageLoad } from '../../scripts/page';
   import { mountVault } from '../../scripts/vault';
 
-  for (const root of document.querySelectorAll<HTMLElement>('[data-vault]')) mountVault(root);
+  mountOnPageLoad('[data-vault]', mountVault);
 </script>

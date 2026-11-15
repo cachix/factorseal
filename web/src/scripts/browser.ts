@@ -59,4 +59,6 @@ export function mountBrowser(root: HTMLElement) {
       step('idle');
     }
   });
+
+  return () => window.clearTimeout(timer);
 }

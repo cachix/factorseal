@@ -179,15 +179,17 @@ const everyday = [
       </div>
     </section>
   </div>
+
+  <script>
+    const agent = navigator.userAgent;
+    const platform = /Android/.test(agent) ? 'android'
+      : /iPhone|iPad|iPod/.test(agent) || navigator.maxTouchPoints > 1 && /Mac/.test(agent) ? null
+        : /Windows/.test(agent) ? 'windows'
+          : /Mac/.test(agent) ? 'macos'
+            : /Linux|X11/.test(agent) ? 'linux' : null;
+
+    document.addEventListener('astro:page-load', () => {
+      if (platform) document.querySelector(`.platform[data-platform="${platform}"]`)?.classList.add('is-current');
+    });
+  </script>
 </StarlightPage>
-
-<script>
-  const agent = navigator.userAgent;
-  const platform = /Android/.test(agent) ? 'android'
-    : /iPhone|iPad|iPod/.test(agent) || navigator.maxTouchPoints > 1 && /Mac/.test(agent) ? null
-      : /Windows/.test(agent) ? 'windows'
-        : /Mac/.test(agent) ? 'macos'
-          : /Linux|X11/.test(agent) ? 'linux' : null;
-
-  if (platform) document.querySelector(`.platform[data-platform="${platform}"]`)?.classList.add('is-current');
-</script>

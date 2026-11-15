@@ -71,6 +71,7 @@ const profileKey = '3f9a1c07b2e4d685';
 
 <script>
   import { mountBrowser } from '../../scripts/browser';
+  import { mountOnPageLoad } from '../../scripts/page';
 
-  for (const root of document.querySelectorAll<HTMLElement>('[data-browser]')) mountBrowser(root);
+  mountOnPageLoad('[data-browser]', mountBrowser);
 </script>
