@@ -54,7 +54,7 @@ export function mountTotp(root: HTMLElement) {
   };
 
   tick();
-  createAstroMotionLifecycle({
+  const motion = createAstroMotionLifecycle({
     target: root,
     onChange: (active, { reducedMotion }) => {
       window.clearInterval(interval);
@@ -63,4 +63,9 @@ export function mountTotp(root: HTMLElement) {
       interval = window.setInterval(tick, 1000);
     },
   });
+
+  return () => {
+    motion.destroy();
+    window.clearInterval(interval);
+  };
 }

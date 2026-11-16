@@ -27,4 +27,6 @@ export function mountAccess(root: HTMLElement) {
     } else if (target.closest('[data-deny]') && root.dataset.state === 'request') show('denied');
     else if (target.closest('[data-revoke]') && root.dataset.state === 'granted') show('revoked');
   });
+
+  return () => window.clearTimeout(timer);
 }

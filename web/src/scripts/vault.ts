@@ -103,5 +103,12 @@ export function mountVault(root: HTMLElement) {
     else if (target.closest('[data-unlock]')) unlock();
   });
 
-  mountTotp(root);
+  const unmountTotp = mountTotp(root);
+
+  return () => {
+    for (const timer of timers) window.clearTimeout(timer);
+    timers.clear();
+    art?.stop();
+    unmountTotp();
+  };
 }

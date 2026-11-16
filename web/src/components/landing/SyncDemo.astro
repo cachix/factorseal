@@ -80,7 +80,8 @@ const rows = [
 </div>
 
 <script>
+  import { mountOnPageLoad } from '../../scripts/page';
   import { mountSync } from '../../scripts/sync';
 
-  for (const root of document.querySelectorAll<HTMLElement>('[data-sync]')) mountSync(root);
+  mountOnPageLoad('[data-sync]', mountSync);
 </script>

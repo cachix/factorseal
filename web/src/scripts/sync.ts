@@ -28,7 +28,7 @@ export function mountSync(root: HTMLElement) {
   const wifi = root.querySelector<HTMLButtonElement>('[data-sync-wifi]');
   const count = root.querySelector<HTMLElement>('.fs-nav__item[aria-current] .fs-count');
   const template = capsule?.content.firstElementChild;
-  if (!stage || !desktop || !phone || !lane || !(template instanceof HTMLElement) || !wifi || !count) return;
+  if (!stage || !desktop || !phone || !lane || !(template instanceof HTMLElement) || !wifi || !count) return () => {};
 
   const scopes: Record<Side, HTMLElement> = { desktop, phone };
   const entries = (root.dataset.entries ?? '').split(' ').filter(Boolean);
@@ -216,7 +216,7 @@ export function mountSync(root: HTMLElement) {
     connect(!online);
   });
 
-  createAstroMotionLifecycle({
+  const motion = createAstroMotionLifecycle({
     target: root,
     threshold: 0.25,
     onChange: (visible, state) => {
@@ -229,4 +229,11 @@ export function mountSync(root: HTMLElement) {
       schedule();
     },
   });
+
+  return () => {
+    motion.destroy();
+    window.clearTimeout(idle);
+    window.clearTimeout(batches.desktop);
+    window.clearTimeout(batches.phone);
+  };
 }

@@ -81,6 +81,7 @@ const folder = '/home/john/dev/site';
 
 <script>
   import { mountAccess } from '../../scripts/access';
+  import { mountOnPageLoad } from '../../scripts/page';
 
-  for (const root of document.querySelectorAll<HTMLElement>('[data-access]')) mountAccess(root);
+  mountOnPageLoad('[data-access]', mountAccess);
 </script>
