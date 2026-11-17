@@ -28,6 +28,9 @@ jobs:
   website:
     name: Website
     runs-on: ubuntu-latest
+    concurrency:
+      group: website-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v5
         with:
@@ -46,6 +49,24 @@ jobs:
           working-directory: web
           output-directory: dist
           site: https://factorseal.dev
+      - name: Prepare static Pages assets
+        working-directory: web
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run prepare:pages
+      - name: Deploy to Cloudflare Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo '::error::Set the CLOUDFLARE_API_TOKEN secret and CLOUDFLARE_ACCOUNT_ID variable before deploying.'
+            exit 1
+          fi
+          npm exec --yes --package=wrangler@4.141.0 -- wrangler pages deploy --branch main
 
   linux:
     name: Linux

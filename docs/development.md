@@ -70,6 +70,43 @@ separately checks installed SecretSpec discovery, approvals, CRUD, project
 isolation, and cache expiry. This is not full protocol conformance on every
 desktop platform.
 
+## Website and documentation
+
+The Astro/Starlight site lives in `web/` and loads its documentation from the
+repository's Markdown guides. Use the Node version in `web/.node-version`:
+
+```console
+$ cd web
+$ npm ci
+$ npm run validate
+$ npm run prepare:pages
+```
+
+The website CI job builds the site and checks links on pull requests and pushes
+to `main`. After those checks pass on a push to `main`, it uploads `web/dist/`
+to the existing Cloudflare Pages project `factorseal`, serving
+<https://factorseal.pages.dev/>. Pull requests do not deploy.
+
+Configure these GitHub Actions values in `cachix/factorseal`:
+
+- Repository variable `CLOUDFLARE_ACCOUNT_ID`: the account containing the Pages project.
+- Repository secret `CLOUDFLARE_API_TOKEN`: a token scoped to that account with
+  **Account > Cloudflare Pages > Edit** permission.
+
+Keep the old `cachix/factorseal.dev` repository's automatic Pages deployments
+disabled so that it cannot overwrite this site's deployments. The workflow
+uses the Pages configuration in `web/wrangler.jsonc` and uploads static assets.
+`npm run prepare:pages` writes a snapshot of public GitHub stars and release
+metadata to `/api/github`; the snapshot refreshes with each deployment.
+Documentation Markdown exports and the search index are also static files.
+
+To deploy a validated build manually from `web/`, set the same Cloudflare
+environment variables and run:
+
+```console
+$ npm exec --yes --package=wrangler@4.141.0 -- wrangler pages deploy --branch main
+```
+
 ## D-Bus dependency migration (DEP-7)
 
 Factorseal and Desktop depend directly on zbus 6. Secret Service,

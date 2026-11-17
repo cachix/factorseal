@@ -9,6 +9,7 @@
     "dev": "astro dev",
     "build": "astro check && astro build",
     "check:links": "cachix-site-check-links dist https://factorseal.dev",
+    "prepare:pages": "node scripts/prepare-pages.mjs",
     "validate": "npm run build && npm run check:links",
     "preview": "astro preview",
     "astro": "astro"
