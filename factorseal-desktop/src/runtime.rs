@@ -98,7 +98,7 @@ impl VaultContents {
 }
 
 pub(crate) use factorseal::transfer::import_plan::{
-    ImportSummary as TransferSummary, PreparedImport,
+    ImportChoice, ImportSummary as TransferSummary, PreparedImport, ReviewedImport,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -506,14 +506,24 @@ impl DesktopRuntime {
         factorseal::transfer::cxf::export_json(&secrets).map_err(|error| error.to_string())
     }
 
-    pub(crate) fn commit_import(
+    pub(crate) fn review_import(
         &self,
         metadata: &VaultMetadata,
         prepared: PreparedImport,
-        replace_existing: bool,
+    ) -> Result<ReviewedImport, String> {
+        prepared
+            .review(&native_client(&self.config, metadata))
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn commit_import(
+        &self,
+        metadata: &VaultMetadata,
+        prepared: ReviewedImport,
+        choices: &[ImportChoice],
     ) -> Result<(TransferSummary, VaultContents), String> {
         let summary = prepared
-            .commit(&native_client(&self.config, metadata), replace_existing)
+            .commit(&native_client(&self.config, metadata), choices)
             .map_err(|error| error.to_string())?;
         let contents = self.load_live_contents(metadata).map_err(|error| {
             format!(

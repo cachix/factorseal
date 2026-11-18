@@ -124,6 +124,7 @@ pub(crate) fn summaries(entries: Vec<VaultEntryMetadata>) -> Vec<Summary> {
 
 pub(crate) fn view(item: &PersonalSecret, version: Option<&[u8; 32]>, values: bool) -> Item {
     Item {
+        retained: factorseal::transfer::unusable_data(item),
         id: item.id.clone(),
         kind: kind_from_core(item.kind),
         title: item.title.clone(),

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
@@ -76,75 +76,134 @@ fn import_manager_items(
             if let Some(id) = string_at(original, "id") {
                 item.id = format!("bitwarden-{id}");
             }
-            let mut extra = SensitiveJson(original.clone());
-            if let Some(object) = extra.0.as_object_mut() {
-                for key in [
-                    "id",
-                    "name",
-                    "type",
-                    "notes",
-                    "favorite",
-                    "folderId",
-                    "fields",
-                    "card",
-                    "identity",
-                    "secureNote",
-                ] {
-                    if let Some(mut removed) = object.remove(key) {
-                        zeroize_json_strings(&mut removed);
-                    }
-                }
-                if let Some(login) = object
-                    .get_mut("login")
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    for key in ["username", "password", "totp"] {
-                        if let Some(mut removed) = login.remove(key) {
-                            zeroize_json_strings(&mut removed);
-                        }
-                    }
-                    if let Some(uris) = login
-                        .get_mut("uris")
-                        .and_then(serde_json::Value::as_array_mut)
-                    {
-                        for uri in uris.iter_mut() {
-                            if let Some(obj) = uri.as_object_mut()
-                                && let Some(mut removed) = obj.remove("uri")
-                            {
-                                zeroize_json_strings(&mut removed);
-                            }
-                        }
-                    }
-                }
-            }
-            prune_empty(&mut extra.0);
             let unusual = original["type"]
                 .as_u64()
                 .is_some_and(|n| !(1..=4).contains(&n))
-                || original["fields"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|field| {
-                        field["name"].as_str().is_none()
-                            || (!field["value"].is_null() && !field["value"].is_string())
-                            || field.as_object().is_some_and(|object| {
-                                object.keys().any(|key| {
-                                    !["name", "value", "type", "linkedId"].contains(&key.as_str())
-                                })
-                            })
-                    })
-                || ["card", "identity"].iter().any(|key| {
-                    original[*key].as_object().is_some_and(|object| {
-                        object.values().any(|v| !v.is_null() && !v.is_string())
-                    })
-                });
-            if extra.0 != serde_json::json!({}) || unusual {
+                || bitwarden_unusual_values(original);
+            if bitwarden_unmapped(original).0 != serde_json::json!({}) || unusual {
                 item.source = Some(serde_json::json!({"format":"bitwarden", "item":original}));
             }
         }
     }
     Ok(items)
+}
+
+fn bitwarden_unmapped(original: &serde_json::Value) -> SensitiveJson {
+    let mut extra = SensitiveJson(original.clone());
+    if let Some(object) = extra.0.as_object_mut() {
+        for key in [
+            "id",
+            "name",
+            "type",
+            "notes",
+            "favorite",
+            "folderId",
+            "fields",
+            "card",
+            "identity",
+            "secureNote",
+        ] {
+            if let Some(mut removed) = object.remove(key) {
+                zeroize_json_strings(&mut removed);
+            }
+        }
+        if let Some(login) = object
+            .get_mut("login")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for key in ["username", "password", "totp"] {
+                if let Some(mut removed) = login.remove(key) {
+                    zeroize_json_strings(&mut removed);
+                }
+            }
+            if let Some(uris) = login
+                .get_mut("uris")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for uri in uris.iter_mut() {
+                    if let Some(obj) = uri.as_object_mut()
+                        && let Some(mut removed) = obj.remove("uri")
+                    {
+                        zeroize_json_strings(&mut removed);
+                    }
+                }
+            }
+        }
+    }
+    prune_empty(&mut extra.0);
+    extra
+}
+
+fn bitwarden_unusual_values(original: &serde_json::Value) -> bool {
+    original["fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|field| {
+            field["name"].as_str().is_none()
+                || (!field["value"].is_null() && !field["value"].is_string())
+                || field.as_object().is_some_and(|object| {
+                    object
+                        .keys()
+                        .any(|key| !["name", "value", "type", "linkedId"].contains(&key.as_str()))
+                })
+        })
+        || ["card", "identity"].iter().any(|key| {
+            original[*key]
+                .as_object()
+                .is_some_and(|object| object.values().any(|v| !v.is_null() && !v.is_string()))
+        })
+}
+
+fn bitwarden_unusable(original: &serde_json::Value, found: &mut BTreeSet<UnusableData>) {
+    let mut extra = bitwarden_unmapped(original);
+    let mut take = |object: &mut serde_json::Map<String, serde_json::Value>,
+                    key: &str,
+                    reason: UnusableData| {
+        if let Some(mut removed) = object.remove(key) {
+            zeroize_json_strings(&mut removed);
+            found.insert(reason);
+        }
+    };
+    if let Some(object) = extra.0.as_object_mut() {
+        for key in [
+            "creationDate",
+            "revisionDate",
+            "sshKey",
+            "bankAccount",
+            "passport",
+        ] {
+            if let Some(mut removed) = object.remove(key) {
+                zeroize_json_strings(&mut removed);
+            }
+        }
+        if object.get("reprompt").and_then(serde_json::Value::as_u64) == Some(0) {
+            object.remove("reprompt");
+        }
+        if let Some(login) = object
+            .get_mut("login")
+            .and_then(serde_json::Value::as_object_mut)
+            && let Some(mut removed) = login.remove("passwordRevisionDate")
+        {
+            zeroize_json_strings(&mut removed);
+        }
+        take(object, "passwordHistory", UnusableData::PasswordHistory);
+        take(object, "reprompt", UnusableData::PasswordReprompt);
+        if let Some(login) = object
+            .get_mut("login")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            take(login, "fido2Credentials", UnusableData::Passkeys);
+            take(login, "uris", UnusableData::WebsiteMatching);
+        }
+    }
+    prune_empty(&mut extra.0);
+    let mapped_type = original["type"]
+        .as_u64()
+        .is_some_and(|n| matches!(n, 1..=6 | 8));
+    if extra.0 != serde_json::json!({}) || !mapped_type || bitwarden_unusual_values(original) {
+        found.insert(UnusableData::Other);
+    }
 }
 
 fn map_additional_bitwarden_fields(item: &mut PersonalSecret, original: &serde_json::Value) {
@@ -241,21 +300,97 @@ pub fn personal_import_names(secrets: &[PersonalSecret]) -> Vec<String> {
     unique_import_names(secrets.iter().map(|secret| secret.title.as_str()))
 }
 
-/// Items containing data retained for backup without full functional support.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnusableData {
+    Passkeys,
+    PasswordHistory,
+    WebsiteMatching,
+    PasswordReprompt,
+    FieldTypes,
+    Other,
+}
+
+fn onepux_unusable(source: &serde_json::Value, found: &mut BTreeSet<UnusableData>) {
+    let item = &source["item"];
+    if item["details"]["passwordHistory"]
+        .as_array()
+        .is_some_and(|history| !history.is_empty())
+    {
+        found.insert(UnusableData::PasswordHistory);
+    }
+    let unknown = |object: &serde_json::Value, known: &[&str]| {
+        object.as_object().is_some_and(|object| {
+            object
+                .iter()
+                .any(|(key, value)| !known.contains(&key.as_str()) && !value.is_null())
+        })
+    };
+    if unknown(
+        item,
+        &[
+            "uuid",
+            "categoryUuid",
+            "favIndex",
+            "state",
+            "createdAt",
+            "updatedAt",
+            "trashed",
+            "overview",
+            "details",
+        ],
+    ) || unknown(
+        &item["overview"],
+        &[
+            "title", "url", "urls", "tags", "ainfo", "ps", "pbe", "pgrng", "icons",
+        ],
+    ) || unknown(
+        &item["details"],
+        &[
+            "password",
+            "passwordHistory",
+            "loginFields",
+            "notesPlain",
+            "sections",
+            "documentAttributes",
+        ],
+    ) {
+        found.insert(UnusableData::Other);
+    }
+}
+
+#[must_use]
+pub fn unusable_data(item: &PersonalSecret) -> Vec<UnusableData> {
+    let mut found = BTreeSet::new();
+    for field in item.sections.iter().flat_map(|section| &section.fields) {
+        if let PersonalFieldType::Unknown(kind) = &field.field_type {
+            found.insert(if matches!(kind.as_str(), "cxf-passkey" | "passkey") {
+                UnusableData::Passkeys
+            } else {
+                UnusableData::FieldTypes
+            });
+        }
+    }
+    if let Some(source) = &item.source {
+        match source["format"].as_str() {
+            Some("bitwarden") => bitwarden_unusable(&source["item"], &mut found),
+            Some("1password-1pux") => onepux_unusable(source, &mut found),
+            Some("cxf") if source["unsupported"] == false => {}
+            _ => {
+                if found.is_empty() {
+                    found.insert(UnusableData::Other);
+                }
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
 #[must_use]
 pub fn preserved_only_items(secrets: &[PersonalSecret]) -> usize {
     secrets
         .iter()
-        .filter(|item| {
-            item.source
-                .as_ref()
-                .is_some_and(|source| source["format"] != "cxf" || source["unsupported"] != false)
-                || item
-                    .sections
-                    .iter()
-                    .flat_map(|section| &section.fields)
-                    .any(|field| matches!(field.field_type, PersonalFieldType::Unknown(_)))
-        })
+        .filter(|item| !unusable_data(item).is_empty())
         .count()
 }
 
@@ -979,6 +1114,89 @@ mod tests {
         let again = import_legacy_manager(TransferFormat::BitwardenJson, &exported).unwrap();
         assert_eq!(again[0].username.as_deref(), Some("user"));
         assert_eq!(again[0].urls, ["https://example.com"]);
+    }
+
+    #[test]
+    fn unusable_data_names_what_factorseal_cannot_use_yet() {
+        let reasons = |item: &str| {
+            let bytes = format!(r#"{{"items":[{item}]}}"#);
+            unusable_data(
+                &import_manager(TransferFormat::BitwardenJson, bytes.as_bytes()).unwrap()[0],
+            )
+        };
+        assert_eq!(
+            reasons(
+                r#"{"type":1,"name":"Plain","reprompt":0,"revisionDate":"2025-01-01T00:00:00.000Z","login":{"password":"p"}}"#
+            ),
+            []
+        );
+        assert_eq!(
+            reasons(r#"{"type":1,"name":"History","passwordHistory":[{"password":"old"}]}"#),
+            [UnusableData::PasswordHistory]
+        );
+        assert_eq!(
+            reasons(
+                r#"{"type":1,"name":"Passkey","login":{"fido2Credentials":[{"keyValue":"k"}]}}"#
+            ),
+            [UnusableData::Passkeys]
+        );
+        assert_eq!(
+            reasons(
+                r#"{"type":1,"name":"Rules","login":{"uris":[{"match":3,"uri":"https://example.com"}]}}"#
+            ),
+            [UnusableData::WebsiteMatching]
+        );
+        assert_eq!(
+            reasons(r#"{"type":1,"name":"Reprompt","reprompt":1}"#),
+            [UnusableData::PasswordReprompt]
+        );
+        assert_eq!(
+            reasons(
+                r#"{"type":1,"name":"Field","fields":[{"name":"Future","value":"raw","type":9}]}"#
+            ),
+            [UnusableData::FieldTypes]
+        );
+        assert_eq!(
+            reasons(
+                r#"{"type":5,"name":"Key","sshKey":{"privateKey":"k","publicKey":"p","keyFingerprint":"f"}}"#
+            ),
+            []
+        );
+        assert_eq!(
+            reasons(r#"{"type":1,"name":"Shared","organizationId":"org"}"#),
+            [UnusableData::Other]
+        );
+        let mut passkey = PersonalSecret::new(PersonalSecretKind::Login, "CXF".into());
+        passkey.sections.push(PersonalSection {
+            id: "passkeys".into(),
+            label: "Passkeys".into(),
+            fields: vec![PersonalField::new(
+                "passkey",
+                "Passkey",
+                PersonalFieldType::Unknown("cxf-passkey".into()),
+                "opaque",
+            )],
+        });
+        passkey.source = Some(serde_json::json!({"format":"cxf","unsupported":true}));
+        assert_eq!(unusable_data(&passkey), [UnusableData::Passkeys]);
+    }
+
+    #[test]
+    fn onepux_reports_history_and_unknown_source_properties() {
+        let mut item = PersonalSecret::new(PersonalSecretKind::Login, "Example".into());
+        item.source = Some(
+            serde_json::json!({"format":"1password-1pux", "item":{"uuid":"one", "createdAt":12, "updatedAt":13, "overview":{"title":"Example"}, "details":{"password":"synthetic"}}}),
+        );
+        assert_eq!(unusable_data(&item), []);
+        item.source.as_mut().unwrap()["item"]["details"]["passwordHistory"] =
+            serde_json::json!([{"password":"old"}]);
+        assert_eq!(unusable_data(&item), [UnusableData::PasswordHistory]);
+        item.source.as_mut().unwrap()["item"]["details"]["futureProperty"] =
+            serde_json::json!({"value":"retained"});
+        assert_eq!(
+            unusable_data(&item),
+            [UnusableData::PasswordHistory, UnusableData::Other]
+        );
     }
 
     #[test]

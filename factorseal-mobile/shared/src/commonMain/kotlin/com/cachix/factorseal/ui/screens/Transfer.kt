@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.cachix.factorseal.app.FactorSeal
+import com.cachix.factorseal.app.ImportSession
 import com.cachix.factorseal.app.Message
 import com.cachix.factorseal.app.Page
 import com.cachix.factorseal.app.PickedFile
@@ -30,6 +31,7 @@ import com.cachix.factorseal.app.message
 import com.cachix.factorseal.app.text
 import com.cachix.factorseal.core.ErrorCode
 import com.cachix.factorseal.core.Format
+import com.cachix.factorseal.core.ImportChoice
 import com.cachix.factorseal.core.Request
 import com.cachix.factorseal.core.Response
 import com.cachix.factorseal.core.TransferKey
@@ -41,7 +43,6 @@ import com.cachix.factorseal.resources.backup_failed
 import com.cachix.factorseal.resources.backup_lead
 import com.cachix.factorseal.resources.backup_passphrase
 import com.cachix.factorseal.resources.backup_saved
-import com.cachix.factorseal.resources.cancel
 import com.cachix.factorseal.resources.choose_file_and_review
 import com.cachix.factorseal.resources.choose_private_identity
 import com.cachix.factorseal.resources.choose_private_key
@@ -72,10 +73,8 @@ import com.cachix.factorseal.resources.icon_folder_open
 import com.cachix.factorseal.resources.import_credentials
 import com.cachix.factorseal.resources.import_explanation
 import com.cachix.factorseal.resources.import_failed
-import com.cachix.factorseal.resources.import_in_progress
-import com.cachix.factorseal.resources.import_lead
-import com.cachix.factorseal.resources.imported_summary
-import com.cachix.factorseal.resources.ok
+import com.cachix.factorseal.resources.import_guide
+import com.cachix.factorseal.resources.import_reading
 import com.cachix.factorseal.resources.passphrase
 import com.cachix.factorseal.resources.passphrases_differ
 import com.cachix.factorseal.resources.placeholder_archive_passphrase
@@ -83,22 +82,12 @@ import com.cachix.factorseal.resources.placeholder_confirm_archive_passphrase
 import com.cachix.factorseal.resources.post_quantum_key
 import com.cachix.factorseal.resources.preparing_backup
 import com.cachix.factorseal.resources.preparing_export
-import com.cachix.factorseal.resources.preserved_summary
 import com.cachix.factorseal.resources.private_key_explanation
 import com.cachix.factorseal.resources.public_key_explanation
-import com.cachix.factorseal.resources.replace_existing
 import com.cachix.factorseal.resources.restore_backup
 import com.cachix.factorseal.resources.restore_explanation
 import com.cachix.factorseal.resources.restore_failed
-import com.cachix.factorseal.resources.restore_in_progress
 import com.cachix.factorseal.resources.restore_lead
-import com.cachix.factorseal.resources.restored_summary
-import com.cachix.factorseal.resources.review_import
-import com.cachix.factorseal.resources.review_import_keep
-import com.cachix.factorseal.resources.review_import_replace
-import com.cachix.factorseal.resources.review_restore
-import com.cachix.factorseal.resources.review_restore_keep
-import com.cachix.factorseal.resources.review_restore_replace
 import com.cachix.factorseal.resources.save_backup
 import com.cachix.factorseal.resources.save_transfer_file
 import com.cachix.factorseal.resources.show_password
@@ -109,7 +98,6 @@ import com.cachix.factorseal.resources.understand_plaintext
 import com.cachix.factorseal.ui.components.Banner
 import com.cachix.factorseal.ui.components.Button
 import com.cachix.factorseal.ui.components.Checkbox
-import com.cachix.factorseal.ui.components.Dialog
 import com.cachix.factorseal.ui.components.IconTile
 import com.cachix.factorseal.ui.components.Labeled
 import com.cachix.factorseal.ui.components.ListHeader
@@ -124,7 +112,11 @@ import com.cachix.factorseal.ui.components.Variant
 import com.cachix.factorseal.ui.theme.Semibold
 import com.cachix.factorseal.ui.theme.Shapes
 import com.cachix.factorseal.ui.theme.Theme
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.stringResource
@@ -193,10 +185,9 @@ fun TransferFormPage(
     val confirmation = remember { TextFieldState() }
     var revealed by remember { mutableStateOf(false) }
     var plaintext by remember { mutableStateOf(false) }
-    var replace by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<Notice?>(null) }
-    var review by remember { mutableStateOf<Response.ImportReview?>(null) }
+    val session = app.importSession
     val useKey = format == Format.CxfAge && hybrid
     val failed =
         when {
@@ -217,6 +208,7 @@ fun TransferFormPage(
 
     fun reset() {
         notice = null
+        app.importError = null
         passphrase.clearText()
         confirmation.clearText()
     }
@@ -247,13 +239,19 @@ fun TransferFormPage(
         confirmation.clearText()
         busy = true
         notice = null
+        app.importError = null
         scope.launch {
             try {
                 if (import) {
                     val picked = files.open()
                     if (picked != null) {
                         try {
-                            review = app.call<Response.ImportReview>(Request.Import(format, Base64.encode(picked.bytes), key))
+                            val prepared = withContext(NonCancellable) { app.call<Response.ImportReview>(Request.Import(format, Base64.encode(picked.bytes), key)) }
+                            if (!currentCoroutineContext().isActive) {
+                                app.run { runCatching { app.call<Response.Status>(Request.ImportCancel(prepared.review)) } }
+                                return@launch
+                            }
+                            app.importSession = ImportSession(prepared)
                         } finally {
                             picked.bytes.fill(0)
                         }
@@ -272,37 +270,41 @@ fun TransferFormPage(
             } catch (error: Exception) {
                 notice = failure(error)
             }
-            if (review == null) busy = false
+            busy = false
         }
     }
 
-    fun finish(confirmed: Boolean) {
-        review = null
-        scope.launch {
-            try {
-                if (confirmed) {
-                    val summary = app.call<Response.Imported>(Request.ImportCommit(replace))
-                    app.refresh()
-                    notice =
-                        Notice(
-                            message(
-                                if (backup) Res.string.restored_summary else Res.string.imported_summary,
-                                summary.added + summary.replaced + summary.kept,
-                                summary.added,
-                                summary.replaced,
-                                summary.kept,
-                            ),
-                            success = true,
-                            detail = summary.preserved.takeIf { it > 0 }?.let { message(Res.string.preserved_summary, it) },
-                        )
-                } else {
-                    app.call<Response.Status>(Request.ImportCancel)
-                }
-            } catch (error: Exception) {
-                notice = failure(error)
-            }
-            busy = false
+    fun finish(choices: List<ImportChoice>?) {
+        val pending = app.importSession ?: return
+        if (pending.busy) return
+        if (choices == null) {
+            app.clearImport()
+            return
         }
+        pending.busy = true
+        app.run {
+            try {
+                val result = app.call<Response.Imported>(Request.ImportCommit(pending.review.review, choices))
+                if (app.importSession === pending) app.importResult = result
+                app.refresh()
+            } catch (error: Exception) {
+                if (app.importSession === pending) app.importError = failure(error).text
+            } finally {
+                if (app.importSession === pending) app.importSession = null
+            }
+        }
+    }
+
+    session?.let { pending ->
+        ImportReviewPage(app, pending, backup, pending.busy, onCancel = { finish(null) }, onCommit = { finish(it) })
+        return
+    }
+    app.importResult?.let { result ->
+        ImportCompletePage(app, result, backup) {
+            app.clearImport()
+            notice = null
+        }
+        return
     }
 
     MainPage {
@@ -320,7 +322,7 @@ fun TransferFormPage(
                     when {
                         backup && import -> Res.string.restore_lead
                         backup -> Res.string.backup_lead
-                        import -> Res.string.import_lead
+                        import -> Res.string.import_guide
                         else -> Res.string.export_lead
                     },
                 ),
@@ -446,17 +448,7 @@ fun TransferFormPage(
                     )
                 }
             }
-            if (import) {
-                Checkbox(
-                    checked = replace,
-                    onChange = {
-                        replace = it
-                        notice = null
-                    },
-                    label = stringResource(Res.string.replace_existing),
-                    enabled = !busy,
-                )
-            }
+            app.importError?.let { Banner(it.text()) }
             notice?.let { current ->
                 val text = listOfNotNull(current.text, current.detail).map { it.text() }.joinToString(" ")
                 if (current.success) {
@@ -476,24 +468,12 @@ fun TransferFormPage(
                 horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (busy) {
-                    Spinner(size = 16.dp, color = colors.mutedForeground)
-                    Text(
-                        stringResource(
-                            when {
-                                import && backup -> Res.string.restore_in_progress
-                                import -> Res.string.import_in_progress
-                                backup -> Res.string.preparing_backup
-                                else -> Res.string.preparing_export
-                            },
-                        ),
-                        Modifier.weight(1f, fill = false),
-                        color = colors.mutedForeground,
-                    )
-                }
                 Button(
                     stringResource(
                         when {
+                            busy && import -> Res.string.import_reading
+                            busy && backup -> Res.string.preparing_backup
+                            busy -> Res.string.preparing_export
                             import -> Res.string.choose_file_and_review
                             backup -> Res.string.save_backup
                             else -> Res.string.save_transfer_file
@@ -506,29 +486,6 @@ fun TransferFormPage(
                     enabled = !busy,
                 )
             }
-        }
-    }
-    review?.let { pending ->
-        Dialog(
-            title = stringResource(if (backup) Res.string.review_restore else Res.string.review_import),
-            onDismiss = { finish(false) },
-            actions = {
-                Button(stringResource(Res.string.cancel), onClick = { finish(false) })
-                Button(stringResource(Res.string.ok), onClick = { finish(true) }, variant = Variant.Primary)
-            },
-        ) {
-            Text(
-                stringResource(
-                    when {
-                        backup && replace -> Res.string.review_restore_replace
-                        backup -> Res.string.review_restore_keep
-                        replace -> Res.string.review_import_replace
-                        else -> Res.string.review_import_keep
-                    },
-                    pending.items,
-                    pending.preserved,
-                ),
-            )
         }
     }
 }

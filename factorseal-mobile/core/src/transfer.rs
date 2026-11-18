@@ -3,7 +3,9 @@ use crate::core::{Failure, Outcome};
 use data_encoding::BASE64;
 use factorseal::personal::{PERSONAL_SECRET_NAMESPACE, totp};
 use factorseal::transfer::cxf::{self, HybridIdentity, HybridRecipient};
-use factorseal::transfer::import_plan::{ImportSummary, PreparedImport};
+use factorseal::transfer::import_plan::{
+    ImportChoice, ImportSummary, PreparedImport, ReviewedImport,
+};
 use factorseal::transfer::{
     MAX_TRANSFER_FILE_BYTES, PersonalSecret, TransferFormat, export_manager,
 };
@@ -107,10 +109,87 @@ pub(crate) fn prepare(
 
 pub(crate) fn commit(
     client: &Client<'_>,
-    prepared: PreparedImport,
-    replace: bool,
+    prepared: ReviewedImport,
+    choices: &[ImportChoice],
 ) -> Outcome<ImportSummary> {
-    prepared.commit(client, replace).map_err(failed)
+    prepared.commit(client, choices).map_err(|error| {
+        if matches!(
+            error.downcast_ref::<factorseal::VaultError>(),
+            Some(factorseal::VaultError::Conflict)
+        ) {
+            Failure::from(factorseal::VaultError::Conflict)
+        } else {
+            failed(error)
+        }
+    })
+}
+
+pub(crate) fn review_items(review: &ReviewedImport) -> Vec<crate::api::ImportItem> {
+    review
+        .items()
+        .iter()
+        .map(|entry| {
+            let metadata = &entry.item.metadata;
+            crate::api::ImportItem {
+                title: metadata
+                    .display_name
+                    .clone()
+                    .or_else(|| metadata.address.as_local().map(|(item, _)| item.to_owned()))
+                    .unwrap_or_else(|| {
+                        metadata
+                            .address
+                            .as_secret_spec()
+                            .map(|address| match address {
+                                factorseal::SecretSpecAddress::Convention { key, .. } => {
+                                    key.clone()
+                                }
+                                factorseal::SecretSpecAddress::Native { coordinates } => {
+                                    coordinates.item.clone()
+                                }
+                            })
+                            .unwrap_or_default()
+                    }),
+                username: metadata.display_username.clone(),
+                website: metadata.display_website.clone(),
+                kind: metadata.display_type.clone(),
+                existing: entry.existing,
+                changes: entry.changes.clone(),
+                retained: entry.item.unusable.clone(),
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn comparisons(
+    review: &ReviewedImport,
+    item: usize,
+    revealed: &[usize],
+) -> Outcome<Vec<crate::api::ImportComparison>> {
+    let value = |value: factorseal::transfer::import_plan::ImportValue| -> Outcome<crate::api::ImportValue> {
+        Ok(crate::api::ImportValue {
+            value: value.value.map(|secret| {
+                std::str::from_utf8(secret.expose())
+                    .map(|text| crate::api::Revealed(Zeroizing::new(text.to_owned())))
+                    .map_err(failed)
+            }).transpose()?,
+            concealed: value.concealed,
+            filled: value.filled,
+            context: value.context,
+        })
+    };
+    review
+        .comparisons(item, revealed)
+        .map_err(invalid)?
+        .into_iter()
+        .map(|row| {
+            Ok(crate::api::ImportComparison {
+                change: row.change,
+                section: row.section,
+                current: value(row.current)?,
+                incoming: value(row.incoming)?,
+            })
+        })
+        .collect()
 }
 
 fn personal_secrets(client: &Client<'_>) -> Outcome<Vec<PersonalSecret>> {

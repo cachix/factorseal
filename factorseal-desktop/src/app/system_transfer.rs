@@ -49,7 +49,7 @@ impl DesktopView {
                 button("system-credential-export")
                     .icon(Glyph::Upload)
                     .label("Choose destination app…")
-                    .disabled(self.transfer_busy)
+                    .disabled(self.transfer_busy || self.import_review.is_some())
                     .on_click(cx.listener(|view, _, _, cx| view.export_system_credentials(cx))),
             )
         }
@@ -60,12 +60,27 @@ impl DesktopView {
             self.system_transfer.active = false;
             self.system_transfer.generation = self.system_transfer.generation.wrapping_add(1);
             self.transfer_busy = false;
+            if self
+                .import_review
+                .as_ref()
+                .is_some_and(|review| review.system.is_some())
+            {
+                self.import_review = None;
+            }
             apple_exchange::finish();
         }
     }
 
+    pub(super) fn finish_system_import(&mut self, generation: u64) -> bool {
+        let current = self.system_transfer_current(generation);
+        if current {
+            self.cancel_system_transfer();
+        }
+        current
+    }
+
     fn begin_system_transfer(&mut self) -> Option<u64> {
-        if self.transfer_busy {
+        if self.transfer_busy || self.import_review.is_some() {
             return None;
         }
         self.system_transfer.active = true;
@@ -135,6 +150,11 @@ impl DesktopView {
     }
 
     fn review_system_import(&mut self, data: Zeroizing<Vec<u8>>, cx: &mut Context<Self>) {
+        let Snapshot::Unsealed { metadata, .. } = &self.snapshot else {
+            return;
+        };
+        let metadata = metadata.clone();
+        let runtime = Arc::clone(&self.runtime);
         let generation = self.system_transfer.generation;
         if !self.system_transfer_current(generation) {
             apple_exchange::finish();
@@ -147,12 +167,6 @@ impl DesktopView {
             ));
             return;
         }
-        let Snapshot::Unsealed { metadata, .. } = &self.snapshot else {
-            return;
-        };
-        let metadata = metadata.clone();
-        let runtime = Arc::clone(&self.runtime);
-        let replace = self.transfer_replace_existing;
         self.close_item_editor(cx);
         self.clear_personal_detail();
         self.selected_vault_item = Some(VaultSelection::TransferCredentials);
@@ -161,32 +175,25 @@ impl DesktopView {
             let prepared = smol::unblock(move || {
                 crate::runtime::PreparedImport::manager(TransferFormat::CxfAge, &data)
                     .map_err(|error| error.to_string())
-            }).await;
-            if !view.update(cx, |view, _| view.system_transfer_current(generation)).unwrap_or(false) { return; }
-            let result = match prepared {
-                Ok(prepared) => {
-                    let preview = format!("{} items are ready to import. {} contain data without full functional support.\n\nExisting items will be {}. Keep the source vault until you have verified important credentials.",
-                        prepared.len(), prepared.preserved_only(), if replace { "replaced" } else { "kept" });
-                    let decision = rfd::AsyncMessageDialog::new().set_title("Review import")
-                        .set_description(preview).set_buttons(rfd::MessageButtons::OkCancel).show().await;
-                    if !view.update(cx, |view, _| view.system_transfer_current(generation)).unwrap_or(false) { return; }
-                    if decision != rfd::MessageDialogResult::Ok {
-                        let _ = view.update(cx, |view, cx| view.system_transfer_event(Event::Cancelled, cx));
-                        return;
-                    }
-                    smol::unblock(move || runtime.commit_import(&metadata, prepared, replace)).await
-                        .map(|(summary, contents)| TransferCompletion {
-                            summary: Some(summary), contents: Some(contents), path: std::path::PathBuf::default(),
-                        })
-                }
-                Err(error) => Err(error),
-            };
+                    .and_then(|prepared| runtime.review_import(&metadata, prepared))
+            })
+            .await;
             let _ = view.update(cx, |view, cx| {
-                if !view.system_transfer_current(generation) { return; }
-                view.cancel_system_transfer();
-                view.finish_transfer(true, false, result);
+                if !view.system_transfer_current(generation) {
+                    return;
+                }
+                match prepared {
+                    Ok(prepared) => view.open_import_review(import_review::ImportReview::system(
+                        prepared, generation,
+                    )),
+                    Err(error) => {
+                        view.cancel_system_transfer();
+                        view.finish_transfer(true, false, Err(error));
+                    }
+                }
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 }
