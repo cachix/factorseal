@@ -97,7 +97,7 @@ impl DesktopView {
                     .items_center()
                     .text_heading()
                     .font_semibold()
-                    .child(div().min_w_0().truncate().child(title)),
+                    .child(div().min_w_0().truncate().child(text("list-title", title))),
             )
     }
 
@@ -107,8 +107,10 @@ impl DesktopView {
         cx: &App,
     ) -> gpui::Stateful<Div> {
         let theme = cx.theme();
+        // A button for screen readers; callers name it with `aria_label`.
         h_flex()
             .id(id)
+            .role(gpui::Role::Button)
             .relative()
             .w_full()
             .items_center()
@@ -138,13 +140,13 @@ impl DesktopView {
                         .text_size(rems(1.95))
                         .line_height(rems(2.25))
                         .font_semibold()
-                        .child("FactorSeal"),
+                        .child(text("factorseal", "FactorSeal")),
                 )
                 .on_click(cx.listener(|view, _, _, cx| view.show_vault_browser(cx))),
         )
     }
 
-    pub(super) fn render_sidebar_nav(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_sidebar_nav(&self, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let muted = cx.theme().muted_foreground;
         let selected = |selection: &VaultSelection| {
             !self.settings_open && self.selected_vault_item.as_ref() == Some(selection)
@@ -159,6 +161,7 @@ impl DesktopView {
                     VaultSelection::TransferCredentials | VaultSelection::BackupVault
                 );
             sidebar_item(id, selected(&selection), cx)
+                .aria_label(name)
                 .when(disabled, |item| item.text_color(muted))
                 .child(sidebar_label(icon, name))
                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -166,6 +169,9 @@ impl DesktopView {
                 }))
         };
         v_flex()
+            .id("vault-pages")
+            .role(gpui::Role::TabList)
+            .aria_label("Pages")
             .flex_none()
             .gap_1()
             .px_3()
@@ -189,6 +195,7 @@ impl DesktopView {
             ))
             .child(
                 sidebar_item("open-settings", self.settings_open, cx)
+                    .aria_label("Settings")
                     .child(sidebar_label(IconName::Settings, "Settings"))
                     .on_click(cx.listener(|view, _, _, cx| view.open_settings(cx))),
             )
@@ -231,7 +238,12 @@ impl DesktopView {
                             .rounded_full()
                             .bg(theme.success),
                     )
-                    .child(div().min_w_0().truncate().child("Unsealed"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(text("unsealed", "Unsealed")),
+                    )
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)),
             )
             .child(
@@ -261,6 +273,7 @@ impl DesktopView {
                         .primary()
                         .icon(IconName::Plus)
                         .tooltip("New item")
+                        .accessibility_label("New item")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.show_personal_panel(PersonalPanel::NewItem, cx);
                         })),
@@ -367,7 +380,7 @@ impl DesktopView {
                             .truncate()
                             .text_heading()
                             .font_semibold()
-                            .child("Search results"),
+                            .child(text("search-results", "Search results")),
                     )
                     .child(
                         div()
@@ -378,9 +391,12 @@ impl DesktopView {
                             .bg(theme.muted)
                             .text_body()
                             .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "{result_count} {}",
-                                if result_count == 1 { "item" } else { "items" }
+                            .child(text(
+                                "result-count",
+                                format!(
+                                    "{result_count} {}",
+                                    if result_count == 1 { "item" } else { "items" }
+                                ),
                             )),
                     ),
             )
@@ -582,7 +598,10 @@ impl DesktopView {
                                 .px_6()
                                 .py_3()
                                 .text_color(theme.danger)
-                                .child(format!("Could not load vault contents: {error}")),
+                                .child(text(
+                                    "could-not-load-vault",
+                                    format!("Could not load vault contents: {error}"),
+                                )),
                         )
                     })
                     .when_some(error.map(str::to_owned), |main, error| {
@@ -592,7 +611,7 @@ impl DesktopView {
                                 .px_6()
                                 .py_3()
                                 .text_color(theme.danger)
-                                .child(error),
+                                .child(text("error", error)),
                         )
                     });
                 vault.child(

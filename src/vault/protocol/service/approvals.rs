@@ -122,6 +122,7 @@ impl ApprovalCandidate {
                 reason: Some(format!("System keyring: {service}")),
                 requested_permission_duration_seconds: None,
                 declared_launch_chain: Vec::new(),
+                declared_wsl_origin: None,
             },
             scope: DocumentKind::LinuxSecretService,
             namespace: project.into_bytes(),
@@ -426,13 +427,23 @@ impl PendingApprovals {
             let PermissionState::Pending { expires_at, .. } = existing.summary.state else {
                 unreachable!("queue stores only pending records");
             };
+            // A program that asks again after it stopped waiting must reach
+            // the approval prompt again, and the prompt follows the revision.
+            // A repeat while it still waits changes nothing.
+            let asked_again = existing
+                .awaited_until
+                .is_none_or(|until| until <= monotonic_now);
             existing.awaited_until = existing
                 .awaited_until
                 .max(Some(monotonic_now + REQUESTER_GRACE));
-            return Ok(VaultInteractionReference {
+            let reference = VaultInteractionReference {
                 id: existing.summary.id.clone(),
                 expires_at,
-            });
+            };
+            if asked_again {
+                self.revision = self.revision.wrapping_add(1);
+            }
+            return Ok(reference);
         }
         self.recent_creations.retain(|(created, _)| {
             monotonic_now.saturating_duration_since(*created) < APPROVAL_RATE_WINDOW
@@ -783,6 +794,20 @@ mod tests {
             panic!("pending");
         };
         assert!(!awaited);
+    }
+
+    #[test]
+    fn a_request_asked_again_after_its_requester_stopped_waiting_changes_the_revision() {
+        let mut approvals = PendingApprovals::default();
+        let start = Instant::now();
+        let first = approvals.create_at(candidate(0, 0), 100, start).unwrap();
+        let revision = approvals.revision();
+        approvals.create_at(candidate(0, 0), 100, start).unwrap();
+        assert_eq!(revision, approvals.revision());
+        let later = start + REQUESTER_GRACE + Duration::from_secs(1);
+        let retried = approvals.create_at(candidate(0, 0), 103, later).unwrap();
+        assert_eq!(retried.id, first.id);
+        assert_ne!(revision, approvals.revision());
     }
 
     #[test]
