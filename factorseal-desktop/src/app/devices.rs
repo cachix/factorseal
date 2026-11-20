@@ -1,7 +1,7 @@
 use super::totp::unix_now;
 use super::{
     App, Arc, Button, Context, DesktopRuntime, DesktopView, Div, Input, SecretInputState, Snapshot,
-    VaultSelection, Window, div, h_flex, px, v_flex,
+    VaultSelection, Window, div, h_flex, px, text, v_flex,
 };
 use crate::appearance::TypeScale as _;
 use crate::branding::Glyph;
@@ -309,19 +309,32 @@ impl DesktopView {
                                         .text_color(theme.foreground),
                                 ),
                             )
-                            .child(div().text_title().font_semibold().child("Name this device"))
+                            .child(
+                                div()
+                                    .text_title()
+                                    .font_semibold()
+                                    .child(text("name-this-device", "Name this device")),
+                            )
                             .child(
                                 div()
                                     .text_center()
                                     .text_lead()
                                     .text_color(theme.muted_foreground)
-                                    .child("Other devices see this name when you pair and sync."),
+                                    .child(text(
+                                        "other-devices-see-this",
+                                        "Other devices see this name when you pair and sync.",
+                                    )),
                             ),
                     )
                     .child(
                         v_flex()
                             .gap_2()
-                            .child(div().text_body().font_medium().child("Device name"))
+                            .child(
+                                div()
+                                    .text_body()
+                                    .font_medium()
+                                    .child(text("device-name", "Device name")),
+                            )
                             .child(crate::controls::hover_field(
                                 "device-name-field",
                                 Input::new(&self.device_name),
@@ -369,33 +382,46 @@ impl DesktopView {
             }
             devices.sort_by_key(|device| device.endpoint);
             devices.dedup_by_key(|device| device.endpoint);
-            panel = panel.child(div().font_semibold().child(format!("Connect these {} devices?", devices.len())))
-                .child(div().text_body().child("These devices will share personal secrets and their history. Other secrets stay on each device."));
-            let mut list = v_flex().rounded_lg().border_1().border_color(theme.border);
-            for device in devices {
+            panel = panel.child(div().font_semibold().child(text("connect-these-devices", format!("Connect these {} devices?", devices.len()))))
+                .child(div().text_body().child(text("these-devices-will-share", "These devices will share personal secrets and their history. Other secrets stay on each device.")));
+            let mut list = v_flex()
+                .id("review-devices")
+                .role(gpui::Role::List)
+                .aria_label("Devices to connect")
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border);
+            for (index, device) in devices.into_iter().enumerate() {
+                let local = device.endpoint == self.devices.endpoint;
                 list = list.child(
                     h_flex()
+                        .id(("review-device", index))
+                        .role(gpui::Role::ListItem)
+                        .aria_label(if local {
+                            format!("{}, this device", device.name)
+                        } else {
+                            device.name.clone()
+                        })
                         .px_4()
                         .py_2()
                         .gap_2()
-                        .child(div().flex_1().child(device.name))
-                        .when(device.endpoint == self.devices.endpoint, |row| {
+                        .child(div().flex_1().child(text("name", device.name)))
+                        .when(local, |row| {
                             row.child(
                                 div()
                                     .text_caption()
                                     .text_color(theme.muted_foreground)
-                                    .child("This device"),
+                                    .child(text("this-device", "This device")),
                             )
                         }),
                 );
             }
             panel = panel
                 .child(list)
-                .child(
-                    div()
-                        .text_body()
-                        .child("Check that both devices show this code."),
-                )
+                .child(div().text_body().child(text(
+                    "check-that-both-devices",
+                    "Check that both devices show this code.",
+                )))
                 .child(
                     div()
                         .text_title()
@@ -428,11 +454,10 @@ impl DesktopView {
                 );
             }
         } else {
-            panel = panel.child(
-                div()
-                    .text_color(theme.danger)
-                    .child("These devices could not be checked. Cancel and try again."),
-            );
+            panel = panel.child(div().text_color(theme.danger).child(text(
+                "these-devices-could-not",
+                "These devices could not be checked. Cancel and try again.",
+            )));
         }
         panel
     }
@@ -459,7 +484,10 @@ impl DesktopView {
         };
         if countdown(invitation.expires(), unix_now()).is_none() {
             return panel
-                .child(div().text_body().child("This pairing code has expired."))
+                .child(div().text_body().child(text(
+                    "this-pairing-code-has",
+                    "This pairing code has expired.",
+                )))
                 .child(
                     button("renew-pairing-code")
                         .primary()
@@ -481,7 +509,10 @@ impl DesktopView {
                     .text_body()
                     .text_center()
                     .text_color(theme.muted_foreground)
-                    .child("Scan this code on the other device, or copy it there."),
+                    .child(text(
+                        "scan-this-code-on",
+                        "Scan this code on the other device, or copy it there.",
+                    )),
             )
             .child(
                 button("copy-pairing-code")
@@ -511,16 +542,18 @@ impl DesktopView {
         } else {
             "Connect a device"
         };
-        let mut panel = if state.request.is_some() {
-            self.render_device_review(cx)
-        } else {
-            match screen {
+        let mut panel =
+            if state.request.is_some() {
+                self.render_device_review(cx)
+            } else {
+                match screen {
                 PairingScreen::Choose => v_flex()
                     .gap_3()
                     .w_full()
-                    .child(div().text_body().child(
+                    .child(div().text_body().child(text(
+                        "start-on-either-device",
                         "Start on either device. Both devices will share their personal secrets.",
-                    ))
+                    )))
                     .child(
                         pairing_choice(
                             "choose-show-code",
@@ -551,7 +584,7 @@ impl DesktopView {
                 PairingScreen::Paste => v_flex()
                     .gap_3()
                     .w_full()
-                    .child(div().font_medium().child("Pairing code"))
+                    .child(div().font_medium().child(text("pairing-code", "Pairing code")))
                     .child(self.pairing_ticket.clone())
                     .child(
                         button("use-pairing-code")
@@ -562,14 +595,14 @@ impl DesktopView {
                             .on_click(cx.listener(|view, _, _, cx| view.submit_pairing_code(cx))),
                     ),
             }
-        };
+            };
         let theme = cx.theme().clone();
         if let Some(error) = self.devices_notice.as_ref().or(self.devices.error.as_ref()) {
             panel = panel.child(
                 div()
                     .text_body()
                     .text_color(theme.danger)
-                    .child(error.clone()),
+                    .child(text("error", error.clone())),
             );
         }
         let approved_here = self.pairing_approved_here();
@@ -578,7 +611,10 @@ impl DesktopView {
                 div()
                     .text_body()
                     .text_color(theme.muted_foreground)
-                    .child("The other device still needs to approve."),
+                    .child(text(
+                        "the-other-device-still",
+                        "The other device still needs to approve.",
+                    )),
             );
         }
         let left = state
@@ -613,13 +649,17 @@ impl DesktopView {
                         h_flex()
                             .justify_between()
                             .items_center()
-                            .child(div().text_heading().font_semibold().child(title))
+                            .child(
+                                div()
+                                    .text_heading()
+                                    .font_semibold()
+                                    .child(text("pairing-title", title)),
+                            )
                             .when_some(left.clone(), |row, left| {
                                 row.child(
-                                    div()
-                                        .text_body()
-                                        .text_color(theme.muted_foreground)
-                                        .child(format!("Expires in {left}")),
+                                    div().text_body().text_color(theme.muted_foreground).child(
+                                        text("expires-in-left", format!("Expires in {left}")),
+                                    ),
                                 )
                             }),
                     )
@@ -703,6 +743,7 @@ impl DesktopView {
             .primary()
             .icon(IconName::Plus)
             .tooltip(self.pairing_label())
+            .accessibility_label(self.pairing_label())
             .on_click(cx.listener(|view, _, window, cx| view.open_device_pairing(window, cx)))
     }
     pub(super) fn render_connect_first_device(&self, cx: &mut Context<Self>) -> Div {
@@ -713,7 +754,10 @@ impl DesktopView {
                 div()
                     .text_body()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Connect another device to sync your personal secrets."),
+                    .child(text(
+                        "connect-another-device-to",
+                        "Connect another device to sync your personal secrets.",
+                    )),
             )
             .child(
                 button("connect-first-device")
@@ -731,7 +775,7 @@ impl DesktopView {
                 div()
                     .p_6()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Loading devices…"),
+                    .child(text("loading-devices", "Loading devices…")),
             );
         }
         self.needs_device_name(cx)
@@ -804,14 +848,17 @@ impl DesktopView {
             .gap_4()
             .when(renaming, |panel| panel.child(self.render_device_rename(cx)))
             .when(state.conflicts > 0, |panel| {
-                panel.child(div().p_3().rounded_lg().bg(theme.secondary).child(format!(
-                    "{} {} conflicting versions.",
-                    state.conflicts,
-                    if state.conflicts == 1 {
-                        "item has"
-                    } else {
-                        "items have"
-                    }
+                panel.child(div().p_3().rounded_lg().bg(theme.secondary).child(text(
+                    "items-have-conflicting-versions",
+                    format!(
+                        "{} {} conflicting versions.",
+                        state.conflicts,
+                        if state.conflicts == 1 {
+                            "item has"
+                        } else {
+                            "items have"
+                        }
+                    ),
                 )))
             })
             .child(detail_row("Access", row.access(), &theme))
@@ -852,9 +899,10 @@ impl DesktopView {
                 |panel, error| panel.child(div().text_color(theme.danger).child(error.clone())),
             )
             .when(!alone, |panel| {
-                panel.child(div().text_caption().text_color(theme.muted_foreground).child(
+                panel.child(div().text_caption().text_color(theme.muted_foreground).child(text(
+                    "syncs-automatically-while-factorseal",
                     "Syncs automatically while FactorSeal is open, even when the vault is sealed.",
-                ))
+                )))
             })
     }
 }
@@ -887,7 +935,7 @@ fn detail_row(
                 .w(gpui::rems(140. / 16.))
                 .flex_none()
                 .text_color(theme.muted_foreground)
-                .child(label),
+                .child(text(label, label)),
         )
         .child(div().flex_1().child(value.into()))
 }
@@ -912,8 +960,11 @@ fn pairing_choice(
     cx: &App,
 ) -> gpui::Stateful<Div> {
     let theme = cx.theme();
+    // A button for screen readers, named by its title.
     h_flex()
         .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(title)
         .w_full()
         .items_center()
         .gap_3()
@@ -934,12 +985,16 @@ fn pairing_choice(
             v_flex()
                 .flex_1()
                 .min_w_0()
-                .child(div().font_semibold().child(title))
+                .child(
+                    div()
+                        .font_semibold()
+                        .child(text("pairing-choice-title", title)),
+                )
                 .child(
                     div()
                         .text_caption()
                         .text_color(theme.muted_foreground)
-                        .child(detail),
+                        .child(text("pairing-choice-detail", detail)),
                 ),
         )
         .child(
