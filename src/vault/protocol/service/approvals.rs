@@ -122,6 +122,7 @@ impl ApprovalCandidate {
                 reason: Some(format!("System keyring: {service}")),
                 requested_permission_duration_seconds: None,
                 declared_launch_chain: Vec::new(),
+                declared_wsl_origin: None,
             },
             scope: DocumentKind::LinuxSecretService,
             namespace: project.into_bytes(),

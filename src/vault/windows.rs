@@ -190,8 +190,14 @@ fn accept_until_sealed(
                         .spawn_scoped(scope, move || {
                             let _active = ActiveConnection(active);
                             // A malformed or disconnected client must not
-                            // terminate the per-user vault.
-                            let _ = handle_connection(service, caller_cache, &mut stream);
+                            // terminate the per-user vault. Still counted, so
+                            // a client's undifferentiated transport timeout
+                            // has a corresponding operator-visible signal.
+                            if handle_connection(service, caller_cache, &mut stream).is_err() {
+                                crate::security::events::record(
+                                    crate::security::events::Kind::ConnectionFailed,
+                                );
+                            }
                         })
                     {
                         active.fetch_sub(1, Ordering::AcqRel);
@@ -217,6 +223,15 @@ pub(crate) fn private_listener(path: &Path) -> VaultResult<ByteListener> {
         .nonblocking(true)
         .accept_remote(false)
         .security_descriptor(Some(same_user_security_descriptor()?))
+        // `interprocess` defaults both hints to 512 bytes. A response over
+        // that (e.g. a permission list with real entries) can't fit the
+        // kernel buffer in one write, and under the short-lived
+        // `IPC_FRAME_IO_TIMEOUT` budget the read/write pump can fail before
+        // the reader drains enough to let the rest through. Match the
+        // private helper channel's own 64 KiB choice so ordinary responses
+        // fit in a single write instead of depending on that pump.
+        .input_buffer_size_hint(65536)
+        .output_buffer_size_hint(65536)
         .create_duplex::<pipe_mode::Bytes>()
         .map_err(|error| io_error("create named pipe", &error))
 }
@@ -607,6 +622,7 @@ pub(crate) fn caller_identity(
         .map_err(|error| io_error("read named-pipe client PID", &error))?;
     let client_sid = client_sid(stream)?;
     if client_sid != current_process_sid()? {
+        crate::security::events::record(crate::security::events::Kind::UntrustedCallerRejected);
         return Err(VaultError::AuthorizationRequired);
     }
     let (executable, start_time) = process_executable(process_id)?;

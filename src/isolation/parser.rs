@@ -47,7 +47,9 @@ pub(crate) fn parse(bytes: &[u8]) -> VaultResult<VaultRequest> {
             "factorseal-parser",
         )
         .map_err(failure)?;
-        parse_with(&executable, bytes, TIMEOUT)
+        crate::timing::result("parser", "parse", || {
+            parse_with(&executable, bytes, TIMEOUT)
+        })
     }
     #[cfg(not(any(unix, windows)))]
     {
