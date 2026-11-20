@@ -29,12 +29,23 @@ encrypted until unlock. Generic keyring lookups show their supplied attributes i
 the main review card. The user can deny the request or allow it and authenticate using
 FactorSeal's secure input. Unlocking and approval stay in the same popup and
 reuse the secure password entry. The vault browser stays closed. New access
-requires a signed grant for the specific entry, authenticated executable, project, folder, and operation, valid for one hour or until revoked. Keyring approvals bind the stored item ID, so another item with the same service name requires separate approval. The worker
+requires a signed grant for the specific entry, authenticated executable, project, folder, and operation, valid for one hour or until revoked. Requests relayed from WSL2 show the distro name, and their grants expire after five minutes whatever duration is chosen, because every WSL2 caller shares the broker's identity (see [architecture](../docs/architecture.md#wsl2-broker)). Keyring approvals bind the stored item ID, so another item with the same service name requires separate approval. The worker
 checks grants for every operation. SecretSpec IPC also opens this approval flow,
 using its own provider-cache scope. Project labels are caller-supplied context;
 the worker authenticates the executable independently. Denial, dismissal, and
 timeout return distinct D-Bus errors. The dialog only offers unlock-method
 buttons when the vault has multiple methods configured.
+
+On every platform, Desktop opens the same popup for pending SecretSpec
+permissions while the vault is unsealed. That includes requests from the native
+provider and requests relayed from WSL2. On macOS and Windows this is the only
+Desktop approval flow; keyring prompts remain Linux-only. The popup can open
+while you are typing in another app, and on Windows it can take keyboard focus
+even while it stays behind that app. So its fields accept no typing until you
+click inside it, and Grant access, Enter, Unlock, and Save secret do nothing
+until one second after the popup appears or its list of requests changes.
+Escape still denies. If Windows keeps another app in front, the popup's taskbar
+button flashes until you open it.
 
 Wi-Fi passwords appear under **System integrations → Wi-Fi passwords**. On
 Linux, the desktop registers a NetworkManager secret agent on the system bus
@@ -83,7 +94,8 @@ that point also requires a change in SecretSpec.
 
 On Wayland compositors supporting layer-shell, including Niri, the access
 prompt opens as a centered overlay outside the tiling layout. It takes keyboard
-focus until dismissed; Escape and Deny close it. Compositors without layer-shell
+focus until dismissed, but its fields accept typing only after a click; Escape
+and Deny close it. Compositors without layer-shell
 receive a normal access dialog instead. No compositor window rule is required.
 
 On Linux, theme probes run as short-lived child processes so GTK and Qt never

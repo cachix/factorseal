@@ -214,6 +214,7 @@ impl DesktopView {
             .ghost()
             .icon(Glyph::QrCode)
             .tooltip(SCAN_SCREEN)
+            .accessibility_label(SCAN_SCREEN)
             .loading(self.qr_capturing)
             .on_click(cx.listener(move |view, _, _, cx| view.scan_qr_screen(key, cx)))
     }

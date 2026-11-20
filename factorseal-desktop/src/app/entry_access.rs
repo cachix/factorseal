@@ -13,7 +13,6 @@ pub(super) fn scope_label(permission: &Permission) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
 pub(super) fn entry_label(permission: &Permission) -> Option<String> {
     let (PermissionTarget::Entry { address, .. } | PermissionTarget::ProjectEntry { address, .. }) =
         permission.target.as_deref()?
@@ -67,14 +66,20 @@ impl DesktopView {
         contents: &VaultContents,
         cx: &mut Context<Self>,
     ) -> Div {
-        let mut panel = v_flex()
-            .gap_3()
-            .child(div().text_heading().font_semibold().child("Access"));
+        let mut panel = v_flex().gap_3().child(
+            div()
+                .text_heading()
+                .font_semibold()
+                .child(text("access", "Access")),
+        );
         if contents.permissions_loading {
-            return panel.child("Loading access…");
+            return panel.child(text("loading-access", "Loading access…"));
         }
         if let Some(error) = &contents.permissions_error {
-            return panel.child(format!("Could not load access: {error}"));
+            return panel.child(text(
+                "could-not-load-access",
+                format!("Could not load access: {error}"),
+            ));
         }
         let mut count = 0_usize;
         for permission in contents
@@ -84,7 +89,10 @@ impl DesktopView {
         {
             count += 1;
             let mut details = vec![
-                ("Application", permission.principal.application_id.clone()),
+                (
+                    "Application",
+                    display_executable(&permission.principal.application_id),
+                ),
                 (
                     "Operation",
                     permission_operation_label(permission.operation).to_owned(),
@@ -111,7 +119,7 @@ impl DesktopView {
             }
             let mut card = v_flex()
                 .gap_2()
-                .child(Self::render_detail_rows(details, cx));
+                .child(Self::render_detail_rows("details", details, cx));
             if matches!(permission.state, PermissionState::Granted { .. }) {
                 let id = permission.id.clone();
                 let inherited = !matches!(
@@ -119,7 +127,7 @@ impl DesktopView {
                     Some(PermissionTarget::Entry { .. } | PermissionTarget::ProjectEntry { .. })
                 );
                 if inherited {
-                    card = card.child(div().text_body().text_color(cx.theme().muted_foreground).child("Revoking this grant removes its access to every entry in its scope."));
+                    card = card.child(div().text_body().text_color(cx.theme().muted_foreground).child(text("revoking-this-grant-removes", "Revoking this grant removes its access to every entry in its scope.")));
                 }
                 card = card.child(
                     button(("revoke-entry-access", count))
@@ -137,7 +145,10 @@ impl DesktopView {
             panel = panel.child(card);
         }
         if count == 0 {
-            panel = panel.child("No recorded access grants apply to this entry.");
+            panel = panel.child(text(
+                "no-recorded-access-grants",
+                "No recorded access grants apply to this entry.",
+            ));
         }
         panel
     }
