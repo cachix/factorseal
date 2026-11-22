@@ -11,12 +11,14 @@ use zeroize::Zeroizing;
 
 use crate::vault::encoding::base64_bytes;
 use crate::vault::{
-    DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError, VaultResult,
+    DeclaredApplication, DocumentKind, HistoryEntry, SecretAddress, SecretSpecAddress, VaultError,
+    VaultResult,
 };
 
 // Version 17 adds personal-item usernames and favorites to inventory and marks awaited approvals.
 // Version 18 adds caller-declared launch chains and single-use write approvals.
-pub(super) const PROTOCOL_VERSION: u8 = 18;
+// Version 19 adds the access log.
+pub(super) const PROTOCOL_VERSION: u8 = 19;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -750,6 +752,13 @@ pub enum VaultAction {
     RevokePermission {
         id: String,
     },
+    /// Reads of secrets by other applications on this device, newest first.
+    /// Permission managers only.
+    ListAccessLog {
+        /// Continue below this record ID.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<u64>,
+    },
 }
 
 impl VaultAction {
@@ -827,7 +836,10 @@ impl VaultAction {
                     Ok(())
                 }
             }
-            Self::Status | Self::ListPermissions | Self::ExportRevision => Ok(()),
+            Self::Status
+            | Self::ListPermissions
+            | Self::ExportRevision
+            | Self::ListAccessLog { .. } => Ok(()),
             Self::ListPermissionsPage { cursor, .. } => validate_permission_id(cursor),
             Self::ListVaultEntries { cursor, limit } => {
                 validate_list_limit(*limit)?;
@@ -1160,6 +1172,12 @@ pub enum VaultResponseBody {
     PermissionWait {
         status: PermissionWaitStatus,
     },
+    AccessLog {
+        records: Vec<AccessRecord>,
+        /// Record ID to continue below, absent on the last page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<u64>,
+    },
 }
 
 /// Value-free coordinates for one entry in a user-facing vault document.
@@ -1405,6 +1423,62 @@ pub struct PermissionPrincipal {
     pub application_id: String,
     pub executable_digest: [u8; 32],
     pub signer_id: Option<String>,
+}
+
+/// One read of a secret by another application, kept only on this device.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessRecord {
+    /// Increases with every new record and is never reused.
+    pub id: u64,
+    /// Service clock of the latest read, in whole seconds since the Unix epoch.
+    pub at: u64,
+    /// Reads repeated less than a minute apart share one record.
+    pub count: u32,
+    pub outcome: AccessOutcome,
+    pub requester: AccessRequester,
+    pub scope: DocumentKind,
+    #[serde(with = "base64_bytes")]
+    pub namespace: Vec<u8>,
+    /// Absent when a denied request covered a whole namespace or project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<SecretAddress>,
+}
+
+impl AccessRecord {
+    /// Whether this record is about the given inventory entry.
+    #[must_use]
+    pub fn is_for(&self, entry: &VaultEntryMetadata) -> bool {
+        self.scope == entry.document_kind
+            && self.namespace == entry.partition
+            && self.address.as_ref() == Some(&entry.address)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccessOutcome {
+    Allowed,
+    Denied,
+}
+
+/// Who asked. Every label is display text only and was bounded when recorded.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum AccessRequester {
+    /// A program on this device, with the context it declared.
+    Program {
+        principal: PermissionPrincipal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        application: Option<DeclaredApplication>,
+    },
+    /// A paired browser extension filling a website.
+    Browser { origin: String },
+    /// Mobile autofill filling another app.
+    App { package: String },
+    /// Mobile autofill filling a website.
+    Website { origin: String },
 }
 
 impl From<&CallerIdentity> for PermissionPrincipal {

@@ -78,9 +78,24 @@ pub(crate) struct VaultContents {
     pub(crate) permissions_loading: bool,
     pub(crate) permissions_error: Option<String>,
     pub(crate) secret_service_error: Option<String>,
+    pub(crate) access_log: Vec<factorseal::AccessRecord>,
+    pub(crate) access_log_error: Option<String>,
 }
 
 impl VaultContents {
+    pub(crate) fn complete_access_log(
+        &mut self,
+        result: Result<Vec<factorseal::AccessRecord>, String>,
+    ) {
+        match result {
+            Ok(records) => {
+                self.access_log = records;
+                self.access_log_error = None;
+            }
+            Err(error) => self.access_log_error = Some(error),
+        }
+    }
+
     pub(crate) fn complete_permissions(
         &mut self,
         result: Result<Vec<factorseal::Permission>, String>,
@@ -111,7 +126,7 @@ impl ItemVersion {
 }
 
 pub(crate) enum PersonalWriteError {
-    Changed(VaultContents),
+    Changed(Box<VaultContents>),
     Failed(String),
 }
 
@@ -437,7 +452,7 @@ impl DesktopRuntime {
         match response.result {
             Ok(VaultResponseBody::Mutated) => Ok(self.load_live_contents(&metadata)?),
             Err(error) if error.code == VaultResponseErrorCode::Conflict => Err(
-                PersonalWriteError::Changed(self.load_live_contents(&metadata)?),
+                PersonalWriteError::Changed(Box::new(self.load_live_contents(&metadata)?)),
             ),
             Err(error) => Err(error.message.into()),
             Ok(_) => Err("vault returned an unexpected personal-secret response"
@@ -553,6 +568,16 @@ impl DesktopRuntime {
         metadata: &VaultMetadata,
     ) -> Result<Vec<factorseal::Permission>, String> {
         load_permissions(|action| {
+            let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
+            self.request_live(metadata, &request)
+        })
+    }
+
+    pub(crate) fn load_access_log(
+        &self,
+        metadata: &VaultMetadata,
+    ) -> Result<Vec<factorseal::AccessRecord>, String> {
+        load_access_log(|action| {
             let request = VaultRequest::new(action).map_err(|error| error.to_string())?;
             self.request_live(metadata, &request)
         })
@@ -981,8 +1006,30 @@ fn load_vault_contents(
     mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
 ) -> Result<VaultContents, String> {
     let mut contents = load_vault_entries(&mut request)?;
+    contents.complete_access_log(load_access_log(&mut request));
     contents.complete_permissions(Ok(load_permissions(request)?));
     Ok(contents)
+}
+
+fn load_access_log(
+    mut request: impl FnMut(VaultAction) -> Result<VaultResponseBody, String>,
+) -> Result<Vec<factorseal::AccessRecord>, String> {
+    let mut records = Vec::new();
+    let mut cursor = None;
+    loop {
+        let VaultResponseBody::AccessLog {
+            records: page,
+            next_cursor,
+        } = request(VaultAction::ListAccessLog { cursor })?
+        else {
+            return Err("vault returned an unexpected access log response".to_owned());
+        };
+        records.extend(page);
+        if next_cursor.is_none() || next_cursor == cursor {
+            return Ok(records);
+        }
+        cursor = next_cursor;
+    }
 }
 
 fn load_vault_entries(
@@ -1521,6 +1568,10 @@ mod tests {
             },
             VaultResponseBody::VaultEntries {
                 entries: vec![second.clone()],
+                next_cursor: None,
+            },
+            VaultResponseBody::AccessLog {
+                records: Vec::new(),
                 next_cursor: None,
             },
             VaultResponseBody::Permissions {

@@ -1662,7 +1662,7 @@ impl DesktopView {
                     true
                 }
                 Err(PersonalWriteError::Changed(contents)) => {
-                    self.apply_personal_contents(contents);
+                    self.apply_personal_contents(*contents);
                     self.editor_problem(personal_detail::ITEM_CHANGED.to_owned(), cx);
                     if let Some(VaultSelection::Entry(entry)) = self.selected_vault_item.clone() {
                         self.load_personal_item(*entry, cx);

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -54,12 +55,15 @@ import com.cachix.factorseal.app.Page
 import com.cachix.factorseal.app.ToastAction
 import com.cachix.factorseal.app.USERNAME_ID
 import com.cachix.factorseal.app.dateLabel
+import com.cachix.factorseal.app.dayLabel
 import com.cachix.factorseal.app.fieldIcon
 import com.cachix.factorseal.app.grouped
 import com.cachix.factorseal.app.icon
 import com.cachix.factorseal.app.label
 import com.cachix.factorseal.app.message
 import com.cachix.factorseal.app.text
+import com.cachix.factorseal.app.timeLabel
+import com.cachix.factorseal.core.Access
 import com.cachix.factorseal.core.Code
 import com.cachix.factorseal.core.Draft
 import com.cachix.factorseal.core.ErrorCode
@@ -85,6 +89,7 @@ import com.cachix.factorseal.resources.could_not_delete
 import com.cachix.factorseal.resources.could_not_undo
 import com.cachix.factorseal.resources.custom_field
 import com.cachix.factorseal.resources.custom_fields
+import com.cachix.factorseal.resources.day_at
 import com.cachix.factorseal.resources.delete
 import com.cachix.factorseal.resources.delete_body
 import com.cachix.factorseal.resources.delete_title
@@ -126,6 +131,7 @@ import com.cachix.factorseal.resources.new_item
 import com.cachix.factorseal.resources.not_saved
 import com.cachix.factorseal.resources.notes
 import com.cachix.factorseal.resources.open
+import com.cachix.factorseal.resources.recent_access
 import com.cachix.factorseal.resources.remove_field
 import com.cachix.factorseal.resources.remove_from_favorites
 import com.cachix.factorseal.resources.replaces_otp
@@ -135,6 +141,7 @@ import com.cachix.factorseal.resources.save
 import com.cachix.factorseal.resources.save_changes_title
 import com.cachix.factorseal.resources.saved
 import com.cachix.factorseal.resources.scan_qr_code
+import com.cachix.factorseal.resources.see_all
 import com.cachix.factorseal.resources.setup_key_placeholder
 import com.cachix.factorseal.resources.type_one_time_password
 import com.cachix.factorseal.resources.type_website
@@ -171,6 +178,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.stringResource
+import kotlin.time.Clock
 import kotlin.time.TimeSource
 
 @Composable
@@ -183,6 +191,7 @@ private fun labels() = Labels(
 )
 
 private const val MASK = "••••••••"
+private const val RECENT_ACCESS = 5
 
 private fun Item.draft() = Draft(id, kind, title, favorite, notes, sections)
 
@@ -266,6 +275,7 @@ fun ItemPage(
     id: String,
 ) {
     val page = Page.Entry(id)
+    val access = accessLog(app)
     var item by remember(id) { mutableStateOf<Item?>(null) }
     var error by remember(id) { mutableStateOf<Message?>(null) }
     val editor = app.editors[page]
@@ -436,6 +446,7 @@ fun ItemPage(
                     labels = labels,
                     onAdd = { addable -> scope.launch { startEditing(addable) } },
                 )
+                RecentAccess(app, access.entries.orEmpty().filter { it.item == id })
                 app.items
                     ?.firstOrNull { it.id == id }
                     ?.updatedAt
@@ -788,6 +799,54 @@ private fun AddField(
     Box {
         Button(stringResource(Res.string.add_field), onClick = { open = true }, variant = Variant.Ghost, icon = Res.drawable.icon_plus)
         Menu(expanded = open, onDismiss = { open = false }, items = items, end = false)
+    }
+}
+
+@Composable
+private fun RecentAccess(
+    app: FactorSeal,
+    entries: List<Access>,
+) {
+    if (entries.isEmpty()) return
+    val now = Clock.System.now().epochSeconds
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            Modifier.fillMaxWidth().defaultMinSize(minHeight = 32.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(stringResource(Res.string.recent_access), Modifier.weight(1f), style = Type.lead, weight = Semibold)
+            if (entries.size > RECENT_ACCESS) {
+                Button(
+                    stringResource(Res.string.see_all),
+                    onClick = {
+                        app.open(Page.Activity)
+                        app.open(Page.Reads(entries.first()))
+                    },
+                    variant = Variant.Ghost,
+                    modifier = Modifier.offset(x = 10.dp),
+                    size = ButtonSize.Small,
+                )
+            }
+        }
+        Column(Modifier.fillMaxWidth()) {
+            entries.take(RECENT_ACCESS).forEach { access ->
+                Row(
+                    Modifier.fillMaxWidth().defaultMinSize(minHeight = 44.dp).padding(vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AppAvatar(access.requesterName())
+                    Text(access.requesterName(), Modifier.weight(1f), maxLines = 1)
+                    Outcome(access.allowed, access.count)
+                    Text(
+                        stringResource(Res.string.day_at, dayLabel(access.at, now), timeLabel(access.at)),
+                        color = Theme.colors.mutedForeground,
+                        maxLines = 1,
+                    )
+                }
+                Divider()
+            }
+        }
     }
 }
 

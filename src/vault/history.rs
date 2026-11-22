@@ -94,6 +94,8 @@ pub enum ServiceReason {
     GrantStorage,
     /// A record's eviction deadline passed.
     Expiry,
+    /// A read was added to this device's access log.
+    AccessLog,
 }
 
 /// Caller-declared application context as it was presented with a request,
@@ -428,7 +430,7 @@ impl DocumentKind {
     }
 }
 
-fn bounded(value: &str) -> String {
+pub(crate) fn bounded(value: &str) -> String {
     if value.len() <= MAX_DECLARED_FIELD_BYTES {
         return value.to_owned();
     }

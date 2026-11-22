@@ -2,6 +2,7 @@ use self::shortcuts::OpenSettings;
 use crate::secret_input::SecretInputState;
 #[cfg(target_os = "linux")]
 mod access;
+mod activity;
 mod approval_window;
 mod breadcrumb;
 mod browser;
@@ -1192,6 +1193,7 @@ fn category_documentation(
 enum VaultSelection {
     PersonalSecrets,
     Devices,
+    Activity,
     TransferCredentials,
     BackupVault,
     Category(factorseal::DocumentKind),
@@ -1202,6 +1204,7 @@ impl VaultSelection {
     fn page_title(&self) -> Option<&'static str> {
         match self {
             Self::Devices => Some("Devices"),
+            Self::Activity => Some("Activity"),
             Self::TransferCredentials => Some("Transfer credentials"),
             Self::BackupVault => Some("Back up vault"),
             _ => None,
@@ -1214,6 +1217,7 @@ impl VaultSelection {
             Self::Entry(entry) if is_personal_secret(entry) => Page::PersonalSecrets,
             Self::Entry(entry) => Page::Category(entry.document_kind),
             Self::Devices => Page::Devices,
+            Self::Activity => Page::Activity,
             Self::TransferCredentials => Page::TransferCredentials,
             Self::BackupVault => Page::BackupVault,
             Self::Category(kind) => Page::Category(*kind),
@@ -1258,6 +1262,7 @@ fn restored_selection(
                 VaultSelection::Entry(Box::new(entry.clone()))
             }),
         Page::Devices => VaultSelection::Devices,
+        Page::Activity => VaultSelection::Activity,
         Page::TransferCredentials => VaultSelection::TransferCredentials,
         Page::BackupVault => VaultSelection::BackupVault,
         Page::Category(kind) => VaultSelection::Category(*kind),
@@ -1279,6 +1284,7 @@ fn vault_page(selection: Option<&VaultSelection>, panel: PersonalPanel) -> Vault
         Some(VaultSelection::PersonalSecrets) => VaultPage::Personal(panel),
         Some(
             VaultSelection::Devices
+            | VaultSelection::Activity
             | VaultSelection::TransferCredentials
             | VaultSelection::BackupVault,
         ) => VaultPage::Section,
@@ -1389,6 +1395,7 @@ struct DesktopView {
     generator_focus: gpui::FocusHandle,
     password_strength: Option<factorseal::personal::generator::Strength>,
     password_rating: Option<Task<()>>,
+    access_log_watch: Option<Task<()>>,
     clipboard_notice: Option<u64>,
     clipboard_notice_leaving: bool,
     error_details_open: bool,
@@ -1401,6 +1408,7 @@ struct DesktopView {
     device_pairing: Option<devices::PairingScreen>,
     pairing_focus: gpui::FocusHandle,
     selected_device: usize,
+    selected_activity: Option<activity::ActivityKey>,
     section_opened: bool,
     devices_notice: Option<String>,
     device_name: gpui::Entity<InputState>,
@@ -1780,6 +1788,7 @@ impl DesktopView {
             generator_focus: cx.focus_handle(),
             password_strength: None,
             password_rating: None,
+            access_log_watch: None,
             clipboard_notice: None,
             clipboard_notice_leaving: false,
             error_details_open: false,
@@ -1792,6 +1801,7 @@ impl DesktopView {
             device_pairing: None,
             pairing_focus: cx.focus_handle(),
             selected_device: 0,
+            selected_activity: None,
             section_opened: false,
             devices_notice: None,
             device_name,
@@ -2250,6 +2260,18 @@ impl DesktopView {
             return;
         }
         self.forget_qr_scan();
+        match selection {
+            VaultSelection::Activity => {
+                self.selected_activity = None;
+                refresh_desktop_snapshot(Arc::clone(&self.runtime), cx);
+                self.watch_access_log(cx);
+            }
+            VaultSelection::Entry(_) => {
+                self.refresh_access_log(cx);
+                self.watch_access_log(cx);
+            }
+            _ => {}
+        }
         match selection {
             VaultSelection::Entry(entry) if is_personal_secret(&entry) => {
                 self.open_personal_entry(*entry, cx);
@@ -3802,6 +3824,7 @@ impl DesktopView {
             Some(VaultSelection::PersonalSecrets) => self.render_personal_secrets_detail(cx),
             Some(
                 VaultSelection::Devices
+                | VaultSelection::Activity
                 | VaultSelection::TransferCredentials
                 | VaultSelection::BackupVault,
             ) => div(),
@@ -3825,6 +3848,7 @@ impl DesktopView {
                     )
                     .child(Self::render_detail_rows(vault_entry_details(entry), cx))
                     .child(Self::render_entry_access(entry, contents, cx))
+                    .children(self.render_recent_access(entry, cx))
             }
         }
     }
@@ -4905,6 +4929,7 @@ mod tests {
         for selection in [
             VaultSelection::PersonalSecrets,
             VaultSelection::Devices,
+            VaultSelection::Activity,
             VaultSelection::TransferCredentials,
             VaultSelection::BackupVault,
             VaultSelection::Category(DocumentKind::SecretSpecProject),

@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.cachix.factorseal.core.Access
 import com.cachix.factorseal.core.ErrorCode
 import com.cachix.factorseal.core.Factor
 import com.cachix.factorseal.core.Request
@@ -69,6 +70,12 @@ sealed interface Page {
 
     data class Device(
         val name: String,
+    ) : Page
+
+    data object Activity : Page
+
+    data class Reads(
+        val latest: Access,
     ) : Page
 
     data class Transfer(

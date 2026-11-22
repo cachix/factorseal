@@ -7,8 +7,12 @@ use crate::vault::{Provenance, VaultError, VaultResult, VaultStore};
 
 use super::super::grant::{list_granted_permissions, revoke_permission};
 use super::super::lease::{ReplayWindow, UnsealLease};
-use super::super::{CallerIdentity, Permission, PermissionWaitStatus, VaultInteractionReference};
+use super::super::{
+    AccessOutcome, AccessRecord, AccessRequester, CallerIdentity, Permission, PermissionWaitStatus,
+    VaultInteractionReference,
+};
 use super::super::{RequestId, UnsealLeasePolicy};
+use super::access_log::{AccessLog, AccessTarget};
 use super::approvals::{ApprovalCandidate, PendingApprovals};
 use super::time::RequestTime;
 
@@ -25,6 +29,7 @@ struct LiveState {
     lease: UnsealLease,
     replay: ReplayWindow,
     approvals: PendingApprovals,
+    access_log: AccessLog,
     granted_permissions: Vec<Permission>,
     /// Whole second the storage eviction sweep last ran in. The sweep
     /// decrypts, verifies, and re-parses every document with a record due for
@@ -33,6 +38,12 @@ struct LiveState {
     last_purge_at: u64,
     #[cfg(all(test, feature = "hardware"))]
     purges: usize,
+}
+
+impl LiveState {
+    fn save_access_log(&mut self, now: u64) {
+        let _ = self.access_log.save(&self.store, now);
+    }
 }
 
 pub(super) struct LiveStateGuard<'a> {
@@ -56,12 +67,14 @@ impl ServiceState {
         store.set_deadline(lease.expires_at())?;
         // Requests still waiting for review when the vault last sealed.
         let approvals = PendingApprovals::load(&store, now);
+        let access_log = AccessLog::load(&store, now);
         Ok(Self {
             live: Mutex::new(LiveState {
                 store,
                 lease,
                 replay: ReplayWindow::new(),
                 approvals,
+                access_log,
                 granted_permissions: Vec::new(),
                 // Opening the store already swept this second.
                 last_purge_at: now,
@@ -79,6 +92,12 @@ impl ServiceState {
     }
 
     pub(super) fn seal(&self) {
+        if let Ok(mut live) = self.live.try_lock() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            live.save_access_log(now);
+        }
         crate::security::events::record(crate::security::events::Kind::VaultSealed);
         self.seal_handle.request_seal();
         self.approval_changed.notify_all();
@@ -133,9 +152,13 @@ impl ServiceState {
         }
         let (now, monotonic_now) = clock.sample();
         if live.lease.is_expired(monotonic_now.max(Instant::now())) {
+            live.save_access_log(now);
             live.store.seal();
             self.approval_changed.notify_all();
             return Ok(true);
+        }
+        if live.access_log.due(now) {
+            live.save_access_log(now);
         }
         if live.last_purge_at != now {
             crate::timing::result("vault_maintenance", "purge_expired", || {
@@ -213,10 +236,34 @@ impl LiveStateGuard<'_> {
     }
 
     pub(super) fn deny_approval(&mut self, id: &str, now: u64) -> VaultResult<()> {
-        self.live.approvals.deny(id, now)?;
+        let refused = self.live.approvals.deny(id, now)?;
         self.save_approvals(now);
         self.approval_changed.notify_all();
+        if let Some((requester, target)) = refused {
+            self.record_access(requester, target, AccessOutcome::Denied, now);
+        }
         Ok(())
+    }
+
+    /// Add a read to the access log. Maintenance writes it later, so the
+    /// read it describes never waits on or fails with that write.
+    pub(super) fn record_access(
+        &mut self,
+        requester: AccessRequester,
+        target: AccessTarget,
+        outcome: AccessOutcome,
+        now: u64,
+    ) {
+        self.live.access_log.record(requester, target, outcome, now);
+    }
+
+    pub(super) fn access_page(
+        &mut self,
+        cursor: Option<u64>,
+        budget: usize,
+        now: u64,
+    ) -> (Vec<AccessRecord>, Option<u64>) {
+        self.live.access_log.page(cursor, budget, now)
     }
 
     pub(super) fn revoke_permission(

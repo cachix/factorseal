@@ -8,6 +8,7 @@ pub(super) enum SectionRow {
     Transfer { import: bool },
     Backup { restore: bool },
     Device(usize),
+    Activity(usize),
 }
 
 pub(super) fn transfer_rows(backup: bool) -> [SectionRow; 2] {
@@ -28,7 +29,7 @@ impl SectionRow {
             Self::Transfer { import: true } => "Import credentials",
             Self::Backup { restore: false } => "Create backup",
             Self::Backup { restore: true } => "Restore backup",
-            Self::Device(_) => "",
+            Self::Device(_) | Self::Activity(_) => "",
         }
     }
 
@@ -42,6 +43,7 @@ impl SectionRow {
                 Glyph::Upload.into()
             }
             Self::Device(_) => IconName::Network.into(),
+            Self::Activity(_) => Glyph::Clock.into(),
         }
     }
 }
@@ -53,6 +55,7 @@ impl DesktopView {
                 self.selected_vault_item,
                 Some(
                     VaultSelection::Devices
+                        | VaultSelection::Activity
                         | VaultSelection::TransferCredentials
                         | VaultSelection::BackupVault
                 )
@@ -71,6 +74,9 @@ impl DesktopView {
             Some(VaultSelection::BackupVault) => transfer_rows(true).to_vec(),
             Some(VaultSelection::Devices) => (0..self.device_list(cx).len())
                 .map(SectionRow::Device)
+                .collect(),
+            Some(VaultSelection::Activity) => (0..self.activity_rows().len())
+                .map(SectionRow::Activity)
                 .collect(),
             _ => Vec::new(),
         }
@@ -92,6 +98,9 @@ impl DesktopView {
                 let count = self.device_list(cx).len();
                 (count > 0).then(|| SectionRow::Device(self.selected_device.min(count - 1)))
             }
+            Some(VaultSelection::Activity) => {
+                self.selected_activity_row().map(SectionRow::Activity)
+            }
             _ => None,
         }
     }
@@ -111,6 +120,7 @@ impl DesktopView {
                 }
                 self.selected_device = index;
             }
+            SectionRow::Activity(index) => self.open_activity_row(index),
         }
         self.section_opened = true;
         if let Some(position) = self
@@ -160,6 +170,14 @@ impl DesktopView {
             |header| header.child(self.connect_device_button(cx)),
         );
         let rows = self.section_rows(cx);
+        let activity = if matches!(rows.first(), Some(SectionRow::Activity(_))) {
+            self.activity_rows()
+        } else {
+            Vec::new()
+        };
+        let entries = self
+            .unsealed_contents()
+            .map_or(&[][..], |contents| contents.entries.as_slice());
         let selected = self.selected_section(cx);
         let highlighted = self
             .shortcuts
@@ -173,27 +191,36 @@ impl DesktopView {
             })
             .key_context(shortcuts::LIST_CONTEXT);
         for (index, row) in rows.into_iter().enumerate() {
-            let (title, detail) = self.section_row_text(row, cx);
             let current = (self.section_opened || !self.shortcuts.compact) && Some(row) == selected;
+            let item = Self::list_row(("section-row", index), current, cx);
+            let item = if let SectionRow::Activity(index) = row {
+                let (day, item) =
+                    Self::activity_list_row(item, &activity, index, current, entries, cx);
+                if let Some(day) = day {
+                    list = list.child(Self::activity_day_heading(&day, index == 0, cx));
+                }
+                item
+            } else {
+                let (title, detail) = self.section_row_text(row, cx);
+                item.child(
+                    icon_tile(2., &theme)
+                        .child(row.icon().size(rems(1.)).text_color(theme.foreground)),
+                )
+                .child(list_row_text(title, detail, &theme))
+            };
             list = list.child(
-                Self::list_row(("section-row", index), current, cx)
-                    .child(
-                        icon_tile(2., &theme)
-                            .child(row.icon().size(rems(1.)).text_color(theme.foreground)),
+                item.when(self.shortcuts.compact, |row| {
+                    row.child(
+                        gpui_component::Icon::new(IconName::ChevronRight)
+                            .flex_none()
+                            .text_color(theme.muted_foreground),
                     )
-                    .child(list_row_text(title, detail, &theme))
-                    .when(self.shortcuts.compact, |row| {
-                        row.child(
-                            gpui_component::Icon::new(IconName::ChevronRight)
-                                .flex_none()
-                                .text_color(theme.muted_foreground),
-                        )
-                    })
-                    .when(highlighted == Some(index), |row| {
-                        row.keyboard_cursor(current, cx)
-                            .child(self.reveal_when_moved(index == 0))
-                    })
-                    .on_click(cx.listener(move |view, _, _, cx| view.open_section(row, cx))),
+                })
+                .when(highlighted == Some(index), |row| {
+                    row.keyboard_cursor(current, cx)
+                        .child(self.reveal_when_moved(index == 0))
+                })
+                .on_click(cx.listener(move |view, _, _, cx| view.open_section(row, cx))),
             );
         }
         let invite = self.shortcuts.compact
@@ -209,35 +236,47 @@ impl DesktopView {
             .child(div().flex_1().min_h_0().child(self.scroll_list(list)))
     }
 
-    fn section_header(
+    pub(super) fn section_header(
         icon: gpui_component::Icon,
         title: impl IntoElement,
         detail: Option<&'static str>,
         cx: &App,
     ) -> Div {
         let theme = cx.theme();
-        h_flex()
-            .min_w_0()
-            .items_center()
-            .gap_4()
-            .child(
-                icon_tile(56. / 16., theme)
-                    .child(icon.size(rems(28. / 16.)).text_color(theme.foreground)),
-            )
-            .child(v_flex().flex_1().min_w_0().gap_1().child(title).when_some(
-                detail,
-                |header, detail| {
+        Self::section_header_tile(
+            icon_tile(56. / 16., theme)
+                .child(icon.size(rems(28. / 16.)).text_color(theme.foreground)),
+            title,
+            detail.map(gpui::SharedString::from),
+            cx,
+        )
+    }
+
+    pub(super) fn section_header_tile(
+        mark: impl IntoElement,
+        title: impl IntoElement,
+        detail: Option<gpui::SharedString>,
+        cx: &App,
+    ) -> Div {
+        let theme = cx.theme();
+        h_flex().min_w_0().items_center().gap_4().child(mark).child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(title)
+                .when_some(detail, |header, detail| {
                     header.child(
                         div()
                             .text_body()
                             .text_color(theme.muted_foreground)
                             .child(detail),
                     )
-                },
-            ))
+                }),
+        )
     }
 
-    fn section_title(title: impl Into<gpui::SharedString>) -> Div {
+    pub(super) fn section_title(title: impl Into<gpui::SharedString>) -> Div {
         div()
             .min_w_0()
             .text_title()
@@ -251,6 +290,9 @@ impl DesktopView {
         let Some(row) = self.selected_section(cx) else {
             return pane;
         };
+        if let SectionRow::Activity(index) = row {
+            return pane.child(self.render_activity_detail(index, cx));
+        }
         let (title, detail) = self.section_row_text(row, cx);
         let content = match row {
             SectionRow::Settings(_) => {
@@ -276,6 +318,7 @@ impl DesktopView {
                     None => div(),
                 }
             }
+            SectionRow::Activity(_) => div(),
         };
         let rename = match row {
             SectionRow::Device(index) => {
@@ -323,6 +366,17 @@ impl DesktopView {
                 .min_h_0()
                 .h_full()
                 .child(self.scroll_detail(setup));
+        }
+        if self.selected_vault_item == Some(VaultSelection::Activity)
+            && !self.settings_open
+            && let Some(state) = self.render_activity_state(cx)
+        {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .h_full()
+                .child(self.scroll_detail(state));
         }
         let theme = cx.theme().clone();
         if compact {

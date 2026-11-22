@@ -2776,6 +2776,24 @@ mod tests {
             .unwrap();
             let secret: Secret = item.call("GetSecret", &(session,)).await.unwrap();
             assert_eq!(secret.2, b"backup");
+            let listed = target.service.handle(
+                &target.caller,
+                crate::VaultRequest::new(crate::VaultAction::ListAccessLog { cursor: None })
+                    .unwrap(),
+                unix_time(),
+            );
+            let Ok(crate::VaultResponseBody::AccessLog { records, .. }) = listed.result else {
+                panic!("expected the access log");
+            };
+            assert_eq!(
+                records.len(),
+                1,
+                "only the item read is logged, not the index"
+            );
+            assert!(matches!(
+                &records[0].address,
+                Some(crate::SecretAddress::Local { item, .. }) if item.starts_with("item/")
+            ));
         });
     }
     #[test]

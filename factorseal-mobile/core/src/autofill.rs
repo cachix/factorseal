@@ -1,6 +1,10 @@
-use crate::api::{ErrorCode, Login, Site};
+use crate::api::{Access, ErrorCode, Login, Requester, Site};
 use crate::core::{Failure, Outcome};
-use factorseal::personal::{PersonalField, PersonalFieldType, PersonalSecret, website};
+use factorseal::DocumentKind;
+use factorseal::personal::{
+    PERSONAL_SECRET_NAMESPACE, PersonalField, PersonalFieldType, PersonalSecret, website,
+};
+use factorseal::vault::{AccessOutcome, AccessRecord, AccessRequester};
 
 const APP_SCHEME: &str = "androidapp://";
 const MAX_PACKAGE: usize = 255;
@@ -42,10 +46,48 @@ impl Target {
         matches!(self, Self::App(_))
     }
 
+    pub(crate) fn requester(&self) -> AccessRequester {
+        match self {
+            Self::Origin(origin) => AccessRequester::Website {
+                origin: origin.clone(),
+            },
+            Self::App(address) => AccessRequester::App {
+                package: address.trim_start_matches(APP_SCHEME).to_owned(),
+            },
+        }
+    }
+
     fn address(&self) -> &str {
         match self {
             Self::Origin(address) | Self::App(address) => address,
         }
+    }
+}
+
+pub(crate) fn access(record: AccessRecord) -> Access {
+    let item = (record.scope == DocumentKind::LocalKeyring
+        && record.namespace == PERSONAL_SECRET_NAMESPACE)
+        .then(|| {
+            record
+                .address
+                .and_then(|address| address.as_local().map(|(id, _)| id.to_owned()))
+        })
+        .flatten();
+    let (requester, name) = match record.requester {
+        AccessRequester::App { package } => (Requester::App, package),
+        AccessRequester::Website { origin } => (Requester::Website, origin),
+        AccessRequester::Browser { origin } => (Requester::Browser, origin),
+        AccessRequester::Program { principal, .. } => {
+            (Requester::Program, principal.application_id)
+        }
+    };
+    Access {
+        at: record.at,
+        count: record.count,
+        allowed: record.outcome == AccessOutcome::Allowed,
+        requester,
+        name,
+        item,
     }
 }
 

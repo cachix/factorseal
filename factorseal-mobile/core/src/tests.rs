@@ -727,6 +727,37 @@ fn autofill_offers_and_fills_only_logins_saved_for_the_exact_website() {
     );
     assert_eq!(refused["code"], "invalid", "{refused}");
     assert_eq!(websites(&core, &github), ["https://github.com/login"]);
+    let activity = send(&core, &json!({"type": "activity"}))["entries"].clone();
+    let entries: Vec<_> = activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["allowed"].clone(),
+                entry["requester"].clone(),
+                entry["name"].clone(),
+                entry["item"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            (
+                json!(false),
+                json!("website"),
+                json!("https://example.com"),
+                github.clone()
+            ),
+            (
+                json!(true),
+                json!("website"),
+                json!("https://github.com"),
+                github.clone()
+            ),
+        ]
+    );
 
     send(&core, &json!({"type": "seal"}));
     let sealed = send(
@@ -1193,6 +1224,10 @@ fn the_shared_messages_list_every_value_the_core_can_send() {
         json!(every!(LoginChange: Added, Updated, Unchanged))
     );
     assert_eq!(
+        enums["requester"],
+        json!(every!(Requester: App, Website, Browser, Program))
+    );
+    assert_eq!(
         enums["strength"],
         json!(every!(Strength: Weak, Good, Strong))
     );
@@ -1239,6 +1274,7 @@ fn conversation(core: &Core) -> Vec<Value> {
     exchange(json!({"type": "codes", "id": id}));
     exchange(json!({"type": "logins", "site": {"app": "com.github.android"}}));
     exchange(json!({"type": "fill", "id": id, "site": {"web": "https://github.com"}}));
+    exchange(json!({"type": "activity"}));
     exchange(
         json!({"type": "save-login", "site": {"app": "com.github.android"}, "title": "GitHub", "username": "octocat", "password": "a new password"}),
     );

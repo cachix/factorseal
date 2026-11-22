@@ -361,6 +361,31 @@ enum class LoginChange {
 }
 
 @Serializable
+enum class Requester {
+    @SerialName("app")
+    App,
+
+    @SerialName("website")
+    Website,
+
+    @SerialName("browser")
+    Browser,
+
+    @SerialName("program")
+    Program,
+}
+
+@Serializable
+data class Access(
+    val at: Long,
+    val count: Int,
+    val allowed: Boolean,
+    val requester: Requester,
+    val name: String,
+    val item: String?,
+)
+
+@Serializable
 sealed interface Request {
     @Serializable
     @SerialName("start")
@@ -570,6 +595,10 @@ sealed interface Request {
         val username: String,
         val password: String,
     ) : Request
+
+    @Serializable
+    @SerialName("activity")
+    data object Activity : Request
 }
 
 @Serializable
@@ -715,6 +744,12 @@ sealed interface Response {
     data class LoginSaved(
         val id: String,
         val change: LoginChange,
+    ) : Response
+
+    @Serializable
+    @SerialName("activity")
+    data class Activity(
+        val entries: List<Access>,
     ) : Response
 
     @Serializable

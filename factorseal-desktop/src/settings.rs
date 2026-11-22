@@ -50,6 +50,7 @@ impl WindowPlacement {
 pub(crate) enum Page {
     PersonalSecrets,
     Devices,
+    Activity,
     TransferCredentials,
     BackupVault,
     Category(factorseal::DocumentKind),

@@ -160,6 +160,7 @@ pub enum Request {
         username: Secret,
         password: Secret,
     },
+    Activity,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +249,9 @@ pub enum Response {
     LoginSaved {
         id: String,
         change: LoginChange,
+    },
+    Activity {
+        entries: Vec<Access>,
     },
     Error {
         code: ErrorCode,
@@ -342,6 +346,26 @@ impl Drop for Login {
         self.title.zeroize();
         self.username.zeroize();
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Access {
+    pub at: u64,
+    pub count: u32,
+    pub allowed: bool,
+    pub requester: Requester,
+    pub name: String,
+    pub item: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Requester {
+    App,
+    Website,
+    Browser,
+    Program,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
