@@ -6,6 +6,7 @@ mod branding;
 mod controls;
 mod crash_reporting;
 mod instance;
+mod keymap;
 mod motion;
 mod runtime;
 mod secret_input;

@@ -48,8 +48,8 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyWindowHandle, App, Bounds, ColorExt as _, Context, Div, Global, HighlightStyle, Hsla,
-    KeyBinding, MenuItem, Render, ScrollHandle, StyledText, Subscription, Task, Window,
-    WindowBounds, WindowOptions, actions, div, prelude::*, px, rems, size, svg,
+    MenuItem, Render, ScrollHandle, StyledText, Subscription, Task, Window, WindowBounds,
+    WindowOptions, actions, div, prelude::*, px, rems, size, svg,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Root, Selectable as _, Side, Sizable as _, Size,
@@ -1647,6 +1647,10 @@ impl DesktopView {
             cx.notify();
         });
         let settings_report = cx.subscribe_in(&settings, window, Self::report_from_settings);
+        let shortcuts_changed = cx.subscribe(
+            &settings,
+            |_, _, _: &crate::settings_view::ShortcutsChanged, cx| shortcuts::apply_shortcuts(cx),
+        );
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -1821,6 +1825,7 @@ impl DesktopView {
                 vault_search_change,
                 settings_changed,
                 settings_report,
+                shortcuts_changed,
                 use_generated_password,
                 device_name_submit,
                 pairing_ticket_submit,
@@ -4702,10 +4707,6 @@ pub(crate) fn setup(
     cx.on_action(seal_vault);
     cx.on_action(quit);
     cx.on_action(focus_search);
-    cx.bind_keys([
-        KeyBinding::new("secondary-f", FocusSearch, None),
-        KeyBinding::new("secondary-f", FocusSearch, Some("Input")),
-    ]);
     shortcuts::bind_keys(cx);
     cx.on_action(undo_personal_change);
     cx.on_action(redo_personal_change);

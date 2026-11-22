@@ -1,11 +1,13 @@
 use gpui::{
-    AnyElement, App, Context, Div, Entity, EventEmitter, SharedString, Subscription, Window, div,
-    prelude::*, rems,
+    AnyElement, App, Context, Div, Entity, EventEmitter, Keystroke, SharedString, Subscription,
+    Window, div, prelude::*, rems,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, StyledExt as _,
-    button::Button,
+    ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _,
+    StyledExt as _,
+    button::{Button, ButtonVariants as _},
     h_flex,
+    kbd::Kbd,
     select::{Select, SelectEvent, SelectItem, SelectState},
     switch::Switch,
     v_flex,
@@ -15,6 +17,7 @@ use crate::{
     appearance::{self, Choice, TypeScale as _},
     branding::Glyph,
     controls::button,
+    keymap::{self, Shortcut},
     settings::DesktopSettings,
 };
 
@@ -104,13 +107,14 @@ pub(crate) struct Browsers {
 pub(crate) enum Section {
     Appearance,
     Security,
+    Shortcuts,
     Browsers,
     Diagnostics,
 }
 
 impl Section {
     pub(crate) fn visible(browsers: bool) -> Vec<Self> {
-        [Self::Appearance, Self::Security]
+        [Self::Appearance, Self::Security, Self::Shortcuts]
             .into_iter()
             .chain(browsers.then_some(Self::Browsers))
             .chain([Self::Diagnostics])
@@ -121,6 +125,7 @@ impl Section {
         match self {
             Self::Appearance => "Appearance",
             Self::Security => "Security",
+            Self::Shortcuts => "Shortcuts",
             Self::Browsers => "Browser extensions",
             Self::Diagnostics => "Diagnostics",
         }
@@ -130,6 +135,7 @@ impl Section {
         match self {
             Self::Appearance => IconName::Palette.into(),
             Self::Security => Glyph::Lock.into(),
+            Self::Shortcuts => Glyph::Keyboard.into(),
             Self::Browsers => IconName::Globe.into(),
             Self::Diagnostics => Glyph::Bug.into(),
         }
@@ -140,10 +146,58 @@ pub(crate) struct ReportIssue;
 
 impl EventEmitter<ReportIssue> for SettingsView {}
 
+pub(crate) struct ShortcutsChanged;
+
+impl EventEmitter<ShortcutsChanged> for SettingsView {}
+
+struct Recording {
+    shortcut: Shortcut,
+    rejected: Option<Keystroke>,
+    _keys: Subscription,
+}
+
+enum Recorded {
+    Ignored,
+    Cancelled,
+    Rejected,
+    Saved(DesktopSettings),
+}
+
+fn record(shortcut: Shortcut, keystroke: &Keystroke, settings: &DesktopSettings) -> Recorded {
+    if matches!(
+        keystroke.key.as_str(),
+        "shift" | "control" | "alt" | "platform" | "function"
+    ) {
+        return Recorded::Ignored;
+    }
+    if keystroke.key == "escape" && !keystroke.modifiers.modified() {
+        return Recorded::Cancelled;
+    }
+    if !keymap::usable(keystroke) {
+        return Recorded::Rejected;
+    }
+    if keymap::clash(shortcut, keystroke, &settings.shortcuts).is_some()
+        || (shortcut.works_in_text_fields() && keymap::edits_text(keystroke))
+    {
+        return Recorded::Rejected;
+    }
+    let mut changed = settings.clone();
+    let defaults: Vec<_> = shortcut.keys(&std::collections::BTreeMap::new());
+    if defaults.len() == 1 && keymap::same(&defaults[0], keystroke) {
+        changed.shortcuts.remove(shortcut.id());
+    } else {
+        changed
+            .shortcuts
+            .insert(shortcut.id().to_owned(), keystroke.unparse());
+    }
+    Recorded::Saved(changed)
+}
+
 pub(crate) struct SettingsView {
     section: Section,
     controls: Vec<Control>,
     error: Option<&'static str>,
+    recording: Option<Recording>,
     export_busy: bool,
     export_complete: bool,
     _subscriptions: Vec<Subscription>,
@@ -236,6 +290,7 @@ impl SettingsView {
             section: Section::Appearance,
             controls,
             error: None,
+            recording: None,
             export_busy: false,
             export_complete: false,
             _subscriptions: subscriptions,
@@ -253,6 +308,7 @@ impl SettingsView {
     pub(crate) fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
         self.section = section;
         self.error = None;
+        self.recording = None;
         cx.notify();
     }
 
@@ -573,6 +629,7 @@ impl SettingsView {
                     cx,
                 ))
                 .child(h_flex().text_body().child(protection)),
+            Section::Shortcuts => self.shortcuts(cx),
             Section::Browsers => browsers.map_or_else(div, |browsers| Self::browsers(browsers, cx)),
             Section::Diagnostics => self.diagnostics(cx),
         };
@@ -580,6 +637,171 @@ impl SettingsView {
         content.w_full().when_some(self.error, |content, error| {
             content.child(div().text_color(danger).child(error))
         })
+    }
+
+    fn start_recording(&mut self, shortcut: Shortcut, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity().downgrade();
+        let home = window.window_handle();
+        let keys = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != home {
+                return;
+            }
+            cx.stop_propagation();
+            let keystroke = event.keystroke.clone();
+            let _ = view.update(cx, |view, cx| view.recorded(&keystroke, window, cx));
+        });
+        self.recording = Some(Recording {
+            shortcut,
+            rejected: None,
+            _keys: keys,
+        });
+        cx.notify();
+    }
+
+    fn recorded(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
+        match record(recording.shortcut, keystroke, appearance::current(cx)) {
+            Recorded::Ignored => return,
+            Recorded::Cancelled => self.recording = None,
+            Recorded::Rejected => recording.rejected = Some(keystroke.clone()),
+            Recorded::Saved(settings) => {
+                self.recording = None;
+                self.save_shortcuts(settings, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn save_shortcuts(
+        &mut self,
+        settings: DesktopSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save(settings, window, cx);
+        cx.emit(ShortcutsChanged);
+    }
+
+    fn reset_shortcut(
+        &mut self,
+        shortcut: Option<Shortcut>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = appearance::current(cx).clone();
+        match shortcut {
+            Some(shortcut) => {
+                if let Some((keystroke, _)) = keymap::reset_clash(shortcut, &settings.shortcuts) {
+                    self.start_recording(shortcut, window, cx);
+                    if let Some(recording) = &mut self.recording {
+                        recording.rejected = Some(keystroke);
+                    }
+                    return;
+                }
+                settings.shortcuts.remove(shortcut.id());
+            }
+            None => settings.shortcuts.clear(),
+        }
+        self.recording = None;
+        self.save_shortcuts(settings, window, cx);
+    }
+
+    fn shortcut_row(&self, shortcut: Shortcut, cx: &mut Context<Self>) -> Div {
+        let overrides = &appearance::current(cx).shortcuts;
+        let keys = shortcut.keys(overrides);
+        let changed = shortcut.changed(overrides);
+        let recording = self
+            .recording
+            .as_ref()
+            .filter(|recording| recording.shortcut == shortcut);
+        let theme = cx.theme().clone();
+        let id = shortcut.id();
+        let field = h_flex()
+            .id(SharedString::from(format!("shortcut-{id}")))
+            .w(rems(11.))
+            .h_8()
+            .px_2()
+            .gap_1()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.input)
+            .bg(theme.background)
+            .text_body()
+            .text_color(theme.muted_foreground);
+        let field = if let Some(recording) = recording {
+            let rejected = recording.rejected.clone();
+            field
+                .border_color(if rejected.is_some() {
+                    theme.danger
+                } else {
+                    theme.ring
+                })
+                .map(|field| match rejected {
+                    Some(keystroke) => field.child(
+                        Kbd::new(keystroke)
+                            .text_color(theme.danger)
+                            .bg(theme.danger.opacity(0.1)),
+                    ),
+                    None => field.child("Press a shortcut"),
+                })
+                .on_mouse_down_out(cx.listener(|view, _, _, cx| {
+                    view.recording = None;
+                    cx.notify();
+                }))
+        } else {
+            field
+                .cursor_pointer()
+                .hover(|field| field.bg(theme.secondary))
+                .map(|field| {
+                    if keys.is_empty() {
+                        field.child("None")
+                    } else {
+                        field.children(keys.into_iter().map(Kbd::new))
+                    }
+                })
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.start_recording(shortcut, window, cx);
+                }))
+        };
+        let control = h_flex()
+            .gap_2()
+            .items_center()
+            .when(changed && recording.is_none(), |control| {
+                control.child(
+                    button(SharedString::from(format!("reset-shortcut-{id}")))
+                        .ghost()
+                        .small()
+                        .icon(IconName::Undo2)
+                        .tooltip("Use the default")
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.reset_shortcut(Some(shortcut), window, cx);
+                        })),
+                )
+            })
+            .child(field);
+        Self::setting(shortcut.label(), control, cx)
+    }
+
+    fn shortcuts(&self, cx: &mut Context<Self>) -> Div {
+        let unchanged = appearance::current(cx).shortcuts.is_empty();
+        let rows: Vec<_> = Shortcut::ALL
+            .into_iter()
+            .map(|shortcut| self.shortcut_row(shortcut, cx))
+            .collect();
+        v_flex().gap_3().child(Self::list(rows, cx)).child(
+            h_flex().child(
+                button("reset-shortcuts")
+                    .icon(IconName::Undo2)
+                    .label("Reset to defaults")
+                    .disabled(unchanged)
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.reset_shortcut(None, window, cx);
+                    })),
+            ),
+        )
     }
 
     fn export_diagnostics(&mut self, cx: &mut Context<Self>) {
@@ -641,6 +863,7 @@ mod tests {
             generator,
             window: None,
             page: None,
+            shortcuts: std::collections::BTreeMap::from([("undo".to_owned(), "alt-u".to_owned())]),
         };
         assert_eq!(
             SettingsView::default_appearance(&settings),
@@ -650,6 +873,10 @@ mod tests {
                 idle_seconds: 60,
                 maximum_seconds: 900,
                 generator,
+                shortcuts: std::collections::BTreeMap::from([(
+                    "undo".to_owned(),
+                    "alt-u".to_owned(),
+                )]),
                 ..DesktopSettings::default()
             }
         );
@@ -660,13 +887,19 @@ mod tests {
         let sections = Section::visible;
         assert_eq!(
             sections(false),
-            [Section::Appearance, Section::Security, Section::Diagnostics]
+            [
+                Section::Appearance,
+                Section::Security,
+                Section::Shortcuts,
+                Section::Diagnostics
+            ]
         );
         assert_eq!(
             sections(true),
             [
                 Section::Appearance,
                 Section::Security,
+                Section::Shortcuts,
                 Section::Browsers,
                 Section::Diagnostics
             ]

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::Write as _,
     path::{Path, PathBuf},
 };
@@ -24,6 +25,7 @@ pub(crate) struct DesktopSettings {
     pub(crate) generator: factorseal::personal::generator::Options,
     pub(crate) window: Option<WindowPlacement>,
     pub(crate) page: Option<Page>,
+    pub(crate) shortcuts: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -71,6 +73,7 @@ impl Default for DesktopSettings {
             generator: factorseal::personal::generator::Options::default(),
             window: None,
             page: None,
+            shortcuts: BTreeMap::new(),
         }
     }
 }
@@ -104,6 +107,10 @@ impl DesktopSettings {
         ensure!(
             self.window.as_ref().is_none_or(WindowPlacement::is_valid),
             "window placement is invalid"
+        );
+        ensure!(
+            crate::keymap::valid(&self.shortcuts),
+            "a keyboard shortcut is invalid"
         );
         crate::runtime::lease_policy(self.idle_seconds, self.maximum_seconds)
             .map_err(anyhow::Error::msg)?;
@@ -224,6 +231,10 @@ mod tests {
                 maximized: true,
             }),
             page: Some(Page::Category(factorseal::DocumentKind::SecretSpecProject)),
+            shortcuts: BTreeMap::from([
+                ("open-palette".to_owned(), "alt-p".to_owned()),
+                ("seal-vault".to_owned(), String::new()),
+            ]),
         };
         save(&path.with_file_name("desktop.json"), &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);
