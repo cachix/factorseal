@@ -289,7 +289,7 @@ fn field_label(label: &'static str, field: impl IntoElement) -> Div {
 
 fn segmented<T: Copy + PartialEq + 'static>(
     id: &'static str,
-    options: impl IntoIterator<Item = (T, &'static str)>,
+    options: impl IntoIterator<Item = (T, &'static str, Option<branding::Brand>)>,
     selected: T,
     disabled: bool,
     on_select: impl Fn(&T, &mut Window, &mut App) + 'static,
@@ -316,12 +316,20 @@ fn segmented<T: Copy + PartialEq + 'static>(
             options
                 .into_iter()
                 .enumerate()
-                .map(|(index, (value, label))| {
+                .map(|(index, (value, label, logo))| {
                     let on_select = on_select.clone();
                     let chosen = value == selected;
                     button((id, index))
                         .ghost()
-                        .label(label)
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_1p5()
+                                .children(
+                                    logo.map(|logo| gpui_component::Icon::new(logo).size(rems(1.))),
+                                )
+                                .child(label),
+                        )
                         .selected(chosen)
                         .disabled(disabled)
                         .border_1()
@@ -340,6 +348,17 @@ fn segmented<T: Copy + PartialEq + 'static>(
                         .on_click(move |_, window, cx| on_select(&value, window, cx))
                 }),
         )
+}
+
+fn format_brand(format: TransferFormat) -> Option<branding::Brand> {
+    match format {
+        TransferFormat::BitwardenJson => Some(branding::Brand::Bitwarden),
+        TransferFormat::OnePasswordCsv | TransferFormat::OnePasswordPux => {
+            Some(branding::Brand::OnePassword)
+        }
+        TransferFormat::KeePassCsv => Some(branding::Brand::KeePassXc),
+        TransferFormat::FactorSeal | TransferFormat::CxfAge => None,
+    }
 }
 
 fn search_icon(color: Hsla) -> impl IntoElement {
@@ -3461,7 +3480,10 @@ impl DesktopView {
     fn render_cxf_key_options(&self, is_import: bool, cx: &mut Context<Self>) -> Div {
         let mut panel = v_flex().gap_3().child(segmented(
             "transfer-key-mode",
-            [(false, "Passphrase"), (true, "Post-quantum key")],
+            [
+                (false, "Passphrase", None),
+                (true, "Post-quantum key", None),
+            ],
             self.transfer_use_recipient,
             self.transfer_busy,
             cx.listener(|view, hybrid: &bool, _, cx| {
@@ -3568,6 +3590,7 @@ impl DesktopView {
                                     } else {
                                         candidate.label()
                                     },
+                                    format_brand(candidate),
                                 )
                             }),
                         format,

@@ -261,6 +261,14 @@ fn discover_browsers() -> Vec<(Browser, bool)> {
         .collect()
 }
 
+fn browser_icon(browser: Browser) -> gpui_component::Icon {
+    match browser {
+        Browser::Firefox => branding::Brand::Firefox.into(),
+        Browser::Chrome | Browser::Chromium => branding::Brand::Chrome.into(),
+        Browser::Edge => IconName::Globe.into(),
+    }
+}
+
 fn browser_state(paired_count: usize, extension_installed: bool) -> String {
     if paired_count > 0 {
         format!(
@@ -385,7 +393,7 @@ impl DesktopView {
                         .border_color(theme.border)
                         .child(
                             icon_tile(2., &theme).child(
-                                gpui_component::Icon::new(IconName::Globe)
+                                browser_icon(browser)
                                     .size(rems(1.))
                                     .text_color(theme.foreground),
                             ),
@@ -449,6 +457,7 @@ impl DesktopView {
             .map(
                 |(index, browser, paired_count, extension_installed)| BrowserRow {
                     name: browser.name(),
+                    icon: browser_icon(browser),
                     state: browser_state(paired_count, extension_installed).into(),
                     install: (paired_count == 0 && !extension_installed).then(|| {
                         button(("install-browser-extension", index))

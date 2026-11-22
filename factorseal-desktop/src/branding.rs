@@ -28,6 +28,51 @@ pub(crate) const GRIP_ASSET: &str = "factorseal-grip.svg";
 pub(crate) const KEYBOARD_ASSET: &str = "factorseal-keyboard.svg";
 
 #[derive(Clone, Copy)]
+pub(crate) enum Brand {
+    Firefox,
+    Chrome,
+    Bitwarden,
+    OnePassword,
+    KeePassXc,
+}
+
+impl Brand {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Firefox,
+        Self::Chrome,
+        Self::Bitwarden,
+        Self::OnePassword,
+        Self::KeePassXc,
+    ];
+
+    pub(crate) const fn asset(self) -> &'static str {
+        match self {
+            Self::Firefox => "brands/firefox.svg",
+            Self::Chrome => "brands/chrome.svg",
+            Self::Bitwarden => "brands/bitwarden.svg",
+            Self::OnePassword => "brands/1password.svg",
+            Self::KeePassXc => "brands/keepassxc.svg",
+        }
+    }
+
+    pub(crate) const fn svg(self) -> &'static [u8] {
+        match self {
+            Self::Firefox => include_bytes!("../../assets/brands/firefox.svg"),
+            Self::Chrome => include_bytes!("../../assets/brands/chrome.svg"),
+            Self::Bitwarden => include_bytes!("../../assets/brands/bitwarden.svg"),
+            Self::OnePassword => include_bytes!("../../assets/brands/1password.svg"),
+            Self::KeePassXc => include_bytes!("../../assets/brands/keepassxc.svg"),
+        }
+    }
+}
+
+impl IconNamed for Brand {
+    fn path(self) -> SharedString {
+        self.asset().into()
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(crate) enum Glyph {
     Bug,
     Lock,
