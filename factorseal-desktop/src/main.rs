@@ -1,13 +1,18 @@
+#![cfg_attr(target_family = "wasm", allow(dead_code))]
+
 mod app;
 mod appearance;
 #[cfg(feature = "apple-credential-exchange")]
 mod apple_exchange;
 mod branding;
 mod controls;
+#[cfg_attr(target_family = "wasm", path = "web/crash_reporting.rs")]
 mod crash_reporting;
+#[cfg(not(target_family = "wasm"))]
 mod instance;
 mod keymap;
 mod motion;
+mod platform;
 mod runtime;
 mod secret_input;
 mod settings;
@@ -16,10 +21,127 @@ mod theming;
 mod timing;
 mod unlock_animation;
 
-use std::{borrow::Cow, path::PathBuf};
+use std::borrow::Cow;
+#[cfg(not(target_family = "wasm"))]
+use std::path::PathBuf;
 
+#[cfg(not(target_family = "wasm"))]
 use clap::Parser;
-use gpui::{AssetSource, QuitMode, SharedString};
+use gpui::{AssetSource, SharedString};
+
+#[cfg(not(target_family = "wasm"))]
+use gpui_component_assets::Assets as ComponentIcons;
+
+#[cfg(target_family = "wasm")]
+gpui_component_assets::icon_assets!(
+    ComponentIcons,
+    [
+        ALargeSmall,
+        ArrowDown,
+        ArrowLeft,
+        ArrowRight,
+        ArrowUp,
+        Asterisk,
+        Ban,
+        BatteryCharging,
+        BatteryFull,
+        BatteryLow,
+        BatteryMedium,
+        BatteryWarning,
+        Battery,
+        Bell,
+        BookOpen,
+        Bot,
+        Building2,
+        Calendar,
+        CaseSensitive,
+        ChartPie,
+        Check,
+        ChevronDown,
+        ChevronLeft,
+        ChevronRight,
+        ChevronUp,
+        ChevronsUpDown,
+        CircleAlert,
+        CircleCheck,
+        CircleUser,
+        CircleX,
+        Close,
+        Copy,
+        Cpu,
+        Dash,
+        Delete,
+        EllipsisVertical,
+        Ellipsis,
+        ExternalLink,
+        EyeOff,
+        Eye,
+        FileText,
+        File,
+        FolderClosed,
+        FolderOpen,
+        Folder,
+        Frame,
+        GalleryVerticalEnd,
+        Github,
+        Globe,
+        HardDrive,
+        HeartOff,
+        Heart,
+        Inbox,
+        Info,
+        Inspector,
+        LayoutDashboard,
+        LoaderCircle,
+        Loader,
+        Map,
+        Maximize,
+        MemoryStick,
+        Menu,
+        Minimize,
+        Minus,
+        Moon,
+        Network,
+        Palette,
+        PanelBottomOpen,
+        PanelBottom,
+        PanelLeftClose,
+        PanelLeftOpen,
+        PanelLeft,
+        PanelRightClose,
+        PanelRightOpen,
+        PanelRight,
+        Pause,
+        Play,
+        Plus,
+        Redo2,
+        Redo,
+        RefreshCw,
+        Replace,
+        ResizeCorner,
+        RotateCw,
+        Search,
+        Settings2,
+        Settings,
+        SortAscending,
+        SortDescending,
+        SquareTerminal,
+        StarFill,
+        StarOff,
+        Star,
+        Sun,
+        ThumbsDown,
+        ThumbsUp,
+        TriangleAlert,
+        Undo2,
+        Undo,
+        User,
+        WindowClose,
+        WindowMaximize,
+        WindowMinimize,
+        WindowRestore,
+    ]
+);
 
 struct Assets;
 
@@ -100,13 +222,13 @@ impl AssetSource for Assets {
                 .find(|brand| brand.asset() == path)
             {
                 Some(brand) => Ok(Some(Cow::Borrowed(brand.svg()))),
-                None => gpui_component_assets::Assets.load(path),
+                None => ComponentIcons.load(path),
             },
         }
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
-        let mut assets = gpui_component_assets::Assets.list(path)?;
+        let mut assets = ComponentIcons.list(path)?;
         assets.extend(
             vec![
                 branding::MARK_ASSET.into(),
@@ -146,8 +268,10 @@ const SECRET_SERVICE_NAME: &str = "org.freedesktop.secrets";
 #[cfg(target_os = "linux")]
 const ACTIVATION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Set to `0` to keep an instance off the system keyring.
+#[cfg(not(target_family = "wasm"))]
 const SECRET_SERVICE_ENV: &str = "FACTORSEAL_DESKTOP_SECRET_SERVICE";
 
+#[cfg(not(target_family = "wasm"))]
 #[derive(Debug, Parser)]
 #[command(name = "factorseal-desktop", version, about = "FactorSeal Desktop")]
 #[allow(clippy::struct_excessive_bools)]
@@ -183,6 +307,7 @@ struct Args {
     maximum_seconds: Option<u64>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn main() {
     if let Err(error) = factorseal::diagnostics::initialize("desktop") {
         eprintln!("factorseal-desktop: diagnostics unavailable: {error}");
@@ -268,7 +393,7 @@ fn main() {
     else {
         unreachable!("secondary Desktop instances return before application startup")
     };
-    let (access_sender, access_requests) = smol::channel::unbounded();
+    let (access_sender, access_requests) = async_channel::unbounded();
     let secret_service_host = start_secret_service(secret_service, access_sender);
     let _crash_reporting =
         crash_reporting::start(saved.automatic_crash_reports).unwrap_or_else(|error| {
@@ -291,10 +416,31 @@ fn main() {
     factorseal::diagnostics::finish(true);
 }
 
+#[cfg(target_family = "wasm")]
+fn main() {
+    gpui_platform::web_init();
+    let (_, activations) = async_channel::bounded(1);
+    let (_, access_requests) = async_channel::bounded(1);
+    gpui_platform::single_threaded_web()
+        .with_assets(Assets)
+        .run(move |cx| {
+            app::setup(
+                runtime::RuntimeConfig::browser(),
+                false,
+                true,
+                activations,
+                access_requests,
+                None,
+                cx,
+            );
+        });
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn desktop_application() -> gpui::Application {
     let application = gpui_platform::application()
         .with_assets(Assets)
-        .with_quit_mode(QuitMode::Explicit);
+        .with_quit_mode(gpui::QuitMode::Explicit);
     application.on_reopen(|cx| cx.dispatch_action(&app::OpenDesktop));
     application
 }
@@ -337,9 +483,10 @@ async fn wait_for_secret_service_async(timeout: std::time::Duration) -> Result<(
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn start_secret_service(
     enabled: bool,
-    activate: smol::channel::Sender<app::AccessEvent>,
+    activate: async_channel::Sender<app::AccessEvent>,
 ) -> Option<std::sync::Arc<app::SecretServiceHost>> {
     #[cfg(target_os = "linux")]
     {
@@ -363,7 +510,7 @@ fn start_secret_service(
 /// Sends keyring requests to the dedicated access window.
 #[cfg(target_os = "linux")]
 struct DesktopPrompter {
-    activate: smol::channel::Sender<app::AccessEvent>,
+    activate: async_channel::Sender<app::AccessEvent>,
 }
 
 #[cfg(target_os = "linux")]

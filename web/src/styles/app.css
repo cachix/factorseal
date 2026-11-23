@@ -21,6 +21,25 @@
   position: relative;
 }
 
+.fs-live {
+  border: 0;
+  height: 100%;
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  visibility: hidden;
+  width: 100%;
+}
+
+[data-live='ready'] .fs-live {
+  pointer-events: auto;
+  visibility: visible;
+}
+
+[data-live='ready'] .fs-app {
+  visibility: hidden;
+}
+
 .fs-app {
   background: var(--fs-surface);
   color: var(--fs-ink);

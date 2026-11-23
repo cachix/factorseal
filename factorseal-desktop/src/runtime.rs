@@ -1,20 +1,25 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use factorseal::browser::desktop::WorkerFailure;
-use factorseal::security::LockedBytes;
 use factorseal::{
-    DocumentKind, MAX_LIST_PAGE_SIZE, NativeVaultClient, UnlockGroup, UnlockPolicy, Vault,
-    VaultAction, VaultArchive, VaultClient, VaultEntryMetadata, VaultMetadata, VaultMutation,
-    VaultRequest, VaultResponseBody, VaultResponseErrorCode, WireSecret, WireSecretAddress,
-    decrypt_vault_archive, encrypt_vault_archive,
+    DocumentKind, MAX_LIST_PAGE_SIZE, UnlockGroup, VaultAction, VaultArchive, VaultClient,
+    VaultEntryMetadata, VaultMetadata, VaultMutation, VaultRequest, VaultResponseBody,
+    VaultResponseErrorCode, WireSecret, WireSecretAddress, decrypt_vault_archive,
+    encrypt_vault_archive,
 };
 use sha2::{Digest as _, Sha256};
+use web_time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-use factorseal::isolation::network::ProcessManager as SyncManager;
+#[cfg(target_family = "wasm")]
+mod memory;
+#[cfg(not(target_family = "wasm"))]
+mod native;
+
+#[cfg(target_family = "wasm")]
+pub(crate) use memory::{DesktopRuntime, Icon, IconManager, open_icon_helper};
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use native::{DesktopRuntime, explicit_or_default_root, open_icon_helper};
 
 use factorseal::transfer::{PersonalSecret, TransferFormat, export_manager};
 
@@ -49,11 +54,7 @@ impl TransferKey<'_> {
     }
 }
 
-const METADATA_FILE: &str = "factorseal.json";
 pub(crate) use factorseal::personal::PERSONAL_SECRET_NAMESPACE;
-const CLI_EXECUTABLE_ENV: &str = "FACTORSEAL_CLI_EXECUTABLE";
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const DEFAULT_SOCKET: &str = "factorseal.sock";
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LeasePolicy {
@@ -180,182 +181,7 @@ impl Snapshot {
     }
 }
 
-pub(crate) struct DesktopRuntime {
-    config: RuntimeConfig,
-    next_lease: Mutex<LeasePolicy>,
-    events: smol::channel::Sender<Snapshot>,
-    lifeline: Mutex<Option<std::process::ChildStdin>>,
-    unlock_in_progress: AtomicBool,
-    sync_output: Mutex<Option<std::process::ChildStdout>>,
-    sync_io: Mutex<()>,
-    sync_manager: Mutex<Option<Arc<SyncManager>>>,
-}
-
 impl DesktopRuntime {
-    pub(crate) fn browser_request(
-        &self,
-        action: factorseal::browser::WorkerAction,
-    ) -> Result<factorseal::browser::WorkerReply, WorkerFailure> {
-        let metadata = Vault::inspect(&self.config.root).map_err(|_| WorkerFailure::Rejected)?;
-        let request = VaultRequest::new(VaultAction::Browser { action })
-            .map_err(|_| WorkerFailure::Rejected)?;
-        let response = native_client(&self.config, &metadata)
-            .request(&request)
-            .map_err(|_| WorkerFailure::Rejected)?;
-        match response.result {
-            Ok(VaultResponseBody::Browser { reply }) => Ok(reply),
-            Err(error) if error.code == factorseal::VaultResponseErrorCode::Conflict => {
-                Err(WorkerFailure::Changed)
-            }
-            _ => Err(WorkerFailure::Rejected),
-        }
-    }
-    pub(crate) fn new(config: RuntimeConfig) -> (Arc<Self>, smol::channel::Receiver<Snapshot>) {
-        let (events, receiver) = smol::channel::bounded(16);
-        (
-            Arc::new(Self {
-                next_lease: Mutex::new(config.lease),
-                config,
-                events,
-                lifeline: Mutex::new(None),
-                unlock_in_progress: AtomicBool::new(false),
-                sync_output: Mutex::new(None),
-                sync_io: Mutex::new(()),
-                sync_manager: Mutex::new(None),
-            }),
-            receiver,
-        )
-    }
-
-    pub(crate) fn inspect(&self) -> Snapshot {
-        if !self.config.root.join(METADATA_FILE).is_file() {
-            return Snapshot::Uninitialized { error: None };
-        }
-        let metadata = match Vault::inspect(&self.config.root) {
-            Ok(metadata) => metadata,
-            Err(error) => return Snapshot::Error(error.to_string()),
-        };
-        match live_status(&self.config, &metadata) {
-            Ok(Some((idle_deadline, absolute_deadline))) => {
-                let (contents, contents_error) = match load_vault_contents_from_client(
-                    &native_client(&self.config, &metadata),
-                ) {
-                    Ok(contents) => (contents, None),
-                    Err(error) => (VaultContents::default(), Some(error)),
-                };
-                Snapshot::Unsealed {
-                    metadata,
-                    idle_deadline,
-                    absolute_deadline,
-                    owned: self.lifeline.lock().is_ok_and(|pipe| pipe.is_some()),
-                    contents,
-                    contents_error,
-                    error: None,
-                }
-            }
-            Ok(None) => Snapshot::Sealed {
-                metadata,
-                error: None,
-            },
-            Err(error) => Snapshot::Uninitialized { error: Some(error) },
-        }
-    }
-
-    pub(crate) fn set_next_lease(&self, lease: LeasePolicy) {
-        if let Ok(mut next) = self.next_lease.lock() {
-            *next = lease;
-        }
-    }
-
-    pub(crate) fn unlock(
-        self: &Arc<Self>,
-        metadata: VaultMetadata,
-        group: UnlockGroup,
-        password: Zeroizing<Vec<u8>>,
-    ) -> Result<(), &'static str> {
-        let password =
-            LockedBytes::from_zeroizing(password).map_err(|_| "could not lock password memory")?;
-        if self
-            .unlock_in_progress
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err("an unlock attempt is already running");
-        }
-        crate::timing::begin_unlock();
-        let runtime = Arc::clone(self);
-        self.report_unlock_step(&metadata, &group, UnlockStep::Verifying);
-        if std::thread::Builder::new()
-            .name("factorseal-desktop-agent".to_owned())
-            .spawn(move || {
-                crate::timing::mark_unlock("worker_started", "ok");
-                runtime.run_unsealed(metadata, &group, password);
-            })
-            .is_err()
-        {
-            self.unlock_in_progress.store(false, Ordering::Release);
-            crate::timing::finish_unlock("worker_started", "error");
-            return Err("could not start the unlock worker");
-        }
-        Ok(())
-    }
-
-    pub(crate) fn initialize(
-        self: &Arc<Self>,
-        policy: UnlockPolicy,
-        password: Zeroizing<Vec<u8>>,
-    ) -> Result<(), &'static str> {
-        let password =
-            LockedBytes::from_zeroizing(password).map_err(|_| "could not lock password memory")?;
-        if self
-            .unlock_in_progress
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err("an initialization or unlock attempt is already running");
-        }
-        let runtime = Arc::clone(self);
-        let _ = self.events.try_send(Snapshot::Initializing);
-        if std::thread::Builder::new()
-            .name("factorseal-desktop-initialize".to_owned())
-            .spawn(move || runtime.run_initialization(policy, password))
-            .is_err()
-        {
-            self.unlock_in_progress.store(false, Ordering::Release);
-            return Err("could not start the initialization worker");
-        }
-        Ok(())
-    }
-
-    /// Native socket client for the Desktop's own vault access, such as the
-    /// Secret Service adapter it hosts.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn vault_client(&self) -> NativeVaultClient {
-        NativeVaultClient::new(
-            self.config
-                .socket
-                .clone()
-                .unwrap_or_else(|| self.config.root.join(DEFAULT_SOCKET)),
-        )
-    }
-
-    pub(crate) fn seal(&self) -> Result<(), String> {
-        let pipe = self
-            .lifeline
-            .lock()
-            .map_err(|_| "desktop worker lock unavailable".to_owned())?
-            .take();
-        if pipe.is_none() {
-            return Err("this Desktop instance does not own the running agent".to_owned());
-        }
-        drop(pipe);
-        Ok(())
-    }
-
-    pub(crate) fn lease_deadlines(&self, metadata: &VaultMetadata) -> Option<(u64, u64)> {
-        live_status(&self.config, metadata).ok().flatten()
-    }
-
     pub(crate) fn keep_unsealed(&self, metadata: &VaultMetadata) -> Result<(), String> {
         let request = VaultRequest::new(VaultAction::ListVaultEntries {
             cursor: None,
@@ -419,7 +245,7 @@ impl DesktopRuntime {
         expected: Option<ItemVersion>,
         mutation: VaultMutation,
     ) -> Result<VaultContents, PersonalWriteError> {
-        let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
+        let metadata = self.metadata()?;
         let request = VaultRequest::new(VaultAction::Mutate {
             namespace: PERSONAL_SECRET_NAMESPACE.to_vec(),
             mutations: vec![
@@ -431,7 +257,8 @@ impl DesktopRuntime {
             ],
         })
         .map_err(|error| error.to_string())?;
-        let response = native_client(&self.config, &metadata)
+        let response = self
+            .client(&metadata)
             .request(&request)
             .map_err(|error| error.to_string())?;
         match response.result {
@@ -451,9 +278,8 @@ impl DesktopRuntime {
         metadata: &VaultMetadata,
         passphrase: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, String> {
-        let archived =
-            factorseal::read_vault_export(&native_client(&self.config, metadata), |_| true)
-                .map_err(|error| error.to_string())?;
+        let archived = factorseal::read_vault_export(&self.client(metadata), |_| true)
+            .map_err(|error| error.to_string())?;
         let archive = VaultArchive::new(unix_time()?, archived);
         encrypt_vault_archive(&archive, passphrase).map_err(|error| error.to_string())
     }
@@ -513,7 +339,7 @@ impl DesktopRuntime {
         replace_existing: bool,
     ) -> Result<(TransferSummary, VaultContents), String> {
         let summary = prepared
-            .commit(&native_client(&self.config, metadata), replace_existing)
+            .commit(&self.client(metadata), replace_existing)
             .map_err(|error| error.to_string())?;
         let contents = self.load_live_contents(metadata).map_err(|error| {
             format!(
@@ -528,7 +354,7 @@ impl DesktopRuntime {
         &self,
         metadata: &VaultMetadata,
     ) -> Result<Vec<PersonalSecret>, String> {
-        factorseal::read_vault_export(&native_client(&self.config, metadata), is_personal_entry)
+        factorseal::read_vault_export(&self.client(metadata), is_personal_entry)
             .map_err(|error| error.to_string())?
             .into_iter()
             .map(|entry| {
@@ -545,7 +371,7 @@ impl DesktopRuntime {
     }
 
     fn load_live_contents(&self, metadata: &VaultMetadata) -> Result<VaultContents, String> {
-        load_vault_contents_from_client(&native_client(&self.config, metadata))
+        load_vault_contents_from_client(&self.client(metadata))
     }
 
     pub(crate) fn load_permissions(
@@ -571,51 +397,6 @@ impl DesktopRuntime {
             },
             after_revision,
         )
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn approve_permissions(
-        &self,
-        metadata: &VaultMetadata,
-        permissions: &[factorseal::Permission],
-        group: factorseal::UnlockGroup,
-        password: Zeroizing<Vec<u8>>,
-        duration: Option<u64>,
-        single_use: bool,
-    ) -> Result<(), String> {
-        let requests = permissions
-            .iter()
-            .map(|permission| {
-                let factorseal::PermissionState::Pending { challenge, .. } = permission.state
-                else {
-                    return Err("permission is no longer pending".to_owned());
-                };
-                Ok((permission.id.clone(), challenge, duration, single_use))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let password = LockedBytes::from_zeroizing(password).map_err(|error| error.to_string())?;
-        let mut worker = self.spawn_worker(
-            factorseal::desktop_worker::Operation::SignPermissions { group, requests },
-            password,
-        )?;
-        let signatures = worker.read_response::<Vec<Vec<u8>>>()?;
-        worker.wait()?;
-        if signatures.len() != permissions.len() {
-            return Err("invalid signing response".to_owned());
-        }
-        for (permission, signature) in permissions.iter().zip(signatures) {
-            self.request_live(
-                metadata,
-                &VaultRequest::new(factorseal::VaultAction::ApprovePermission {
-                    id: permission.id.clone(),
-                    signature,
-                    duration_seconds: duration,
-                    single_use,
-                })
-                .map_err(|error| error.to_string())?,
-            )?;
-        }
-        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -650,309 +431,11 @@ impl DesktopRuntime {
         metadata: &VaultMetadata,
         request: &VaultRequest,
     ) -> Result<VaultResponseBody, String> {
-        native_client(&self.config, metadata)
+        self.client(metadata)
             .request(request)
             .map_err(|error| error.to_string())?
             .result
             .map_err(|error| error.message)
-    }
-
-    pub(crate) fn start_seal(self: &Arc<Self>, _metadata: VaultMetadata) -> Result<(), String> {
-        // The supervisor publishes Sealed only after the worker has exited.
-        self.seal()
-    }
-
-    fn run_unsealed(
-        self: Arc<Self>,
-        metadata: VaultMetadata,
-        group: &UnlockGroup,
-        password: LockedBytes,
-    ) {
-        let result = self.supervise_worker(&metadata, group, password);
-        factorseal::diagnostics::event(
-            "desktop",
-            "supervise_worker",
-            if result.is_ok() { "ok" } else { "error" },
-        );
-        if let Ok(mut pipe) = self.lifeline.lock() {
-            pipe.take();
-        }
-        self.unlock_in_progress.store(false, Ordering::Release);
-        let _ = self.events.try_send(Snapshot::Sealed {
-            metadata,
-            error: result.err(),
-        });
-    }
-
-    fn report_unlock_step(&self, metadata: &VaultMetadata, group: &UnlockGroup, step: UnlockStep) {
-        let _ = self.events.try_send(Snapshot::Unlocking {
-            metadata: metadata.clone(),
-            group: group.clone(),
-            step,
-        });
-    }
-
-    fn run_initialization(self: Arc<Self>, policy: UnlockPolicy, password: LockedBytes) {
-        factorseal::diagnostics::event("desktop", "initialize_vault", "start");
-        let result = (|| {
-            let unlock_password =
-                LockedBytes::from_slice(&password).map_err(|error| error.to_string())?;
-            let mut worker = self.spawn_worker(
-                factorseal::desktop_worker::Operation::Initialize { policy },
-                password,
-            )?;
-            worker.read_ready()?;
-            worker.wait()?;
-            let metadata = Vault::inspect(&self.config.root).map_err(|error| error.to_string())?;
-            Ok((metadata, unlock_password))
-        })();
-        factorseal::diagnostics::event(
-            "desktop",
-            "initialize_vault",
-            if result.is_ok() { "ok" } else { "error" },
-        );
-        match result {
-            Ok((metadata, password)) => {
-                let group = metadata.preferred_unlock_group().clone();
-                crate::timing::begin_unlock();
-                self.report_unlock_step(&metadata, &group, UnlockStep::Verifying);
-                self.run_unsealed(metadata, &group, password);
-            }
-            Err(error) => {
-                self.unlock_in_progress.store(false, Ordering::Release);
-                let _ = self.events.try_send(Snapshot::Error(error));
-            }
-        }
-    }
-
-    fn spawn_worker(
-        &self,
-        operation: factorseal::desktop_worker::Operation,
-        password: LockedBytes,
-    ) -> Result<Worker, String> {
-        use std::process::{Command, Stdio};
-        let desktop = std::env::current_exe().map_err(|e| e.to_string())?;
-        let cli = cli_executable(&desktop)?.ok_or_else(|| "Factorseal CLI must be installed beside Desktop; set FACTORSEAL_CLI_EXECUTABLE to its absolute path".to_owned())?;
-        let mut command = Command::new(&cli);
-        command.arg("--root").arg(&self.config.root);
-        if let Some(socket) = &self.config.socket {
-            command.arg("--socket").arg(socket);
-        }
-        command
-            .arg("desktop-worker")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        let child = command
-            .spawn()
-            .map_err(|e| format!("could not start vault worker: {e}"))?;
-        factorseal::diagnostics::event("desktop", "spawn_worker", "ok");
-        let mut worker = Worker {
-            child,
-            executable: cli,
-            exit_reported: false,
-        };
-        let bootstrap = factorseal::desktop_worker::Bootstrap {
-            desktop_executable: desktop,
-            operation,
-            password: WireSecret::from_locked(password),
-            hosts_secret_service: self.config.secret_service,
-            sync_control: true,
-        };
-        let sent = factorseal::desktop_worker::send(
-            worker
-                .child
-                .stdin
-                .as_mut()
-                .ok_or("worker input unavailable")?,
-            &bootstrap,
-        );
-        drop(bootstrap);
-        sent.map_err(|error| worker.startup_error(&error))?;
-        Ok(worker)
-    }
-
-    fn unlock_operation(
-        &self,
-        group: UnlockGroup,
-    ) -> Result<factorseal::desktop_worker::Operation, String> {
-        let lease = *self
-            .next_lease
-            .lock()
-            .map_err(|_| "desktop lease lock is unavailable".to_owned())?;
-        Ok(factorseal::desktop_worker::Operation::Unlock {
-            group,
-            idle_seconds: lease.idle_timeout.as_secs(),
-            maximum_seconds: lease.maximum_lifetime.as_secs(),
-        })
-    }
-
-    fn supervise_worker(
-        &self,
-        metadata: &VaultMetadata,
-        group: &UnlockGroup,
-        password: LockedBytes,
-    ) -> Result<(), String> {
-        let mut worker = crate::timing::result("desktop_startup", "spawn_worker", || {
-            self.spawn_worker(self.unlock_operation(group.clone())?, password)
-        })?;
-        crate::timing::result("desktop_startup", "wait_worker_ready", || {
-            worker.read_ready()
-        })?;
-        self.report_unlock_step(metadata, group, UnlockStep::Starting);
-        let (idle_deadline, absolute_deadline) =
-            crate::timing::result("desktop_startup", "wait_service_ready", || {
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                loop {
-                    if let Some(status) = worker.child.try_wait().map_err(|e| e.to_string())? {
-                        worker.record_exit(status);
-                        return Err(format!("vault worker exited before serving: {status}"));
-                    }
-                    if let Some(deadlines) =
-                        crate::timing::result("desktop_startup", "probe_live_status", || {
-                            live_status(&self.config, metadata)
-                        })?
-                    {
-                        return Ok(deadlines);
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return Err("vault worker did not become ready".to_owned());
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-            })?;
-        let control_install = self
-            .sync_io
-            .lock()
-            .map_err(|_| "sync control lock unavailable")?;
-        self.lifeline
-            .lock()
-            .map_err(|_| "desktop worker lock unavailable".to_owned())?
-            .replace(
-                worker
-                    .child
-                    .stdin
-                    .take()
-                    .ok_or("worker input unavailable")?,
-            );
-        self.sync_output
-            .lock()
-            .map_err(|_| "worker output lock unavailable")?
-            .replace(
-                worker
-                    .child
-                    .stdout
-                    .take()
-                    .ok_or("worker output unavailable")?,
-            );
-        drop(control_install);
-        // Publish the inventory before requesting permissions. The UI starts
-        // that request once it has applied this first unlocked snapshot.
-        self.report_unlock_step(metadata, group, UnlockStep::Loading);
-        let client = native_client(&self.config, metadata);
-        let (contents, contents_error) =
-            match load_vault_entries(|action| request_contents(&client, action)) {
-                Ok(contents) => (contents, None),
-                Err(error) => (
-                    VaultContents {
-                        permissions_loading: true,
-                        ..VaultContents::default()
-                    },
-                    Some(error),
-                ),
-            };
-        let _ = self.events.try_send(Snapshot::Unsealed {
-            metadata: metadata.clone(),
-            idle_deadline,
-            absolute_deadline,
-            owned: true,
-            contents,
-            contents_error,
-            error: None,
-        });
-        crate::timing::mark_unlock("snapshot_queued", "ok");
-        worker.wait()
-    }
-}
-
-/// On every error, terminate and reap the child rather than leaving an orphan.
-struct Worker {
-    child: std::process::Child,
-    executable: PathBuf,
-    exit_reported: bool,
-}
-impl Worker {
-    fn record_exit(&mut self, status: std::process::ExitStatus) {
-        if !self.exit_reported {
-            factorseal::diagnostics::child_exit(self.child.id(), status);
-            self.exit_reported = true;
-        }
-    }
-
-    fn read_ready(&mut self) -> Result<(), String> {
-        self.read_response()
-    }
-
-    fn read_response<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, String> {
-        let response = factorseal::desktop_worker::receive::<Result<T, String>>(
-            self.child
-                .stdout
-                .as_mut()
-                .ok_or("worker output unavailable")?,
-        );
-        response.map_err(|error| self.startup_error(&error))?
-    }
-
-    fn startup_error(&mut self, error: &std::io::Error) -> String {
-        use std::io::ErrorKind;
-        let reason = match error.kind() {
-            ErrorKind::UnexpectedEof | ErrorKind::BrokenPipe | ErrorKind::ConnectionReset => {
-                "closed its connection before replying".to_owned()
-            }
-            ErrorKind::InvalidData => "sent an invalid startup response".to_owned(),
-            _ => format!("could not communicate with Desktop: {error}"),
-        };
-        // Do not wait for a child that closed stdout but is still running.
-        // Drop will terminate and reap it when this error is returned.
-        let exit = self
-            .child
-            .try_wait()
-            .ok()
-            .flatten()
-            .map(|status| {
-                self.record_exit(status);
-                format!(" ({status})")
-            })
-            .unwrap_or_default();
-        format!(
-            "The vault worker {reason}{exit}. This may indicate an incompatible CLI or a worker crash. \
-             Use the FactorSeal CLI from the same build as Desktop. \
-             Selected CLI: {}. If {CLI_EXECUTABLE_ENV} is set, update it to the matching CLI or unset it to use the CLI beside Desktop.",
-            self.executable.display(),
-        )
-    }
-    fn wait(&mut self) -> Result<(), String> {
-        let status = self.child.wait().map_err(|e| e.to_string())?;
-        self.record_exit(status);
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("vault worker exited: {status}"))
-        }
-    }
-}
-impl Drop for Worker {
-    fn drop(&mut self) {
-        if let Ok(Some(status)) = self.child.try_wait() {
-            self.record_exit(status);
-            return;
-        }
-        let _ = self.child.kill();
-        if let Ok(status) = self.child.wait() {
-            // Reap the key owner before any diagnostic disk I/O.
-            factorseal::diagnostics::event("worker", "supervisor_cleanup", "terminate");
-            self.record_exit(status);
-        }
     }
 }
 
@@ -1018,7 +501,7 @@ fn load_vault_entries(
         entries,
         permissions_loading: true,
         secret_service_error: {
-            let started = std::time::Instant::now();
+            let started = web_time::Instant::now();
             let error = secret_service_error();
             crate::timing::record("desktop_inventory", "probe_secret_service", started, "ok");
             error
@@ -1119,103 +602,11 @@ const fn secret_service_error() -> Option<String> {
     None
 }
 
-pub(crate) fn open_icon_helper() -> Result<factorseal::isolation::network::icon::IconManager, String>
-{
-    let desktop = std::env::current_exe().map_err(|error| error.to_string())?;
-    let cli = cli_executable(&desktop)?.ok_or("Factorseal CLI is not installed")?;
-    let helper = factorseal::isolation::helper_executable(&cli, "factorseal-network")
-        .map_err(|error| format!("Factorseal network helper is not installed: {error}"))?;
-    factorseal::isolation::network::icon::IconManager::open(&helper)
-}
-
-fn cli_executable(desktop: &Path) -> Result<Option<PathBuf>, String> {
-    if let Some(path) = std::env::var_os(CLI_EXECUTABLE_ENV) {
-        let path = PathBuf::from(path);
-        if !path.is_absolute() {
-            return Err(format!("{CLI_EXECUTABLE_ENV} must be an absolute path"));
-        }
-        if !path.is_file() {
-            return Err(format!(
-                "{CLI_EXECUTABLE_ENV} does not name a regular file: {}",
-                path.display()
-            ));
-        }
-        return Ok(Some(path));
-    }
-    let name = if cfg!(windows) {
-        "factorseal.exe"
-    } else {
-        "factorseal"
-    };
-    Ok(desktop
-        .parent()
-        .map(|parent| parent.join(name))
-        .filter(|path| path.is_file()))
-}
-
-impl Drop for DesktopRuntime {
-    fn drop(&mut self) {
-        if let Ok(pipe) = self.lifeline.get_mut() {
-            pipe.take();
-        }
-    }
-}
-
-fn live_status(
-    config: &RuntimeConfig,
-    metadata: &VaultMetadata,
-) -> Result<Option<(u64, u64)>, String> {
-    let client = native_client(config, metadata);
-    let request = VaultRequest::new(VaultAction::Status).map_err(|error| error.to_string())?;
-    match client.request(&request) {
-        Ok(response) => match response.result {
-            Ok(VaultResponseBody::Status {
-                installation_id,
-                idle_deadline,
-                absolute_deadline,
-                ..
-            }) if installation_id == metadata.installation_id().to_string() => {
-                Ok(Some((idle_deadline, absolute_deadline)))
-            }
-            Err(error) if matches!(error.code, factorseal::VaultResponseErrorCode::Sealed) => {
-                Ok(None)
-            }
-            Ok(_) | Err(_) => Err("another or incompatible service owns the endpoint".to_owned()),
-        },
-        Err(factorseal::VaultError::AgentUnreachable(_)) => Ok(None),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn native_client(config: &RuntimeConfig, _metadata: &VaultMetadata) -> NativeVaultClient {
-    NativeVaultClient::new(
-        config
-            .socket
-            .clone()
-            .unwrap_or_else(|| config.root.join(DEFAULT_SOCKET)),
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn native_client(config: &RuntimeConfig, metadata: &VaultMetadata) -> NativeVaultClient {
-    config.socket.as_ref().map_or_else(
-        || NativeVaultClient::for_installation(metadata.installation_id()),
-        |path| NativeVaultClient::new(path.to_string_lossy().into_owned()),
-    )
-}
-
 fn unix_time() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|error| error.to_string())
-}
-
-pub(crate) fn default_root() -> Result<PathBuf, String> {
-    directories::ProjectDirs::from("dev", "Factorseal", "Factorseal")
-        .map(|directories| directories.data_local_dir().to_owned())
-        .ok_or_else(|| "could not determine the platform user-data directory".to_owned())
 }
 
 pub(crate) fn lease_policy(idle_seconds: u64, maximum_seconds: u64) -> Result<LeasePolicy, String> {
@@ -1231,89 +622,6 @@ pub(crate) fn lease_policy(idle_seconds: u64, maximum_seconds: u64) -> Result<Le
     })
 }
 
-pub(crate) fn explicit_or_default_root(root: Option<&Path>) -> Result<PathBuf, String> {
-    root.map_or_else(default_root, |root| Ok(root.to_owned()))
-}
-
-impl DesktopRuntime {
-    pub(crate) fn sync_view(
-        self: &Arc<Self>,
-    ) -> Result<factorseal::desktop_worker::sync::network::View, String> {
-        if !self
-            .config
-            .root
-            .join("personal-sync/transport.key")
-            .is_file()
-            && !self
-                .config
-                .root
-                .join("personal-sync/membership.json")
-                .is_file()
-        {
-            return Ok(factorseal::desktop_worker::sync::network::View::default());
-        }
-        self.sync_manager().map(|manager| manager.view())
-    }
-    pub(crate) fn sync_manager(self: &Arc<Self>) -> Result<Arc<SyncManager>, String> {
-        let mut manager = self
-            .sync_manager
-            .lock()
-            .map_err(|_| "sync lock unavailable")?;
-        if let Some(manager) = &*manager {
-            return Ok(Arc::clone(manager));
-        }
-        if !self.config.root.join(METADATA_FILE).is_file() {
-            return Err("Initialize your vault first".into());
-        }
-        let weak = Arc::downgrade(self);
-        let host = Arc::new(move |command| {
-            let runtime = weak.upgrade().ok_or("Desktop is closing")?;
-            runtime.sync_command(&command)
-        });
-        let created = {
-            let desktop = std::env::current_exe().map_err(|error| error.to_string())?;
-            let cli = cli_executable(&desktop)?.ok_or("Factorseal CLI is not installed")?;
-            let helper = factorseal::isolation::helper_executable(&cli, "factorseal-network")
-                .map_err(|error| format!("Factorseal network helper is not installed: {error}"))?;
-            Arc::new(SyncManager::open(
-                &helper,
-                &self.config.root.join("personal-sync"),
-                host,
-            )?)
-        };
-        *manager = Some(Arc::clone(&created));
-        Ok(created)
-    }
-    fn sync_command(
-        &self,
-        command: &factorseal::desktop_worker::sync::Command,
-    ) -> Result<factorseal::desktop_worker::sync::Reply, String> {
-        let _guard = self
-            .sync_io
-            .lock()
-            .map_err(|_| "sync control lock unavailable")?;
-        {
-            let mut pipe = self
-                .lifeline
-                .lock()
-                .map_err(|_| "worker lock unavailable")?;
-            let input = pipe
-                .as_mut()
-                .ok_or("Unlock the vault in this Desktop to manage devices")?;
-            factorseal::desktop_worker::sync::send(input, command)
-                .map_err(|error| error.to_string())?;
-        }
-        let mut output = self
-            .sync_output
-            .lock()
-            .map_err(|_| "worker output lock unavailable")?;
-        factorseal::desktop_worker::sync::receive::<Result<_, String>>(
-            output.as_mut().ok_or("Worker output unavailable")?,
-        )
-        .map_err(|error| error.to_string())?
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1325,106 +633,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::factorseal_secret_service;
     use super::load_vault_contents;
-
-    #[cfg(unix)]
-    fn test_worker(script: &str) -> super::Worker {
-        use std::process::{Command, Stdio};
-        super::Worker {
-            child: Command::new("sh")
-                .args(["-c", script])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()
-                .unwrap(),
-            executable: "/old-install/bin/factorseal".into(),
-            exit_reported: false,
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn worker_exit_before_reply_explains_cli_mismatch() {
-        let mut worker = test_worker("exit 2");
-        worker.child.wait().unwrap();
-        let error = worker.read_ready().unwrap_err();
-        assert!(error.contains("closed its connection before replying"));
-        assert!(error.contains("exit status: 2"));
-        assert!(error.contains("/old-install/bin/factorseal"));
-        assert!(error.contains("FACTORSEAL_CLI_EXECUTABLE"));
-        assert!(error.contains("same build as Desktop"));
-        assert!(!error.contains("failed to fill whole buffer"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn worker_bootstrap_broken_pipe_explains_cli_mismatch() {
-        let mut worker = test_worker("exit 2");
-        let mut input = worker.child.stdin.take().unwrap();
-        worker.child.wait().unwrap();
-        let error = factorseal::desktop_worker::send(&mut input, &()).unwrap_err();
-        let error = worker.startup_error(&error);
-        assert!(error.contains("closed its connection before replying"));
-        assert!(error.contains("/old-install/bin/factorseal"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn worker_authentication_errors_are_not_reported_as_cli_mismatches() {
-        let mut worker = test_worker("cat");
-        factorseal::desktop_worker::send(
-            worker.child.stdin.as_mut().unwrap(),
-            &Err::<(), _>("Password authentication failed"),
-        )
-        .unwrap();
-        assert_eq!(
-            worker.read_ready().unwrap_err(),
-            "Password authentication failed"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn signing_worker_invalid_reply_is_actionable() {
-        let mut worker = test_worker("cat");
-        factorseal::desktop_worker::send(
-            worker.child.stdin.as_mut().unwrap(),
-            &"not a signing response",
-        )
-        .unwrap();
-        let error = worker.read_response::<Vec<Vec<u8>>>().unwrap_err();
-        assert!(error.contains("invalid startup response"));
-        assert!(error.contains("/old-install/bin/factorseal"));
-    }
-
-    #[test]
-    fn lease_changes_preserve_the_captured_unlock_policy() {
-        let directory = tempfile::tempdir().unwrap();
-        let (runtime, _) = super::DesktopRuntime::new(super::RuntimeConfig {
-            root: directory.path().to_path_buf(),
-            socket: None,
-            lease: super::lease_policy(300, 28_800).unwrap(),
-            secret_service: false,
-        });
-        let group = factorseal::UnlockGroup::new([factorseal::UnlockFactorKind::Password]).unwrap();
-        let captured = runtime.unlock_operation(group.clone()).unwrap();
-        runtime.set_next_lease(super::lease_policy(60, 3600).unwrap());
-        let next = runtime.unlock_operation(group.clone()).unwrap();
-        for (operation, expected_idle, expected_maximum) in
-            [(captured, 300, 28_800), (next, 60, 3600)]
-        {
-            let factorseal::desktop_worker::Operation::Unlock {
-                group: worker_group,
-                idle_seconds,
-                maximum_seconds,
-            } = operation
-            else {
-                panic!("expected an unlock operation");
-            };
-            assert_eq!(worker_group, group);
-            assert_eq!(idle_seconds, expected_idle);
-            assert_eq!(maximum_seconds, expected_maximum);
-        }
-    }
 
     #[cfg(target_os = "linux")]
     #[test]

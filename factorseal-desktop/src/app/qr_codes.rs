@@ -118,7 +118,7 @@ async fn screen_qr_code() -> Result<Zeroizing<String>, &'static str> {
         .and_then(|request| request.response())
         .map_err(|_| SCREEN_FAILED)?;
     let path = file_path(capture.uri().as_str()).ok_or(SCREEN_FAILED)?;
-    smol::unblock(move || {
+    crate::platform::unblock(move || {
         let bytes = std::fs::read(&path).map(Zeroizing::new);
         let _ = std::fs::remove_file(&path);
         screen_code([totp::scan_screen(&bytes.map_err(|_| SCREEN_FAILED)?)])
@@ -128,7 +128,7 @@ async fn screen_qr_code() -> Result<Zeroizing<String>, &'static str> {
 
 #[cfg(target_os = "macos")]
 async fn screen_qr_code() -> Result<Zeroizing<String>, &'static str> {
-    smol::unblock(|| {
+    crate::platform::unblock(|| {
         let folder = tempfile::tempdir().map_err(|_| SCREEN_FAILED)?;
         let paths: Vec<_> = (1..=DISPLAYS)
             .map(|display| folder.path().join(format!("{display}.png")))
@@ -153,11 +153,17 @@ async fn screen_qr_code() -> Result<Zeroizing<String>, &'static str> {
 
 #[cfg(target_os = "windows")]
 async fn screen_qr_code() -> Result<Zeroizing<String>, &'static str> {
-    smol::unblock(|| {
+    crate::platform::unblock(|| {
         let (pixels, width, height) = super::windows_screen::capture().ok_or(SCREEN_FAILED)?;
         screen_code([totp::scan_luma(&pixels, width, height)])
     })
     .await
+}
+
+#[cfg(target_family = "wasm")]
+#[allow(clippy::unused_async)]
+async fn screen_qr_code() -> Result<Zeroizing<String>, &'static str> {
+    Err(SCREEN_FAILED)
 }
 
 fn screen_code(
@@ -202,6 +208,7 @@ pub(super) fn file_path(text: &str) -> Option<PathBuf> {
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with('#'))?;
     let path = match url::Url::parse(line) {
+        #[cfg(not(target_family = "wasm"))]
         Ok(uri) if uri.scheme() == "file" => uri.to_file_path().ok()?,
         _ => PathBuf::from(line),
     };
@@ -316,7 +323,9 @@ impl DesktopView {
         };
         let generation = self.qr_generation;
         cx.spawn(async move |view, cx| {
-            let result = smol::unblock(read).await.map_err(totp::Scan::message);
+            let result = crate::platform::unblock(read)
+                .await
+                .map_err(totp::Scan::message);
             let _ = view.update(cx, |view, cx| {
                 if view.qr_generation == generation {
                     view.qr_scan = Some(QrScan {

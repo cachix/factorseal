@@ -7,6 +7,8 @@ fn open_regular(path: &Path, private: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     let file = super::regular::open_regular(path, &mut options)?;
+    #[cfg(not(any(unix, windows)))]
+    let _ = private;
     #[cfg(unix)]
     let metadata = file.metadata()?;
     #[cfg(windows)]

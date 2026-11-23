@@ -6,6 +6,9 @@ use std::{
     },
 };
 
+#[cfg(target_family = "wasm")]
+use crate::runtime::{Icon, IconManager};
+#[cfg(not(target_family = "wasm"))]
 use factorseal::isolation::network::icon::{Icon, IconManager};
 use factorseal::personal::website::is_public_host;
 use gpui::RenderImage;

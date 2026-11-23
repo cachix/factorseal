@@ -27,7 +27,7 @@ pub(super) struct PersonalDetail {
     generation: u64,
     inputs: HashMap<usize, gpui::Entity<SecretInputState>>,
     ticker: Option<Task<()>>,
-    loaded_at: Option<std::time::Instant>,
+    loaded_at: Option<web_time::Instant>,
 }
 
 impl PersonalDetail {
@@ -204,10 +204,11 @@ impl DesktopView {
         let runtime = Arc::clone(&self.runtime);
         let read_entry = entry.clone();
         cx.spawn(async move |view, cx| {
-            let mut read =
-                smol::unblock(move || runtime.read_personal_item(&metadata, &read_entry));
-            let early = smol::future::or(async { Some((&mut read).await) }, async {
-                smol::Timer::after(OPEN_PATIENCE).await;
+            let mut read = crate::platform::unblock(move || {
+                runtime.read_personal_item(&metadata, &read_entry)
+            });
+            let early = futures_lite::future::or(async { Some((&mut read).await) }, async {
+                cx.background_executor().timer(OPEN_PATIENCE).await;
                 None
             })
             .await;
@@ -258,7 +259,9 @@ impl DesktopView {
         let runtime = Arc::clone(&self.runtime);
         let generation = self.personal_detail.generation;
         cx.spawn(async move |view, cx| {
-            let result = smol::unblock(move || runtime.read_personal_item(&metadata, &entry)).await;
+            let result =
+                crate::platform::unblock(move || runtime.read_personal_item(&metadata, &entry))
+                    .await;
             let _ = view.update(cx, |view, cx| {
                 // Navigation or sealing invalidates an in-flight read.
                 if view.personal_detail.generation == generation && view.is_unsealed() {
@@ -278,7 +281,7 @@ impl DesktopView {
         match result {
             Ok((item, version)) => {
                 if fade && self.personal_detail.item.is_none() {
-                    self.personal_detail.loaded_at = Some(std::time::Instant::now());
+                    self.personal_detail.loaded_at = Some(web_time::Instant::now());
                 }
                 self.personal_detail.inputs.clear();
                 self.initialize_personal_inputs(&item, cx);
@@ -308,7 +311,9 @@ impl DesktopView {
         let generation = self.personal_detail.generation;
         self.personal_detail.ticker = Some(cx.spawn(async move |view, cx| {
             loop {
-                smol::Timer::after(std::time::Duration::from_secs(1)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
                 let ticking = view.update(cx, |view, cx| {
                     let current = view.personal_detail.generation == generation;
                     if current {
@@ -878,7 +883,9 @@ impl DesktopView {
             leaving: false,
         });
         cx.spawn(async move |view, cx| {
-            smol::Timer::after(PERSONAL_TOAST_LIFETIME).await;
+            cx.background_executor()
+                .timer(PERSONAL_TOAST_LIFETIME)
+                .await;
             let _ = view.update(cx, |view, cx| view.dismiss_change_toast(id, cx));
         })
         .detach();

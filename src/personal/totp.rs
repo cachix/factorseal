@@ -1,5 +1,10 @@
+#[cfg(not(target_family = "wasm"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use hmac::Hmac;
 use percent_encoding::percent_decode_str;
+#[cfg(target_family = "wasm")]
+use web_time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 const SCHEME: &str = "otpauth://totp/";
@@ -14,8 +19,8 @@ enum Algorithm {
 
 #[must_use]
 pub fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 

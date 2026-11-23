@@ -223,12 +223,15 @@ const unlockSteps = [
         <span class="fs-locked__link">Protected by TPM</span>
       </footer>
     </div>
+    <iframe class="fs-live" title="FactorSeal" data-live data-src="/desktop/index.html"></iframe>
   </TerminalFrame>
 </div>
 
 <script>
   import { mountOnPageLoad } from '../../scripts/page';
+  import { mountLive } from '../../scripts/live';
   import { mountVault } from '../../scripts/vault';
 
   mountOnPageLoad('[data-vault]', mountVault);
+  mountOnPageLoad('[data-vault]', mountLive);
 </script>

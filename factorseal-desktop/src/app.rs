@@ -4,7 +4,9 @@ use crate::secret_input::SecretInputState;
 mod access;
 mod approval_window;
 mod breadcrumb;
+#[cfg_attr(target_family = "wasm", path = "web/browser.rs")]
 mod browser;
+#[cfg_attr(target_family = "wasm", path = "web/devices.rs")]
 mod devices;
 mod entry_access;
 mod error_notice;
@@ -1412,7 +1414,7 @@ struct DesktopView {
     clipboard_notice_leaving: bool,
     error_details_open: bool,
     error_details_copied: bool,
-    devices: factorseal::desktop_worker::sync::network::View,
+    devices: devices::View,
     devices_busy: bool,
     devices_syncing: bool,
     devices_loaded: bool,
@@ -1537,20 +1539,25 @@ impl DesktopView {
         self.issue_report_busy = true;
         self.set_issue_report_notice("Sending issue report…", cx);
         cx.spawn(async move |view, cx| {
-            let result =
-                smol::unblock(move || crate::crash_reporting::submit_issue(&description)).await;
+            let result = crate::platform::unblock(move || {
+                crate::crash_reporting::submit_issue(&description)
+            })
+            .await;
             let queued = result.is_ok();
             let notice = if let Ok(id) = result {
                 let mut sent = false;
                 for _ in 0..20 {
                     let id = id.clone();
-                    sent = smol::unblock(move || crate::crash_reporting::issue_sent(&id))
-                        .await
-                        .unwrap_or(false);
+                    sent =
+                        crate::platform::unblock(move || crate::crash_reporting::issue_sent(&id))
+                            .await
+                            .unwrap_or(false);
                     if sent {
                         break;
                     }
-                    smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
                 }
                 if sent {
                     "Issue report sent to Sentry with recent diagnostic logs."
@@ -1807,7 +1814,7 @@ impl DesktopView {
             clipboard_notice_leaving: false,
             error_details_open: false,
             error_details_copied: false,
-            devices: factorseal::desktop_worker::sync::network::View::default(),
+            devices: devices::View::default(),
             devices_busy: false,
             devices_syncing: false,
             devices_loaded: false,
@@ -1918,7 +1925,7 @@ impl DesktopView {
             let name = crate::appearance::current(cx)
                 .device_name
                 .clone()
-                .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+                .unwrap_or_else(crate::platform::host_name);
             InputState::new(window, cx).default_value(name)
         })
     }
@@ -1937,7 +1944,9 @@ impl DesktopView {
 
     fn rate_password_later(&mut self, cx: &mut Context<Self>) {
         self.password_rating = Some(cx.spawn(async move |view, cx| {
-            smol::Timer::after(generator::RATING_PAUSE).await;
+            cx.background_executor()
+                .timer(generator::RATING_PAUSE)
+                .await;
             let _ = view.update(cx, Self::rate_password);
         }));
     }
@@ -2173,7 +2182,7 @@ impl DesktopView {
             let helper = Arc::clone(&batch.helper);
             let generation = batch.generation;
             cx.spawn(async move |view, cx| {
-                let (host, icon) = smol::unblock(move || {
+                let (host, icon) = crate::platform::unblock(move || {
                     let icon = helper.fetch(&host);
                     (host, icon)
                 })
@@ -2213,8 +2222,7 @@ impl DesktopView {
             }
             self.clear_secret_inputs(cx);
             self.pairing_ticket.update(cx, SecretInputState::clear);
-            self.devices.state.invitation = None;
-            self.devices.state.request = None;
+            self.forget_device_pairing();
             self.devices_notice = None;
         }
         if self.selected_group.is_none() {
@@ -2399,8 +2407,8 @@ impl DesktopView {
                 .await;
             let _ = view.update(cx, |view, cx| {
                 view.transfer_busy = false;
-                if let Some(chosen) = chosen {
-                    view.transfer_key_file = Some(chosen.path().to_owned());
+                if let Some(path) = chosen.as_ref().and_then(crate::platform::chosen_path) {
+                    view.transfer_key_file = Some(path);
                     view.transfer_notice = None;
                 }
                 cx.notify();
@@ -2508,18 +2516,17 @@ impl DesktopView {
                     .save_file()
                     .await
             };
-            let Some(chosen) = chosen else {
+            let Some(path) = chosen.as_ref().and_then(crate::platform::chosen_path) else {
                 let _ = view.update(cx, |view, cx| {
                     view.transfer_busy = false;
                     cx.notify();
                 });
                 return;
             };
-            let path = chosen.path().to_owned();
             let operation_path = path.clone();
             let commit_runtime = Arc::clone(&runtime);
             let commit_metadata = metadata.clone();
-            let result = smol::unblock(move || {
+            let result = crate::platform::unblock(move || {
                 let key = key_file.as_deref().map_or(
                     TransferKey::Passphrase(&passphrase),
                     TransferKey::HybridFile,
@@ -2576,7 +2583,7 @@ impl DesktopView {
                         });
                         return;
                     }
-                    smol::unblock(move || {
+                    crate::platform::unblock(move || {
                         let (summary, contents) = commit_runtime.commit_import(&commit_metadata, prepared, replace_existing)?;
                         Ok(TransferCompletion { summary: Some(summary), contents: Some(contents), path })
                     }).await
@@ -3169,26 +3176,29 @@ impl DesktopView {
                                     .gap_3()
                                     .px_3()
                                     .child(self.render_personal_secrets_sidebar(contents, cx))
-                                    .child(
-                                        v_flex()
-                                            .gap_1()
-                                            .child(group_label("SecretSpec"))
-                                            .child(self.render_sidebar_section(
-                                                contents,
-                                                factorseal::DocumentKind::SecretSpecProject,
-                                                "Projects",
-                                                0,
-                                                cx,
-                                            ))
-                                            .child(self.render_sidebar_section(
-                                                contents,
-                                                factorseal::DocumentKind::SecretSpecProviderCache,
-                                                "Provider cache",
-                                                1,
-                                                cx,
-                                            )),
-                                    )
-                                    .child(self.render_system_integrations(contents, cx)),
+                                    .when(cfg!(not(target_family = "wasm")), |sections| {
+                                        sections
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(group_label("SecretSpec"))
+                                                    .child(self.render_sidebar_section(
+                                                        contents,
+                                                        factorseal::DocumentKind::SecretSpecProject,
+                                                        "Projects",
+                                                        0,
+                                                        cx,
+                                                    ))
+                                                    .child(self.render_sidebar_section(
+                                                        contents,
+                                                        factorseal::DocumentKind::SecretSpecProviderCache,
+                                                        "Provider cache",
+                                                        1,
+                                                        cx,
+                                                    )),
+                                            )
+                                            .child(self.render_system_integrations(contents, cx))
+                                    }),
                             ),
                     )
                     .vertical_scrollbar(&self.vault_sidebar_scroll),
@@ -3867,7 +3877,8 @@ impl DesktopView {
         cx.spawn(async move |this, cx| {
             let revoked_id = id.clone();
             let result =
-                smol::unblock(move || runtime.revoke_permission(&metadata, revoked_id)).await;
+                crate::platform::unblock(move || runtime.revoke_permission(&metadata, revoked_id))
+                    .await;
             let _ = this.update(cx, |view, cx| {
                 match result {
                     Ok(()) => {
@@ -3922,7 +3933,7 @@ impl DesktopView {
         let runtime_notice = runtime_error.map(|error| self.render_error_notice(error, true, cx));
         let theme = cx.theme();
         let mut methods = h_flex().gap_2().flex_wrap();
-        #[cfg(target_os = "linux")]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let available = [SetupMethod::Password];
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let available = [
@@ -4162,7 +4173,9 @@ impl DesktopView {
                     frame.child(self.render_content(cx))
                 }
             })
-            .child(self.render_footer(cx))
+            .when(cfg!(not(target_family = "wasm")), |frame| {
+                frame.child(self.render_footer(cx))
+            })
     }
 }
 
@@ -4295,8 +4308,8 @@ fn load_deferred_permissions(snapshot: &Snapshot, cx: &mut App) {
     let generation = cx.global::<DesktopWindow>().refresh_generation;
     let runtime = Arc::clone(&cx.global::<RuntimeGlobal>().0);
     cx.spawn(async move |cx| {
-        let started = std::time::Instant::now();
-        let result = smol::unblock(move || runtime.load_permissions(&metadata)).await;
+        let started = web_time::Instant::now();
+        let result = crate::platform::unblock(move || runtime.load_permissions(&metadata)).await;
         cx.update(|cx| {
             let desktop = cx.global_mut::<DesktopWindow>();
             // A seal, another unlock, or a refresh supersedes this request.
@@ -4337,7 +4350,7 @@ fn refresh_desktop_snapshot(runtime: Arc<DesktopRuntime>, cx: &mut App) {
         desktop.refresh_generation
     };
     cx.spawn(async move |cx| {
-        let snapshot = smol::unblock(move || runtime.inspect()).await;
+        let snapshot = crate::platform::unblock(move || runtime.inspect()).await;
         cx.update(|cx| {
             if cx.global::<DesktopWindow>().refresh_generation == generation {
                 apply_desktop_snapshot(&snapshot, cx);
@@ -4717,8 +4730,8 @@ pub(crate) fn setup(
     config: RuntimeConfig,
     background: bool,
     no_tray: bool,
-    activations: smol::channel::Receiver<()>,
-    access_requests: smol::channel::Receiver<AccessEvent>,
+    activations: async_channel::Receiver<()>,
+    access_requests: async_channel::Receiver<AccessEvent>,
     secret_service: Option<Arc<SecretServiceHost>>,
     cx: &mut App,
 ) {

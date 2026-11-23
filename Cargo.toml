@@ -184,6 +184,9 @@ zxcvbn = { version = "3.1.1", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+web-time = "1.1"
+
 [dev-dependencies]
 qrcode = { version = "0.14.1", default-features = false }
 tempfile = "3.20.0"
@@ -253,6 +256,10 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 strip = "debuginfo"
+
+[profile.web]
+inherits = "mobile"
+opt-level = "z"
 
 # Password stretching intentionally uses production-strength Argon2 settings
 # in the desktop app. Optimize only its implementation in development builds

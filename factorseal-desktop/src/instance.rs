@@ -10,7 +10,7 @@ use fs2::FileExt as _;
 pub(crate) enum Instance {
     Primary {
         _lock: File,
-        activations: smol::channel::Receiver<()>,
+        activations: async_channel::Receiver<()>,
     },
     Secondary,
 }
@@ -30,7 +30,7 @@ pub(crate) fn acquire(root: &Path, request_activation: bool) -> Result<Instance,
 
     let watcher = open_private_file(&activation_path)?;
     watcher.set_len(0).map_err(|error| error.to_string())?;
-    let (sender, activations) = smol::channel::bounded(4);
+    let (sender, activations) = async_channel::bounded(4);
     std::thread::Builder::new()
         .name("factorseal-desktop-activation".to_owned())
         .spawn(move || watch(&watcher, &sender))
@@ -51,7 +51,7 @@ fn signal_activation(path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn watch(file: &File, sender: &smol::channel::Sender<()>) {
+fn watch(file: &File, sender: &async_channel::Sender<()>) {
     loop {
         std::thread::sleep(Duration::from_millis(200));
         let requested = file.metadata().is_ok_and(|metadata| metadata.len() != 0);

@@ -2,3 +2,5 @@ node_modules/
 .astro/
 .wrangler/
 dist/
+public/desktop/*
+!public/desktop/index.html

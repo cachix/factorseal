@@ -58,7 +58,7 @@ pub(super) fn show(window: &mut Window, remap_unfocused: bool) {
 #[cfg(target_os = "linux")]
 fn focus_niri(handle: AnyWindowHandle, cx: &mut App) {
     cx.spawn(async move |cx| {
-        if !smol::unblock(niri::focus_desktop).await {
+        if !crate::platform::unblock(niri::focus_desktop).await {
             cx.update(|cx| {
                 let desktop = cx.global::<DesktopWindow>();
                 // Ignore a failed request if its window was hidden or replaced.

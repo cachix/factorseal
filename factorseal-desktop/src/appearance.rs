@@ -156,7 +156,7 @@ fn apply_selected(cx: &mut App) -> Result<()> {
     if let Some(font) = &settings.font {
         theme.font_family = font.clone().into();
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     {
         use crate::theming::{MONO_FONT_FAMILY, UI_FONT_FAMILY, installed_or_bundled_font};
         theme.font_family = installed_or_bundled_font(theme.font_family, UI_FONT_FAMILY, cx);

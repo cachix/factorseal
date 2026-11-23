@@ -14,31 +14,43 @@ apple-credential-exchange = []
 
 [dependencies]
 anyhow = "1.0"
-clap = { version = "4.5", features = ["derive", "env"] }
 directories = "6.0"
-factorseal = { path = "..", default-features = false, features = ["vault-client", "key-protection", "transfer", "secret-service-host", "diagnostics", "personal-sync-network", "personal-tools", "personal-qr", "browser"] }
-fs2 = "0.4.3"
-gethostname = "1.1.0"
+factorseal = { path = "..", default-features = false, features = ["vault-client", "key-protection", "personal-tools", "personal-qr", "diagnostics", "transfer"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 gpui = { package = "gpui-ce", version = "0.3.0" }
 # GPUI CE 0.3 compatibility PR, pinned until upstream merges or releases it.
 gpui-component = { package = "gpui_ce_components", git = "https://github.com/domenkozar/gpui-kit.git", rev = "540da44d442e7e5be870e44a02858d95fd74b153" }
 gpui-component-assets = { package = "gpui_ce_components_assets", git = "https://github.com/domenkozar/gpui-kit.git", rev = "540da44d442e7e5be870e44a02858d95fd74b153" }
-gpui_platform = { package = "gpui_ce_platform", version = "0.3.0", features = ["font-kit", "x11", "wayland"] }
+gpui_platform = { package = "gpui_ce_platform", version = "0.3.0", default-features = false, features = ["font-kit", "x11", "wayland"] }
 gpui-tray = { version = "=0.3.0", default-features = false, features = ["gpui-ce", "menu-state"] }
 jiff = "0.2.35"
+native-theme = "=0.5.7"
 rfd = { version = "0.15.4", default-features = false, features = ["async-std", "xdg-portal"] }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
-sentry = { version = "0.49.2", default-features = false, features = ["backtrace"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10.9"
-native-theme = "=0.5.7"
 tempfile = "3.23"
 toml = "1.1"
-smol = "2.0"
 url = "2.5"
 zeroize = "1.8"
+async-channel = "2.5"
+futures-lite = "2.6"
+web-time = "1.1"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+factorseal = { path = "..", default-features = false, features = ["vault-client", "key-protection", "transfer", "secret-service-host", "diagnostics", "personal-sync-network", "personal-tools", "personal-qr", "browser"] }
+fs2 = "0.4.3"
+gethostname = "1.1.0"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+sentry = { version = "0.49.2", default-features = false, features = ["backtrace"] }
+smol = "2.0"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+uuid = { version = "1", features = ["js"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "=0.14.0", default-features = false, features = ["async-io", "screenshot", "settings"] }

@@ -414,7 +414,35 @@ mod platform {
     }
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(target_family = "wasm")]
+mod platform {
+    use super::{NonNull, io};
+    use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+    const PAGE: usize = 4096;
+
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) fn page_size() -> io::Result<usize> {
+        Ok(PAGE)
+    }
+    pub(super) fn reserve(size: usize) -> io::Result<NonNull<u8>> {
+        let layout = Layout::from_size_align(size, PAGE).map_err(io::Error::other)?;
+        // SAFETY: Region::allocate never reserves zero bytes.
+        NonNull::new(unsafe { alloc_zeroed(layout) })
+            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))
+    }
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) const fn protect_and_lock(_: *mut u8, _: usize) -> io::Result<()> {
+        Ok(())
+    }
+    pub(super) const fn unlock(_: *mut u8, _: usize) {}
+    pub(super) fn release(ptr: *mut u8, size: usize) {
+        // SAFETY: ptr came from reserve with this size and alignment.
+        unsafe { dealloc(ptr, Layout::from_size_align_unchecked(size, PAGE)) }
+    }
+}
+
+#[cfg(not(any(unix, windows, target_family = "wasm")))]
 mod platform {
     use super::{NonNull, io};
     pub(super) fn page_size() -> io::Result<usize> {

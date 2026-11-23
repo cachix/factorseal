@@ -43,12 +43,14 @@ struct AccessView {
     _secret_submit: Subscription,
 }
 
-pub(super) fn setup(receiver: smol::channel::Receiver<AccessEvent>, cx: &mut App) {
+pub(super) fn setup(receiver: async_channel::Receiver<AccessEvent>, cx: &mut App) {
     cx.set_global(AccessWindow::default());
     watch_permissions(cx);
     cx.spawn(async move |cx| {
         loop {
-            smol::Timer::after(std::time::Duration::from_millis(500)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
             cx.update(|cx| {
                 if let Some((_, view)) = cx.global::<AccessWindow>().0.clone() {
                     let expired = view.update(cx, |view, cx| {
@@ -101,15 +103,19 @@ fn watch_permissions(cx: &mut App) {
             let Some((runtime, metadata, current_generation)) = state else {
                 generation = None;
                 after_revision = None;
-                smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
                 continue;
             };
             if generation != Some(current_generation) {
                 generation = Some(current_generation);
                 after_revision = None;
             }
-            let result =
-                smol::unblock(move || runtime.watch_permissions(&metadata, after_revision)).await;
+            let result = crate::platform::unblock(move || {
+                runtime.watch_permissions(&metadata, after_revision)
+            })
+            .await;
             if let Ok((revision, permissions)) = result {
                 let accepted = cx.update(|cx| {
                     // A seal, another unlock or a refresh supersedes this wait.
@@ -153,7 +159,9 @@ fn watch_permissions(cx: &mut App) {
                 // Retry a fresh, complete inventory after a seal, transport
                 // failure or a concurrent mutation between permission pages.
                 after_revision = None;
-                smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
             }
         }
     })
@@ -203,7 +211,7 @@ fn close(cx: &mut App) {
         });
         if let (runtime, Some(metadata), grants) = denial {
             cx.spawn(async move |_| {
-                smol::unblock(move || {
+                crate::platform::unblock(move || {
                     for grant in grants {
                         let _ = runtime.deny_permission(&metadata, grant.id);
                     }
@@ -492,7 +500,7 @@ impl AccessView {
         self.approving = true;
         self.error = None;
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
+            let result = crate::platform::unblock(move || {
                 runtime
                     .approve_permissions(&metadata, &grants, group, password, duration, single_use)
             })

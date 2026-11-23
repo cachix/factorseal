@@ -7,6 +7,7 @@ use crate::appearance::TypeScale as _;
 use crate::branding::Glyph;
 use crate::controls::{ClickStyle as _, button};
 use factorseal::desktop_worker::sync::network::Action;
+pub(super) use factorseal::desktop_worker::sync::network::View;
 use factorseal::personal::sync::TransportBinding;
 use gpui::prelude::*;
 use gpui_component::scroll::ScrollableElement as _;
@@ -94,9 +95,11 @@ impl DesktopView {
     pub(super) fn poll_devices(runtime: Arc<DesktopRuntime>, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| {
             loop {
-                smol::Timer::after(std::time::Duration::from_secs(3)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
                 let runtime = Arc::clone(&runtime);
-                let result = smol::unblock(move || runtime.sync_view()).await;
+                let result = crate::platform::unblock(move || runtime.sync_view()).await;
                 if view
                     .update(cx, |view, cx| {
                         view.devices_loaded = true;
@@ -127,7 +130,9 @@ impl DesktopView {
         .detach();
         cx.spawn(async move |view, cx| {
             loop {
-                smol::Timer::after(std::time::Duration::from_secs(1)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
                 if view
                     .update(cx, |view, cx| {
                         if matches!(view.device_pairing, Some(PairingScreen::Show))
@@ -158,7 +163,7 @@ impl DesktopView {
         let cancelled = matches!(action, Action::Cancel);
         let starts = matches!(action, Action::Invite(_) | Action::Join { .. });
         cx.spawn(async move |view, cx| {
-            let result = smol::unblock(move || {
+            let result = crate::platform::unblock(move || {
                 let devices = runtime.sync_manager()?.action(action)?;
                 Ok::<_, String>((devices, refresh.then(|| runtime.inspect())))
             })
@@ -232,6 +237,10 @@ impl DesktopView {
     }
     fn can_cancel_pairing(&self) -> bool {
         !self.devices_busy || self.devices.state.request.is_none() || self.pairing_approved_here()
+    }
+    pub(super) fn forget_device_pairing(&mut self) {
+        self.devices.state.invitation = None;
+        self.devices.state.request = None;
     }
     pub(super) fn cancel_device_pairing(&mut self, cx: &mut Context<Self>) {
         if !self.can_cancel_pairing() {

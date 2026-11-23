@@ -43,7 +43,9 @@ impl DesktopView {
         self.clipboard_notice_leaving = false;
         cx.notify();
         cx.spawn(async move |view, cx| {
-            smol::Timer::after(std::time::Duration::from_secs(2)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
             let _ = view.update(cx, |view, cx| {
                 if view.copied_personal_field == Some(field) {
                     view.copied_personal_field = None;
@@ -54,7 +56,7 @@ impl DesktopView {
         .detach();
         // Only clear our own clipboard entry; preserve anything copied afterwards.
         cx.spawn(async move |view, cx| {
-            smol::Timer::after(CLIPBOARD_CLEAR_DELAY).await;
+            cx.background_executor().timer(CLIPBOARD_CLEAR_DELAY).await;
             cx.update(|cx| {
                 if cx
                     .read_from_clipboard()
@@ -77,7 +79,9 @@ impl DesktopView {
         self.clipboard_notice_leaving = true;
         cx.notify();
         cx.spawn(async move |view, cx| {
-            smol::Timer::after(crate::motion::LEAVE_DURATION).await;
+            cx.background_executor()
+                .timer(crate::motion::LEAVE_DURATION)
+                .await;
             let _ = view.update(cx, |view, cx| {
                 if view.clipboard_notice == Some(copy) {
                     view.clipboard_notice = None;
@@ -100,7 +104,9 @@ impl DesktopView {
         toast.leaving = true;
         cx.notify();
         cx.spawn(async move |view, cx| {
-            smol::Timer::after(crate::motion::LEAVE_DURATION).await;
+            cx.background_executor()
+                .timer(crate::motion::LEAVE_DURATION)
+                .await;
             let _ = view.update(cx, |view, cx| {
                 if view
                     .change_toast
