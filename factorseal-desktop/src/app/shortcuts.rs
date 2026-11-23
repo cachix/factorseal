@@ -1,14 +1,18 @@
+use std::collections::BTreeMap;
+
 use gpui::{
-    AnyElement, FocusHandle, Focusable as _, KeyBinding, Keystroke, Pixels, ScrollHandle, canvas,
-    point,
+    FocusHandle, Focusable as _, KeyBinding, Keystroke, Pixels, ScrollHandle, canvas, point,
 };
 use gpui_component::{
     IndexPath, InteractiveElementExt as _,
     command::{Command, CommandGroup, CommandItem, CommandState},
+    dialog::DialogTitle,
     kbd::Kbd,
+    window_paddings,
 };
 
 use super::*;
+use crate::{keymap::Shortcut, settings_view::Section};
 
 pub(super) const CONTEXT: &str = "FactorsealDesktop";
 pub(super) const LIST_CONTEXT: &str = "FactorsealList";
@@ -17,8 +21,7 @@ const SIDEBAR_INPUT_CONTEXT: &str = "FactorsealSidebar > Input";
 const OUTSIDE_DIALOG_CONTEXT: &str = "FactorsealDesktop && !Dialog";
 const OUTSIDE_TEXT_CONTEXT: &str = "FactorsealDesktop && !Dialog && !Input && !FactorsealSecret";
 const OUTSIDE_SECRET_CONTEXT: &str = "FactorsealDesktop && !FactorsealSecret";
-const PALETTE_KEYS: &str = "secondary-k";
-const SHORTCUTS_KEYS: &str = "secondary-/";
+const RECENT_LIMIT: usize = 5;
 
 actions!(
     factorseal_desktop,
@@ -32,7 +35,6 @@ actions!(
         GoBack,
         ShowShortcuts,
         NewLogin,
-        BackUpVault,
         OpenSettings,
         EditItem,
         SaveItem,
@@ -41,57 +43,219 @@ actions!(
 );
 
 const ACTIONS_SECTION: usize = 0;
-const ITEMS_SECTION: usize = 1;
+const PAGES_SECTION: usize = 1;
+const ITEMS_SECTION: usize = 2;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PaletteAction {
-    SealNow,
-    NewLogin,
-    BackUpVault,
-    Settings,
-    Shortcuts,
-}
-
-const PALETTE_ACTIONS: [PaletteAction; 5] = [
-    PaletteAction::NewLogin,
-    PaletteAction::BackUpVault,
-    PaletteAction::Settings,
-    PaletteAction::Shortcuts,
-    PaletteAction::SealNow,
+const PALETTE_ACTIONS: [Shortcut; 12] = [
+    Shortcut::NewLogin,
+    Shortcut::EditItem,
+    Shortcut::SaveItem,
+    Shortcut::CopyPassword,
+    Shortcut::CopyUsername,
+    Shortcut::PasteQrCode,
+    Shortcut::Undo,
+    Shortcut::Redo,
+    Shortcut::FocusSearch,
+    Shortcut::OpenSettings,
+    Shortcut::ShowShortcuts,
+    Shortcut::SealVault,
 ];
 
-impl PaletteAction {
-    fn confirmed(index: IndexPath) -> Option<Self> {
-        if index.section == ACTIONS_SECTION {
-            PALETTE_ACTIONS.get(index.row).copied()
-        } else {
-            None
+fn shortcut_icon(shortcut: Shortcut) -> gpui_component::Icon {
+    match shortcut {
+        Shortcut::NewLogin => IconName::Plus.into(),
+        Shortcut::EditItem => Glyph::Pencil.into(),
+        Shortcut::SaveItem => IconName::Check.into(),
+        Shortcut::CopyPassword | Shortcut::CopyUsername => IconName::Copy.into(),
+        Shortcut::PasteQrCode => Glyph::QrCode.into(),
+        Shortcut::Undo => IconName::Undo2.into(),
+        Shortcut::Redo => IconName::Redo2.into(),
+        Shortcut::FocusSearch | Shortcut::OpenPalette => IconName::Search.into(),
+        Shortcut::OpenSettings => IconName::Settings.into(),
+        Shortcut::ShowShortcuts => Glyph::Keyboard.into(),
+        Shortcut::SealVault => Glyph::Lock.into(),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PalettePage {
+    PersonalSecrets,
+    Select(VaultSelection),
+    Settings(Section),
+}
+
+impl PalettePage {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::PersonalSecrets => "Personal secrets",
+            Self::Select(VaultSelection::Category(kind)) => SEARCH_CATEGORIES
+                .iter()
+                .find(|(candidate, _)| candidate == kind)
+                .map_or("Vault items", |(_, title)| title),
+            Self::Select(selection) => selection.page_title().unwrap_or("Vault"),
+            Self::Settings(section) => section.label(),
         }
     }
 
-    fn item(self) -> CommandItem {
-        let (label, icon, action): (&str, gpui_component::Icon, Box<dyn gpui::Action>) = match self
-        {
-            Self::SealNow => ("Seal now", Glyph::Lock.into(), Box::new(SealVault)),
-            Self::NewLogin => ("New login", IconName::Plus.into(), Box::new(NewLogin)),
-            Self::BackUpVault => (
-                "Back up vault",
-                IconName::HardDrive.into(),
-                Box::new(BackUpVault),
-            ),
-            Self::Settings => (
-                "Settings",
-                IconName::Settings.into(),
-                Box::new(OpenSettings),
-            ),
-            Self::Shortcuts => (
-                "Keyboard shortcuts",
-                Glyph::Keyboard.into(),
-                Box::new(ShowShortcuts),
-            ),
-        };
-        CommandItem::new().label(label).icon(icon).action(action)
+    fn icon(&self) -> gpui_component::Icon {
+        match self {
+            Self::PersonalSecrets => IconName::User.into(),
+            Self::Select(VaultSelection::Category(kind)) => sidebar_category_icon(*kind),
+            Self::Select(VaultSelection::Devices) => IconName::Network.into(),
+            Self::Select(VaultSelection::TransferCredentials) => Glyph::Transfer.into(),
+            Self::Select(VaultSelection::BackupVault) => IconName::HardDrive.into(),
+            Self::Select(_) => IconName::Inbox.into(),
+            Self::Settings(section) => section.icon(),
+        }
     }
+
+    const fn detail(&self) -> Option<&'static str> {
+        match self {
+            Self::Settings(_) => Some("Settings"),
+            _ => None,
+        }
+    }
+}
+
+enum PaletteChoice {
+    Action(Shortcut),
+    Page(PalettePage),
+    Entry(Box<factorseal::VaultEntryMetadata>),
+}
+
+struct Palette {
+    actions: Vec<Shortcut>,
+    pages: Vec<PalettePage>,
+    entries: Vec<factorseal::VaultEntryMetadata>,
+}
+
+impl Palette {
+    fn choice(&self, index: IndexPath) -> Option<PaletteChoice> {
+        match index.section {
+            ACTIONS_SECTION => self
+                .actions
+                .get(index.row)
+                .copied()
+                .map(PaletteChoice::Action),
+            PAGES_SECTION => self.pages.get(index.row).cloned().map(PaletteChoice::Page),
+            ITEMS_SECTION => self
+                .entries
+                .get(index.row)
+                .cloned()
+                .map(|entry| PaletteChoice::Entry(Box::new(entry))),
+            _ => None,
+        }
+    }
+}
+
+fn palette_order(recent: &[Shortcut], available: impl Fn(Shortcut) -> bool) -> Vec<Shortcut> {
+    recent
+        .iter()
+        .copied()
+        .chain(
+            PALETTE_ACTIONS
+                .into_iter()
+                .filter(|action| !recent.contains(action)),
+        )
+        .filter(|action| available(*action))
+        .collect()
+}
+
+fn remember_recent(recent: &mut Vec<Shortcut>, action: Shortcut) {
+    recent.retain(|candidate| *candidate != action);
+    recent.insert(0, action);
+    recent.truncate(RECENT_LIMIT);
+}
+
+fn palette_pages(contents: &VaultContents, settings: Vec<Section>) -> Vec<PalettePage> {
+    std::iter::once(PalettePage::PersonalSecrets)
+        .chain(
+            SEARCH_CATEGORIES
+                .iter()
+                .filter(|(kind, _)| category_entries(&contents.entries, *kind).next().is_some())
+                .map(|(kind, _)| PalettePage::Select(VaultSelection::Category(*kind))),
+        )
+        .chain(
+            [
+                VaultSelection::Devices,
+                VaultSelection::TransferCredentials,
+                VaultSelection::BackupVault,
+            ]
+            .map(PalettePage::Select),
+        )
+        .chain(settings.into_iter().map(PalettePage::Settings))
+        .collect()
+}
+
+fn shortcut_action(shortcut: Shortcut) -> Box<dyn gpui::Action> {
+    match shortcut {
+        Shortcut::OpenPalette => Box::new(OpenPalette),
+        Shortcut::FocusSearch => Box::new(FocusSearch),
+        Shortcut::NewLogin => Box::new(NewLogin),
+        Shortcut::EditItem => Box::new(EditItem),
+        Shortcut::SaveItem => Box::new(SaveItem),
+        Shortcut::CopyPassword => Box::new(CopyPassword),
+        Shortcut::CopyUsername => Box::new(CopyUsername),
+        Shortcut::PasteQrCode => Box::new(PasteQrCode),
+        Shortcut::Undo => Box::new(UndoPersonalChange),
+        Shortcut::Redo => Box::new(RedoPersonalChange),
+        Shortcut::SealVault => Box::new(SealVault),
+        Shortcut::OpenSettings => Box::new(OpenSettings),
+        Shortcut::ShowShortcuts => Box::new(ShowShortcuts),
+    }
+}
+
+fn shortcut_bindings(shortcut: Shortcut, keys: &str) -> Vec<KeyBinding> {
+    match shortcut {
+        Shortcut::OpenPalette => vec![KeyBinding::new(keys, OpenPalette, Some(CONTEXT))],
+        Shortcut::FocusSearch => vec![
+            KeyBinding::new(keys, FocusSearch, None),
+            KeyBinding::new(keys, FocusSearch, Some("Input")),
+        ],
+        Shortcut::NewLogin => vec![KeyBinding::new(keys, NewLogin, Some(CONTEXT))],
+        Shortcut::EditItem => vec![KeyBinding::new(keys, EditItem, Some(OUTSIDE_TEXT_CONTEXT))],
+        Shortcut::SaveItem => vec![KeyBinding::new(keys, SaveItem, Some(CONTEXT))],
+        Shortcut::CopyPassword => vec![KeyBinding::new(
+            keys,
+            CopyPassword,
+            Some(OUTSIDE_TEXT_CONTEXT),
+        )],
+        Shortcut::CopyUsername => vec![KeyBinding::new(
+            keys,
+            CopyUsername,
+            Some(OUTSIDE_TEXT_CONTEXT),
+        )],
+        Shortcut::PasteQrCode => vec![KeyBinding::new(
+            keys,
+            PasteQrCode,
+            Some(OUTSIDE_TEXT_CONTEXT),
+        )],
+        Shortcut::Undo => vec![KeyBinding::new(
+            keys,
+            UndoPersonalChange,
+            Some(OUTSIDE_TEXT_CONTEXT),
+        )],
+        Shortcut::Redo => vec![KeyBinding::new(
+            keys,
+            RedoPersonalChange,
+            Some(OUTSIDE_TEXT_CONTEXT),
+        )],
+        Shortcut::SealVault => vec![KeyBinding::new(keys, SealVault, Some(CONTEXT))],
+        Shortcut::OpenSettings => vec![KeyBinding::new(keys, OpenSettings, Some(CONTEXT))],
+        Shortcut::ShowShortcuts => vec![KeyBinding::new(keys, ShowShortcuts, Some(CONTEXT))],
+    }
+}
+
+fn user_bindings(overrides: &BTreeMap<String, String>) -> Vec<KeyBinding> {
+    Shortcut::ALL
+        .into_iter()
+        .flat_map(|shortcut| {
+            shortcut
+                .keys(overrides)
+                .into_iter()
+                .flat_map(move |keystroke| shortcut_bindings(shortcut, &keystroke.unparse()))
+        })
+        .collect()
 }
 
 const BROWSABLE_KINDS: [factorseal::DocumentKind; 5] = [
@@ -104,40 +268,31 @@ const BROWSABLE_KINDS: [factorseal::DocumentKind; 5] = [
 
 pub(super) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new(PALETTE_KEYS, OpenPalette, Some(CONTEXT)),
-        KeyBinding::new("secondary-c", CopyPassword, Some(OUTSIDE_TEXT_CONTEXT)),
-        KeyBinding::new(
-            "secondary-shift-c",
-            CopyUsername,
-            Some(OUTSIDE_TEXT_CONTEXT),
-        ),
-        KeyBinding::new("secondary-l", SealVault, Some(CONTEXT)),
-        KeyBinding::new("secondary-e", EditItem, Some(OUTSIDE_TEXT_CONTEXT)),
-        KeyBinding::new("secondary-s", SaveItem, Some(CONTEXT)),
-        KeyBinding::new("secondary-v", PasteQrCode, Some(OUTSIDE_TEXT_CONTEXT)),
-        KeyBinding::new(SHORTCUTS_KEYS, ShowShortcuts, Some(CONTEXT)),
         KeyBinding::new("escape", GoBack, Some(OUTSIDE_SECRET_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(OUTSIDE_DIALOG_CONTEXT)),
         KeyBinding::new("up", SelectPrevious, Some(OUTSIDE_DIALOG_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(SIDEBAR_INPUT_CONTEXT)),
         KeyBinding::new("enter", OpenSelected, Some(LIST_CONTEXT)),
     ]);
-    cx.bind_keys(history_keys());
+    apply_shortcuts(cx);
 }
 
-fn history_keys() -> [KeyBinding; 2] {
-    [
-        KeyBinding::new(
-            "secondary-z",
-            UndoPersonalChange,
-            Some(OUTSIDE_TEXT_CONTEXT),
-        ),
-        KeyBinding::new(
-            "secondary-shift-z",
-            RedoPersonalChange,
-            Some(OUTSIDE_TEXT_CONTEXT),
-        ),
-    ]
+pub(super) fn apply_shortcuts(cx: &mut App) {
+    let overrides = crate::appearance::current(cx).shortcuts.clone();
+    let names = Shortcut::ALL.map(|shortcut| shortcut_action(shortcut).name());
+    let keymap = cx.key_bindings();
+    {
+        let mut keymap = keymap.borrow_mut();
+        let kept: Vec<_> = keymap
+            .bindings()
+            .filter(|binding| !names.contains(&binding.action().name()))
+            .cloned()
+            .collect();
+        keymap.clear();
+        keymap.add_bindings(kept);
+        keymap.add_bindings(user_bindings(&overrides));
+    }
+    cx.refresh_windows();
 }
 
 pub(super) struct State {
@@ -149,6 +304,7 @@ pub(super) struct State {
     pub(super) narrow: bool,
     reveal: Rc<Cell<bool>>,
     pub(super) overlay: Rc<Cell<bool>>,
+    recent: Vec<Shortcut>,
     list_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
     _keep_focus: Subscription,
@@ -168,6 +324,7 @@ impl State {
             narrow: false,
             reveal: Rc::new(Cell::new(false)),
             overlay: Rc::new(Cell::new(false)),
+            recent: Vec::new(),
             list_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
             _keep_focus: cx.on_focus_lost(window, |view, window, cx| {
@@ -312,10 +469,104 @@ fn tracked_scroll(id: &'static str, scroll: &ScrollHandle, content: impl IntoEle
         .vertical_scrollbar(scroll)
 }
 
-fn palette_actions() -> CommandGroup {
+fn keystrokes(keys: &[&str]) -> Vec<Keystroke> {
+    keys.iter()
+        .filter_map(|keys| Keystroke::parse(keys).ok())
+        .collect()
+}
+
+fn palette_hints(cx: &App) -> Div {
+    let hint = |keys: &[&str], label: &'static str| {
+        h_flex()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .children(keystrokes(keys).into_iter().map(Kbd::new)),
+            )
+            .child(label)
+    };
+    h_flex()
+        .gap_4()
+        .px_3()
+        .py_2()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .text_caption()
+        .text_color(cx.theme().muted_foreground)
+        .child(hint(&["up", "down"], "Move"))
+        .child(hint(&["enter"], "Open"))
+        .child(hint(&["escape"], "Close"))
+}
+
+const SHEET_PADDING: Pixels = px(16.);
+
+fn centered_top(view_height: Pixels, content_height: Pixels) -> Pixels {
+    ((view_height - content_height - SHEET_PADDING * 2.) / 2.).max(px(0.))
+}
+
+fn track_height(height: Rc<Cell<Option<Pixels>>>) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            if height.replace(Some(bounds.size.height)) != Some(bounds.size.height) {
+                window.on_next_frame(|window, _| window.refresh());
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
+fn palette_row(
+    icon: gpui_component::Icon,
+    label: &'static str,
+    detail: Option<&'static str>,
+    action: Option<Box<dyn gpui::Action>>,
+) -> CommandItem {
+    CommandItem::new()
+        .label(label)
+        .keywords(detail)
+        .child(move |window, cx| {
+            let muted = cx.theme().muted_foreground;
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .child(icon.clone().size_4().text_color(muted))
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .children(detail.map(|detail| {
+                    div()
+                        .flex_none()
+                        .text_body()
+                        .text_color(muted)
+                        .child(detail)
+                }))
+                .children(action.as_ref().and_then(|action| {
+                    Kbd::binding_for_action(action.as_ref(), Some(CONTEXT), window)
+                }))
+        })
+}
+
+fn palette_actions(actions: &[Shortcut]) -> CommandGroup {
     CommandGroup::new()
         .label("Actions")
-        .items(PALETTE_ACTIONS.map(PaletteAction::item))
+        .items(actions.iter().map(|shortcut| {
+            palette_row(
+                shortcut_icon(*shortcut),
+                shortcut.label(),
+                None,
+                Some(shortcut_action(*shortcut)),
+            )
+        }))
+}
+
+fn palette_pages_group(pages: &[PalettePage]) -> CommandGroup {
+    CommandGroup::new().label("Go to").items(
+        pages
+            .iter()
+            .map(|page| palette_row(page.icon(), page.label(), page.detail(), None)),
+    )
 }
 
 fn overlay_outlives_vault(overlay_open: bool, vault_open: bool) -> bool {
@@ -341,6 +592,7 @@ fn palette_items(entries: &[factorseal::VaultEntryMetadata]) -> CommandGroup {
                 ])
                 .child(move |_, cx| {
                     h_flex()
+                        .w_full()
                         .min_w_0()
                         .gap_2()
                         .child(
@@ -348,7 +600,7 @@ fn palette_items(entries: &[factorseal::VaultEntryMetadata]) -> CommandGroup {
                                 .size_4()
                                 .text_color(cx.theme().muted_foreground),
                         )
-                        .child(div().truncate().child(row_label.clone()))
+                        .child(div().flex_1().min_w_0().truncate().child(row_label.clone()))
                         .child(
                             div()
                                 .flex_none()
@@ -377,7 +629,6 @@ impl DesktopView {
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::show_shortcuts))
             .on_action(cx.listener(Self::new_login))
-            .on_action(cx.listener(Self::back_up_vault))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::edit_item))
             .on_action(cx.listener(Self::save_item))
@@ -509,7 +760,13 @@ impl DesktopView {
         if window.has_active_dialog(cx) {
             return;
         }
-        let entries = Rc::new(palette_entries(contents));
+        let palette = Rc::new(Palette {
+            actions: palette_order(&self.shortcuts.recent, |action| {
+                self.palette_available(action)
+            }),
+            pages: palette_pages(contents, Section::visible(self.browsers_available(cx))),
+            entries: palette_entries(contents),
+        });
         let state = cx.new(|cx| CommandState::new(window, cx));
         let view = cx.weak_entity();
         let focus_on_mount = Rc::new(Cell::new(true));
@@ -517,7 +774,7 @@ impl DesktopView {
         overlay.set(true);
         window.open_dialog(cx, move |dialog, _, _| {
             let state = state.clone();
-            let entries = Rc::clone(&entries);
+            let palette = Rc::clone(&palette);
             let view = view.clone();
             let focus_on_mount = Rc::clone(&focus_on_mount);
             let overlay = Rc::clone(&overlay);
@@ -533,7 +790,7 @@ impl DesktopView {
                             state.read(cx).focus_handle(cx).focus(window, cx);
                         });
                     }
-                    let confirmed_entries = Rc::clone(&entries);
+                    let confirmed = Rc::clone(&palette);
                     let view = view.clone();
                     let radius = cx.theme().radius_lg;
                     content.child(
@@ -541,20 +798,22 @@ impl DesktopView {
                             .bordered(false)
                             .rounded(radius)
                             .max_h(rems(28.))
-                            .placeholder("Search items and actions")
+                            .placeholder("Search items, pages and actions")
                             .empty(|_, _, cx| {
                                 div()
                                     .p_4()
                                     .text_body()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("No matching items")
+                                    .child("Nothing matches")
                             })
-                            .group(palette_actions())
-                            .group(palette_items(&entries))
+                            .group(palette_actions(&palette.actions))
+                            .group(palette_pages_group(&palette.pages))
+                            .group(palette_items(&palette.entries))
+                            .footer(|_, _, cx| palette_hints(cx))
                             .on_confirm(move |index: IndexPath, window, cx| {
                                 window.close_dialog(cx);
                                 let _ = view.update(cx, |view, cx| {
-                                    view.palette_confirmed(index, &confirmed_entries, window, cx);
+                                    view.palette_confirmed(index, &confirmed, window, cx);
                                 });
                             }),
                     )
@@ -562,24 +821,68 @@ impl DesktopView {
         });
     }
 
+    fn palette_available(&self, shortcut: Shortcut) -> bool {
+        let viewing = !self.settings_open
+            && self.item_editor.is_none()
+            && self.personal_detail.item().is_some()
+            && matches!(&self.selected_vault_item, Some(VaultSelection::Entry(entry))
+                if is_personal_secret(entry));
+        match shortcut {
+            Shortcut::EditItem => viewing,
+            Shortcut::CopyPassword => viewing && self.copy_index(CopyTarget::Password).is_some(),
+            Shortcut::CopyUsername => viewing && self.copy_index(CopyTarget::Username).is_some(),
+            Shortcut::SaveItem => self.item_editor.is_some(),
+            Shortcut::PasteQrCode => self.qr_target().is_some(),
+            Shortcut::Undo => self.personal_history.has(personal_history::Direction::Undo),
+            Shortcut::Redo => self.personal_history.has(personal_history::Direction::Redo),
+            _ => true,
+        }
+    }
+
     fn palette_confirmed(
         &mut self,
         index: IndexPath,
-        entries: &[factorseal::VaultEntryMetadata],
+        palette: &Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.shortcuts.overlay.set(false);
-        match PaletteAction::confirmed(index) {
-            Some(PaletteAction::Shortcuts) => self.show_shortcuts(&ShowShortcuts, window, cx),
-            Some(PaletteAction::NewLogin) => self.focus_new_item_name(window, cx),
-            Some(_) => {}
-            None => {
-                if index.section == ITEMS_SECTION
-                    && let Some(entry) = entries.get(index.row).cloned()
-                {
-                    self.open_entry(entry, cx);
-                }
+        match palette.choice(index) {
+            Some(PaletteChoice::Action(action)) => self.run_palette_action(action, window, cx),
+            Some(PaletteChoice::Page(page)) => self.open_palette_page(page, cx),
+            Some(PaletteChoice::Entry(entry)) => self.open_entry(*entry, cx),
+            None => {}
+        }
+    }
+
+    fn run_palette_action(
+        &mut self,
+        shortcut: Shortcut,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        remember_recent(&mut self.shortcuts.recent, shortcut);
+        self.shortcuts.root.focus(window, cx);
+        window.dispatch_action(shortcut_action(shortcut), cx);
+    }
+
+    fn open_palette_page(&mut self, page: PalettePage, cx: &mut Context<Self>) {
+        let retry = page.clone();
+        if !self.leave_item_editor(move |view, cx| view.open_palette_page(retry, cx), cx) {
+            return;
+        }
+        match page {
+            PalettePage::PersonalSecrets => {
+                self.settings_open = false;
+                self.show_personal_panel(PersonalPanel::Overview, cx);
+            }
+            PalettePage::Select(selection) => {
+                self.settings_open = false;
+                self.select_vault_item(selection, cx);
+            }
+            PalettePage::Settings(section) => {
+                self.open_settings(cx);
+                self.open_section(section_pages::SectionRow::Settings(section), cx);
             }
         }
     }
@@ -651,20 +954,23 @@ impl DesktopView {
         }
     }
 
-    fn copy_field(&mut self, target: CopyTarget, cx: &mut Context<Self>) {
-        if !self.is_unsealed() {
-            cx.propagate();
-            return;
-        }
-        let index = match &self.selected_vault_item {
+    fn copy_index(&self, target: CopyTarget) -> Option<usize> {
+        match &self.selected_vault_item {
             Some(VaultSelection::Entry(entry)) if is_personal_secret(entry) => self
                 .personal_detail
                 .item()
                 .and_then(|item| copy_field_index(item, target))
                 .filter(|index| self.personal_detail.has_value(*index)),
             _ => None,
-        };
-        match index {
+        }
+    }
+
+    fn copy_field(&mut self, target: CopyTarget, cx: &mut Context<Self>) {
+        if !self.is_unsealed() {
+            cx.propagate();
+            return;
+        }
+        match self.copy_index(target) {
             Some(index) => self.copy_saved_personal_field(index, cx),
             None => cx.propagate(),
         }
@@ -768,14 +1074,6 @@ impl DesktopView {
         cx.notify();
     }
 
-    fn back_up_vault(&mut self, _: &BackUpVault, _: &mut Window, cx: &mut Context<Self>) {
-        if self.unsealed_contents().is_none() {
-            return;
-        }
-        self.settings_open = false;
-        self.select_vault_item(VaultSelection::BackupVault, cx);
-    }
-
     fn open_settings_action(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
         self.open_settings(cx);
     }
@@ -806,50 +1104,80 @@ impl DesktopView {
         if window.has_active_dialog(cx) {
             return;
         }
-        let keys = |action: &dyn gpui::Action, window: &Window| {
-            Kbd::binding_for_action(action, Some(CONTEXT), window)
-                .map(IntoElement::into_any_element)
-        };
-        let typed = |keystroke: &str| {
-            Keystroke::parse(keystroke)
-                .ok()
-                .map(|keystroke| Kbd::new(keystroke).into_any_element())
-        };
+        let overrides = crate::appearance::current(cx).shortcuts.clone();
+        let rows: Vec<(&'static str, Vec<Keystroke>)> =
+            [Shortcut::OpenPalette, Shortcut::FocusSearch]
+                .into_iter()
+                .map(|shortcut| (shortcut.label(), shortcut.keys(&overrides)))
+                .chain([
+                    ("Move through a list", keystrokes(&["up", "down"])),
+                    ("Open the selected item", keystrokes(&["enter"])),
+                ])
+                .chain(
+                    Shortcut::ALL
+                        .into_iter()
+                        .filter(|shortcut| {
+                            !matches!(shortcut, Shortcut::OpenPalette | Shortcut::FocusSearch)
+                        })
+                        .map(|shortcut| (shortcut.label(), shortcut.keys(&overrides))),
+                )
+                .chain([("Go back", keystrokes(&["escape"]))])
+                .collect();
+        let view = cx.weak_entity();
         let overlay = Rc::clone(&self.shortcuts.overlay);
         overlay.set(self.unsealed_contents().is_some());
+        let height = Rc::new(Cell::new(None));
         window.open_dialog(cx, move |dialog, window, cx| {
-            let rows: [(&str, Vec<Option<AnyElement>>); 11] = [
-                ("Search items and actions", vec![keys(&OpenPalette, window)]),
-                ("Search the vault", vec![keys(&FocusSearch, window)]),
-                ("Move through a list", vec![typed("up"), typed("down")]),
-                ("Open the selected item", vec![typed("enter")]),
-                ("Copy password", vec![keys(&CopyPassword, window)]),
-                ("Copy username", vec![keys(&CopyUsername, window)]),
-                ("Edit item", vec![keys(&EditItem, window)]),
-                ("Save changes", vec![keys(&SaveItem, window)]),
-                ("Seal now", vec![keys(&SealVault, window)]),
-                ("Go back", vec![keys(&GoBack, window)]),
-                ("Keyboard shortcuts", vec![keys(&ShowShortcuts, window)]),
-            ];
             let theme = cx.theme();
             let overlay = Rc::clone(&overlay);
+            let view = view.clone();
+            let paddings = window_paddings(window);
+            let view_height = window.viewport_size().height - paddings.top - paddings.bottom;
             dialog
                 .on_close(move |_, _, _| overlay.set(false))
-                .title("Keyboard shortcuts")
+                .py(SHEET_PADDING)
                 .width(px(440.))
-                .child(v_flex().children(rows.into_iter().enumerate().map(
-                    |(index, (label, keys))| {
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .justify_between()
-                            .gap_4()
-                            .py_2()
-                            .when(index > 0, |row| row.border_t_1().border_color(theme.border))
-                            .child(div().text_body().child(label))
-                            .child(h_flex().gap_1().children(keys.into_iter().flatten()))
-                    },
-                )))
+                .when_some(height.get(), |dialog, height| {
+                    dialog.margin_top(centered_top(view_height, height))
+                })
+                .child(
+                    v_flex()
+                        .relative()
+                        .child(track_height(Rc::clone(&height)))
+                        .child(DialogTitle::new().mb_2().child("Keyboard shortcuts"))
+                        .children(rows.iter().enumerate().map(|(index, (label, keys))| {
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .gap_4()
+                                .py_2()
+                                .when(index > 0, |row| row.border_t_1().border_color(theme.border))
+                                .child(div().text_body().child(*label))
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .children(keys.iter().cloned().map(Kbd::new)),
+                                )
+                        }))
+                        .child(
+                            h_flex().pt_3().child(
+                                button("change-shortcuts")
+                                    .icon(Glyph::Keyboard)
+                                    .label("Change shortcuts")
+                                    .on_click(move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        let _ = view.update(cx, |view, cx| {
+                                            view.shortcuts.overlay.set(false);
+                                            view.open_palette_page(
+                                                PalettePage::Settings(Section::Shortcuts),
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                            ),
+                        ),
+                )
         });
     }
 }
@@ -1014,7 +1342,10 @@ mod tests {
                 .map(|name| gpui::KeyContext::parse(name).unwrap())
                 .collect::<Vec<_>>()
         };
-        for binding in history_keys() {
+        for binding in shortcut_bindings(Shortcut::Undo, "ctrl-z")
+            .into_iter()
+            .chain(shortcut_bindings(Shortcut::Redo, "ctrl-shift-z"))
+        {
             let predicate = binding.predicate().unwrap();
             let matches = |names: &[&str]| predicate.depth_of(&contexts(names)).is_some();
             assert!(matches(&[CONTEXT]));
@@ -1053,6 +1384,12 @@ mod tests {
     }
 
     #[test]
+    fn the_shortcut_sheet_sits_in_the_middle() {
+        assert_eq!(centered_top(px(900.), px(368.)), px(250.));
+        assert_eq!(centered_top(px(900.), px(868.)), px(0.));
+    }
+
+    #[test]
     fn the_selected_row_scrolls_just_into_view() {
         let viewport = Bounds::new(point(px(0.), px(100.)), size(px(400.), px(300.)));
         let row = |top: f32| Bounds::new(point(px(0.), px(top)), size(px(400.), px(48.)));
@@ -1069,24 +1406,76 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_knows_each_action_by_what_it_is() {
-        let at = |section: usize, row: usize| {
-            PaletteAction::confirmed(IndexPath::new(row).section(section))
-        };
-        assert_ne!(PALETTE_ACTIONS[0], PaletteAction::SealNow);
-        for (row, action) in PALETTE_ACTIONS.into_iter().enumerate() {
-            assert_eq!(at(ACTIONS_SECTION, row), Some(action));
+    fn recent_palette_actions_come_first() {
+        let seal = Shortcut::SealVault;
+        let copy = Shortcut::CopyPassword;
+        let mut recent = Vec::new();
+        remember_recent(&mut recent, copy);
+        remember_recent(&mut recent, seal);
+        remember_recent(&mut recent, copy);
+        assert_eq!(recent, [copy, seal]);
+        let order = palette_order(&recent, |_| true);
+        assert_eq!(order[..2], [copy, seal]);
+        assert_eq!(order.len(), PALETTE_ACTIONS.len());
+        let order = palette_order(&recent, |action| action != copy);
+        assert_eq!(order[0], seal);
+        assert!(!order.contains(&copy));
+        for action in PALETTE_ACTIONS {
+            remember_recent(&mut recent, action);
         }
-        let shortcuts = PALETTE_ACTIONS
-            .iter()
-            .position(|action| *action == PaletteAction::Shortcuts)
-            .unwrap();
-        assert_eq!(
-            at(ACTIONS_SECTION, shortcuts),
-            Some(PaletteAction::Shortcuts)
-        );
-        assert_eq!(at(ACTIONS_SECTION, PALETTE_ACTIONS.len()), None);
-        assert_eq!(at(ITEMS_SECTION, shortcuts), None);
+        assert_eq!(recent.len(), RECENT_LIMIT);
+        assert_eq!(recent[0], PALETTE_ACTIONS[PALETTE_ACTIONS.len() - 1]);
+    }
+
+    #[test]
+    fn the_palette_knows_each_row_by_what_it_is() {
+        let palette = Palette {
+            actions: palette_order(&[], |_| true),
+            pages: palette_pages(&VaultContents::default(), vec![Section::Shortcuts]),
+            entries: vec![entry(
+                factorseal::DocumentKind::LocalKeyring,
+                PERSONAL_SECRET_NAMESPACE,
+            )],
+        };
+        let at = |section: usize, row: usize| palette.choice(IndexPath::new(row).section(section));
+        assert!(matches!(
+            at(ACTIONS_SECTION, 0),
+            Some(PaletteChoice::Action(action)) if action == PALETTE_ACTIONS[0]
+        ));
+        assert!(matches!(
+            at(PAGES_SECTION, palette.pages.len() - 1),
+            Some(PaletteChoice::Page(PalettePage::Settings(
+                Section::Shortcuts
+            )))
+        ));
+        assert!(matches!(
+            at(ITEMS_SECTION, 0),
+            Some(PaletteChoice::Entry(_))
+        ));
+        assert!(at(ACTIONS_SECTION, PALETTE_ACTIONS.len()).is_none());
+        assert!(at(ITEMS_SECTION, 1).is_none());
+        assert!(at(3, 0).is_none());
+    }
+
+    #[test]
+    fn changed_shortcuts_replace_their_default_keys() {
+        let keys = |bindings: Vec<KeyBinding>| {
+            bindings
+                .iter()
+                .filter(|binding| binding.action().partial_eq(&SealVault))
+                .map(|binding| binding.keystrokes()[0].unparse())
+                .collect::<Vec<_>>()
+        };
+        let default = parse_keys("secondary-l");
+        assert_eq!(keys(user_bindings(&BTreeMap::new())), [default]);
+        let changed = BTreeMap::from([("seal-vault".to_owned(), "alt-l".to_owned())]);
+        assert_eq!(keys(user_bindings(&changed)), ["alt-l"]);
+        let unbound = BTreeMap::from([("seal-vault".to_owned(), String::new())]);
+        assert_eq!(keys(user_bindings(&unbound)).len(), 0);
+    }
+
+    fn parse_keys(keys: &str) -> String {
+        Keystroke::parse(keys).unwrap().unparse()
     }
 
     #[test]

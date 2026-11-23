@@ -4,6 +4,11 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Desktop's command palette, opened with Ctrl+K or Ctrl+Shift+P, lists
+  every action with its shortcut, recent actions first, and every page
+  next to your items. Settings has a Shortcuts page to change or reset
+  each keyboard shortcut.
+
 - Write Desktop and mobile text in plain words and drop the tagline
   from the footer. The Desktop footer now has a labeled Report an
   issue button.
