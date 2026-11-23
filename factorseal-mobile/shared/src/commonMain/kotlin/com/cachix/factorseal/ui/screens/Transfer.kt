@@ -41,6 +41,9 @@ import com.cachix.factorseal.resources.backup_failed
 import com.cachix.factorseal.resources.backup_lead
 import com.cachix.factorseal.resources.backup_passphrase
 import com.cachix.factorseal.resources.backup_saved
+import com.cachix.factorseal.resources.brand_bitwarden
+import com.cachix.factorseal.resources.brand_keepassxc
+import com.cachix.factorseal.resources.brand_onepassword
 import com.cachix.factorseal.resources.cancel
 import com.cachix.factorseal.resources.choose_file_and_review
 import com.cachix.factorseal.resources.choose_private_identity
@@ -138,6 +141,13 @@ private fun Format.label(): StringResource = when (this) {
     Format.OnePasswordCsv -> Res.string.format_1password_csv
     Format.OnePasswordPux -> Res.string.format_1password_1pux
     Format.KeePassCsv -> Res.string.format_keepass_csv
+}
+
+private fun Format.logo(): DrawableResource? = when (this) {
+    Format.FactorSeal, Format.CxfAge -> null
+    Format.BitwardenJson -> Res.drawable.brand_bitwarden
+    Format.OnePasswordCsv, Format.OnePasswordPux -> Res.drawable.brand_onepassword
+    Format.KeePassCsv -> Res.drawable.brand_keepassxc
 }
 
 private fun title(
@@ -340,6 +350,7 @@ fun TransferFormPage(
                             reset()
                         },
                         enabled = !busy,
+                        logo = { it.logo() },
                     )
                 }
             }

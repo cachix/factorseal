@@ -89,6 +89,7 @@ type Control = Entity<SelectState<Vec<Item>>>;
 
 pub(crate) struct BrowserRow {
     pub(crate) name: &'static str,
+    pub(crate) icon: gpui_component::Icon,
     pub(crate) state: SharedString,
     pub(crate) install: Option<AnyElement>,
 }
@@ -487,10 +488,13 @@ impl SettingsView {
                     .gap_4()
                     .py_1()
                     .child(
-                        div()
+                        h_flex()
                             .w(rems(140. / 16.))
                             .flex_none()
+                            .items_center()
+                            .gap_2()
                             .text_color(muted)
+                            .child(row.icon.size(rems(1.)))
                             .child(row.name),
                     )
                     .child(div().flex_1().child(row.state))
