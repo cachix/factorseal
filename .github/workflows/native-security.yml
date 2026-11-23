@@ -17,6 +17,7 @@ jobs:
         os: [macos-latest, windows-latest]
     env:
       RUST_TEST_THREADS: 1
+      FACTORSEAL_TEST_HELPER_DIR: ${{ github.workspace }}/target/debug
     defaults:
       run:
         shell: ${{ matrix.os == 'windows-latest' && 'pwsh' || 'bash' }}
@@ -71,7 +72,7 @@ jobs:
           $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
           if (-not $dumpbin) { throw 'dumpbin was not found' }
           $binaries = @('target/debug/factorseal-parser.exe', 'target/debug/factorseal-network.exe')
-          $binaries += @(Get-ChildItem target/debug/deps/factorseal-*.exe -File | ForEach-Object FullName)
+          $binaries += @(Get-ChildItem target/debug/build/factorseal/*/out/factorseal-*.exe -File | ForEach-Object FullName)
           foreach ($binary in $binaries) {
             & $dumpbin /dependents $binary
             if ($LASTEXITCODE -ne 0) { throw 'helper import inspection failed' }
