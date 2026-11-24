@@ -169,27 +169,24 @@ impl DesktopView {
             .flex_none()
             .gap_1()
             .px_3()
-            .when(cfg!(not(target_family = "wasm")), |pages| {
-                pages
-                    .child(page(
-                        "vault-devices",
-                        IconName::Network.into(),
-                        "Devices",
-                        VaultSelection::Devices,
-                    ))
-                    .child(page(
-                        "transfer-credentials",
-                        Glyph::Transfer.into(),
-                        "Transfer credentials",
-                        VaultSelection::TransferCredentials,
-                    ))
-                    .child(page(
-                        "backup-vault",
-                        IconName::HardDrive.into(),
-                        "Back up vault",
-                        VaultSelection::BackupVault,
-                    ))
-            })
+            .child(page(
+                "vault-devices",
+                IconName::Network.into(),
+                "Devices",
+                VaultSelection::Devices,
+            ))
+            .child(page(
+                "transfer-credentials",
+                Glyph::Transfer.into(),
+                "Transfer credentials",
+                VaultSelection::TransferCredentials,
+            ))
+            .child(page(
+                "backup-vault",
+                IconName::HardDrive.into(),
+                "Back up vault",
+                VaultSelection::BackupVault,
+            ))
             .child(
                 sidebar_item("open-settings", self.settings_open, cx)
                     .child(sidebar_label(IconName::Settings, "Settings"))

@@ -6,7 +6,6 @@ mod approval_window;
 mod breadcrumb;
 #[cfg_attr(target_family = "wasm", path = "web/browser.rs")]
 mod browser;
-#[cfg_attr(target_family = "wasm", path = "web/devices.rs")]
 mod devices;
 mod entry_access;
 mod error_notice;
@@ -85,7 +84,7 @@ use crate::{
 };
 use factorseal::transfer::{
     PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
-    TransferFormat, read_transfer_file, write_private_file,
+    TransferFormat,
 };
 
 actions!(
@@ -223,12 +222,12 @@ enum TransferNotice {
 struct TransferCompletion {
     summary: Option<TransferSummary>,
     contents: Option<VaultContents>,
-    path: std::path::PathBuf,
+    location: String,
 }
 
 enum TransferOperation {
     Prepared(crate::runtime::PreparedImport),
-    Exported(TransferCompletion),
+    Exported(Zeroizing<Vec<u8>>),
 }
 
 impl Global for EventTask {}
@@ -2500,30 +2499,32 @@ impl DesktopView {
         let replace_existing = self.transfer_replace_existing;
         let runtime = Arc::clone(&self.runtime);
         cx.spawn(async move |view, cx| {
-            let dialog = rfd::AsyncFileDialog::new()
-                .set_title(match (format.is_native(), is_import) {
-                    (true, true) => "Choose backup to restore",
-                    (true, false) => "Save vault backup",
-                    (false, true) => "Choose credentials to import",
-                    (false, false) => "Save credential transfer",
-                })
-                .add_filter(format.label(), &[format.extension()]);
-            let chosen = if is_import {
-                dialog.pick_file().await
-            } else {
-                dialog
-                    .set_file_name(format!("factorseal-{}.{}", if format.is_native() { "backup" } else { "credentials" }, format.extension()))
-                    .save_file()
-                    .await
+            let title = match (format.is_native(), is_import) {
+                (true, true) => "Choose backup to restore",
+                (true, false) => "Save vault backup",
+                (false, true) => "Choose credentials to import",
+                (false, false) => "Save credential transfer",
             };
-            let Some(path) = chosen.as_ref().and_then(crate::platform::chosen_path) else {
+            let chosen = if is_import {
+                crate::files::open(title, format.label(), format.extension()).await
+            } else {
+                let name = format!("factorseal-{}.{}", if format.is_native() { "backup" } else { "credentials" }, format.extension());
+                crate::files::save(title, format.label(), format.extension(), &name).await
+            };
+            let Some(file) = chosen else {
                 let _ = view.update(cx, |view, cx| {
                     view.transfer_busy = false;
                     cx.notify();
                 });
                 return;
             };
-            let operation_path = path.clone();
+            let location = file.name();
+            let destination = file.path().map(std::path::Path::to_path_buf);
+            let input = if is_import {
+                file.read().await.map(Some)
+            } else {
+                Ok(None)
+            };
             let commit_runtime = Arc::clone(&runtime);
             let commit_metadata = metadata.clone();
             let result = crate::platform::unblock(move || {
@@ -2535,7 +2536,7 @@ impl DesktopView {
                     && key_file.as_deref().is_some_and(|key| {
                         std::fs::canonicalize(key)
                             .ok()
-                            .zip(std::fs::canonicalize(&operation_path).ok())
+                            .zip(destination.and_then(|destination| std::fs::canonicalize(destination).ok()))
                             .is_some_and(|(key, destination)| key == destination)
                     })
                 {
@@ -2543,23 +2544,12 @@ impl DesktopView {
                         "Choose an export destination different from the age key file.".to_owned(),
                     );
                 }
-                if is_import {
-                    let bytes =
-                        read_transfer_file(&operation_path).map_err(|error| error.to_string())?;
+                if let Some(bytes) = input? {
                     DesktopRuntime::prepare_import(&bytes, format, key).map(TransferOperation::Prepared)
+                } else if format.is_native() {
+                    runtime.export_native_archive(&metadata, &passphrase).map(TransferOperation::Exported)
                 } else {
-                    let output = if format.is_native() {
-                        runtime.export_native_archive(&metadata, &passphrase)?
-                    } else {
-                        runtime.export_password_manager(&metadata, format, key)?
-                    };
-                    write_private_file(&operation_path, &output)
-                        .map_err(|error| error.to_string())?;
-                    Ok(TransferOperation::Exported(TransferCompletion {
-                        summary: None,
-                        contents: None,
-                        path: operation_path,
-                    }))
+                    runtime.export_password_manager(&metadata, format, key).map(TransferOperation::Exported)
                 }
             })
             .await;
@@ -2585,10 +2575,12 @@ impl DesktopView {
                     }
                     crate::platform::unblock(move || {
                         let (summary, contents) = commit_runtime.commit_import(&commit_metadata, prepared, replace_existing)?;
-                        Ok(TransferCompletion { summary: Some(summary), contents: Some(contents), path })
+                        Ok(TransferCompletion { summary: Some(summary), contents: Some(contents), location })
                     }).await
                 }
-                Ok(TransferOperation::Exported(completion)) => Ok(completion),
+                Ok(TransferOperation::Exported(output)) => file.write(output)
+                    .await
+                    .map(|()| TransferCompletion { summary: None, contents: None, location }),
                 Err(error) => Err(error),
             };
             let _ = view.update(cx, |view, cx| {
@@ -2654,7 +2646,7 @@ impl DesktopView {
                         } else {
                             "Credential transfer"
                         },
-                        completion.path.display()
+                        completion.location
                     )
                 };
                 self.transfer_notice = Some(TransferNotice::Success(message));
@@ -3176,29 +3168,26 @@ impl DesktopView {
                                     .gap_3()
                                     .px_3()
                                     .child(self.render_personal_secrets_sidebar(contents, cx))
-                                    .when(cfg!(not(target_family = "wasm")), |sections| {
-                                        sections
-                                            .child(
-                                                v_flex()
-                                                    .gap_1()
-                                                    .child(group_label("SecretSpec"))
-                                                    .child(self.render_sidebar_section(
-                                                        contents,
-                                                        factorseal::DocumentKind::SecretSpecProject,
-                                                        "Projects",
-                                                        0,
-                                                        cx,
-                                                    ))
-                                                    .child(self.render_sidebar_section(
-                                                        contents,
-                                                        factorseal::DocumentKind::SecretSpecProviderCache,
-                                                        "Provider cache",
-                                                        1,
-                                                        cx,
-                                                    )),
-                                            )
-                                            .child(self.render_system_integrations(contents, cx))
-                                    }),
+                                    .child(
+                                        v_flex()
+                                            .gap_1()
+                                            .child(group_label("SecretSpec"))
+                                            .child(self.render_sidebar_section(
+                                                contents,
+                                                factorseal::DocumentKind::SecretSpecProject,
+                                                "Projects",
+                                                0,
+                                                cx,
+                                            ))
+                                            .child(self.render_sidebar_section(
+                                                contents,
+                                                factorseal::DocumentKind::SecretSpecProviderCache,
+                                                "Provider cache",
+                                                1,
+                                                cx,
+                                            )),
+                                    )
+                                    .child(self.render_system_integrations(contents, cx)),
                             ),
                     )
                     .vertical_scrollbar(&self.vault_sidebar_scroll),
@@ -3646,7 +3635,7 @@ impl DesktopView {
                                 "Includes your saved items, but not provider caches, app permissions, history or device keys. Use a passphrase that is different from your vault password."
                             }),
                     )
-                    .when(format == TransferFormat::CxfAge, |panel| panel.child(self.render_cxf_key_options(is_import, cx)))
+                    .when(format == TransferFormat::CxfAge && cfg!(not(target_family = "wasm")), |panel| panel.child(self.render_cxf_key_options(is_import, cx)))
                     .when(!use_recipient, |panel| panel.child(field_label(if is_backup { "Backup passphrase" } else { "Transfer passphrase" }, self.archive_passphrase.clone())))
                     .when(!is_import && !use_recipient, |panel| {
                         panel.child(

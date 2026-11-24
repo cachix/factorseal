@@ -6,8 +6,15 @@ use super::{
 use crate::appearance::TypeScale as _;
 use crate::branding::Glyph;
 use crate::controls::{ClickStyle as _, button};
+#[cfg(target_family = "wasm")]
+pub(super) use crate::runtime::sync::View;
+#[cfg(target_family = "wasm")]
+use crate::runtime::sync::{Action, TransportBinding};
+#[cfg(not(target_family = "wasm"))]
 use factorseal::desktop_worker::sync::network::Action;
+#[cfg(not(target_family = "wasm"))]
 pub(super) use factorseal::desktop_worker::sync::network::View;
+#[cfg(not(target_family = "wasm"))]
 use factorseal::personal::sync::TransportBinding;
 use gpui::prelude::*;
 use gpui_component::scroll::ScrollableElement as _;

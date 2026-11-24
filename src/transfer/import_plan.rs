@@ -1,6 +1,11 @@
 //! Fully prepared imports with resumable, independently committed vault records.
 
+#[cfg(not(target_family = "wasm"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::bail;
+#[cfg(target_family = "wasm")]
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     DocumentKind, SecretAddress, VaultAction, VaultArchive, VaultArchiveEntry, VaultClient,
@@ -118,9 +123,7 @@ impl PreparedImport {
         client: &dyn VaultClient,
         replace_existing: bool,
     ) -> anyhow::Result<ImportSummary> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         if self
             .entries
             .iter()

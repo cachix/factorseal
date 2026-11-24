@@ -15,6 +15,8 @@ use zeroize::Zeroizing;
 mod memory;
 #[cfg(not(target_family = "wasm"))]
 mod native;
+#[cfg(target_family = "wasm")]
+pub(crate) mod sync;
 
 #[cfg(target_family = "wasm")]
 pub(crate) use memory::{DesktopRuntime, Icon, IconManager, open_icon_helper};

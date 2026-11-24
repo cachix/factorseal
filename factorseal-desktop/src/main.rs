@@ -8,6 +8,8 @@ mod branding;
 mod controls;
 #[cfg_attr(target_family = "wasm", path = "web/crash_reporting.rs")]
 mod crash_reporting;
+#[cfg_attr(target_family = "wasm", path = "web/files.rs")]
+mod files;
 #[cfg(not(target_family = "wasm"))]
 mod instance;
 mod keymap;

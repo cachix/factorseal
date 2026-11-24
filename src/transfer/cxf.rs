@@ -4,6 +4,8 @@
 //! this is not an implementation of CXP or a platform credential-picker API.
 
 use std::io::{Read as _, Write as _};
+#[cfg(not(target_family = "wasm"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -11,6 +13,8 @@ use credential_exchange_format as cxf;
 use serde::Deserialize as _;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+#[cfg(target_family = "wasm")]
+use web_time::{SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{MAX_MANAGER_FILE_BYTES, MAX_MANAGER_ITEMS, SensitiveJson};
@@ -161,9 +165,7 @@ fn new_header() -> anyhow::Result<cxf::Header> {
         },
         exporter_rp_id: "factorseal.local".into(),
         exporter_display_name: "FactorSeal".into(),
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs(),
+        timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         accounts: vec![cxf::Account {
             id: uuid::Uuid::new_v4().as_bytes().as_slice().into(),
             username: String::new(),

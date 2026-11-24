@@ -178,7 +178,7 @@ impl DesktopView {
                     }
                     crate::platform::unblock(move || runtime.commit_import(&metadata, prepared, replace)).await
                         .map(|(summary, contents)| TransferCompletion {
-                            summary: Some(summary), contents: Some(contents), path: std::path::PathBuf::default(),
+                            summary: Some(summary), contents: Some(contents), location: String::new(),
                         })
                 }
                 Err(error) => Err(error),

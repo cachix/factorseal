@@ -47,10 +47,16 @@ sentry = { version = "0.49.2", default-features = false, features = ["backtrace"
 smol = "2.0"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
+base64 = "0.22.1"
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 uuid = { version = "1", features = ["js"] }
+qrcode = { version = "0.14.1", default-features = false }
+js-sys = "0.3.104"
+wasm-bindgen = "0.2.127"
+wasm-bindgen-futures = "0.4.77"
+web-sys = { version = "0.3.104", features = ["Blob", "Document", "File", "FileList", "HtmlAnchorElement", "HtmlInputElement", "Url", "Window"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "=0.14.0", default-features = false, features = ["async-io", "screenshot", "settings"] }

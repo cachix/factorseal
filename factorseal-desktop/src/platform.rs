@@ -24,5 +24,5 @@ pub(crate) fn host_name() -> String {
 
 #[cfg(target_family = "wasm")]
 pub(crate) fn host_name() -> String {
-    String::new()
+    "john-laptop".to_owned()
 }

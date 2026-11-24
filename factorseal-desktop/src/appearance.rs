@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::LazyLock};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use gpui::{App, Global, Hsla, Styled, rems};
 use gpui_component::theme::{Theme, ThemeMode};
 use native_theme::theme::ColorMode;
@@ -268,11 +268,11 @@ pub(crate) fn update(settings: crate::settings::DesktopSettings, cx: &mut App) -
         &preferences.system_theme,
         preferences.system_input,
     )?;
-    let path = preferences
-        .path
-        .as_deref()
-        .context("desktop configuration directory is unavailable")?;
-    crate::settings::save(path, &settings)?;
+    match preferences.path.as_deref() {
+        Some(path) => crate::settings::save(path, &settings)?,
+        None if cfg!(target_family = "wasm") => settings.validate()?,
+        None => anyhow::bail!("desktop configuration directory is unavailable"),
+    }
     crate::crash_reporting::set_enabled(settings.automatic_crash_reports);
     if security_changed {
         crate::app::set_next_lease(
