@@ -36,6 +36,9 @@ pub(crate) fn connect(cx: &mut App) {
     });
     let _ = window.add_event_listener_with_callback("message", listener.as_ref().unchecked_ref());
     listener.forget();
+    if let Ok(launched) = web_sys::Event::new("factorseal:launched") {
+        let _ = window.dispatch_event(&launched);
+    }
     cx.spawn(async move |cx| {
         while let Ok(message) = receiver.recv().await {
             cx.update(|cx| match message {

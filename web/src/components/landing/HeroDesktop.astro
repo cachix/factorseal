@@ -1,10 +1,11 @@
 ---
 import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
+import LiveFrame from './LiveFrame.astro';
 ---
 
 <div class="fs-hero-app" data-hero>
   <TerminalFrame class="fs-window" title="FactorSeal">
-    <iframe class="fs-live" title="FactorSeal" data-live data-src="/desktop/index.html"></iframe>
+    <LiveFrame title="FactorSeal" demo="desktop" />
   </TerminalFrame>
 </div>
 

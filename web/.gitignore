@@ -3,4 +3,3 @@ node_modules/
 .wrangler/
 dist/
 public/desktop/*
-!public/desktop/index.html

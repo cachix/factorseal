@@ -1,18 +1,19 @@
 ---
 import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
 import Icon from './Icon.astro';
+import LiveFrame from './LiveFrame.astro';
 ---
 
 <div class="sync" data-sync>
   <div class="sync-computer" data-sync-device>
     <TerminalFrame class="fs-window" title="FactorSeal">
-      <iframe class="fs-live" title="FactorSeal on a computer" data-live data-src="/desktop/index.html?demo=computer"></iframe>
+      <LiveFrame title="FactorSeal on a computer" demo="computer" />
     </TerminalFrame>
   </div>
   <div class="phone" data-sync-device>
     <div class="phone__screen">
       <div class="phone__display">
-        <iframe class="fs-live" title="FactorSeal on a phone" data-live data-min-width="360" data-src="/desktop/index.html?demo=phone"></iframe>
+        <LiveFrame title="FactorSeal on a phone" demo="phone" minWidth={360} />
       </div>
     </div>
   </div>

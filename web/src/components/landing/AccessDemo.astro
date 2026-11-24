@@ -1,5 +1,6 @@
 ---
 import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
+import LiveFrame from './LiveFrame.astro';
 
 const command = 'secret-tool lookup service gh:github.com';
 const token = 'gho_16C7e42F292c6912E7710c838347Ae178B4a';
@@ -11,7 +12,7 @@ const token = 'gho_16C7e42F292c6912E7710c838347Ae178B4a';
 <span class="access-output access-output--granted">{token}</span><span class="access-output access-output--denied">secret-tool: FactorSeal keyring access was denied</span><span class="access-output access-output--done"><span class="prompt">$</span> </span><span class="access-cursor" aria-hidden="true"></span></code></pre>
   </TerminalFrame>
   <div class="access-prompt">
-    <iframe class="fs-live" title="FactorSeal access request" data-live data-min-width="500" data-src="/desktop/index.html?demo=access"></iframe>
+    <LiveFrame title="FactorSeal access request" demo="access" minWidth={500} />
   </div>
 </div>
 

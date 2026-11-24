@@ -681,6 +681,25 @@ fn sorted_personal_entries<'a>(
     entries
 }
 
+#[cfg(target_family = "wasm")]
+fn first_item(snapshot: &Snapshot) -> Option<String> {
+    let Snapshot::Unsealed { contents, .. } = snapshot else {
+        return None;
+    };
+    if crate::site::demo() != crate::site::Demo::Desktop {
+        return None;
+    }
+    sorted_personal_entries(&contents.entries, "")
+        .first()
+        .and_then(|entry| personal_item_id(entry))
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn first_item(_snapshot: &Snapshot) -> Option<String> {
+    None
+}
+
 fn desired_vault_browser_height(contents: &VaultContents) -> gpui::Pixels {
     let document_count = contents
         .entries
@@ -1690,6 +1709,7 @@ impl DesktopView {
             &settings,
             |_, _, _: &crate::settings_view::ShortcutsChanged, cx| shortcuts::apply_shortcuts(cx),
         );
+        let open_item_before_seal = first_item(&snapshot);
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -1809,7 +1829,7 @@ impl DesktopView {
             password_revealed: false,
             focus_password: true,
             selected_vault_item: None,
-            open_item_before_seal: None,
+            open_item_before_seal,
             vault_sidebar_scroll: ScrollHandle::new(),
             personal_panel: PersonalPanel::Overview,
             personal_detail: personal_detail::PersonalDetail::default(),

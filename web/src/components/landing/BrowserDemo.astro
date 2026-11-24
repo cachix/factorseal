@@ -1,5 +1,6 @@
 ---
 import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
+import LiveFrame from './LiveFrame.astro';
 import appIcon from '../../../../assets/logo/factorseal-app-icon.svg?raw';
 import mark from '../../../../assets/logo/factorseal-mark-ink.svg?raw';
 import fieldHtml from '../../../../extensions/browser/field.html?raw';
@@ -46,7 +47,7 @@ const field = extension(fieldHtml, {
     <iframe class="browser-popup" title="FactorSeal extension" data-popup={popup}></iframe>
   </TerminalFrame>
   <div class="browser-prompt">
-    <iframe class="fs-live" title="FactorSeal fill request" data-live data-min-width="500" data-src="/desktop/index.html?demo=browser"></iframe>
+    <LiveFrame title="FactorSeal fill request" demo="browser" minWidth={500} />
   </div>
 </div>
 

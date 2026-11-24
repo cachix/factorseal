@@ -6,6 +6,8 @@ interface ThemeMessage {
 }
 
 const frames = new Set<HTMLIFrameElement>();
+const waiting = new Set<() => void>();
+let allowed = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData !== true;
 let theme = 'factorseal';
 let mode = document.documentElement.dataset.theme;
 
@@ -36,7 +38,8 @@ const paint = ({ theme: next, dark, colors }: ThemeMessage) => {
 
 const receive = (event: MessageEvent) => {
   const message = event.data as ThemeMessage;
-  if (event.origin !== location.origin || message?.type !== 'factorseal:theme') {
+  const known = [...frames].some((frame) => frame.contentWindow === event.source);
+  if (!known || event.origin !== location.origin || message?.type !== 'factorseal:theme') {
     return;
   }
   paint(message);
@@ -55,12 +58,32 @@ new MutationObserver(() => {
 }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 addEventListener('message', receive);
 
+const allow = () => {
+  allowed = true;
+  waiting.forEach((run) => run());
+};
+
+let zoomFits: boolean | undefined;
+
 const fit = (frame: HTMLIFrameElement) => {
   const area = frame.parentElement!;
+  if (!area.clientWidth) {
+    return;
+  }
   const scale = Math.min(1, area.clientWidth / Number(frame.dataset.minWidth ?? 960));
-  frame.style.width = `${area.clientWidth / scale}px`;
+  const width = area.clientWidth / scale;
+  frame.style.width = `${width}px`;
   frame.style.height = `${area.clientHeight / scale}px`;
   frame.style.zoom = scale < 1 ? String(scale) : '';
+  frame.style.transform = '';
+  const page = frame.contentDocument?.documentElement;
+  if (scale < 1 && zoomFits === undefined && page) {
+    zoomFits = Math.abs(page.clientWidth - width) < 2;
+  }
+  if (scale < 1 && zoomFits === false) {
+    frame.style.zoom = '';
+    frame.style.transform = `scale(${scale})`;
+  }
 };
 
 export function mountLive(root: HTMLElement) {
@@ -69,34 +92,65 @@ export function mountLive(root: HTMLElement) {
     return () => {};
   }
   const src = frame.dataset.src;
-  const ready = (event: MessageEvent) => {
-    if (event.source === frame.contentWindow && event.data === 'factorseal:ready') {
+  const retry = root.querySelector<HTMLButtonElement>('[data-live-retry]');
+  const play = root.querySelector<HTMLButtonElement>('[data-live-start]');
+  const receive = (event: MessageEvent) => {
+    if (event.source !== frame.contentWindow) {
+      return;
+    }
+    if (event.data === 'factorseal:error') {
+      root.dataset.live = 'error';
+    } else if (event.data === 'factorseal:ready') {
       root.dataset.live = 'ready';
+      frames.add(frame);
       if (theme !== 'factorseal') {
-        post({ type: 'factorseal:theme', theme });
+        frame.contentWindow?.postMessage({ type: 'factorseal:theme', theme }, location.origin);
       }
     }
   };
   const start = () => {
-    frames.add(frame);
-    frame.src = src;
+    waiting.delete(start);
+    delete root.dataset.live;
+    frame.contentWindow?.location.replace(src);
+  };
+  const show = () => {
+    if (allowed) {
+      start();
+    } else {
+      waiting.add(start);
+      root.dataset.live = 'idle';
+    }
   };
   const stop = () => {
+    waiting.delete(start);
     frames.delete(frame);
     delete root.dataset.live;
-    frame.removeAttribute('src');
+    frame.contentWindow?.location.replace('about:blank');
+  };
+  const restart = () => {
+    stop();
+    start();
   };
   const sizes = new ResizeObserver(() => fit(frame));
-  const nearby = new IntersectionObserver(([entry]) => (entry.isIntersecting ? start() : stop()), {
+  const nearby = new IntersectionObserver(([entry]) => {
+    if (entry.isIntersecting) {
+      nearby.disconnect();
+      show();
+    }
+  }, {
     rootMargin: '100% 0px',
   });
-  addEventListener('message', ready);
+  addEventListener('message', receive);
+  retry?.addEventListener('click', restart);
+  play?.addEventListener('click', allow);
   sizes.observe(frame.parentElement!);
   nearby.observe(root);
   return () => {
     stop();
     sizes.disconnect();
     nearby.disconnect();
-    removeEventListener('message', ready);
+    removeEventListener('message', receive);
+    retry?.removeEventListener('click', restart);
+    play?.removeEventListener('click', allow);
   };
 }

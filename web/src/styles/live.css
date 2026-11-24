@@ -36,11 +36,83 @@
   left: 0;
   position: absolute;
   top: 0;
+  transform-origin: 0 0;
   visibility: hidden;
 }
 
 [data-live='ready'] .fs-live {
   visibility: visible;
+}
+
+.fs-live-state {
+  align-items: center;
+  color: var(--fs-quiet);
+  display: flex;
+  font-family: var(--sl-font);
+  inset: 0;
+  justify-content: center;
+  position: absolute;
+}
+
+[data-live='ready'] .fs-live-state {
+  display: none;
+}
+
+.fs-live-spinner {
+  animation:
+    fs-live-appear 0.2s 0.4s both,
+    fs-live-spin 0.8s linear infinite;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 50%;
+  border-top-color: currentColor;
+  height: 1.5rem;
+  width: 1.5rem;
+}
+
+.fs-live-error {
+  align-items: center;
+  display: none;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 1rem;
+  text-align: center;
+}
+
+.fs-live-error p {
+  margin: 0;
+}
+
+.fs-live-state .icon {
+  height: 1rem;
+  width: 1rem;
+}
+
+.fs-live-start {
+  display: none;
+}
+
+:is([data-live='idle'], [data-live='error']) .fs-live-spinner {
+  display: none;
+}
+
+[data-live='idle'] .fs-live-start {
+  display: inline-flex;
+}
+
+[data-live='error'] .fs-live-error {
+  display: flex;
+}
+
+@keyframes fs-live-appear {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes fs-live-spin {
+  to {
+    transform: rotate(1turn);
+  }
 }
 
 .sync {
