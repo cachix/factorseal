@@ -13,7 +13,7 @@ pub(super) fn scope_label(permission: &Permission) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 pub(super) fn entry_label(permission: &Permission) -> Option<String> {
     let (PermissionTarget::Entry { address, .. } | PermissionTarget::ProjectEntry { address, .. }) =
         permission.target.as_deref()?

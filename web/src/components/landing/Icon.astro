@@ -17,10 +17,9 @@ function render() {
     if (!raw) throw new Error(`Unknown FactorSeal glyph: ${name}`);
     return inlineSvg(raw, classes);
   }
-  const icon = lucide[name];
-  if (!icon) throw new Error(`Unknown icon: ${name}`);
-  const { fill, body } = typeof icon === 'string' ? { fill: false, body: icon } : icon;
-  return `<svg class="${classes}" viewBox="0 0 24 24" fill="${fill ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${body}</svg>`;
+  const body = lucide[name];
+  if (!body) throw new Error(`Unknown icon: ${name}`);
+  return `<svg class="${classes}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${body}</svg>`;
 }
 ---
 

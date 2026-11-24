@@ -9,6 +9,7 @@
   <body>
     <script type="module">
       import init from "./factorseal-desktop.js";
+      if (parent !== window) document.documentElement.dataset.theme = parent.document.documentElement.dataset.theme;
       let active = false;
       addEventListener("pointerdown", () => (active = true), { capture: true });
       document.documentElement.addEventListener("pointerleave", () => (active = false));

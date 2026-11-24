@@ -32,8 +32,10 @@ pub(super) fn options(
         } else {
             gpui::WindowKind::Dialog
         },
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_family = "wasm")))]
         kind: gpui::WindowKind::Dialog,
+        #[cfg(target_family = "wasm")]
+        kind: gpui::WindowKind::Normal,
         ..Default::default()
     }
 }

@@ -153,9 +153,13 @@ struct Joining {
 impl Default for Devices {
     fn default() -> Self {
         let now = unix_time().unwrap_or_default();
+        let (local_name, peer) = match crate::site::demo() {
+            crate::site::Demo::Phone => ("Phone".to_owned(), crate::platform::host_name()),
+            _ => (crate::platform::host_name(), "Phone".to_owned()),
+        };
         Self(Mutex::new(Mock {
-            local_name: crate::platform::host_name(),
-            devices: vec![binding(PHONE, "Phone")],
+            local_name,
+            devices: vec![binding(PHONE, &peer)],
             invited: None,
             joining: None,
             last_exchange: now.saturating_sub(120),
@@ -219,6 +223,13 @@ impl Devices {
             last_exchange: Some(mock.last_exchange),
             error: None,
         }
+    }
+
+    pub(crate) fn exchanged(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last_exchange = unix_time().unwrap_or_default();
     }
 
     pub(crate) fn action(&self, action: Action) -> Result<View, String> {

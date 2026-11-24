@@ -19,6 +19,9 @@ mod runtime;
 mod secret_input;
 mod settings;
 mod settings_view;
+#[cfg(target_family = "wasm")]
+#[path = "web/site.rs"]
+mod site;
 mod theming;
 mod timing;
 mod unlock_animation;
@@ -428,13 +431,14 @@ fn main() {
         .run(move |cx| {
             app::setup(
                 runtime::RuntimeConfig::browser(),
-                false,
+                matches!(site::demo(), site::Demo::Access | site::Demo::Browser),
                 true,
                 activations,
                 access_requests,
                 None,
                 cx,
             );
+            site::connect(cx);
         });
 }
 

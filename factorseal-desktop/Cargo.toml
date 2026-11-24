@@ -56,7 +56,7 @@ qrcode = { version = "0.14.1", default-features = false }
 js-sys = "0.3.104"
 wasm-bindgen = "0.2.127"
 wasm-bindgen-futures = "0.4.77"
-web-sys = { version = "0.3.104", features = ["Blob", "Document", "File", "FileList", "HtmlAnchorElement", "HtmlInputElement", "Url", "Window"] }
+web-sys = { version = "0.3.104", features = ["Blob", "Document", "Element", "File", "FileList", "HtmlAnchorElement", "HtmlInputElement", "Location", "MessageEvent", "Url", "UrlSearchParams", "Window"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "=0.14.0", default-features = false, features = ["async-io", "screenshot", "settings"] }

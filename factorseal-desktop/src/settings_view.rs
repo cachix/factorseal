@@ -271,6 +271,11 @@ impl SettingsView {
                 })
             })
             .collect();
+        let theme_changed = cfg!(target_family = "wasm").then(|| {
+            cx.observe_global_in::<gpui_component::theme::Theme>(window, |view, window, cx| {
+                view.sync_controls(window, cx);
+            })
+        });
         let subscriptions = controls
             .iter()
             .map(|control| {
@@ -286,6 +291,7 @@ impl SettingsView {
                     },
                 )
             })
+            .chain(theme_changed)
             .collect();
         Self {
             section: Section::Appearance,

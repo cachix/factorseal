@@ -13,6 +13,7 @@ use factorseal::{
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
+use super::relay::{Change, Message};
 use super::sync::{Devices, View};
 use super::{
     LeasePolicy, PERSONAL_SECRET_NAMESPACE, RuntimeConfig, Snapshot,
@@ -40,6 +41,15 @@ impl DesktopRuntime {
             lease: Mutex::new(None),
             metadata: Mutex::new(None),
             devices: Arc::default(),
+        });
+        let weak = Arc::downgrade(&runtime);
+        super::relay::connect(move |message| {
+            if let Some(runtime) = weak.upgrade() {
+                match message {
+                    Message::Changes(changes) => runtime.receive(changes),
+                    Message::Add => runtime.add(),
+                }
+            }
         });
         if let Ok(metadata) = UnlockGroup::new([UnlockFactorKind::Password])
             .and_then(|group| UnlockPolicy::new([group]))
@@ -105,6 +115,29 @@ impl DesktopRuntime {
         self.seal()
     }
 
+    #[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
+    pub(crate) fn approve_permissions(
+        &self,
+        _metadata: &VaultMetadata,
+        permissions: &[Permission],
+        _group: UnlockGroup,
+        _password: Zeroizing<Vec<u8>>,
+        duration: Option<u64>,
+        single_use: bool,
+    ) -> Result<(), String> {
+        let now = unix_time().unwrap_or_default();
+        self.vault.approve(
+            permissions,
+            &PermissionState::Granted {
+                granted_at: now,
+                expires_at: duration.map(|duration| now + duration),
+                single_use,
+            },
+        );
+        crate::site::report_access(true);
+        Ok(())
+    }
+
     pub(crate) fn lease_deadlines(&self, _metadata: &VaultMetadata) -> Option<(u64, u64)> {
         self.vault.deadlines()
     }
@@ -135,12 +168,37 @@ impl DesktopRuntime {
             .ok_or_else(|| "Set up your vault first".to_owned())
     }
 
+    fn receive(&self, changes: Vec<Change>) {
+        self.vault.merge(changes);
+        self.devices.exchanged();
+        self.refresh();
+    }
+
+    fn add(&self) {
+        if let Some(change) = self.vault.add(sample_items()) {
+            super::relay::send(&[change]);
+            self.refresh();
+        }
+    }
+
+    fn refresh(&self) {
+        if let (Ok(metadata), Some(deadlines)) = (self.metadata(), self.vault.deadlines()) {
+            let _ = self.events.try_send(self.unsealed(metadata, deadlines));
+        }
+    }
+
     fn create(&self, policy: UnlockPolicy) -> Result<VaultMetadata, ()> {
         let created_at = unix_time().map_err(drop)?;
         let metadata = VaultMetadata::in_memory(policy, created_at).map_err(drop)?;
         *self.metadata.lock().unwrap_or_else(PoisonError::into_inner) = Some(metadata.clone());
+        let items = sample_items();
+        let shown = if super::relay::syncing() {
+            1
+        } else {
+            items.len()
+        };
         self.vault.fill(
-            sample_items(),
+            items.into_iter().take(shown),
             sample_entries(),
             sample_permissions(created_at),
         );
@@ -266,6 +324,43 @@ impl MemoryVault {
         opened
     }
 
+    fn add(&self, items: Vec<PersonalSecret>) -> Option<Change> {
+        let mut store = self.store();
+        let item = items
+            .into_iter()
+            .find(|item| !store.items.contains_key(&item.id))?;
+        let value = item.encode().ok()?;
+        store.items.insert(item.id.clone(), value.clone());
+        Some((item.id.clone(), Some(value)))
+    }
+
+    fn merge(&self, changes: Vec<Change>) {
+        let mut store = self.store();
+        for (id, value) in changes {
+            match value {
+                Some(value) => {
+                    store.items.insert(id, value);
+                }
+                None => {
+                    store.items.remove(&id);
+                }
+            }
+        }
+    }
+
+    fn approve(&self, permissions: &[Permission], state: &PermissionState) {
+        let mut store = self.store();
+        for stored in &mut store.permissions {
+            if permissions
+                .iter()
+                .any(|permission| permission.id == stored.id)
+            {
+                stored.state = state.clone();
+            }
+        }
+        store.revision += 1;
+    }
+
     fn close(&self) {
         self.store().lease = None;
     }
@@ -371,7 +466,9 @@ impl MemoryVault {
                 namespace,
                 mutations,
             } if namespace.as_slice() == PERSONAL_SECRET_NAMESPACE => {
-                apply(&mut store.items, mutations)
+                let body = apply(&mut store.items, mutations)?;
+                super::relay::send(&changes(mutations));
+                Ok(body)
             }
             VaultAction::ExportRevision => Ok(VaultResponseBody::ExportRevision { revision: None }),
             VaultAction::ImportVaultEntry {
@@ -382,11 +479,24 @@ impl MemoryVault {
             } => Ok(VaultResponseBody::VaultEntryImported {
                 status: import(&mut store, entry, value.expose(), *replace_existing)?,
             }),
-            VaultAction::ListPermissions => Ok(VaultResponseBody::Permissions {
-                revision: store.revision,
-                permissions: store.permissions.clone(),
-                next_cursor: None,
-            }),
+            VaultAction::WaitPermissions { after_revision, .. }
+                if *after_revision == store.revision =>
+            {
+                Err((VaultResponseErrorCode::Conflict, "No permission changed."))
+            }
+            VaultAction::ListPermissions | VaultAction::WaitPermissions { .. } => {
+                Ok(VaultResponseBody::Permissions {
+                    revision: store.revision,
+                    permissions: store.permissions.clone(),
+                    next_cursor: None,
+                })
+            }
+            VaultAction::DenyPermission { id } => {
+                store.permissions.retain(|permission| permission.id != *id);
+                store.revision += 1;
+                crate::site::report_access(false);
+                Ok(VaultResponseBody::Mutated)
+            }
             VaultAction::RevokePermission { id } => {
                 store.permissions.retain(|permission| permission.id != *id);
                 store.revision += 1;
@@ -486,6 +596,20 @@ fn apply(
     Ok(VaultResponseBody::Mutated)
 }
 
+fn changes(mutations: &[VaultMutation]) -> Vec<Change> {
+    mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            VaultMutation::Put { address, value, .. } => Some((
+                address.item.clone(),
+                Some(Zeroizing::new(value.expose().to_vec())),
+            )),
+            VaultMutation::Delete { address } => Some((address.item.clone(), None)),
+            VaultMutation::Check { .. } => None,
+        })
+        .collect()
+}
+
 fn entry_metadata(id: &str, value: &[u8]) -> Option<VaultEntryMetadata> {
     let item = PersonalSecret::decode_current(value).ok()?;
     Some(VaultEntryMetadata {
@@ -556,7 +680,7 @@ fn sample_items() -> Vec<PersonalSecret> {
     );
     let mut wifi = PersonalSecret::new(PersonalSecretKind::SecureNote, "Home Wi-Fi".to_owned());
     wifi.notes = Some("Network: Doe Home\nPassword: correct-horse-battery".to_owned());
-    vec![
+    [
         fastmail,
         github,
         identity,
@@ -581,6 +705,13 @@ fn sample_items() -> Vec<PersonalSecret> {
             "https://login.tailscale.com",
         ),
     ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, mut item)| {
+        item.id = format!("00000000-0000-4000-8000-{index:012}");
+        item
+    })
+    .collect()
 }
 
 fn sample_entries() -> Vec<(VaultEntryMetadata, Zeroizing<Vec<u8>>)> {
@@ -703,6 +834,7 @@ fn portable_keyring_item(entry: &VaultEntryMetadata, secret: &str) -> Option<Vec
 }
 
 fn sample_permissions(now: u64) -> Vec<Permission> {
+    let pending = crate::site::demo() == crate::site::Demo::Access;
     let grant = |id: &str, application_id: &str, scope, target, project: &str, expires_at| {
         Some(Permission {
             target: Some(Box::new(target)),
@@ -718,10 +850,20 @@ fn sample_permissions(now: u64) -> Vec<Permission> {
             },
             application: VaultApplicationContext::new(Some(project.to_owned()), None, None, None)
                 .ok()?,
-            state: PermissionState::Granted {
-                granted_at: now,
-                expires_at,
-                single_use: false,
+            state: if pending && application_id == "/usr/bin/secret-tool" {
+                PermissionState::Pending {
+                    created_at: now,
+                    expires_at: now + 24 * 60 * 60,
+                    challenge: [0; 32],
+                    awaited: true,
+                    expiring_write: false,
+                }
+            } else {
+                PermissionState::Granted {
+                    granted_at: now,
+                    expires_at,
+                    single_use: false,
+                }
             },
         })
     };

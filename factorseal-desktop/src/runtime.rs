@@ -16,6 +16,8 @@ mod memory;
 #[cfg(not(target_family = "wasm"))]
 mod native;
 #[cfg(target_family = "wasm")]
+mod relay;
+#[cfg(target_family = "wasm")]
 pub(crate) mod sync;
 
 #[cfg(target_family = "wasm")]
@@ -386,7 +388,7 @@ impl DesktopRuntime {
         })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     pub(crate) fn watch_permissions(
         &self,
         metadata: &VaultMetadata,
@@ -401,7 +403,7 @@ impl DesktopRuntime {
         )
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     pub(crate) fn deny_permission(
         &self,
         metadata: &VaultMetadata,

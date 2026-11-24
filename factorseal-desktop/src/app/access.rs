@@ -1,6 +1,5 @@
 //! A separate, compact review window for a pending system-keyring lookup.
 use super::*;
-use factorseal::{SecretServiceAccessContext, SecretServiceAccessRequest};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -24,7 +23,7 @@ struct AccessView {
     runtime: Arc<DesktopRuntime>,
     snapshot: Snapshot,
     requests: Vec<SecretServiceAccessRequest>,
-    inputs: Vec<factorseal::SecretServiceInputRequest>,
+    inputs: Vec<SecretServiceInputRequest>,
     editor: InputEditor,
     explicit_unlock: bool,
     unlocks: Vec<(SecretServiceAccessContext, Vec<String>)>,
@@ -436,10 +435,7 @@ fn deny(cx: &mut App) {
 
 impl AccessView {
     fn prune_inputs(&mut self, cx: &mut Context<Self>) -> bool {
-        let changed = prune_queue(
-            &mut self.inputs,
-            factorseal::SecretServiceInputRequest::is_expired,
-        );
+        let changed = prune_queue(&mut self.inputs, SecretServiceInputRequest::is_expired);
         if changed {
             self.editor.value.update(cx, SecretInputState::clear);
             self.editor.initialized = false;

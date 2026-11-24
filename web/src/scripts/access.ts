@@ -1,32 +1,27 @@
-const AUTHORIZING_MS = 700;
 const RETRY_MS = 4500;
 
 export function mountAccess(root: HTMLElement) {
+  const frame = root.querySelector<HTMLIFrameElement>('[data-live]');
   let timer: number | undefined;
 
-  const show = (state: string) => {
-    window.clearTimeout(timer);
-    root.dataset.state = state;
-    if (state === 'denied' || state === 'revoked') timer = window.setTimeout(() => show('request'), RETRY_MS);
+  const restart = () => {
+    delete root.dataset.state;
+    delete root.dataset.live;
+    frame?.contentWindow?.location.reload();
   };
 
-  const choose = (lifetime: string) => {
-    root.dataset.lifetime = lifetime;
-    for (const choice of root.querySelectorAll<HTMLElement>('[data-lifetime-choice]')) {
-      choice.setAttribute('aria-pressed', String(choice.dataset.lifetimeChoice === lifetime));
+  const receive = (event: MessageEvent) => {
+    if (event.source !== frame?.contentWindow || event.data?.type !== 'factorseal:access') {
+      return;
     }
+    root.dataset.state = event.data.granted ? 'granted' : 'denied';
+    window.clearTimeout(timer);
+    timer = window.setTimeout(restart, RETRY_MS);
   };
 
-  root.addEventListener('click', (event) => {
-    const target = event.target as Element;
-    const choice = target.closest<HTMLElement>('[data-lifetime-choice]');
-    if (choice?.dataset.lifetimeChoice && root.dataset.state === 'request') choose(choice.dataset.lifetimeChoice);
-    else if (target.closest('[data-grant]') && root.dataset.state === 'request') {
-      show('authorizing');
-      timer = window.setTimeout(() => show('granted'), AUTHORIZING_MS);
-    } else if (target.closest('[data-deny]') && root.dataset.state === 'request') show('denied');
-    else if (target.closest('[data-revoke]') && root.dataset.state === 'granted') show('revoked');
-  });
-
-  return () => window.clearTimeout(timer);
+  addEventListener('message', receive);
+  return () => {
+    window.clearTimeout(timer);
+    removeEventListener('message', receive);
+  };
 }

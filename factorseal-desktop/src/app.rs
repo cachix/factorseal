@@ -1,6 +1,6 @@
 use self::shortcuts::OpenSettings;
 use crate::secret_input::SecretInputState;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 mod access;
 mod approval_window;
 mod breadcrumb;
@@ -18,6 +18,9 @@ mod personal_detail;
 mod personal_history;
 mod placement;
 mod qr_codes;
+#[cfg(target_family = "wasm")]
+#[path = "web/secret_service.rs"]
+mod secret_service;
 mod section_pages;
 mod shortcuts;
 #[cfg(feature = "apple-credential-exchange")]
@@ -30,19 +33,22 @@ mod window_activation;
 #[cfg(target_os = "windows")]
 mod windows_screen;
 
+#[cfg(target_family = "wasm")]
+pub(crate) use browser::{cancel as cancel_browser, request as request_browser};
+
 pub(crate) enum AccessEvent {
-    #[cfg(target_os = "linux")]
-    Finished(factorseal::SecretServiceAccessContext),
-    #[cfg(target_os = "linux")]
-    Input(factorseal::SecretServiceInputRequest),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
+    Finished(SecretServiceAccessContext),
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
+    Input(SecretServiceInputRequest),
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     Unlock {
-        context: factorseal::SecretServiceAccessContext,
+        context: SecretServiceAccessContext,
         objects: Vec<String>,
     },
-    #[cfg(target_os = "linux")]
-    Request(factorseal::SecretServiceAccessRequest),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
+    Request(SecretServiceAccessRequest),
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     Permissions(Vec<factorseal::Permission>),
 }
 use std::{cell::Cell, rc::Rc, sync::Arc};
@@ -85,6 +91,14 @@ use crate::{
 use factorseal::transfer::{
     PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
     TransferFormat,
+};
+#[cfg(target_os = "linux")]
+use factorseal::{
+    SecretServiceAccessContext, SecretServiceAccessRequest, SecretServiceInputRequest,
+};
+#[cfg(target_family = "wasm")]
+use secret_service::{
+    SecretServiceAccessContext, SecretServiceAccessRequest, SecretServiceInputRequest,
 };
 
 actions!(
@@ -913,7 +927,7 @@ fn highlighted_text(text: String, query: &str, color: Hsla) -> StyledText {
     StyledText::new(text).with_highlights(highlights)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 fn hex_digest(digest: &[u8; 32]) -> String {
     use std::fmt::Write as _;
     let mut output = String::with_capacity(64);
@@ -964,7 +978,7 @@ fn link_showing(
         .child(shown.into())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static str {
     match scope {
         Some(factorseal::DocumentKind::LinuxSecretService) => "System keyring",
@@ -1836,7 +1850,7 @@ impl DesktopView {
             transfer_notice: None,
             #[cfg(feature = "apple-credential-exchange")]
             system_transfer: system_transfer::State::default(),
-            system_integrations_expanded: true,
+            system_integrations_expanded: !cfg!(target_family = "wasm"),
             search_cursor: 0,
             search_scroll: ScrollHandle::new(),
             shortcuts: shortcuts::State::new(window, cx),
@@ -4275,7 +4289,7 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
     cx.global_mut::<DesktopStatus>().unsealed = matches!(snapshot, Snapshot::Unsealed { .. });
     refresh_tray(cx);
     sync_secret_service(snapshot, cx);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     access::update(snapshot, cx);
     if matches!(snapshot, Snapshot::Unsealed { .. }) {
         crate::timing::finish_unlock("ui_updated", "ok");
@@ -4761,15 +4775,15 @@ pub(crate) fn setup(
         refresh_generation: 0,
     });
     sync_secret_service(&initial, cx);
-    let handle = open_desktop_window(
-        Arc::clone(&runtime),
-        initial,
-        Arc::clone(&view_holder),
-        !background,
-        cx,
-    )
-    .expect("failed to open FactorSeal window");
-    {
+    if !(background && cfg!(target_family = "wasm")) {
+        let handle = open_desktop_window(
+            Arc::clone(&runtime),
+            initial,
+            Arc::clone(&view_holder),
+            !background,
+            cx,
+        )
+        .expect("failed to open FactorSeal window");
         let desktop = cx.global_mut::<DesktopWindow>();
         desktop.handle = Some(handle);
         desktop.visible = !background;
@@ -4795,9 +4809,9 @@ pub(crate) fn setup(
         }
     })
     .detach();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     access::setup(access_requests, cx);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_family = "wasm")))]
     drop(access_requests);
     if !background {
         cx.activate(true);
