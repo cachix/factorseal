@@ -90,24 +90,22 @@ fn json(path: &Path) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::registration::CHROMIUM_ID;
+    use crate::browser::registration::{CHROME_STORE_ID, CHROMIUM_ID};
 
     #[test]
-    fn detects_chrome_using_the_native_host_identity() {
+    fn detects_chrome_using_the_store_listing_identity() {
         let directory = tempfile::tempdir().unwrap();
         let profile = directory.path().join("Default");
         std::fs::create_dir(&profile).unwrap();
-        let id = default_extension_id("chrome");
         std::fs::write(
             profile.join("Secure Preferences"),
-            serde_json::json!({"extensions":{"settings":{id:{"location":1}}}}).to_string(),
+            serde_json::json!({"extensions":{"settings":{CHROME_STORE_ID:{"location":1}}}})
+                .to_string(),
         )
         .unwrap();
         assert!(in_profiles(directory.path(), Browser::Chrome));
-        assert_eq!(
-            in_profiles(directory.path(), Browser::Chromium),
-            id == CHROMIUM_ID
-        );
+        assert!(!in_profiles(directory.path(), Browser::Chromium));
+        assert!(!in_profiles(directory.path(), Browser::Edge));
     }
 
     #[test]

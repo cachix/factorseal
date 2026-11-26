@@ -32,14 +32,22 @@ Firefox 140+: open `about:debugging#/runtime/this-firefox`, choose Load
 Temporary Add-on, and select `dist/firefox/manifest.json`. Temporary add-ons must
 be loaded again after restarting Firefox.
 
-### Chromium, Chrome, and Edge
+### Chromium and Edge
 
-Chromium/Chrome/Edge 137+: open the browser's extensions page, enable developer
-mode, and load `dist/chromium` unpacked. Its development ID is fixed by the
-manifest public key ([Chrome documentation](https://developer.chrome.com/docs/extensions/reference/manifest/key)).
-If you loaded the earlier build, remove it and load this one again, then pair it;
-its old path-dependent ID and pairing storage do not carry over. The Chrome
-store build uses the Chrome Web Store item ID. See [store packages](#store-packages).
+Chromium/Edge 137+: open the browser's extensions page, enable developer mode,
+and load `dist/chromium` unpacked. Its development ID is fixed by the manifest
+public key ([Chrome documentation](https://developer.chrome.com/docs/extensions/reference/manifest/key)).
+An older unpacked installation with a path-dependent ID needs to be removed
+and paired again.
+
+### Google Chrome
+
+Desktop registers the official Chrome Web Store item ID for Chrome 137 and
+later. To test that identity before publication, open the draft's **Package**
+tab, choose **View public key**, and add that public key as the `key` in a
+temporary unpacked copy of the Chrome store package. Load the copy in Chrome
+and confirm its ID matches the draft. The upload ZIP stays as generated. See
+[store packages](#store-packages).
 
 Desktop refreshes registration on every startup. There is no global disable
 setting. Extension installation and pairing still require the user’s actions.
@@ -138,11 +146,11 @@ The build copies the source files and checked-in artwork directly. The ZIPs use
 `manifest.json` at their root. The Chrome ZIP omits the unpacked development key.
 Firefox keeps the stable add-on ID `factorseal@factorseal.dev`.
 
-Create the Chrome Web Store item as a draft and copy its 32-character item ID.
-Set `FACTORSEAL_CHROME_STORE_ID` to that ID in the Cargo build environment for the
-matching Desktop and native host packages. Reinstall or restart that Desktop
-so it registers the store ID for Chrome. Chromium and Edge development builds use the existing
-development ID. Pairing is per extension ID and browser profile.
+Desktop builds pin the official Chrome Web Store item ID
+`dpfkfmddmpbpnkhbmdaaoleiackehgjb` for native host registration and installation
+detection in Chrome. Start the matching Desktop build once to register it.
+Unpacked Chromium and Edge builds use the development ID. Pairing is per
+extension ID and browser profile.
 
 Use the following single purpose for both listings.
 
