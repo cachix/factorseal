@@ -188,7 +188,7 @@ impl DesktopView {
                     )),
                     Err(error) => {
                         view.cancel_system_transfer();
-                        view.finish_transfer(true, false, Err(error));
+                        view.finish_transfer(true, false, Err(error), cx);
                     }
                 }
                 cx.notify();

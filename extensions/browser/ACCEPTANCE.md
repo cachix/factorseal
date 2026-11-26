@@ -6,7 +6,9 @@ supported browser. Automated DOM/protocol tests do not replace this acceptance.
 1. Serve `fixtures/login.html` on a controlled HTTPS origin and create a Personal
    Login with that exact origin and test username/password. Build/install using
    the README; verify the extension's profile fingerprint in Desktop when pairing.
-2. With the vault sealed, visit the page in the focused browser's active tab and
+2. Before granting site access, verify that **Fill this page** and **Save login
+   from this page** work from the toolbar popup. Enable detection for the test
+   hostname and reload. With the vault sealed, visit the page in the focused browser's active tab and
    choose the FactorSeal button in the username field. Confirm that the compact
    approval window opens above the current app, names the origin, and asks to
    unseal without claiming a match. Unseal, choose the account, and confirm the
@@ -62,10 +64,9 @@ supported browser. Automated DOM/protocol tests do not replace this acceptance.
     extension to identify it without re-pairing. Browser host registration alone
     must not make an absent browser appear installed. Sealed vaults show no setup
     panel; all-paired vaults keep browser management available in Settings.
-15. Open a page showing a two-factor QR code and choose **Add one-time password**.
-    Desktop must read the code from that tab only, even while the popup covers
-    part of it, name the origin, and offer that origin's logins with a note on any
-    that already has a one-time password. Nothing may be saved before approval.
-    On a page without a code the page must show "No QR code found on this page."
+15. Verify Firefox describes credentials and site origins in the install
+    consent. Decline optional technical data and verify pairing and fill still
+    work. Verify both extensions are disabled in private windows, and that
+    refusing, pausing, or revoking site access stops automatic capture.
 16. Check that page scripts cannot reach the field buttons or notices, and that a
     page embedding field.html or notice.html itself cannot start a request.

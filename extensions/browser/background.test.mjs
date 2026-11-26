@@ -6,9 +6,9 @@ import {webcrypto} from 'node:crypto';
 const core=await readFile(new URL('./core.js',import.meta.url),'utf8');
 const background=await readFile(new URL('./background.js',import.meta.url),'utf8');
 const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);}});
-async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false,forgotten=0,focused=true,owned=true,untouched=true,picture='data:image/jpeg;base64,/9j/4AAQ'}={}) {
+async function harness({navigate=false,chrome=false,pairReason="done",nativeError,paired=false,forgotten=0,focused=true,owned=true,untouched=true,origins=['https://*/*'],dataCollection=['technicalAndInteraction'],filled=true}={}) {
   let stored=paired?{paired:true}:{},polls=0,signatures=0,connects=0,saving=false,deadPort=false;
-  const fills=[],commands=[],payloads=[],registrations=[],injections=[],notices=[];
+  const fills=[],commands=[],registrations=[],injections=[],notices=[];
   const tab={id:1,windowId:1,active:true,url:'https://example.com/login'};
   const runtime={id:'factorseal-test',getURL:p=>`extension://factorseal/${p}`,onMessage:event(),onInstalled:event(),connectNative(){
     connects++;
@@ -25,16 +25,15 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
           const {key,payload,signature}=request.message;
           const publicKey=await webcrypto.subtle.importKey('raw',Buffer.from(key,'hex'),'Ed25519',false,['verify']);
           assert.equal(await webcrypto.subtle.verify('Ed25519',publicKey,Buffer.from(signature,'hex'),new TextEncoder().encode(payload)),true);signatures++;
-          const command=JSON.parse(payload);commands.push(command);payloads.push(payload.length);
+          const command=JSON.parse(payload);commands.push(command);
           if(forgotten>0){forgotten--;response={type:'finished',reason:'unauthorized'};}
           else if(command.action.type==='pair')response={type:'finished',reason:pairReason};
           else if(command.action.type==='revoke')response={type:'finished',reason:'done'};
           else if(command.action.type==='detect'){response={type:'state',state:'awaiting_unseal'};}
-          else if(['save','one_time'].includes(command.action.type)){
-            saving=true;response={type:'state',state:command.action.type==='save'?'awaiting_approval':'reading'};
+          else if(command.action.type==='save'){
+            saving=true;response={type:'state',state:'awaiting_approval'};
             if(navigate){tab.url='https://example.com/account';for(const fn of api.tabs.onUpdated.listeners)fn(tab.id,{url:tab.url,status:'loading'});}
           }
-          else if(command.action.type==='image')response={type:'state',state:'reading'};
           else if(command.action.type==='poll') {
             polls++;
             if(saving)response={type:'finished',reason:'done'};
@@ -51,9 +50,9 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
     return port;
   }};
   const api={runtime,storage:{local:{get:async keys=>Object.fromEntries([keys].flat().map(key=>[key,stored[key]])),set:async values=>Object.assign(stored,values),setAccessLevel:async()=>{}}},
-    permissions:{contains:async()=>true,onAdded:event(),onRemoved:event()},
-    scripting:{getRegisteredContentScripts:async()=>registrations,registerContentScripts:async scripts=>registrations.push(...scripts),executeScript:async options=>injections.push(options),unregisterContentScripts:async()=>{}},
-    tabs:{query:async()=>[tab],get:async id=>id===tab.id?tab:{...tab,id},captureVisibleTab:async()=>{if(picture instanceof Error)throw picture;return picture;},sendMessage:async(_tab,m)=>{if(m.type==='pressed')return {valid:owned && untouched};if(['check','owns'].includes(m.type))return {valid:owned,document:m.document};if(m.type==='find')return {document:tab.form===false?null:'doc'};if(m.type==='save-current')return {offered:true};if(['notice','close-notice','site-changed'].includes(m.type)){notices.push(m);return {};}fills.push(m);return {filled:true};},onRemoved:event(),onActivated:event(),onUpdated:event()},
+    permissions:{getAll:async()=>({origins,data_collection:dataCollection}),onAdded:event(),onRemoved:event()},
+    scripting:{getRegisteredContentScripts:async()=>registrations,registerContentScripts:async scripts=>registrations.push(...scripts),executeScript:async options=>injections.push(options),updateContentScripts:async scripts=>Object.assign(registrations[0],scripts[0]),unregisterContentScripts:async()=>{registrations.length=0;}},
+    tabs:{query:async()=>[tab],get:async id=>id===tab.id?tab:{...tab,id},sendMessage:async(_tab,m)=>{if(m.type==='pressed')return {valid:owned && untouched};if(['check','owns'].includes(m.type))return {valid:owned,document:m.document};if(m.type==='find')return {document:tab.form===false?null:'doc'};if(m.type==='save-current')return {document:'doc',username:'alice',password:'secret'};if(['notice','close-notice','site-changed'].includes(m.type)){notices.push(m);return {};}fills.push(m);return {filled};},onRemoved:event(),onActivated:event(),onUpdated:event()},
     windows:{get:async()=>({focused}),onFocusChanged:event()}};
   let now=Date.now();
   const saveTimers=new Map();
@@ -63,7 +62,7 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
     const timer={};saveTimers.set(timer,{fn,until:clock.now()+ms});return timer;
   };
   const clear=timer=>{if(!saveTimers.delete(timer))clearTimeout(timer);};
-  const navigator=chrome?{userAgentData:{brands:[{brand:'Chromium'}]}}:{userAgent:'Firefox/129'};
+  const navigator=chrome?{userAgentData:{brands:[{brand:'Chromium'}]}}:{userAgent:'Firefox/140'};
   const context={navigator,crypto:webcrypto,TextEncoder,TextDecoder,URL,atob,btoa,Date:clock,setTimeout:schedule,clearTimeout:clear,console};
   context[chrome?'chrome':'browser']=api;
   vm.runInNewContext(core,context);vm.runInNewContext(background,context);
@@ -75,7 +74,14 @@ async function harness({navigate=false,chrome=false,pairReason="done",nativeErro
     pendingCount:()=>vm.runInNewContext('pendingSaves.size',context),
     get saveTimerCount(){return saveTimers.size;},
     advance(ms){now+=ms;for(const [timer,{fn,until}] of saveTimers)if(until<=clock.now()){saveTimers.delete(timer);fn();}},
-    closeTab(){for(const fn of api.tabs.onRemoved.listeners)fn(tab.id);},fills,commands,payloads,registrations,injections,setNativeError(value){nativeError=value;},killPort(){deadPort=true;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
+    closeTab(){for(const fn of api.tabs.onRemoved.listeners)fn(tab.id);},fills,commands,registrations,injections,
+    setOrigins(grants){
+      const removed=origins.filter(origin=>!grants.includes(origin));
+      origins=grants;
+      const change=removed.length?api.permissions.onRemoved:api.permissions.onAdded;
+      for(const listener of change.listeners)listener({origins:removed});
+    },
+    setNativeError(value){nativeError=value;},killPort(){deadPort=true;},get connects(){return connects;},get signatures(){return signatures;},get stored(){return stored;}};
 }
 async function until(condition){for(let i=0;i<300;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw new Error('timed out');}
 test('submitted save survives navigation and never persists credentials in extension storage',async()=>{
@@ -183,7 +189,7 @@ test('the popup still fills and saves a paused site when asked',async()=>{
   const saving=await harness({paired:true});
   await saving.message({type:'pause'},popup);
   assert.equal((await saving.message({type:'save-page'},popup)).offered,true);
-  assert.equal((await saving.message({type:'save',document:'doc',username:'alice',password:'secret'},saving.sender)).accepted,true);
+  assert.equal((await saving.message({type:'save',document:'doc',username:'alice',password:'secret'},saving.sender)).accepted,false);
   await until(()=>saving.commands.some(c=>c.action.type==='save'));
 });
 test('a sign-in asks on the page first, also on the next page of the same site, and Desktop sees the login only after Save',async()=>{
@@ -275,10 +281,9 @@ test('pairing UI state persists only after approval and clears after revocation'
   assert.equal(h.registrations.length,0);
   await h.message({type:'pair'},popupSender);
   await until(()=>h.stored.paired===true);
-  await until(()=>h.injections.length===1);
   await until(()=>h.notices.some(n=>n.type==='site-changed'));
   assert.equal(h.registrations[0].id,'factorseal-login');
-  assert.equal(h.injections[0].target.tabId,1);
+  assert.equal(h.injections.length,0);
   assert.equal((await h.message({type:'status'},popupSender)).paired,true);
   await until(()=>h.commands.length>0);
   await h.message({type:'revoke'},popupSender);
@@ -345,7 +350,7 @@ test('Save login from this page is taken once while the popup keeps the focus',a
   const save=document=>h.message({type:'save',document,username:'alice',password:'secret'},h.sender);
   assert.equal((await save('before')).accepted,false);
   assert.equal((await h.message({type:'save-page'},popup)).offered,true);
-  assert.equal((await save('page')).accepted,true);
+  assert.equal((await save('page')).accepted,false);
   await until(()=>h.commands.some(c=>c.action.type==='save'));
   assert.equal((await save('again')).accepted,false);
 });
@@ -374,54 +379,48 @@ test('Fill this page reports a page without a login form, on that page only',asy
   h.tab.id=2;
   assert.equal((await h.message({type:'status'},popup)).status,'idle');
 });
-test('Add one-time password asks Desktop about the current site and survives navigation',async()=>{
-  const h=await harness({paired:true,navigate:true});
-  const popup={url:'extension://factorseal/popup.html'};
-  await h.message({type:'one-time'},popup);
-  let state;
-  for(let i=0;i<300;i++){state=await h.message({type:'status'},popup);if(state.status==='one_time_saved')break;await new Promise(r=>setTimeout(r,10));}
-  assert.equal(state.status,'one_time_saved');
-  assert.deepEqual(h.commands[0].action,{type:'one_time',origin:'https://example.com'});
-  assert.equal(h.commands.some(c=>c.action.type==='cancel'),false);
-  assert.equal(h.fills.length,0);
+test('permission changes register only granted sites, while manual actions remain available',async()=>{
+  const h=await harness({paired:true,origins:[]});
+  assert.equal((await h.message({type:'status'},popupSender)).detection,false);
+  assert.equal((await h.message({type:'field',document:'doc'},h.sender)).show,false);
+  assert.equal((await h.message({type:'save',document:'doc',username:'alice',password:'secret'},h.sender)).accepted,false);
+  assert.equal((await h.message({type:'fill'},popupSender)).found,true);
+  await until(()=>h.fills.length===1);
+  await h.message({type:'cancel'},popupSender);
+  assert.equal((await h.message({type:'save-page'},popupSender)).offered,true);
+  h.setOrigins(['https://other.test/*','https://example.com/*']);
+  await until(()=>h.registrations.length===1);
+  assert.equal(JSON.stringify(h.registrations[0].matches),'["https://example.com/*","https://other.test/*"]');
+  assert.equal((await h.message({type:'save',document:'doc',username:'alice',password:'secret'},h.sender)).ask,true);
+  h.setOrigins(['https://other.test/*']);
+  await until(()=>h.registrations[0].matches.length===1);
+  assert.equal(h.pendingCount(),0);
+  assert.equal((await h.message({type:'field',document:'doc'},h.sender)).show,false);
+  h.setOrigins([]);
+  await until(()=>h.registrations.length===0);
 });
-test('a page cannot ask for a one-time password',async()=>{
+test('a rejected fill is reported as discarded',async()=>{
+  const h=await harness({paired:true,filled:false});
+  await h.message({type:'fill'},popupSender);
+  await until(()=>h.fills.length===1);
+  const result=await h.message({type:'status'},popupSender);
+  assert.equal(result.status,'fill_discarded');
+});
+test('Firefox sends browser metadata only with optional data consent',async()=>{
+  const h=await harness({dataCollection:[]});
+  await h.message({type:'pair'},popupSender);
+  await until(()=>h.commands.length===1);
+  assert.equal('browser' in h.commands[0],false);
+});
+test('private tabs cannot save credentials or persist paused sites',async()=>{
   const h=await harness({paired:true});
-  assert.notEqual((await h.message({type:'one-time'},h.sender)).accepted,true);
-  assert.equal(h.connects,0);
-});
-test('Add one-time password sends only the tab picture, in pieces Desktop frames can hold',async()=>{
-  const bytes=Buffer.from(Array.from({length:100001},(_,i)=>i*7%256));
-  const h=await harness({paired:true,picture:`data:image/jpeg;base64,${bytes.toString('base64')}`});
-  const popup={url:'extension://factorseal/popup.html'};
-  await h.message({type:'one-time'},popup);
-  await until(()=>h.commands.some(c=>c.action.type==='poll'));
-  const parts=h.commands.filter(c=>c.action.type==='image').map(c=>c.action);
-  assert.ok(parts.length>1);
-  assert.ok(parts.every(part=>part.size===bytes.length));
-  assert.deepEqual(Buffer.concat(parts.map(part=>Buffer.from(part.data,'base64'))),bytes);
-  assert.ok(h.payloads.every(length=>length<=63*1024));
-  assert.deepEqual(h.commands.map(c=>c.action.type).slice(0,1),['one_time']);
-  assert.equal(JSON.stringify(h.notices),'[{"type":"notice"}]');
-});
-test('a cancelled one-time password request stops sending the tab picture',async()=>{
-  const picture=Buffer.alloc(2000000,7).toString('base64');
-  const h=await harness({paired:true,picture:`data:image/jpeg;base64,${picture}`});
-  const popup={url:'extension://factorseal/popup.html'};
-  const images=()=>h.commands.filter(c=>c.action.type==='image').length;
-  await h.message({type:'one-time'},popup);
-  await until(()=>images()>0);
-  await h.message({type:'cancel'},popup);
-  const sent=images();
-  await new Promise(r=>setTimeout(r,100));
-  assert.ok(images()<=sent+1 && images()<Math.ceil(picture.length/43688));
-});
-test('a tab that cannot be captured says so and never reaches Desktop',async()=>{
-  const h=await harness({paired:true,picture:new Error('capture refused')});
-  const popup={url:'extension://factorseal/popup.html'};
-  assert.equal((await h.message({type:'one-time'},popup)).status,'capture_failed');
-  assert.equal((await h.message({type:'status'},popup)).status,'capture_failed');
-  assert.ok(!h.commands.some(c=>c.action.type==='one_time'));
+  h.tab.incognito=true;
+  assert.equal((await h.message({type:'status'},popupSender)).site,undefined);
+  assert.equal((await h.message({type:'save-page'},popupSender)).offered,false);
+  assert.equal((await h.message({type:'save',document:'doc',username:'alice',password:'secret'},h.sender)).accepted,false);
+  assert.equal((await h.message({type:'pause'},popupSender)).accepted,false);
+  assert.equal(h.stored.paused,undefined);
+  assert.ok(!h.commands.some(c=>c.action.type==='save'));
 });
 
 for(const action of ['pause','unpair'])test(`an existing save question is disabled after ${action}`,async()=>{

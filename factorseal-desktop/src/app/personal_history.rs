@@ -71,6 +71,14 @@ impl<T> History<T> {
         self.push(Direction::Undo, change);
     }
 
+    pub(super) fn has(&self, direction: Direction) -> bool {
+        !match direction {
+            Direction::Undo => &self.undo,
+            Direction::Redo => &self.redo,
+        }
+        .is_empty()
+    }
+
     pub(super) fn take(&mut self, direction: Direction) -> Option<T> {
         self.stack(direction).pop()
     }

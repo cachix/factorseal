@@ -267,7 +267,7 @@ impl DesktopView {
                     return;
                 }
                 view.import_review = None;
-                view.finish_transfer(true, restore, result);
+                view.finish_transfer(true, restore, result, cx);
                 cx.notify();
             });
         })
