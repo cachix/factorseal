@@ -58,6 +58,7 @@ import com.cachix.factorseal.app.label
 import com.cachix.factorseal.core.Kind
 import com.cachix.factorseal.core.Summary
 import com.cachix.factorseal.resources.Res
+import com.cachix.factorseal.resources.activity
 import com.cachix.factorseal.resources.autofill_chrome
 import com.cachix.factorseal.resources.autofill_line
 import com.cachix.factorseal.resources.autofill_offer
@@ -67,6 +68,7 @@ import com.cachix.factorseal.resources.brand_chrome
 import com.cachix.factorseal.resources.clear_search
 import com.cachix.factorseal.resources.could_not_load
 import com.cachix.factorseal.resources.devices
+import com.cachix.factorseal.resources.glyph_clock
 import com.cachix.factorseal.resources.glyph_close
 import com.cachix.factorseal.resources.glyph_lock
 import com.cachix.factorseal.resources.glyph_search
@@ -154,6 +156,8 @@ fun VaultScreen(app: FactorSeal) {
             Page.New -> NewItemPage(app)
             Page.Devices -> DevicesPage(app)
             is Page.Device -> DevicePage(app, page.name)
+            Page.Activity -> ActivityPage(app)
+            is Page.Reads -> ReadsPage(app, page.latest)
             is Page.Transfer -> TransferPage(app, page.backup)
             is Page.TransferForm -> TransferFormPage(app, page.backup, page.import)
             Page.Settings -> SettingsPage(app)
@@ -320,6 +324,7 @@ private fun Home(app: FactorSeal) {
             )
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 SidebarItem(stringResource(Res.string.devices), Res.drawable.icon_network, onClick = { app.open(Page.Devices) })
+                SidebarItem(stringResource(Res.string.activity), Res.drawable.glyph_clock, onClick = { app.open(Page.Activity) })
                 SidebarItem(stringResource(Res.string.transfer_credentials), Res.drawable.glyph_transfer, onClick = { app.open(Page.Transfer(backup = false)) })
                 SidebarItem(stringResource(Res.string.back_up_vault), Res.drawable.icon_hard_drive, onClick = { app.open(Page.Transfer(backup = true)) })
                 SidebarItem(stringResource(Res.string.settings), Res.drawable.icon_settings, onClick = { app.open(Page.Settings) })

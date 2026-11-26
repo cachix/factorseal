@@ -7,8 +7,9 @@ use super::wire::PROTOCOL_VERSION;
 #[cfg(all(test, feature = "hardware"))]
 use super::wire::{MAX_MESSAGE_BYTES, REQUEST_ID_BYTES};
 use super::{
-    CallerIdentity, GrantPermission, UnsealLeasePolicy, VaultAction, VaultRequest, VaultResponse,
-    VaultResponseBody, VaultResponseError, VaultResponseErrorCode,
+    AccessOutcome, AccessRequester, CallerIdentity, GrantPermission, PermissionPrincipal,
+    UnsealLeasePolicy, VaultAction, VaultRequest, VaultResponse, VaultResponseBody,
+    VaultResponseError, VaultResponseErrorCode,
 };
 #[cfg(all(test, feature = "hardware"))]
 use super::{
@@ -16,6 +17,8 @@ use super::{
     VaultApplicationContext, VaultMutation, WireSecret, WireSecretAddress,
 };
 
+#[cfg(feature = "vault-store")]
+mod access_log;
 #[cfg(feature = "vault-store")]
 mod actions;
 #[cfg(feature = "vault-store")]
@@ -35,10 +38,12 @@ use time::{RequestTime, tighten};
 
 #[cfg(feature = "vault-store")]
 use super::grant::GrantRequirement;
+#[cfg(feature = "vault-store")]
+use access_log::AccessTarget;
 #[cfg(all(test, feature = "hardware"))]
 use actions::{ScopedAction, scope_action};
 #[cfg(feature = "vault-store")]
-use actions::{execute_action, validate_evict_at};
+use actions::{execute_action, read_target, validate_evict_at};
 #[cfg(feature = "vault-store")]
 use approvals::{ApprovalCandidate, PERMISSION_CONTROL_NAMESPACE};
 #[cfg(feature = "vault-store")]
@@ -180,6 +185,34 @@ impl VaultService {
         }
     }
 
+    /// Add a read of a personal item that happened outside the vault, such
+    /// as mobile autofill filling another app, to the access log. Permission
+    /// managers only.
+    pub fn record_personal_access(
+        &self,
+        caller: &CallerIdentity,
+        requester: AccessRequester,
+        item: &str,
+        outcome: AccessOutcome,
+        now: u64,
+    ) -> VaultResult<()> {
+        caller.validate()?;
+        let address = crate::vault::SecretAddress::new(item, None)?;
+        let mut state = self.state.lock_live(Instant::now())?;
+        permission_manager_deadline(&state, caller, now)?;
+        state.record_access(
+            requester,
+            AccessTarget {
+                scope: DocumentKind::LocalKeyring,
+                namespace: crate::personal::PERSONAL_SECRET_NAMESPACE.to_vec(),
+                address: Some(address),
+            },
+            outcome,
+            now,
+        );
+        Ok(())
+    }
+
     /// Run storage eviction and enforce the lease even when no request arrives.
     ///
     /// Returns `true` once the service has sealed and should stop accepting
@@ -233,11 +266,34 @@ impl VaultService {
             #[cfg(feature = "browser")]
             VaultAction::Browser { action } => {
                 require_live_manager(&state, caller, clock, valid_until)?;
-                let reply = self
+                let mut browser = self
                     .browser
                     .lock()
-                    .map_err(|_| VaultError::WorkerUnavailable)?
-                    .execute(state.store(), action, now, &provenance)?;
+                    .map_err(|_| VaultError::WorkerUnavailable)?;
+                let release = match &action {
+                    crate::browser::WorkerAction::Release {
+                        ticket, candidate, ..
+                    } => browser
+                        .origin(ticket)
+                        .map(|origin| (origin.to_owned(), candidate.id.clone())),
+                    _ => None,
+                };
+                let reply = browser.execute(state.store(), action, now, &provenance)?;
+                drop(browser);
+                if let (Some((origin, id)), crate::browser::WorkerReply::Fill { .. }) =
+                    (release, &reply)
+                {
+                    state.record_access(
+                        AccessRequester::Browser { origin },
+                        AccessTarget {
+                            scope: DocumentKind::LocalKeyring,
+                            namespace: crate::personal::PERSONAL_SECRET_NAMESPACE.to_vec(),
+                            address: crate::vault::SecretAddress::new(id, None).ok(),
+                        },
+                        AccessOutcome::Allowed,
+                        now,
+                    );
+                }
                 clock.check(valid_until.get())?;
                 let (now, monotonic_now) = clock.sample();
                 state.touch(now, monotonic_now)?;
@@ -448,6 +504,7 @@ impl VaultService {
                         state.wait_for_permission(&peer, &id, Duration::from_millis(1), clock)?;
                     return Ok(VaultResponseBody::PermissionWait { status });
                 }
+                let item = entry.clone();
                 let candidate =
                     ApprovalCandidate::for_keyring(&peer, &service, entry, base_dir, operation);
                 match candidate.require_keyring(state.store(), now) {
@@ -465,6 +522,11 @@ impl VaultService {
                     Err(error) => return Err(error.into()),
                 }
                 if let Some(action) = action {
+                    let read = read_target(&action).filter(|target| {
+                        operation == super::PermissionOperation::Get
+                            && item.is_some()
+                            && target.address == item
+                    });
                     let result = execute_action(
                         state.store(),
                         caller,
@@ -475,6 +537,14 @@ impl VaultService {
                         clock,
                         valid_until,
                     )?;
+                    if let Some(target) = read.filter(|_| released(&result.0)) {
+                        state.record_access(
+                            access_log::program(PermissionPrincipal::from(&peer), None),
+                            target,
+                            AccessOutcome::Allowed,
+                            now,
+                        );
+                    }
                     clock.check(valid_until.get())?;
                     if result.1 {
                         let (now, monotonic_now) = clock.sample();
@@ -564,18 +634,46 @@ impl VaultService {
                     status: super::PermissionChange::Revoked,
                 });
             }
-            action => execute_action(
-                state.store(),
-                caller,
-                action,
-                state.lease_deadlines(),
-                &provenance,
-                application
-                    .as_ref()
-                    .and_then(|context| context.base_dir.as_deref()),
-                clock,
-                valid_until,
-            ),
+            VaultAction::ListAccessLog { cursor } => {
+                require_live_manager(&state, caller, clock, valid_until)?;
+                let (records, next_cursor) =
+                    state.access_page(cursor, super::wire::MAX_MESSAGE_BYTES - 4096, now);
+                return Ok(VaultResponseBody::AccessLog {
+                    records,
+                    next_cursor,
+                });
+            }
+            action => {
+                let read = read_target(&action);
+                let result = execute_action(
+                    state.store(),
+                    caller,
+                    action,
+                    state.lease_deadlines(),
+                    &provenance,
+                    application
+                        .as_ref()
+                        .and_then(|context| context.base_dir.as_deref()),
+                    clock,
+                    valid_until,
+                );
+                if let Some(target) = read.filter(|target| {
+                    result.as_ref().is_ok_and(|(body, _)| released(body))
+                        && (target.scope == DocumentKind::NetworkManagerWifi
+                            || permission_manager_deadline(&state, caller, now).is_err())
+                }) {
+                    state.record_access(
+                        access_log::program(
+                            PermissionPrincipal::from(caller),
+                            application.as_ref(),
+                        ),
+                        target,
+                        AccessOutcome::Allowed,
+                        now,
+                    );
+                }
+                result
+            }
         };
         let (result, refresh_lease) = match result {
             Ok(result) => result,
@@ -595,6 +693,11 @@ impl VaultService {
         }
         Ok(result)
     }
+}
+
+#[cfg(feature = "vault-store")]
+fn released(body: &VaultResponseBody) -> bool {
+    matches!(body, VaultResponseBody::Secret { value: Some(_) })
 }
 
 #[cfg(feature = "vault-store")]

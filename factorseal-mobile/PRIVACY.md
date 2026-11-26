@@ -1,6 +1,6 @@
 # FactorSeal for Android and iOS privacy policy
 
-Last updated 23 October 2026.
+Last updated 20 November 2026.
 
 FactorSeal has no accounts and no servers of its own. It collects no analytics,
 no crash reports and no advertising data, and it has no ads or trackers.
@@ -44,6 +44,10 @@ pairing. It reads each image on your phone and never saves or sends it.
 When an app or website asks for a login, Android tells FactorSeal its name or
 address. FactorSeal matches it against your vault on your phone and sends
 nothing over the network.
+
+FactorSeal keeps a list of which apps and websites it filled, and when, in
+your encrypted vault for 90 days. The list stays on your phone and is not synced
+to your other devices.
 
 ## Changes and questions
 

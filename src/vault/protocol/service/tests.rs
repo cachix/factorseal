@@ -135,9 +135,9 @@ use super::super::grant::{
 use super::super::wire::SINGLE_USE_GRANT_SECONDS;
 use super::*;
 use crate::vault::{
-    DeviceKeyId, HistoryEntry, HistoryOperation, MAX_HISTORY_PAGE_SIZE, Permission,
-    PermissionOperation, PermissionPrincipal, Provenance, SecretAddress, ServiceReason,
-    VaultEntryImportStatus, VaultEntryMetadata, VersionId,
+    AccessOutcome, AccessRecord, AccessRequester, DeviceKeyId, HistoryEntry, HistoryOperation,
+    MAX_HISTORY_PAGE_SIZE, Permission, PermissionOperation, PermissionPrincipal, Provenance,
+    SecretAddress, ServiceReason, VaultEntryImportStatus, VaultEntryMetadata, VersionId,
 };
 use crate::{DocumentKind, MAX_LIST_PAGE_SIZE, SecretSpecAddress, SecretSpecCoordinates, Vault};
 
@@ -2000,6 +2000,256 @@ fn pending_approval_survives_sealing_and_is_approved_after_unseal() {
     assert_eq!(
         pending_ids(&service, &manager, now + 61),
         [] as [std::string::String; 0]
+    );
+}
+
+fn access_log(service: &VaultService, manager: &CallerIdentity, now: u64) -> Vec<AccessRecord> {
+    let listed = service.handle(
+        manager,
+        VaultRequest::new(VaultAction::ListAccessLog { cursor: None }).unwrap(),
+        now,
+    );
+    let Ok(VaultResponseBody::AccessLog {
+        records,
+        next_cursor: None,
+    }) = listed.result
+    else {
+        panic!("expected the access log");
+    };
+    records
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn reads_by_other_applications_are_logged_and_survive_sealing() {
+    let now = wall_clock();
+    let (directory, service) = service(now, UnsealLeasePolicy::default());
+    let reader = caller();
+    let manager = permission_manager();
+    service.authorize_permission_manager(&manager, now).unwrap();
+    for identity in [&reader, &manager] {
+        service
+            .authorize_entry(
+                identity,
+                b"secretspec",
+                &address(),
+                [GrantPermission::Get, GrantPermission::Put],
+                None,
+                now,
+            )
+            .unwrap();
+    }
+    let get = || {
+        VaultRequest::new(VaultAction::Get {
+            namespace: b"secretspec".to_vec(),
+            address: address(),
+        })
+        .unwrap()
+    };
+    assert!(matches!(
+        service.handle(&reader, get(), now + 1).result,
+        Ok(VaultResponseBody::Secret { value: None })
+    ));
+    let stored = service.handle(
+        &reader,
+        VaultRequest::new(VaultAction::Put {
+            namespace: b"secretspec".to_vec(),
+            address: address(),
+            value: WireSecret::new(b"secret".to_vec()).unwrap(),
+            evict_at: None,
+        })
+        .unwrap(),
+        now + 2,
+    );
+    assert!(matches!(stored.result, Ok(VaultResponseBody::Stored)));
+    for at in [now + 3, now + 4] {
+        assert!(matches!(
+            service.handle(&reader, get(), at).result,
+            Ok(VaultResponseBody::Secret { value: Some(_) })
+        ));
+    }
+    assert!(matches!(
+        service.handle(&manager, get(), now + 5).result,
+        Ok(VaultResponseBody::Secret { value: Some(_) })
+    ));
+    let denied = service
+        .handle(&reader, cache_request("demo"), now + 6)
+        .result
+        .unwrap_err()
+        .interaction
+        .unwrap();
+    service
+        .handle(
+            &manager,
+            VaultRequest::new(VaultAction::DenyPermission { id: denied.id }).unwrap(),
+            now + 7,
+        )
+        .result
+        .unwrap();
+    assert_eq!(
+        service
+            .handle(
+                &reader,
+                VaultRequest::new(VaultAction::ListAccessLog { cursor: None }).unwrap(),
+                now + 8,
+            )
+            .result
+            .unwrap_err()
+            .code,
+        VaultResponseErrorCode::AuthorizationRequired
+    );
+
+    let records = access_log(&service, &manager, now + 8);
+    let principal = PermissionPrincipal::from(&reader);
+    assert_eq!(
+        records,
+        [
+            AccessRecord {
+                id: 1,
+                at: now + 7,
+                count: 1,
+                outcome: AccessOutcome::Denied,
+                requester: AccessRequester::Program {
+                    principal: principal.clone(),
+                    application: Some(crate::vault::DeclaredApplication {
+                        project: Some("demo".into()),
+                        ..Default::default()
+                    }),
+                },
+                scope: DocumentKind::SecretSpecProviderCache,
+                namespace: b"demo".to_vec(),
+                address: Some(SecretAddress::secret_spec(project_address("demo")).unwrap()),
+            },
+            AccessRecord {
+                id: 0,
+                at: now + 4,
+                count: 2,
+                outcome: AccessOutcome::Allowed,
+                requester: AccessRequester::Program {
+                    principal,
+                    application: None,
+                },
+                scope: DocumentKind::LocalKeyring,
+                namespace: b"secretspec".to_vec(),
+                address: Some(address().resolve().unwrap()),
+            },
+        ]
+    );
+
+    let service = reopen_after_seal(&directory, service, now + 20);
+    assert_eq!(access_log(&service, &manager, now + 21), records);
+    let inventory = service.handle(
+        &manager,
+        VaultRequest::new(VaultAction::ListVaultEntries {
+            cursor: None,
+            limit: MAX_LIST_PAGE_SIZE,
+        })
+        .unwrap(),
+        now + 22,
+    );
+    let Ok(VaultResponseBody::VaultEntries { entries, .. }) = inventory.result else {
+        panic!("expected inventory");
+    };
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.document_kind != DocumentKind::Authorization)
+    );
+}
+
+#[test]
+fn reads_are_written_to_the_log_after_half_a_minute() {
+    let now = wall_clock();
+    let (_directory, service) = service(now, UnsealLeasePolicy::default());
+    let reader = caller();
+    service
+        .authorize_entry(
+            &reader,
+            b"secretspec",
+            &address(),
+            [GrantPermission::Get, GrantPermission::Put],
+            None,
+            now,
+        )
+        .unwrap();
+    let stored = service.handle(
+        &reader,
+        VaultRequest::new(VaultAction::Put {
+            namespace: b"secretspec".to_vec(),
+            address: address(),
+            value: WireSecret::new(b"secret".to_vec()).unwrap(),
+            evict_at: None,
+        })
+        .unwrap(),
+        now + 1,
+    );
+    assert!(matches!(stored.result, Ok(VaultResponseBody::Stored)));
+    let revision = || {
+        service
+            .state
+            .lock_live(Instant::now())
+            .unwrap()
+            .store()
+            .export_revision()
+            .unwrap()
+    };
+    let before = revision();
+    let read = service.handle(
+        &reader,
+        VaultRequest::new(VaultAction::Get {
+            namespace: b"secretspec".to_vec(),
+            address: address(),
+        })
+        .unwrap(),
+        now + 2,
+    );
+    assert!(matches!(
+        read.result,
+        Ok(VaultResponseBody::Secret { value: Some(_) })
+    ));
+    assert!(
+        !service
+            .expire_if_needed_at(now + 3, Instant::now())
+            .unwrap()
+    );
+    assert_eq!(revision(), before);
+    assert!(
+        !service
+            .expire_if_needed_at(now + 30, Instant::now())
+            .unwrap()
+    );
+    assert_ne!(revision(), before);
+}
+
+#[test]
+fn in_process_managers_record_reads_they_make_for_other_apps() {
+    let now = wall_clock();
+    let (_directory, service) = service(now, UnsealLeasePolicy::default());
+    let manager = permission_manager();
+    let app = AccessRequester::App {
+        package: "com.example.bank".into(),
+    };
+    assert!(
+        service
+            .record_personal_access(&manager, app.clone(), "item", AccessOutcome::Allowed, now)
+            .is_err()
+    );
+    service.authorize_permission_manager(&manager, now).unwrap();
+    service
+        .record_personal_access(
+            &manager,
+            app.clone(),
+            "item",
+            AccessOutcome::Allowed,
+            now + 1,
+        )
+        .unwrap();
+    let records = access_log(&service, &manager, now + 2);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].requester, app);
+    assert_eq!(
+        records[0].namespace,
+        crate::personal::PERSONAL_SECRET_NAMESPACE
     );
 }
 

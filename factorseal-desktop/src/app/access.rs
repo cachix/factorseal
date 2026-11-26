@@ -1,4 +1,5 @@
 //! A separate, compact review window for a pending system-keyring lookup.
+use super::activity::{application_name, visible_text};
 use super::*;
 use factorseal::{SecretServiceAccessContext, SecretServiceAccessRequest};
 use std::collections::BTreeMap;
@@ -683,13 +684,6 @@ fn unlock_target_label(path: &str) -> String {
     }
 }
 
-fn application_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
-}
-
 fn requester_label(grants: &[&factorseal::Permission]) -> Option<String> {
     single(grants.iter().map(|grant| &grant.principal)).map(|principal| {
         if grants.iter().all(|grant| is_secretspec_request(grant)) {
@@ -709,49 +703,6 @@ fn header_requester(grants: &[&factorseal::Permission], other_requests: bool) ->
 }
 
 const REASON_LIMIT: usize = 200;
-
-fn hidden_character(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{00AD}'
-                | '\u{0600}'..='\u{0605}'
-                | '\u{061C}'
-                | '\u{06DD}'
-                | '\u{070F}'
-                | '\u{0890}'..='\u{0891}'
-                | '\u{08E2}'
-                | '\u{115F}'..='\u{1160}'
-                | '\u{180E}'
-                | '\u{200B}'..='\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2060}'..='\u{206F}'
-                | '\u{3164}'
-                | '\u{FEFF}'
-                | '\u{FFA0}'
-                | '\u{FFF9}'..='\u{FFFB}'
-                | '\u{110BD}'
-                | '\u{110CD}'
-                | '\u{13430}'..='\u{1343F}'
-                | '\u{1BCA0}'..='\u{1BCA3}'
-                | '\u{1D173}'..='\u{1D17A}'
-                | '\u{E0000}'..='\u{E007F}'
-        )
-}
-
-fn visible_text(text: &str) -> String {
-    let visible: String = text
-        .chars()
-        .filter_map(|character| {
-            if character.is_whitespace() {
-                Some(' ')
-            } else {
-                (!hidden_character(character)).then_some(character)
-            }
-        })
-        .collect();
-    visible.split_whitespace().collect::<Vec<_>>().join(" ")
-}
 
 fn display_reason(reason: &str) -> String {
     let words = visible_text(reason);

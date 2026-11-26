@@ -176,6 +176,12 @@ impl DesktopView {
                 VaultSelection::Devices,
             ))
             .child(page(
+                "vault-activity",
+                Glyph::Clock.into(),
+                "Activity",
+                VaultSelection::Activity,
+            ))
+            .child(page(
                 "transfer-credentials",
                 Glyph::Transfer.into(),
                 "Transfer credentials",

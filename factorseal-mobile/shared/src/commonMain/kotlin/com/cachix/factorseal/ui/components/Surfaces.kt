@@ -193,6 +193,7 @@ fun ListRow(
     modifier: Modifier = Modifier,
     selected: Boolean = false,
     chevron: Boolean = false,
+    enabled: Boolean = true,
     content: @Composable RowScope.() -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -203,7 +204,7 @@ fun ListRow(
             Modifier
                 .fillMaxWidth()
                 .background(if (pressed || selected) colors.selection else Color.Transparent)
-                .clickable(interaction, indication = null, role = Role.Button, onClick = onClick)
+                .clickable(interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
                 .defaultMinSize(minHeight = 60.dp)
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -238,9 +239,18 @@ fun PageHeader(
     modifier: Modifier = Modifier,
     detail: String? = null,
     actions: (@Composable RowScope.() -> Unit)? = null,
+) = PageHeader({ IconTile(icon, size = 56.dp) }, title, modifier, detail, actions)
+
+@Composable
+fun PageHeader(
+    mark: @Composable () -> Unit,
+    title: String,
+    modifier: Modifier = Modifier,
+    detail: String? = null,
+    actions: (@Composable RowScope.() -> Unit)? = null,
 ) {
     Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconTile(icon, size = 56.dp)
+        mark()
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, style = Type.title, maxLines = 2)
             if (detail != null) Text(detail, color = Theme.colors.mutedForeground, maxLines = 2)

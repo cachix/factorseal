@@ -73,7 +73,8 @@
     {"type": "logins", "site": {"web": "https://github.com/login"}},
     {"type": "logins", "site": {"app": "com.github.android"}},
     {"type": "fill", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "site": {"app": "com.github.android"}},
-    {"type": "save-login", "site": {"web": "https://github.com"}, "title": "github.com", "username": "octocat", "password": "correct horse battery staple"}
+    {"type": "save-login", "site": {"web": "https://github.com"}, "title": "github.com", "username": "octocat", "password": "correct horse battery staple"},
+    {"type": "activity"}
   ],
   "responses": [
     {"type": "status", "vault": "unsealed", "groups": [["password"]], "backend": "android-trusted-environment", "paired": false, "idle-deadline": 1800000300, "absolute-deadline": 1800028800},
@@ -156,6 +157,7 @@
     {"type": "logins", "linked": [{"id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "title": "GitHub", "username": "octocat"}], "others": [{"id": "01JB8W40AC3D5F7H9K1M3P5R7T", "title": "Example", "username": "alice"}]},
     {"type": "credentials", "username": "octocat", "password": "correct horse battery staple"},
     {"type": "login-saved", "id": "01JB8W3ZK4S6Q2X9V7M5T1R0PA", "change": "updated"},
+    {"type": "activity", "entries": [{"at": 1800000000, "count": 1, "allowed": true, "requester": "website", "name": "https://github.com", "item": "01JB8W3ZK4S6Q2X9V7M5T1R0PA"}]},
     {"type": "error", "code": "password-rejected", "message": "Incorrect password. Please try again."}
   ],
   "enums": {
@@ -163,6 +165,7 @@
     "field-type": ["text", "concealed", "url", "email", "phone", "date", "month-year", "totp", "multiline", "boolean", "card-number", "ssh-key", "address", "reference", "unknown"],
     "kind": ["login", "secure-note", "card", "identity", "ssh-key", "api-credential", "passport", "bank-account", "document", "generic"],
     "login-change": ["added", "updated", "unchanged"],
+    "requester": ["app", "website", "browser", "program"],
     "strength": ["weak", "good", "strong"],
     "vault-state": ["absent", "sealed", "unsealed"]
   }

@@ -539,6 +539,9 @@ impl DesktopView {
                     cx,
                 ))),
         );
+        if let Some(recent) = self.render_recent_access(entry, cx) {
+            panel = panel.child(recent);
+        }
         if let Some(modified) = entry
             .updated_at
             .and_then(|updated_at| modified_text(updated_at, &jiff::tz::TimeZone::system()))
@@ -740,7 +743,7 @@ impl DesktopView {
                     self.show_toast("Item deleted", Some(Direction::Undo), false, cx);
                 }
             }
-            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
+            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(*contents, cx),
             Err(PersonalWriteError::Failed(error)) => {
                 self.personal_detail.error = Some(format!("Could not delete the item: {error}"));
                 cx.notify();
@@ -783,7 +786,7 @@ impl DesktopView {
         let (version, updated_contents) = match result {
             Ok(result) => result,
             Err(PersonalWriteError::Changed(contents)) => {
-                self.show_changed_item(contents, cx);
+                self.show_changed_item(*contents, cx);
                 return;
             }
             Err(PersonalWriteError::Failed(error)) => {
@@ -911,7 +914,7 @@ impl DesktopView {
                 self.personal_detail.error = None;
                 self.change_toast = None;
             }
-            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(contents, cx),
+            Err(PersonalWriteError::Changed(contents)) => self.show_changed_item(*contents, cx),
             Err(PersonalWriteError::Failed(error)) => {
                 self.personal_detail.error = Some(format!("Not saved: {error}"));
             }

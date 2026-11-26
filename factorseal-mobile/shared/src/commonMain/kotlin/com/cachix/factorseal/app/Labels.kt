@@ -62,6 +62,7 @@ import com.cachix.factorseal.resources.month_9
 import com.cachix.factorseal.resources.strength_good
 import com.cachix.factorseal.resources.strength_strong
 import com.cachix.factorseal.resources.strength_weak
+import com.cachix.factorseal.resources.today
 import com.cachix.factorseal.resources.type_address
 import com.cachix.factorseal.resources.type_boolean
 import com.cachix.factorseal.resources.type_card_number
@@ -77,7 +78,11 @@ import com.cachix.factorseal.resources.type_reference
 import com.cachix.factorseal.resources.type_ssh_key
 import com.cachix.factorseal.resources.type_text
 import com.cachix.factorseal.resources.type_website
+import com.cachix.factorseal.resources.yesterday
+import kotlinx.datetime.DateTimeUnit
+import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
+import kotlinx.datetime.minus
 import kotlinx.datetime.toLocalDateTime
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.StringResource
@@ -245,8 +250,30 @@ private val Months =
 
 @Composable
 fun dateLabel(epochSeconds: Long): String {
-    val date = Instant.fromEpochSeconds(epochSeconds).toLocalDateTime(TimeZone.currentSystemDefault()).date
+    val date = localDate(epochSeconds)
     return "${date.day} ${stringResource(Months[date.month.ordinal])} ${date.year}"
+}
+
+fun localDate(epochSeconds: Long): LocalDate = Instant.fromEpochSeconds(epochSeconds).toLocalDateTime(TimeZone.currentSystemDefault()).date
+
+@Composable
+fun dayLabel(
+    epochSeconds: Long,
+    now: Long,
+): String {
+    val date = localDate(epochSeconds)
+    val today = localDate(now)
+    return when {
+        date == today -> stringResource(Res.string.today)
+        date == today.minus(1, DateTimeUnit.DAY) -> stringResource(Res.string.yesterday)
+        date.year == today.year -> "${date.day} ${stringResource(Months[date.month.ordinal])}"
+        else -> dateLabel(epochSeconds)
+    }
+}
+
+fun timeLabel(epochSeconds: Long): String {
+    val time = Instant.fromEpochSeconds(epochSeconds).toLocalDateTime(TimeZone.currentSystemDefault()).time
+    return "${time.hour.toString().padStart(2, '0')}:${time.minute.toString().padStart(2, '0')}"
 }
 
 fun grouped(code: String): String {

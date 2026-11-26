@@ -10,7 +10,7 @@ use crate::transfer;
 use factorseal::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret, generator, templates, totp};
 use factorseal::transfer::import_plan::PreparedImport;
 use factorseal::vault::{
-    MAX_LIST_PAGE_SIZE, VaultAction, VaultMutation, VaultRequest, VaultResponseBody,
+    AccessOutcome, MAX_LIST_PAGE_SIZE, VaultAction, VaultMutation, VaultRequest, VaultResponseBody,
     VaultResponseErrorCode, WireSecret, WireSecretAddress,
 };
 use factorseal::{
@@ -199,6 +199,7 @@ impl Core {
             }
             Request::Logins { site } => self.logins(&site),
             Request::Fill { id, site } => self.fill(&id, &site),
+            Request::Activity => self.activity(),
             Request::SaveLogin {
                 site,
                 title,
@@ -263,6 +264,25 @@ impl Core {
 
     fn fill(&self, id: &str, site: &Site) -> Outcome<Response> {
         let target = Target::of(site)?;
+        let filled = self.fill_target(id, &target);
+        let outcome = match &filled {
+            Ok(_) => Some(AccessOutcome::Allowed),
+            Err(failure) if failure.code == ErrorCode::Denied => Some(AccessOutcome::Denied),
+            Err(_) => None,
+        };
+        if let (Some(outcome), Ok(service)) = (outcome, self.require_live()) {
+            let _ = service.record_personal_access(
+                &self.caller,
+                target.requester(),
+                id,
+                outcome,
+                totp::unix_now(),
+            );
+        }
+        filled
+    }
+
+    fn fill_target(&self, id: &str, target: &Target) -> Outcome<Response> {
         let (mut item, version) = self.read(id)?;
         if !item.is_fillable_login() {
             return Err(Failure::new(
@@ -277,7 +297,7 @@ impl Core {
                     "this login is not saved for this website",
                 ));
             }
-            autofill::link(&mut item, &target);
+            autofill::link(&mut item, target);
             self.write(&item, Some(&version))?;
         }
         let (username, password) = item.login_credentials().ok_or_else(unexpected)?;
@@ -285,6 +305,26 @@ impl Core {
             username: Revealed(Zeroizing::new(username.to_owned())),
             password: Revealed(Zeroizing::new(password.to_owned())),
         })
+    }
+
+    fn activity(&self) -> Outcome<Response> {
+        let mut entries = Vec::new();
+        let mut cursor = None;
+        loop {
+            let VaultResponseBody::AccessLog {
+                records,
+                next_cursor,
+            } = self.request(VaultAction::ListAccessLog { cursor })?
+            else {
+                return Err(unexpected());
+            };
+            entries.extend(records.into_iter().map(autofill::access));
+            if next_cursor.is_none() || next_cursor == cursor {
+                break;
+            }
+            cursor = next_cursor;
+        }
+        Ok(Response::Activity { entries })
     }
 
     fn save_login(

@@ -13,6 +13,7 @@ use super::super::{
     CallerIdentity, GrantPermission, PermissionPrincipal, VaultAction, VaultMutation,
     VaultResponseBody, WireSecret, WireSecretAddress,
 };
+use super::access_log::AccessTarget;
 use super::approvals::PERMISSION_CONTROL_NAMESPACE;
 use super::time::{RequestTime, tighten};
 
@@ -141,7 +142,8 @@ pub(super) fn execute_action(
         | VaultAction::WaitPermission { .. }
         | VaultAction::ApprovePermission { .. }
         | VaultAction::DenyPermission { .. }
-        | VaultAction::RevokePermission { .. } => {
+        | VaultAction::RevokePermission { .. }
+        | VaultAction::ListAccessLog { .. } => {
             unreachable!("action was handled before execution")
         }
     }
@@ -548,7 +550,30 @@ impl ActionContext<'_> {
 }
 
 pub(super) fn scope_action(action: VaultAction) -> ScopedAction {
-    let scope = match action {
+    let scope = action_scope(&action);
+    ScopedAction { action, scope }
+}
+
+/// The secret a read asks for, if this action reads one.
+pub(super) fn read_target(action: &VaultAction) -> Option<AccessTarget> {
+    let (namespace, address) = match action {
+        VaultAction::Get { namespace, address } => (namespace.clone(), address.resolve().ok()?),
+        VaultAction::GetProject { project, address }
+        | VaultAction::GetCache { project, address } => (
+            project.as_bytes().to_vec(),
+            SecretAddress::secret_spec(address.clone()).ok()?,
+        ),
+        _ => return None,
+    };
+    Some(AccessTarget {
+        scope: action_scope(action),
+        namespace,
+        address: Some(address),
+    })
+}
+
+fn action_scope(action: &VaultAction) -> DocumentKind {
+    match *action {
         VaultAction::GetProject { .. }
         | VaultAction::PutProject { .. }
         | VaultAction::DeleteProject { .. }
@@ -584,8 +609,7 @@ pub(super) fn scope_action(action: VaultAction) -> ScopedAction {
             DocumentKind::NetworkManagerWifi
         }
         _ => DocumentKind::LocalKeyring,
-    };
-    ScopedAction { action, scope }
+    }
 }
 
 /// A deadline equal to the vault's whole-second clock is a valid

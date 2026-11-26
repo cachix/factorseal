@@ -195,6 +195,7 @@ mod tests {
     fn dedicated_pages_follow_the_logo() {
         for (selection, title) in [
             (VaultSelection::Devices, "Devices"),
+            (VaultSelection::Activity, "Activity"),
             (VaultSelection::TransferCredentials, "Transfer credentials"),
             (VaultSelection::BackupVault, "Back up vault"),
         ] {

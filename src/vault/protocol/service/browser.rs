@@ -117,6 +117,13 @@ fn put(
     Ok(WorkerReply::Done)
 }
 impl BrowserState {
+    /// The website a pending fill is for, while its ticket is still open.
+    pub(super) fn origin(&self, ticket: &str) -> Option<&str> {
+        self.tickets
+            .get(ticket)
+            .map(|pending| pending.origin.as_str())
+    }
+
     pub(super) fn execute(
         &mut self,
         store: &VaultStore,

@@ -18,10 +18,11 @@ use crate::vault::{
 
 use super::super::grant::{GrantTarget, promote_permission};
 use super::super::{
-    CallerIdentity, GrantPermission, Permission, PermissionOperation, PermissionPrincipal,
-    PermissionState, PermissionWaitStatus, SINGLE_USE_GRANT_SECONDS, VaultAction,
-    VaultApplicationContext, VaultInteractionReference,
+    AccessRequester, CallerIdentity, GrantPermission, Permission, PermissionOperation,
+    PermissionPrincipal, PermissionState, PermissionWaitStatus, SINGLE_USE_GRANT_SECONDS,
+    VaultAction, VaultApplicationContext, VaultInteractionReference,
 };
+use super::access_log::{self, AccessTarget};
 use crate::vault::signature::{permission_payload, verify};
 
 /// The lifetime a person signed when approving: a duration (`None` for
@@ -538,7 +539,12 @@ impl PendingApprovals {
         }
     }
 
-    pub(super) fn deny(&mut self, id: &str, now: u64) -> VaultResult<()> {
+    /// Returns who was refused and what they asked to read, for the access log.
+    pub(super) fn deny(
+        &mut self,
+        id: &str,
+        now: u64,
+    ) -> VaultResult<Option<(AccessRequester, AccessTarget)>> {
         self.purge_expired(now);
         let index = self
             .records
@@ -559,7 +565,20 @@ impl PendingApprovals {
             expires_at.saturating_add(APPROVAL_TTL_SECONDS),
         );
         self.revision = self.revision.wrapping_add(1);
-        Ok(())
+        Ok((record.permission == GrantPermission::Get).then(|| {
+            (
+                access_log::program(record.summary.principal, Some(&record.summary.application)),
+                AccessTarget {
+                    scope: record.scope,
+                    namespace: if record.scope == DocumentKind::LinuxSecretService {
+                        crate::vault::secret_service_data::NAMESPACE.to_vec()
+                    } else {
+                        record.namespace
+                    },
+                    address: record.address,
+                },
+            )
+        }))
     }
 
     pub(super) fn status(
@@ -721,6 +740,34 @@ mod tests {
             approvals.create(missing, 100),
             Err(VaultError::AuthorizationRequired)
         ));
+    }
+
+    #[test]
+    fn denied_keyring_reads_name_the_stored_item() {
+        let mut approvals = PendingApprovals::default();
+        let item = crate::SecretAddress::new("item-1", None).unwrap();
+        let keyring = ApprovalCandidate::for_keyring(
+            &candidate(0, 0).caller,
+            "service/github",
+            Some(item.clone()),
+            "/home".to_owned(),
+            PermissionOperation::Get,
+        );
+        let id = approvals.create(keyring, 100).unwrap().id;
+        let (_, target) = approvals.deny(&id, 101).unwrap().unwrap();
+        assert_eq!(
+            target,
+            AccessTarget {
+                scope: DocumentKind::LinuxSecretService,
+                namespace: crate::vault::secret_service_data::NAMESPACE.to_vec(),
+                address: Some(item),
+            }
+        );
+
+        let mut write = candidate(0, 0);
+        write.permission = GrantPermission::Put;
+        let id = approvals.create(write, 102).unwrap().id;
+        assert_eq!(approvals.deny(&id, 103).unwrap(), None);
     }
 
     #[test]

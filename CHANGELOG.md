@@ -13,6 +13,12 @@ All notable changes to FactorSeal will be documented in this file.
   imported, not only after the next unlock. Add field no longer lists
   Website twice when the item has no website.
 
+- Desktop and mobile have an Activity page that shows which app or
+  website read which secret on this device, and when, including
+  refused requests. Each row opens the app's full program path and
+  every read of that day. Each item lists its recent access too. The
+  list stays on the device for 90 days and is never synced.
+
 - Write Desktop and mobile text in plain words and drop the tagline
   from the footer. The Desktop footer now has a labeled Report an
   issue button.

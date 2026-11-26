@@ -48,6 +48,7 @@ class ProtocolTest {
         assertEquals(values("field-type"), FieldType.serializer().descriptor.elementNames.toList())
         assertEquals(values("kind"), Kind.serializer().descriptor.elementNames.toList())
         assertEquals(values("login-change"), LoginChange.serializer().descriptor.elementNames.toList())
+        assertEquals(values("requester"), Requester.serializer().descriptor.elementNames.toList())
         assertEquals(values("strength"), Strength.serializer().descriptor.elementNames.toList())
         assertEquals(values("vault-state"), VaultState.serializer().descriptor.elementNames.toList())
     }

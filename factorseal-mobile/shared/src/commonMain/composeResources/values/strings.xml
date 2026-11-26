@@ -66,6 +66,25 @@
     <string name="try_different_search">Try a different search.</string>
     <string name="could_not_load">Could not load vault contents: %1$s</string>
 
+    <string name="activity">Activity</string>
+    <string name="no_activity">No activity yet</string>
+    <string name="no_activity_line">When FactorSeal fills a password in another app or website, it shows up here.</string>
+    <string name="recent_access">Recent access</string>
+    <string name="see_all">See all</string>
+    <string name="today">Today</string>
+    <string name="yesterday">Yesterday</string>
+    <string name="day_at">%1$s at %2$s</string>
+    <string name="deleted_secret">Deleted secret</string>
+    <string name="denied">Denied</string>
+    <string name="denied_times">Denied %1$d times</string>
+    <string name="reads">Read %1$d times</string>
+    <string name="time_range">%1$s to %2$s</string>
+    <string name="read_once">Read once</string>
+    <string name="reads_title">Reads</string>
+    <string name="open_secret">Open secret</string>
+    <string name="requester_app">App</string>
+    <string name="requester_application">Application</string>
+
     <string name="modified">Modified %1$s</string>
     <string name="item_changed">This item changed somewhere else, so your change was not saved.</string>
     <string name="edit">Edit</string>
