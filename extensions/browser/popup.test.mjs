@@ -2,22 +2,29 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
+const core=await readFile(new URL('./core.js',import.meta.url),'utf8');
 const labels=await readFile(new URL('./labels.js',import.meta.url),'utf8');
 const source=await readFile(new URL('./popup.js',import.meta.url),'utf8');
 function popup(state,{allowed=true,reply}={}){
   const calls=[];let closed=false;
   const nodes=new Map();
   const element=id=>{if(!nodes.has(id))nodes.set(id,{id,hidden:false,disabled:false,textContent:''});return nodes.get(id);};
-  const buttons=['pair','enable','fill','save-page','one-time','pause','cancel','revoke'].map(element);
-  const context=vm.createContext({document:{getElementById:element,querySelectorAll:()=>buttons},browser:{runtime:{sendMessage:async message=>{calls.push(message.type);return reply?.[message.type]??state;}},permissions:{request:async()=>{calls.push('site-permission');return allowed;}}},setTimeout:()=>{},close:()=>{closed=true;}});
-  vm.runInContext(labels,context);vm.runInContext(source,context);context.render(state);
+  const buttons=['pair','enable','fill','save-page','pause','cancel','revoke'].map(element);
+  const context=vm.createContext({URL,document:{getElementById:element,querySelectorAll:()=>buttons},browser:{runtime:{sendMessage:async message=>{calls.push(message.type);return reply?.[message.type]??state;}},permissions:{request:async options=>{calls.push(...options.origins);return allowed;}}},setTimeout:()=>{},close:()=>{closed=true;}});
+  vm.runInContext(core,context);vm.runInContext(labels,context);vm.runInContext(source,context);context.render(state);
   return {element,render:context.render,calls,get closed(){return closed;}};
 }
-for(const allowed of [true,false])test(`pairing requests site access in the same click (allowed: ${allowed})`,async()=>{
-  const {element,calls}=popup({paired:false,status:'idle'},{allowed});
+test('pairing does not request website access',async()=>{
+  const {element,calls}=popup({paired:false,status:'idle'});
   calls.length=0;
   await element('pair').onclick();
-  assert.deepEqual(calls.slice(0,2),['site-permission','pair']);
+  assert.deepEqual(calls.slice(0,2),['pair','status']);
+});
+test('detection requests access only to the current host',async()=>{
+  const {element,calls}=popup({paired:true,site:'https://example.com:443',status:'idle'});
+  calls.length=0;
+  await element('enable').onclick();
+  assert.deepEqual(calls.slice(0,2),['https://example.com/*','status']);
 });
 test('unpaired popup offers pairing without login or profile controls',()=>{
   const {element}=popup({paired:false,pending:null,status:'Disconnected'});
@@ -63,13 +70,15 @@ test('installation guidance stays hidden for ordinary connection failures and no
   }
 });
 test('approved pairing reveals permission onboarding, then page controls; revocation resets it',()=>{
-  const {element,render}=popup({paired:true,pending:null,detection:false,status:'done'});
+  const {element,render}=popup({paired:true,pending:null,detection:false,site:'https://example.com',status:'done'});
   assert.equal(element('onboarding').hidden,true);
   assert.equal(element('detection').hidden,false);
-  assert.equal(element('site-controls').hidden,true);
+  assert.equal(element('pause').hidden,true);
+  assert.equal(element('fill').disabled,false);
+  assert.equal(element('save-page').hidden,false);
   render({paired:true,detection:true,paused:true,site:'https://example.com',status:'idle'});
   assert.equal(element('detection').hidden,true);
-  assert.equal(element('site-controls').hidden,false);
+  assert.equal(element('pause').hidden,false);
   assert.equal(element('pause').textContent,'Resume on this site');
   render({paired:false,status:'revoked'});
   assert.equal(element('controls').hidden,true);
@@ -88,20 +97,4 @@ for(const found of [true,false])test(`Fill this page closes the popup only when 
   await p.element('fill').onclick();
   assert.equal(p.closed,found);
   if(!found)assert.equal(p.element('status').textContent,'No complete login form found on this page.');
-});
-test('Add one-time password is offered on a website to a paired profile with no request pending',()=>{
-  const {element,render}=popup({paired:true,detection:false,site:'https://example.com',status:'idle'});
-  assert.equal(element('one-time').hidden,false);
-  assert.equal(element('one-time').disabled,false);
-  render({paired:true,detection:false,status:'idle'});
-  assert.equal(element('one-time').disabled,true);
-  render({paired:true,pending:'one_time',site:'https://example.com',status:'reading'});
-  assert.equal(element('one-time').hidden,true);
-  assert.equal(element('status').textContent,'Reading the QR code on this page.');
-  render({paired:false,site:'https://example.com',status:'idle'});
-  assert.equal(element('one-time').hidden,true);
-});
-for(const [status,text] of [['one_time_saved','One-time password saved in FactorSeal.'],['no_code','No QR code found on this page.']])test(`one-time password result: ${status}`,()=>{
-  const {element}=popup({paired:true,site:'https://example.com',status});
-  assert.equal(element('status').textContent,text);
 });

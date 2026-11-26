@@ -7,6 +7,15 @@ use std::{
 pub const FIREFOX_ID: &str = "factorseal@factorseal.dev";
 /// Development ID derived from the public key in manifest.chromium.json.
 pub const CHROMIUM_ID: &str = "eljopjcihlpjipbefddajpoiefpfgdca";
+
+pub(super) fn default_extension_id(browser: &str) -> &'static str {
+    match browser {
+        "firefox" => FIREFOX_ID,
+        "chrome" => option_env!("FACTORSEAL_CHROME_STORE_ID").unwrap_or(CHROMIUM_ID),
+        _ => CHROMIUM_ID,
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub root: PathBuf,
@@ -60,7 +69,7 @@ pub fn install(
             "choose firefox, chrome, chromium, or edge",
         ));
     }
-    let id = id.unwrap_or(if firefox { FIREFOX_ID } else { CHROMIUM_ID });
+    let id = id.unwrap_or_else(|| default_extension_id(browser));
     if id.len() > 128
         || id.is_empty()
         || !id

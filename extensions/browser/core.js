@@ -7,6 +7,7 @@
     return u.origin;
   };
   const decode = value => new TextDecoder('utf-8', {fatal:true}).decode(Uint8Array.from(atob(value), c => c.charCodeAt(0)));
+  const sitePattern = site => `https://${new URL(site).hostname}/*`;
   function validateResponse(value) {
     if (!value || typeof value !== 'object' || JSON.stringify(value).length > 65536) throw new Error('invalid_response');
     const fields = {hello:['type','version','session'],state:['type','state'],context:['type','nonce'],fill:['type','username','password'],finished:['type','reason']}[value.type];
@@ -26,5 +27,5 @@
     if(brands.includes('Chromium')||/Chrom(?:e|ium)\//.test(agent))return 'chromium';
     return undefined;
   }
-  globalThis.FactorSealCore = {hex,origin,decode,validateResponse,browserKind};
+  globalThis.FactorSealCore = {hex,origin,decode,sitePattern,validateResponse,browserKind};
 })();

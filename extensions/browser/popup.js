@@ -2,8 +2,9 @@ const api=globalThis.browser||globalThis.chrome;
 const element=id=>document.getElementById(id);
 const status=element('status');
 const labels=globalThis.FactorSealLabels;
-let busy=false,notice='',previousStatus;
+let busy=false,notice='',previousStatus,site;
 function render(state) {
+  site=state.site;
   const paired=state.paired===true;
   const pending=Boolean(state.pending);
   const unavailable=['desktop_missing','desktop_unavailable','native_disconnected','native_timeout'].includes(state.status)&&!pending;
@@ -18,14 +19,12 @@ function render(state) {
   element('pair').textContent=unavailable?'Try again':'Pair with Desktop';
   element('pair').hidden=pending;
   element('cancel').hidden=!pending;
-  element('save-page').hidden=!paired||!state.detection||pending;
-  element('save-page').disabled=busy||!state.site;
-  element('one-time').hidden=!paired||pending;
-  element('one-time').disabled=busy||!state.site;
-  element('detection').hidden=!paired||state.detection;
-  element('site-controls').hidden=!paired||!state.detection;
+  element('save-page').hidden=!paired||pending;
+  element('detection').hidden=!paired||!site||state.detection;
+  element('pause').hidden=!paired||!state.detection;
   element('pause').textContent=state.paused?'Resume on this site':'Pause on this site';
-  for(const id of ['fill','pause','revoke','enable'])element(id).disabled=pending||busy||(id==='pause'&&!state.site);
+  for(const id of ['fill','save-page','pause','enable'])element(id).disabled=pending||busy||!site;
+  element('revoke').disabled=pending||busy;
   element('pairing-key').hidden=paired||!pending;
   const key=state.profile?`Profile key: ${state.profile}…`:'';
   element('profile-key').textContent=key;
@@ -37,12 +36,9 @@ async function refresh() {try{render(await api.runtime.sendMessage({type:'status
 for(const button of document.querySelectorAll('button'))button.onclick=async()=>{
   if(busy)return;busy=true;button.disabled=true;
   try {
-    if(button.id==='pair'){
-      // Request from the click itself: browsers require a user gesture.
-      await api.permissions.request({origins:['https://*/*']});
-      await api.runtime.sendMessage({type:'pair'});notice='';
-    } else if(button.id==='enable'){
-      const allowed=await api.permissions.request({origins:['https://*/*']});
+    if(button.id==='enable'){
+      // The browser requires the permission prompt to start from the click.
+      const allowed=await api.permissions.request({origins:[globalThis.FactorSealCore.sitePattern(site)]});
       notice=allowed?'Detection enabled. Reload the login page.':'Site access declined.';
     } else {
       const result=await api.runtime.sendMessage({type:button.id});notice='';

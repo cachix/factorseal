@@ -2,7 +2,8 @@
   "manifest_version": 3,
   "name": "FactorSeal",
   "version": "0.1.0",
-  "description": "Fill personal logins with approval in FactorSeal Desktop.",
+  "description": "Save and fill logins with FactorSeal Desktop. Requires a compatible Desktop installation.",
+  "incognito": "not_allowed",
   "permissions": [
     "nativeMessaging",
     "storage",
@@ -38,10 +39,14 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "factorseal@factorseal.dev",
-      "strict_min_version": "129.0",
+      "strict_min_version": "140.0",
       "data_collection_permissions": {
         "required": [
-          "none"
+          "authenticationInfo",
+          "browsingActivity"
+        ],
+        "optional": [
+          "technicalAndInteraction"
         ]
       }
     }

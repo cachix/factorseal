@@ -28,7 +28,7 @@ so the browser can start that Desktop even when it does not inherit shell variab
 
 ### Firefox
 
-Firefox 129+: open `about:debugging#/runtime/this-firefox`, choose Load
+Firefox 140+: open `about:debugging#/runtime/this-firefox`, choose Load
 Temporary Add-on, and select `dist/firefox/manifest.json`. Temporary add-ons must
 be loaded again after restarting Firefox.
 
@@ -38,8 +38,8 @@ Chromium/Chrome/Edge 137+: open the browser's extensions page, enable developer
 mode, and load `dist/chromium` unpacked. Its development ID is fixed by the
 manifest public key ([Chrome documentation](https://developer.chrome.com/docs/extensions/reference/manifest/key)).
 If you loaded the earlier build, remove it and load this one again, then pair it;
-its old path-dependent ID and pairing storage do not carry over. Store publication
-will need the store-assigned identity and corresponding native-host allowlist.
+its old path-dependent ID and pairing storage do not carry over. The Chrome
+store build uses the Chrome Web Store item ID. See [store packages](#store-packages).
 
 Desktop refreshes registration on every startup. There is no global disable
 setting. Extension installation and pairing still require the user’s actions.
@@ -54,7 +54,7 @@ remain visible even when executable discovery misses them. Settings retains inst
 instructions and paired-profile controls. Pairing is
 per profile; a paired browser does not imply every profile is paired or online.
 Browser names are signed, self-reported display metadata, not authorization.
-Reload extensions paired with an older build to identify their browser names.
+Firefox shares its browser name only with the optional technical-data permission.
 Discovery is best effort; portable or sandboxed installations may not be found.
 
 All registered browsers use the vault selected by the most recently started Desktop.
@@ -70,9 +70,11 @@ and Cancel; login and profile controls appear only after pairing approval.
 Open the extension popup and choose **Pair with Desktop**. In Desktop, choose
 **Unlock & Pair** when sealed, or **Pair browser** when already unsealed.
 A successful unlock completes that pairing without another confirmation.
-Pairing requests HTTPS site access, then enables login detection automatically
-after Desktop approves. If you decline site access, you can enable it later
-from the popup. Login fields on HTTPS pages then get a small FactorSeal button.
+Pairing works without granting standing access to any website. The toolbar
+popup offers **Fill this page** and **Save login from this page** on HTTPS
+pages using temporary access from opening the popup. Choose **Enable detection
+on this site** separately for each HTTPS hostname where you want field buttons
+and automatic save prompts. Reload the page after granting access.
 Choosing it opens Desktop, which prompts to unseal if needed, checks for matching
 logins, and offers account-specific Fill buttons. Desktop never opens just because
 a page has a login form. Field buttons and page notices are extension pages inside
@@ -86,11 +88,11 @@ grants, including in-dialog unsealing and the Wayland overlay with a normal
 dialog fallback. Closing that approval window or pressing Escape denies the
 request. The main Desktop window can stay closed.
 
-Submitting a login or registration form asks **Save this login in FactorSeal?**
-on the page, and again on the next page of the same site if the submission
-navigates. Choose **Save** to review it in Desktop, unlocking there first if
-sealed. **Not now** forgets it, and the question expires after two minutes. A
-login FactorSeal just filled is not offered again. Desktop offers **Save login**,
+On a site with detection enabled, submitting a login or registration form asks
+**Save this login in FactorSeal?** on the page. After navigation, a related page
+with detection enabled can show the same question. Choose **Save** to review it
+in Desktop and unlock there if needed. **Not now** forgets it, and the question
+expires after two minutes. FactorSeal skips logins it just filled. Desktop offers **Save login**,
 or an explicit **Update password** choice for existing logins with the same
 origin and username. Unchanged credentials are skipped. Updates preserve the
 item's other fields and reject records changed since review. A save survives the
@@ -101,17 +103,13 @@ For pages that do not emit a standard form submission, choose **Save login from
 this page** in the popup while the completed form is still visible. Captured
 credentials are kept only in memory during review, never in extension storage.
 
-Choose **Add one-time password** in the popup while a site shows its two-factor
-QR code. The extension captures only that tab and sends the picture to Desktop in
-signed pieces. Desktop reads the code and offers the site's logins or **Save as
-new login**. The extension never receives the setup key.
-
 ## Current boundaries
 
 - Filling supports HTTPS top-level forms with exactly one visible password and
   an unambiguous username field. Saving also supports matching password and
   confirmation fields, preferring fields marked `new-password`. Cross-origin
-  form actions, frames, form-less widgets, and shadow DOM are excluded.
+  form actions and submit-button overrides, frames, form-less widgets, and
+  shadow DOM are excluded. The browser disables the extension in private windows.
 - Matching uses exact parsed origin, including port. Login records must contain
   `username`, `password`, and URL fields. Imported records with ambiguous field
   mappings fail closed. Filling never submits a form.
@@ -128,9 +126,93 @@ new login**. The extension never receives the setup key.
 - The page can read filled credentials. A compromised authorized browser or
   extension is outside the website-origin boundary. JavaScript cannot guarantee
   secret zeroization. No secrets are intentionally logged or persisted in the extension.
-- No store publication, signed extension packages, Safari adapter, or sandboxed
-  browser installation support is provided here. Native hardware/browser release
-  acceptance and independent security review remain required.
+- Safari and sandboxed browser installations are outside this release's support.
+  Native hardware/browser release acceptance and independent security review
+  remain required.
+
+## Store packages
+
+From the repository root, run `node extensions/browser/build.mjs --store` with
+Node.js and Python 3 to create both upload ZIPs in `extensions/browser/dist/store`.
+The build copies the source files and checked-in artwork directly. The ZIPs use
+`manifest.json` at their root. The Chrome ZIP omits the unpacked development key.
+Firefox keeps the stable add-on ID `factorseal@factorseal.dev`.
+
+Create the Chrome Web Store item as a draft and copy its 32-character item ID.
+Set `FACTORSEAL_CHROME_STORE_ID` to that ID in the Cargo build environment for the
+matching Desktop and native host packages. Reinstall or restart that Desktop
+so it registers the store ID for Chrome. Chromium and Edge development builds use the existing
+development ID. Pairing is per extension ID and browser profile.
+
+Use the following single purpose for both listings.
+
+> Save and fill website logins with approval in FactorSeal Desktop.
+
+State the Desktop dependency and supported hardware in both listings. A
+supported Linux or Windows device needs TPM 2.0. A supported Mac needs a Secure
+Enclave. Use the [public privacy policy](https://factorseal.dev/browser-extension/#privacy-policy) for the Chrome dashboard and
+include its data disclosures in the listings. Chrome permission justifications
+are local Desktop communication (`nativeMessaging`), pairing credentials and
+site pause preferences (`storage`), on-demand page access (`activeTab`), and the
+top-level form script (`scripting`). Optional HTTPS access enables detection
+for a user-approved hostname. For Chrome listing artwork, capture a real
+1280 × 800 screenshot of the release extension in use with test credentials.
+
+In Chrome's Test instructions and Firefox's Notes for Reviewers, include the
+direct link to the exact matching Desktop installer, supported OS and hardware,
+the store extension ID, and the [HTTPS login test page](https://factorseal.dev/browser-test/).
+Its form stays on the page and submits no credentials over the network.
+Reviewers can use the following steps.
+
+1. Install the pinned Desktop build and start it once to register the native
+   messaging host. Create a new test vault on the review device.
+2. Install the extension, open its toolbar popup, and choose **Pair with
+   Desktop**. Approve the request in Desktop.
+3. Open the test page. Enter `review@example.com` and a throwaway password.
+   Choose **Save login from this page** and approve the save in Desktop.
+4. Reload the test page and choose **Fill this page**. Approve the login in
+   Desktop and verify that the extension fills the fields.
+5. Enable detection for the test hostname, reload, and verify the field button
+   and save prompt. Disconnect the profile from the popup.
+
+Test the actual signed store packages with the matching Desktop installer on
+each advertised platform. For a Windows MSIX build, confirm that an ordinary
+Chrome or Firefox process can discover the native host registration written by
+the installed app. See [native acceptance](ACCEPTANCE.md).
+
+## Privacy policy
+
+The FactorSeal browser extension helps you save and fill website logins with
+FactorSeal Desktop on the same device. Pairing sends a browser-profile public
+key and signed requests to Desktop. When you ask to fill a login, Desktop
+receives the site's HTTPS origin and returns the credentials you approve. When
+you ask to save, the username, password, and origin go to Desktop for approval.
+The approved login is stored in your encrypted vault. Saved logins follow your
+Desktop vault's sync settings, including encrypted device sync if you enable it.
+
+If you grant automatic detection for a site, the extension inspects the
+top-level login form. On a user-initiated submission, it can hold the origin
+and submitted username and password in browser memory for up to two minutes to
+offer a save. The extension sends the values to Desktop when you choose
+**Save**. **Not now** discards the offer. You can pause automatic detection on
+that site or revoke its host access in your browser's extension settings.
+
+The extension stores its pairing key and state and paused origins in the local
+browser profile. Desktop stores approved browser pairings and may display the
+browser family. Firefox shares that label only if you grant its optional
+technical-data permission. You can disconnect a profile in Desktop or in the
+extension. Removing the extension clears its local profile storage. You can
+remove saved logins through Desktop.
+
+The extension sends these data to the local FactorSeal Desktop app through
+native messaging. It does not send them to FactorSeal, advertisers, or
+analytics providers. Desktop's optional crash reporting and issue reporting
+are configured separately in Desktop. FactorSeal's handling of browser data
+adheres to the
+[Chrome Web Store User Data Policy](https://developer.chrome.com/docs/webstore/program-policies/policies#protecting_user_privacy),
+including its Limited Use requirements. Report privacy questions through the
+[FactorSeal issue tracker](https://github.com/cachix/factorseal/issues). Use the
+[private security reporting instructions](../../SECURITY.md) for sensitive reports.
 
 ## Tests
 
@@ -148,7 +230,7 @@ If it is a wrapper, `FACTORSEAL_DESKTOP_IDENTITY` names the actual executable fo
 Unix peer verification. Desktop finds its native bridge beside
 `FACTORSEAL_CLI_EXECUTABLE` when configured. The NixOS desktop module sets these
 paths for its packaged wrapper. Chromium requires version 137+ for Web Crypto
-Ed25519; Firefox requires 129+.
+Ed25519; Firefox requires 140+ for built-in data consent.
 
 Desktop Settings also lists cached paired profile fingerprints with Disconnect
 buttons, so revocation does not require the original extension. The public cache

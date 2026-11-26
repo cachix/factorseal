@@ -1,4 +1,11 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=FACTORSEAL_CHROME_STORE_ID");
+    if let Ok(id) = std::env::var("FACTORSEAL_CHROME_STORE_ID") {
+        assert!(
+            id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)),
+            "FACTORSEAL_CHROME_STORE_ID must be the 32-character Chrome Web Store item ID"
+        );
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
     {
