@@ -52,6 +52,7 @@ import com.cachix.factorseal.ui.theme.Medium
 import com.cachix.factorseal.ui.theme.Shapes
 import com.cachix.factorseal.ui.theme.Theme
 import com.cachix.factorseal.ui.theme.Type
+import org.jetbrains.compose.resources.DrawableResource
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -140,6 +141,7 @@ fun <T> Segmented(
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    logo: (T) -> DrawableResource? = { null },
 ) {
     val colors = Theme.colors
     FlowRow(
@@ -173,12 +175,16 @@ fun <T> Segmented(
                     .padding(horizontal = 14.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    label(option),
-                    color = if (chosen) colors.foreground else colors.mutedForeground,
-                    weight = Medium,
-                    maxLines = 1,
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val tint = if (chosen) colors.foreground else colors.mutedForeground
+                    logo(option)?.let { Icon(it, tint = tint) }
+                    Text(
+                        label(option),
+                        color = tint,
+                        weight = Medium,
+                        maxLines = 1,
+                    )
+                }
             }
         }
     }

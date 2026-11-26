@@ -3,7 +3,8 @@
   "minimum_chrome_version": "137",
   "name": "FactorSeal",
   "version": "0.1.0",
-  "description": "Fill personal logins with approval in FactorSeal Desktop.",
+  "description": "Save and fill logins with FactorSeal Desktop. Requires a compatible Desktop installation.",
+  "incognito": "not_allowed",
   "permissions": [
     "nativeMessaging",
     "storage",

@@ -4,6 +4,15 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Desktop's command palette, opened with Ctrl+K or Ctrl+Shift+P, lists
+  every action with its shortcut, recent actions first, and every page
+  next to your items. Settings has a Shortcuts page to change or reset
+  each keyboard shortcut.
+
+- Show a website icon on Desktop as soon as an item is saved or
+  imported, not only after the next unlock. Add field no longer lists
+  Website twice when the item has no website.
+
 - Desktop and mobile have an Activity page that shows which app or
   website read which secret on this device, and when, including
   refused requests. Each row opens the app's full program path and

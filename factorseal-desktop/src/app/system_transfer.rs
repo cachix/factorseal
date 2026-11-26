@@ -184,7 +184,7 @@ impl DesktopView {
             let _ = view.update(cx, |view, cx| {
                 if !view.system_transfer_current(generation) { return; }
                 view.cancel_system_transfer();
-                view.finish_transfer(true, false, result);
+                view.finish_transfer(true, false, result, cx);
                 cx.notify();
             });
         }).detach();

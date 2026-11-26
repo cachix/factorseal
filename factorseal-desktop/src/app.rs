@@ -49,8 +49,8 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyWindowHandle, App, Bounds, ColorExt as _, Context, Div, Global, HighlightStyle, Hsla,
-    KeyBinding, MenuItem, Render, ScrollHandle, StyledText, Subscription, Task, Window,
-    WindowBounds, WindowOptions, actions, div, prelude::*, px, rems, size, svg,
+    MenuItem, Render, ScrollHandle, StyledText, Subscription, Task, Window, WindowBounds,
+    WindowOptions, actions, div, prelude::*, px, rems, size, svg,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Root, Selectable as _, Side, Sizable as _, Size,
@@ -290,7 +290,7 @@ fn field_label(label: &'static str, field: impl IntoElement) -> Div {
 
 fn segmented<T: Copy + PartialEq + 'static>(
     id: &'static str,
-    options: impl IntoIterator<Item = (T, &'static str)>,
+    options: impl IntoIterator<Item = (T, &'static str, Option<branding::Brand>)>,
     selected: T,
     disabled: bool,
     on_select: impl Fn(&T, &mut Window, &mut App) + 'static,
@@ -317,12 +317,20 @@ fn segmented<T: Copy + PartialEq + 'static>(
             options
                 .into_iter()
                 .enumerate()
-                .map(|(index, (value, label))| {
+                .map(|(index, (value, label, logo))| {
                     let on_select = on_select.clone();
                     let chosen = value == selected;
                     button((id, index))
                         .ghost()
-                        .label(label)
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_1p5()
+                                .children(
+                                    logo.map(|logo| gpui_component::Icon::new(logo).size(rems(1.))),
+                                )
+                                .child(label),
+                        )
                         .selected(chosen)
                         .disabled(disabled)
                         .border_1()
@@ -341,6 +349,17 @@ fn segmented<T: Copy + PartialEq + 'static>(
                         .on_click(move |_, window, cx| on_select(&value, window, cx))
                 }),
         )
+}
+
+fn format_brand(format: TransferFormat) -> Option<branding::Brand> {
+    match format {
+        TransferFormat::BitwardenJson => Some(branding::Brand::Bitwarden),
+        TransferFormat::OnePasswordCsv | TransferFormat::OnePasswordPux => {
+            Some(branding::Brand::OnePassword)
+        }
+        TransferFormat::KeePassCsv => Some(branding::Brand::KeePassXc),
+        TransferFormat::FactorSeal | TransferFormat::CxfAge => None,
+    }
 }
 
 fn search_icon(color: Hsla) -> impl IntoElement {
@@ -1655,6 +1674,10 @@ impl DesktopView {
             cx.notify();
         });
         let settings_report = cx.subscribe_in(&settings, window, Self::report_from_settings);
+        let shortcuts_changed = cx.subscribe(
+            &settings,
+            |_, _, _: &crate::settings_view::ShortcutsChanged, cx| shortcuts::apply_shortcuts(cx),
+        );
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -1831,6 +1854,7 @@ impl DesktopView {
                 vault_search_change,
                 settings_changed,
                 settings_report,
+                shortcuts_changed,
                 use_generated_password,
                 device_name_submit,
                 pairing_ticket_submit,
@@ -2583,7 +2607,7 @@ impl DesktopView {
                 Err(error) => Err(error),
             };
             let _ = view.update(cx, |view, cx| {
-                view.finish_transfer(is_import, format.is_native(), result);
+                view.finish_transfer(is_import, format.is_native(), result, cx);
                 cx.notify();
             });
         })
@@ -2596,6 +2620,7 @@ impl DesktopView {
         is_import: bool,
         is_backup: bool,
         result: Result<TransferCompletion, String>,
+        cx: &mut Context<Self>,
     ) {
         self.transfer_busy = false;
         match result {
@@ -2609,6 +2634,7 @@ impl DesktopView {
                 {
                     *current = contents;
                     *contents_error = None;
+                    self.refresh_website_icons(cx);
                 }
                 let message = if let Some(summary) = completion.summary {
                     let mut message = format!(
@@ -3483,7 +3509,10 @@ impl DesktopView {
     fn render_cxf_key_options(&self, is_import: bool, cx: &mut Context<Self>) -> Div {
         let mut panel = v_flex().gap_3().child(segmented(
             "transfer-key-mode",
-            [(false, "Passphrase"), (true, "Post-quantum key")],
+            [
+                (false, "Passphrase", None),
+                (true, "Post-quantum key", None),
+            ],
             self.transfer_use_recipient,
             self.transfer_busy,
             cx.listener(|view, hybrid: &bool, _, cx| {
@@ -3590,6 +3619,7 @@ impl DesktopView {
                                     } else {
                                         candidate.label()
                                     },
+                                    format_brand(candidate),
                                 )
                             }),
                         format,
@@ -4726,10 +4756,6 @@ pub(crate) fn setup(
     cx.on_action(seal_vault);
     cx.on_action(quit);
     cx.on_action(focus_search);
-    cx.bind_keys([
-        KeyBinding::new("secondary-f", FocusSearch, None),
-        KeyBinding::new("secondary-f", FocusSearch, Some("Input")),
-    ]);
     shortcuts::bind_keys(cx);
     cx.on_action(undo_personal_change);
     cx.on_action(redo_personal_change);

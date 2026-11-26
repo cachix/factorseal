@@ -6,6 +6,7 @@ mod branding;
 mod controls;
 mod crash_reporting;
 mod instance;
+mod keymap;
 mod motion;
 mod runtime;
 mod secret_input;
@@ -94,7 +95,13 @@ impl AssetSource for Assets {
             branding::KEYBOARD_ASSET => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../../assets/logo/factorseal-keyboard.svg"
             )))),
-            _ => gpui_component_assets::Assets.load(path),
+            _ => match branding::Brand::ALL
+                .into_iter()
+                .find(|brand| brand.asset() == path)
+            {
+                Some(brand) => Ok(Some(Cow::Borrowed(brand.svg()))),
+                None => gpui_component_assets::Assets.load(path),
+            },
         }
     }
 
@@ -127,6 +134,7 @@ impl AssetSource for Assets {
                 branding::KEYBOARD_ASSET.into(),
             ]
             .into_iter()
+            .chain(branding::Brand::ALL.map(|brand| brand.asset().into()))
             .filter(|asset: &SharedString| asset.starts_with(path)),
         );
         Ok(assets)

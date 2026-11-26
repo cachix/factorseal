@@ -445,6 +445,7 @@ impl<V> Draft<V> {
                 .iter()
                 .rposition(|row| {
                     !row.removed
+                        && !row.hidden
                         && row.field_type == PersonalFieldType::Url
                         && row.id.starts_with("url")
                 })
@@ -1653,7 +1654,7 @@ impl DesktopView {
             return true;
         }
         if base.is_some() {
-            match self.save_personal_item(item) {
+            match self.save_personal_item(item, cx) {
                 Ok(()) => {
                     self.personal_detail.clear_error();
                     self.close_item_editor(cx);
@@ -1662,7 +1663,7 @@ impl DesktopView {
                     true
                 }
                 Err(PersonalWriteError::Changed(contents)) => {
-                    self.apply_personal_contents(*contents);
+                    self.apply_personal_contents(*contents, cx);
                     self.editor_problem(personal_detail::ITEM_CHANGED.to_owned(), cx);
                     if let Some(VaultSelection::Entry(entry)) = self.selected_vault_item.clone() {
                         self.load_personal_item(*entry, cx);
@@ -1678,7 +1679,7 @@ impl DesktopView {
             match self.runtime.put_personal_secret(&item, None) {
                 Ok((version, contents)) => {
                     self.item_editor = None;
-                    self.apply_personal_contents(contents);
+                    self.apply_personal_contents(contents, cx);
                     self.personal_panel = PersonalPanel::Overview;
                     let saved = self.unsealed_contents().and_then(|contents| {
                         contents
@@ -3504,6 +3505,18 @@ mod tests {
                 .addable()
                 .contains(&Addable::Website)
         );
+    }
+
+    #[test]
+    fn an_empty_website_is_offered_once() {
+        let login = PersonalSecret::template(PersonalSecretKind::Login, "GitHub".into());
+        let draft = Draft::from_item(&login, fake);
+        let websites = draft
+            .addable()
+            .iter()
+            .filter(|field| field.label() == WEBSITE_LABEL)
+            .count();
+        assert_eq!(websites, 1);
     }
 
     #[test]

@@ -597,7 +597,11 @@ impl DesktopView {
         }))
     }
 
-    pub(super) fn apply_personal_contents(&mut self, updated_contents: VaultContents) {
+    pub(super) fn apply_personal_contents(
+        &mut self,
+        updated_contents: VaultContents,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(entry) = updated_contents
             .entries
             .iter()
@@ -614,16 +618,18 @@ impl DesktopView {
             *contents = updated_contents;
             *contents_error = None;
         }
+        self.refresh_website_icons(cx);
     }
 
     pub(super) fn save_personal_item(
         &mut self,
         updated: PersonalSecret,
+        cx: &mut Context<Self>,
     ) -> Result<(), PersonalWriteError> {
         let (version, contents) = self
             .runtime
             .put_personal_secret(&updated, self.personal_detail.version)?;
-        self.apply_personal_contents(contents);
+        self.apply_personal_contents(contents, cx);
         if let Some(previous) = self.personal_detail.item.replace(updated) {
             self.personal_history.record(Change::Edit {
                 item: previous,
@@ -635,7 +641,7 @@ impl DesktopView {
     }
 
     fn show_changed_item(&mut self, contents: VaultContents, cx: &mut Context<Self>) {
-        self.apply_personal_contents(contents);
+        self.apply_personal_contents(contents, cx);
         self.personal_history.clear();
         if let Some(VaultSelection::Entry(entry)) = self.selected_vault_item.clone()
             && is_personal_secret(&entry)
@@ -727,7 +733,7 @@ impl DesktopView {
         {
             Ok(updated_contents) => {
                 let item = self.personal_detail.item.take();
-                self.apply_personal_contents(updated_contents);
+                self.apply_personal_contents(updated_contents, cx);
                 self.show_personal_panel(PersonalPanel::Overview, cx);
                 if let Some(item) = item {
                     self.personal_history.record(Change::Delete {
@@ -793,7 +799,7 @@ impl DesktopView {
                 return;
             }
         };
-        self.apply_personal_contents(updated_contents);
+        self.apply_personal_contents(updated_contents, cx);
         let message = match (direction, &change) {
             (Direction::Undo, _) => "Change undone",
             (Direction::Redo, Change::Edit { .. }) => "Saved",
@@ -902,7 +908,7 @@ impl DesktopView {
         };
         let result = favorite_item(item, !item.favorite)
             .map_err(PersonalWriteError::from)
-            .and_then(|updated| self.save_personal_item(updated));
+            .and_then(|updated| self.save_personal_item(updated, cx));
         match result {
             Ok(()) => {
                 self.personal_detail.error = None;

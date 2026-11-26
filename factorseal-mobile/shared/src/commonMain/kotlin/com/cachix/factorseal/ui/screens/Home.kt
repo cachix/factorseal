@@ -64,6 +64,7 @@ import com.cachix.factorseal.resources.autofill_line
 import com.cachix.factorseal.resources.autofill_offer
 import com.cachix.factorseal.resources.back
 import com.cachix.factorseal.resources.back_up_vault
+import com.cachix.factorseal.resources.brand_chrome
 import com.cachix.factorseal.resources.clear_search
 import com.cachix.factorseal.resources.could_not_load
 import com.cachix.factorseal.resources.devices
@@ -363,7 +364,10 @@ private fun AutofillOffer(
     InfoBox(fill = Theme.colors.surface) {
         Text(stringResource(Res.string.autofill_offer), weight = Medium)
         Text(stringResource(Res.string.autofill_line), color = Theme.colors.mutedForeground)
-        Text(stringResource(Res.string.autofill_chrome), color = Theme.colors.mutedForeground)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Res.drawable.brand_chrome, Modifier.padding(top = 2.dp), tint = Theme.colors.mutedForeground)
+            Text(stringResource(Res.string.autofill_chrome), color = Theme.colors.mutedForeground)
+        }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
             Button(stringResource(Res.string.not_now), onClick = onDismiss, size = ButtonSize.Small, variant = Variant.Ghost)
             Button(stringResource(Res.string.turn_on), onClick = autofill::enable, size = ButtonSize.Small, variant = Variant.Primary)
