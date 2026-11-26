@@ -2585,7 +2585,7 @@ impl DesktopView {
                 Err(error) => Err(error),
             };
             let _ = view.update(cx, |view, cx| {
-                view.finish_transfer(is_import, format.is_native(), result);
+                view.finish_transfer(is_import, format.is_native(), result, cx);
                 cx.notify();
             });
         })
@@ -2598,6 +2598,7 @@ impl DesktopView {
         is_import: bool,
         is_backup: bool,
         result: Result<TransferCompletion, String>,
+        cx: &mut Context<Self>,
     ) {
         self.transfer_busy = false;
         match result {
@@ -2611,6 +2612,7 @@ impl DesktopView {
                 {
                     *current = contents;
                     *contents_error = None;
+                    self.refresh_website_icons(cx);
                 }
                 let message = if let Some(summary) = completion.summary {
                     let mut message = format!(
