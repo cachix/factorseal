@@ -366,6 +366,61 @@ impl DesktopView {
         }
         let detected = Detected::read(global);
         let theme = cx.theme().clone();
+        let settings = button("open-browser-settings")
+            .ghost()
+            .small()
+            .icon(IconName::Globe)
+            .label("Browser extensions")
+            .on_click(cx.listener(|view, _, _, cx| {
+                view.open_settings(cx);
+                view.open_section(
+                    section_pages::SectionRow::Settings(crate::settings_view::Section::Browsers),
+                    cx,
+                );
+            }));
+        let rows: Vec<_> = detected
+            .browsers(false)
+            .map(|(_, browser, paired_count, extension_installed)| {
+                let status = if paired_count > 0 {
+                    theme.success
+                } else if extension_installed {
+                    theme.warning
+                } else {
+                    theme.muted_foreground
+                };
+                h_flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        icon_tile(2., &theme).child(
+                            browser_icon(browser)
+                                .size(rems(1.))
+                                .text_color(theme.foreground),
+                        ),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(div().font_semibold().child(browser.name()))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_caption()
+                                    .text_color(theme.muted_foreground)
+                                    .child(div().size_2().rounded_full().bg(status))
+                                    .child(browser_state(paired_count, extension_installed)),
+                            ),
+                    )
+            })
+            .collect();
+        if rows.is_empty() {
+            return div().mt_2().child(settings);
+        }
         v_flex()
             .mt_2()
             .flex_none()
@@ -375,63 +430,8 @@ impl DesktopView {
             .border_1()
             .border_color(theme.border)
             .overflow_hidden()
-            .children(detected.browsers(false).map(
-                |(_, browser, paired_count, extension_installed)| {
-                    let status = if paired_count > 0 {
-                        theme.success
-                    } else if extension_installed {
-                        theme.warning
-                    } else {
-                        theme.muted_foreground
-                    };
-                    h_flex()
-                        .items_center()
-                        .gap_3()
-                        .px_4()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .child(
-                            icon_tile(2., &theme).child(
-                                browser_icon(browser)
-                                    .size(rems(1.))
-                                    .text_color(theme.foreground),
-                            ),
-                        )
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .child(div().font_semibold().child(browser.name()))
-                                .child(
-                                    h_flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .text_caption()
-                                        .text_color(theme.muted_foreground)
-                                        .child(div().size_2().rounded_full().bg(status))
-                                        .child(browser_state(paired_count, extension_installed)),
-                                ),
-                        )
-                },
-            ))
-            .child(
-                h_flex().p_2().justify_end().child(
-                    button("open-browser-settings")
-                        .ghost()
-                        .small()
-                        .icon(IconName::Globe)
-                        .label("Browser extensions")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.open_settings(cx);
-                            view.open_section(
-                                section_pages::SectionRow::Settings(
-                                    crate::settings_view::Section::Browsers,
-                                ),
-                                cx,
-                            );
-                        })),
-                ),
-            )
+            .children(rows)
+            .child(h_flex().p_2().justify_end().child(settings))
     }
 
     pub(super) fn browsers_available(&self, cx: &App) -> bool {
