@@ -5,8 +5,19 @@ use std::{
     path::{Path, PathBuf},
 };
 pub const FIREFOX_ID: &str = "factorseal@factorseal.dev";
+/// Item ID assigned to the official Chrome Web Store listing.
+pub(super) const CHROME_STORE_ID: &str = "dpfkfmddmpbpnkhbmdaaoleiackehgjb";
 /// Development ID derived from the public key in manifest.chromium.json.
 pub const CHROMIUM_ID: &str = "eljopjcihlpjipbefddajpoiefpfgdca";
+
+pub(super) fn default_extension_id(browser: &str) -> &'static str {
+    match browser {
+        "firefox" => FIREFOX_ID,
+        "chrome" => CHROME_STORE_ID,
+        _ => CHROMIUM_ID,
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub root: PathBuf,
@@ -60,7 +71,7 @@ pub fn install(
             "choose firefox, chrome, chromium, or edge",
         ));
     }
-    let id = id.unwrap_or(if firefox { FIREFOX_ID } else { CHROMIUM_ID });
+    let id = id.unwrap_or_else(|| default_extension_id(browser));
     if id.len() > 128
         || id.is_empty()
         || !id
@@ -187,6 +198,23 @@ mod tests {
             serde_json::json!([FIREFOX_ID])
         );
         assert!(manifest.get("allowed_origins").is_none());
+    }
+
+    #[test]
+    fn chrome_native_host_allows_only_the_store_listing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("host.json");
+        let id = default_extension_id("chrome");
+        assert_eq!(id, CHROME_STORE_ID);
+        assert_ne!(id, default_extension_id("chromium"));
+        assert_eq!(default_extension_id("edge"), CHROMIUM_ID);
+        write_manifest(&path, &directory.path().join("bridge"), id, false).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            manifest["allowed_origins"],
+            serde_json::json!([format!("chrome-extension://{CHROME_STORE_ID}/")])
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Installation hints only. Profile metadata never grants vault access.
 use super::Browser;
-use crate::browser::registration::{CHROMIUM_ID, FIREFOX_ID};
+use crate::browser::registration::{FIREFOX_ID, default_extension_id};
 use std::{io::Read, path::Path};
 
 /// Check standard profiles, including Chromium's unpacked development extensions.
@@ -58,9 +58,14 @@ fn in_profiles(root: &Path, browser: Browser) -> bool {
                     .is_some_and(|addons| addons.iter().any(|addon| addon["id"] == FIREFOX_ID))
             })
         } else {
+            let id = default_extension_id(if browser == Browser::Chrome {
+                "chrome"
+            } else {
+                "chromium"
+            });
             ["Preferences", "Secure Preferences"].iter().any(|file| {
                 json(&profile.join(file))
-                    .is_some_and(|value| value["extensions"]["settings"][CHROMIUM_ID].is_object())
+                    .is_some_and(|value| value["extensions"]["settings"][id].is_object())
             })
         }
     })
@@ -85,6 +90,23 @@ fn json(path: &Path) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::registration::{CHROME_STORE_ID, CHROMIUM_ID};
+
+    #[test]
+    fn detects_chrome_using_the_store_listing_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("Default");
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::write(
+            profile.join("Secure Preferences"),
+            serde_json::json!({"extensions":{"settings":{CHROME_STORE_ID:{"location":1}}}})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(in_profiles(directory.path(), Browser::Chrome));
+        assert!(!in_profiles(directory.path(), Browser::Chromium));
+        assert!(!in_profiles(directory.path(), Browser::Edge));
+    }
 
     #[test]
     fn detects_unpacked_extensions_without_pairing_or_host_registration() {

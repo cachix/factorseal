@@ -40,22 +40,31 @@ function page({hidden=false,crossOrigin=false,newPassword=false,confirmation=fal
   const confirm=confirmation?new Input('password'):null;
   if(confirm){confirm.top=90;confirm.autocomplete='new-password';}
   password.hidden=hidden;password.autocomplete=newPassword?'new-password':'';
-  const owner={action:crossOrigin?'https://evil.test/post':'https://example.com/post',querySelectorAll:()=>[username,password,...(confirm?[confirm]:[])]};
+  class Element {
+    getAttribute(name){return this[name]??null;}
+    querySelectorAll(){return [username,password,...(confirm?[confirm]:[])];}
+  }
+  class Form extends Element {}
+  const owner=new Form();
+  owner.action=crossOrigin?'https://other.test/post':'https://example.com/post';
+  const submitter=new Element();
+  submitter.form=owner;
+  submitter.type='submit';
   password.form=owner;
   const node=()=>({style:{setProperty(name,value,priority){if(priority==='important')this[name.replace(/-(\w)/g,(_,c)=>c.toUpperCase())]=value;}},children:[],append(...children){this.children.push(...children);},remove(){this.removed=true;},attachShadow(options){this.shadow={options,...node()};return this.shadow;},
     getBoundingClientRect(){const width=parseFloat(this.style.width)||0,height=parseFloat(this.style.height)||0,left=this.style.left?parseFloat(this.style.left):1000-16-width,top=parseFloat(this.style.top)||0;return {left,top,width,height,right:left+width,bottom:top+height};}});
   const inside=(host,x,y)=>{const r=host.getBoundingClientRect();return x>=r.left && x<=r.right && y>=r.top && y<=r.bottom;};
-  const doc={visibilityState:'visible',documentElement:{append(host){frames.push(host);}},createElement:node,querySelectorAll:()=>{scans++;return [password,...(confirm?[confirm]:[])];},addEventListener:(name,fn)=>{events[name]=fn;},elementsFromPoint:(x,y)=>[...(overlay?[overlay]:[]),...frames.filter(host=>!host.removed && host.style.pointerEvents!=='none' && (host.covers?.(y)??inside(host,x,y))).reverse(),y>85?confirm:y>45?password:username]};
+  const doc={baseURI:'https://example.com/login',visibilityState:'visible',documentElement:{append(host){frames.push(host);}},createElement:node,querySelectorAll:selector=>{if(selector.includes('formaction'))return submitter.formaction===undefined?[]:[submitter];scans++;return [password,...(confirm?[confirm]:[])];},addEventListener:(name,fn)=>{events[name]=fn;},elementsFromPoint:(x,y)=>[...(overlay?[overlay]:[]),...frames.filter(host=>!host.removed && host.style.pointerEvents!=='none' && (host.covers?.(y)??inside(host,x,y))).reverse(),y>85?confirm:y>45?password:username]};
   const window={addEventListener:()=>{}};window.top=window;
   const replies={field:{show},pending:{save:pending},save:{accepted:true,ask}};
-  const context={crypto:webcrypto,URL,Event,TextEncoder,HTMLInputElement:Input,document:doc,innerWidth:1000,innerHeight:800,location:{protocol:'https:',origin:'https://example.com',href:'https://example.com/login'},window,
+  const context={crypto:webcrypto,URL,Event,TextEncoder,Element,HTMLFormElement:Form,HTMLInputElement:Input,navigator:{userActivation:{isActive:true}},document:doc,innerWidth:1000,innerHeight:800,location:{protocol:'https:',origin:'https://example.com',href:'https://example.com/login'},window,
     getComputedStyle:element=>({visibility:'visible',display:element.style?.display==='none'?'none':'block',opacity:'1',filter:'none',clipPath:'none',pointerEvents:element.style?.pointerEvents||'auto',...element.computed}),setTimeout:fn=>{queueMicrotask(fn);},requestAnimationFrame:fn=>{queueMicrotask(fn);},addEventListener:()=>{},MutationObserver:class{constructor(fn){observer=fn;}observe(){}},
     browser:{runtime:{id:'test',getURL:path=>`extension://factorseal/${path}`,sendMessage:async message=>{messages.push(message);return replies[message.type]??{accepted:true};},onMessage:{addListener:f=>{listener=f;}}}}};
   vm.runInNewContext(script,context);
   const message=payload=>{let result;listener(payload,{id:'test'},r=>result=r);return result;};
   const token=()=>messages.find(m=>m.document)?.document;
   const views=()=>frames.filter(host=>!host.removed).map(host=>host.shadow.children[0].src);
-  return {username,password,confirm,owner,context,message,messages,frames,views,token,doc,events,mutate:records=>observer(records),cover:element=>{overlay=element;},get scans(){return scans;},edit:()=>events.input({isTrusted:true}),submit:(trusted=true)=>events.submit({isTrusted:trusted,target:owner})};
+  return {username,password,confirm,owner,submitter,context,message,messages,frames,views,token,doc,events,mutate:records=>observer(records),cover:element=>{overlay=element;},get scans(){return scans;},edit:()=>events.input({isTrusted:true}),submit:(trusted=true)=>events.submit({isTrusted:trusted,target:owner,submitter})};
 }
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 for(const registration of [false,true])test(`offers submitted ${registration?'registration':'login'} credentials once`,async()=>{
@@ -68,20 +77,47 @@ for(const registration of [false,true])test(`offers submitted ${registration?'re
   assert.equal(saves.length,1);
   assert.equal(saves[0].username,'alice');assert.equal(saves[0].password,'secret');
 });
-test('save ignores forged submits, hidden fields, cross-origin actions, and mismatched confirmation',()=>{
+test('save ignores forged submits, hidden fields, cross-origin actions, and mismatched confirmation',async()=>{
   for(const options of [{},{hidden:true},{crossOrigin:true},{newPassword:true,confirmation:true}]){
     const p=page(options);p.username.value='alice';p.password.value='secret';
     if(p.confirm)p.confirm.value='different';
+    await settle();
     p.submit(Object.keys(options).length>0);
     assert.equal(p.messages.filter(m=>m.type==='save').length,0);
   }
 });
-test('explicit save and corrected submissions use the current fields',()=>{
+test('explicit save and corrected submissions use the current fields',async()=>{
   const p=page({newPassword:true});p.username.value='alice';p.password.value='first';
-  assert.equal(p.message({type:'save-current'}).offered,true);
+  assert.equal(p.message({type:'save-current',origin:'https://example.com'}).password,'first');
+  assert.equal(p.message({type:'save-current',origin:'https://other.test'}),null);
+  await settle();
   p.password.value='corrected';p.edit();p.submit();
   const saves=p.messages.filter(m=>m.type==='save');
-  assert.equal(saves.length,2);assert.equal(saves[1].password,'corrected');
+  assert.equal(saves.length,1);assert.equal(saves[0].password,'corrected');
+});
+test('paused or ungranted pages skip capturing submitted credentials',async()=>{
+  const p=page({show:false});
+  p.username.value='alice';p.password.value='secret';
+  await settle();
+  p.submit();
+  assert.equal(p.messages.some(m=>m.type==='save'),false);
+  assert.equal(p.message({type:'save-current',origin:'https://example.com'}).password,'secret');
+});
+test('automatic saves require user activation and use the actual submit action',async()=>{
+  const p=page();
+  p.username.value='alice';p.password.value='secret';
+  p.submitter.formaction='https://other.test/post';
+  await settle();
+  assert.equal(p.message({type:'find'}).document,null);
+  assert.equal(p.message({type:'save-current',origin:'https://example.com'}),null);
+  p.submit();
+  p.submitter.formaction='/same-origin';
+  p.context.navigator.userActivation.isActive=false;
+  p.submit();
+  assert.equal(p.messages.some(m=>m.type==='save'),false);
+  p.context.navigator.userActivation.isActive=true;
+  p.submit();
+  assert.equal(p.messages.filter(m=>m.type==='save').length,1);
 });
 test('finding the page form reports its document only when it has a login form',async()=>{
   const p=page();await settle();
@@ -130,7 +166,7 @@ test('a login FactorSeal just filled is not offered for saving again',async()=>{
   assert.equal(p.message({type:'fill',document:p.token(),username:'alice',password:'secret'}).filled,true);
   p.submit();
   assert.equal(p.messages.filter(m=>m.type==='save').length,0);
-  assert.equal(p.message({type:'save-current'}).offered,true);
+  assert.equal(p.message({type:'save-current',origin:'https://example.com'}).password,'secret');
 });
 test('its own frames neither hide the login fields nor count as page changes',async()=>{
   const p=page();await settle();
@@ -197,6 +233,11 @@ test('approved stable form receives selected fields',async()=>{
   const p=page();await settle();
   assert.equal(p.message({type:'fill',document:p.token(),username:'alice',password:'secret'}).filled,true);
   assert.equal(p.username.value,'alice');assert.equal(p.password.value,'secret');
+});
+test('a form that clears the filled password reports a failed fill',async()=>{
+  const p=page();await settle();
+  p.password.onInput=()=>{p.password.value='';};
+  assert.equal(p.message({type:'fill',document:p.token(),username:'alice',password:'secret'}).filled,false);
 });
 test('shared signed fixture verifies in Web Crypto',async()=>{
   const fixture=JSON.parse(await readFile(new URL('./fixtures/signed-request.json',import.meta.url),'utf8'));
