@@ -2962,6 +2962,7 @@ dependencies = [
  "turso",
  "url",
  "uuid",
+ "web-time",
  "webpki-roots",
  "widestring",
  "windows 0.61.3",
@@ -2977,13 +2978,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ashpd 0.14.0",
+ "async-channel",
+ "base64 0.22.1",
  "clap",
  "detect-desktop-environment",
  "directories",
  "factorseal",
  "fs2",
+ "futures-lite",
  "futures-util",
  "gethostname",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "gpui-ce",
  "gpui-tray",
  "gpui_ce_components",
@@ -2992,6 +2999,7 @@ dependencies = [
  "gpui_ce_platform",
  "image",
  "jiff",
+ "js-sys",
  "native-theme",
  "native-theme-gtk",
  "native-theme-qt",
@@ -3010,6 +3018,11 @@ dependencies = [
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "url",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
  "windows-sys 0.61.2",
  "xdg",
  "zbus 6.2.1",
@@ -4427,7 +4440,6 @@ dependencies = [
  "futures",
  "parking_lot",
  "rand 0.9.5",
- "wasm_thread",
  "web-time",
 ]
 
@@ -4486,7 +4498,6 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm_thread",
  "web-sys",
  "web-time",
 ]
@@ -11846,18 +11857,6 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "wasm_thread"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7516db7f32decdadb1c3b8deb1b7d78b9df7606c5cc2f6241737c2ab3a0258e"
-dependencies = [
- "futures",
- "js-sys",
- "wasm-bindgen",
  "web-sys",
 ]
 

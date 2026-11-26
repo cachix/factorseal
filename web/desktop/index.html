@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>FactorSeal</title>
+    <link rel="modulepreload" href="./factorseal-desktop.js" />
+    <link rel="preload" href="./factorseal-desktop_bg.wasm" as="fetch" type="application/wasm" crossorigin />
+    <style>html, body { margin: 0; height: 100%; overflow: hidden; }</style>
+  </head>
+  <body>
+    <script>
+      const root = document.documentElement;
+      if (parent !== window) root.dataset.theme = parent.document.documentElement.dataset.theme;
+      const report = (state) => parent.postMessage(`factorseal:${state}`, location.origin);
+      const crash = (error) => error instanceof WebAssembly.RuntimeError && report("error");
+      addEventListener("error", (event) => crash(event.error));
+      addEventListener("unhandledrejection", (event) => crash(event.reason));
+      let active = false;
+      addEventListener("pointerdown", () => (active = true), { capture: true });
+      root.addEventListener("pointerleave", () => (active = false));
+      addEventListener("wheel", (event) => active || event.stopImmediatePropagation(), { capture: true, passive: true });
+      let launched = false;
+      addEventListener("factorseal:launched", () => {
+        launched = true;
+        requestAnimationFrame(() => requestAnimationFrame(() => report("ready")));
+      });
+      const start = (attempt) =>
+        import("./factorseal-desktop.js")
+          .then(({ default: init }) => init())
+          .then(() => setTimeout(() => launched || report("error"), 15000))
+          .catch(() => (attempt < 2 ? setTimeout(() => start(attempt + 1), 1000) : report("error")));
+      start(0);
+    </script>
+  </body>
+</html>

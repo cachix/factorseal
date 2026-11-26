@@ -13,7 +13,7 @@ pub(super) fn scope_label(permission: &Permission) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 pub(super) fn entry_label(permission: &Permission) -> Option<String> {
     let (PermissionTarget::Entry { address, .. } | PermissionTarget::ProjectEntry { address, .. }) =
         permission.target.as_deref()?
@@ -39,8 +39,8 @@ pub(super) fn lifetime_label(permission: &Permission) -> String {
     let Some(deadline) = deadline else {
         return "Until revoked".to_owned();
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     if deadline <= now {

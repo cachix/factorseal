@@ -118,7 +118,7 @@ impl Section {
         [Self::Appearance, Self::Security, Self::Shortcuts]
             .into_iter()
             .chain(browsers.then_some(Self::Browsers))
-            .chain([Self::Diagnostics])
+            .chain(cfg!(not(target_family = "wasm")).then_some(Self::Diagnostics))
             .collect()
     }
 
@@ -271,6 +271,11 @@ impl SettingsView {
                 })
             })
             .collect();
+        let theme_changed = cfg!(target_family = "wasm").then(|| {
+            cx.observe_global_in::<gpui_component::theme::Theme>(window, |view, window, cx| {
+                view.sync_controls(window, cx);
+            })
+        });
         let subscriptions = controls
             .iter()
             .map(|control| {
@@ -286,6 +291,7 @@ impl SettingsView {
                     },
                 )
             })
+            .chain(theme_changed)
             .collect();
         Self {
             section: Section::Appearance,
@@ -432,7 +438,7 @@ impl SettingsView {
     fn appearance_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
         let reduced_motion = appearance::current(cx).reduced_motion;
         let website_icons = appearance::current(cx).website_icons;
-        vec![
+        [
             Self::setting("Theme", self.select("Theme", 0), cx),
             Self::setting("UI scale", self.select("UI scale", 1), cx),
             Self::setting("Text size", self.select("Text size", 2), cx),
@@ -448,6 +454,9 @@ impl SettingsView {
                 ),
                 cx,
             ),
+        ]
+        .into_iter()
+        .chain(cfg!(not(target_family = "wasm")).then(|| {
             Self::setting(
                 "Show website icons",
                 Self::switch(
@@ -458,8 +467,9 @@ impl SettingsView {
                     cx,
                 ),
                 cx,
-            ),
-        ]
+            )
+        }))
+        .collect()
     }
 
     fn security_rows(&self, cx: &App) -> Vec<Div> {
@@ -620,10 +630,12 @@ impl SettingsView {
             Section::Appearance => v_flex()
                 .gap_3()
                 .child(Self::list(self.appearance_rows(cx), cx))
-                .child(Self::note(
-                    "Icons are fetched from DuckDuckGo by website name and kept only while the vault is unsealed.",
-                    cx,
-                ))
+                .when(cfg!(not(target_family = "wasm")), |panel| {
+                    panel.child(Self::note(
+                        "Icons are fetched from DuckDuckGo by website name and kept only while the vault is unsealed.",
+                        cx,
+                    ))
+                })
                 .child(h_flex().child(Self::reset_button(cx))),
             Section::Security => v_flex()
                 .gap_3()
@@ -819,9 +831,8 @@ impl SettingsView {
                 .set_file_name("factorseal-diagnostics.json")
                 .save_file()
                 .await;
-            let result = if let Some(chosen) = chosen {
-                let path = chosen.path().to_owned();
-                Some(smol::unblock(move || factorseal::diagnostics::export(&path)).await)
+            let result = if let Some(path) = chosen.as_ref().and_then(crate::platform::chosen_path) {
+                Some(crate::platform::unblock(move || factorseal::diagnostics::export(&path)).await)
             } else {
                 None
             };

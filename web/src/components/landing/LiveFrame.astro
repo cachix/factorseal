@@ -1,0 +1,24 @@
+---
+import Button from '@cachix/site-kit/ui/Button.astro';
+import Icon from './Icon.astro';
+
+interface Props {
+  title: string;
+  demo: string;
+  minWidth?: number;
+}
+
+const { title, demo, minWidth } = Astro.props;
+const page = import.meta.env.DEV ? '/desktop/index.html' : '/desktop/';
+const src = `${page}?demo=${demo}`;
+---
+
+<iframe class="fs-live" title={title} data-live data-min-width={minWidth} data-src={src}></iframe>
+<div class="fs-live-state" role="status">
+  <span class="fs-live-spinner" aria-hidden="true"></span>
+  <Button variant="secondary" class="fs-live-start" data-live-start><Icon name="play" />Start demo</Button>
+  <div class="fs-live-error">
+    <p>Could not start the demo.</p>
+    <Button variant="secondary" data-live-retry><Icon name="rotate-ccw" />Retry</Button>
+  </div>
+</div>

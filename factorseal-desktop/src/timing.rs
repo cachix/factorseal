@@ -1,7 +1,8 @@
 //! Timing for one Desktop unlock request from UI submission to UI update.
 
 use std::sync::Mutex;
-use std::time::Instant;
+
+use web_time::Instant;
 
 static UNLOCK_STARTED: Mutex<Option<Instant>> = Mutex::new(None);
 

@@ -18,6 +18,7 @@
     python3
     qt6.qtbase
     shellcheck
+    wasm-bindgen-cli_0_2_127
     vulkan-loader
     yyjson # Upstream SecretSpec IPC conformance runner's C transport fixtures.
   ] ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
@@ -30,7 +31,7 @@
     enable = true;
     channel = "stable";
     version = "1.99.0";
-    targets = [ "x86_64-pc-windows-msvc" ];
+    targets = [ "x86_64-pc-windows-msvc" "wasm32-unknown-unknown" ];
   };
 
   enterTest = ''

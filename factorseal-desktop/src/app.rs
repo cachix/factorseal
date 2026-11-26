@@ -1,9 +1,10 @@
 use self::shortcuts::OpenSettings;
 use crate::secret_input::SecretInputState;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 mod access;
 mod approval_window;
 mod breadcrumb;
+#[cfg_attr(target_family = "wasm", path = "web/browser.rs")]
 mod browser;
 mod devices;
 mod entry_access;
@@ -17,6 +18,9 @@ mod personal_detail;
 mod personal_history;
 mod placement;
 mod qr_codes;
+#[cfg(target_family = "wasm")]
+#[path = "web/secret_service.rs"]
+mod secret_service;
 mod section_pages;
 mod shortcuts;
 #[cfg(feature = "apple-credential-exchange")]
@@ -29,19 +33,22 @@ mod window_activation;
 #[cfg(target_os = "windows")]
 mod windows_screen;
 
+#[cfg(target_family = "wasm")]
+pub(crate) use browser::{cancel as cancel_browser, request as request_browser};
+
 pub(crate) enum AccessEvent {
-    #[cfg(target_os = "linux")]
-    Finished(factorseal::SecretServiceAccessContext),
-    #[cfg(target_os = "linux")]
-    Input(factorseal::SecretServiceInputRequest),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
+    Finished(SecretServiceAccessContext),
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
+    Input(SecretServiceInputRequest),
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     Unlock {
-        context: factorseal::SecretServiceAccessContext,
+        context: SecretServiceAccessContext,
         objects: Vec<String>,
     },
-    #[cfg(target_os = "linux")]
-    Request(factorseal::SecretServiceAccessRequest),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
+    Request(SecretServiceAccessRequest),
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     Permissions(Vec<factorseal::Permission>),
 }
 use std::{cell::Cell, rc::Rc, sync::Arc};
@@ -83,7 +90,15 @@ use crate::{
 };
 use factorseal::transfer::{
     PersonalField, PersonalFieldType, PersonalSecret, PersonalSecretKind, PersonalSection,
-    TransferFormat, read_transfer_file, write_private_file,
+    TransferFormat,
+};
+#[cfg(target_os = "linux")]
+use factorseal::{
+    SecretServiceAccessContext, SecretServiceAccessRequest, SecretServiceInputRequest,
+};
+#[cfg(target_family = "wasm")]
+use secret_service::{
+    SecretServiceAccessContext, SecretServiceAccessRequest, SecretServiceInputRequest,
 };
 
 actions!(
@@ -221,12 +236,12 @@ enum TransferNotice {
 struct TransferCompletion {
     summary: Option<TransferSummary>,
     contents: Option<VaultContents>,
-    path: std::path::PathBuf,
+    location: String,
 }
 
 enum TransferOperation {
     Prepared(crate::runtime::PreparedImport),
-    Exported(TransferCompletion),
+    Exported(Zeroizing<Vec<u8>>),
 }
 
 impl Global for EventTask {}
@@ -666,6 +681,25 @@ fn sorted_personal_entries<'a>(
     entries
 }
 
+#[cfg(target_family = "wasm")]
+fn first_item(snapshot: &Snapshot) -> Option<String> {
+    let Snapshot::Unsealed { contents, .. } = snapshot else {
+        return None;
+    };
+    if crate::site::demo() != crate::site::Demo::Desktop {
+        return None;
+    }
+    sorted_personal_entries(&contents.entries, "")
+        .first()
+        .and_then(|entry| personal_item_id(entry))
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn first_item(_snapshot: &Snapshot) -> Option<String> {
+    None
+}
+
 fn desired_vault_browser_height(contents: &VaultContents) -> gpui::Pixels {
     let document_count = contents
         .entries
@@ -912,7 +946,7 @@ fn highlighted_text(text: String, query: &str, color: Hsla) -> StyledText {
     StyledText::new(text).with_highlights(highlights)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 fn hex_digest(digest: &[u8; 32]) -> String {
     use std::fmt::Write as _;
     let mut output = String::with_capacity(64);
@@ -963,7 +997,7 @@ fn link_showing(
         .child(shown.into())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 fn permission_access_type(scope: Option<factorseal::DocumentKind>) -> &'static str {
     match scope {
         Some(factorseal::DocumentKind::LinuxSecretService) => "System keyring",
@@ -1412,7 +1446,7 @@ struct DesktopView {
     clipboard_notice_leaving: bool,
     error_details_open: bool,
     error_details_copied: bool,
-    devices: factorseal::desktop_worker::sync::network::View,
+    devices: devices::View,
     devices_busy: bool,
     devices_syncing: bool,
     devices_loaded: bool,
@@ -1537,20 +1571,25 @@ impl DesktopView {
         self.issue_report_busy = true;
         self.set_issue_report_notice("Sending issue report…", cx);
         cx.spawn(async move |view, cx| {
-            let result =
-                smol::unblock(move || crate::crash_reporting::submit_issue(&description)).await;
+            let result = crate::platform::unblock(move || {
+                crate::crash_reporting::submit_issue(&description)
+            })
+            .await;
             let queued = result.is_ok();
             let notice = if let Ok(id) = result {
                 let mut sent = false;
                 for _ in 0..20 {
                     let id = id.clone();
-                    sent = smol::unblock(move || crate::crash_reporting::issue_sent(&id))
-                        .await
-                        .unwrap_or(false);
+                    sent =
+                        crate::platform::unblock(move || crate::crash_reporting::issue_sent(&id))
+                            .await
+                            .unwrap_or(false);
                     if sent {
                         break;
                     }
-                    smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
                 }
                 if sent {
                     "Issue report sent to Sentry with recent diagnostic logs."
@@ -1670,6 +1709,7 @@ impl DesktopView {
             &settings,
             |_, _, _: &crate::settings_view::ShortcutsChanged, cx| shortcuts::apply_shortcuts(cx),
         );
+        let open_item_before_seal = first_item(&snapshot);
         let selected_group = snapshot
             .metadata()
             .map(|metadata| metadata.preferred_unlock_group().clone());
@@ -1789,7 +1829,7 @@ impl DesktopView {
             password_revealed: false,
             focus_password: true,
             selected_vault_item: None,
-            open_item_before_seal: None,
+            open_item_before_seal,
             vault_sidebar_scroll: ScrollHandle::new(),
             personal_panel: PersonalPanel::Overview,
             personal_detail: personal_detail::PersonalDetail::default(),
@@ -1807,7 +1847,7 @@ impl DesktopView {
             clipboard_notice_leaving: false,
             error_details_open: false,
             error_details_copied: false,
-            devices: factorseal::desktop_worker::sync::network::View::default(),
+            devices: devices::View::default(),
             devices_busy: false,
             devices_syncing: false,
             devices_loaded: false,
@@ -1830,7 +1870,7 @@ impl DesktopView {
             transfer_notice: None,
             #[cfg(feature = "apple-credential-exchange")]
             system_transfer: system_transfer::State::default(),
-            system_integrations_expanded: true,
+            system_integrations_expanded: !cfg!(target_family = "wasm"),
             search_cursor: 0,
             search_scroll: ScrollHandle::new(),
             shortcuts: shortcuts::State::new(window, cx),
@@ -1918,7 +1958,7 @@ impl DesktopView {
             let name = crate::appearance::current(cx)
                 .device_name
                 .clone()
-                .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+                .unwrap_or_else(crate::platform::host_name);
             InputState::new(window, cx).default_value(name)
         })
     }
@@ -1937,7 +1977,9 @@ impl DesktopView {
 
     fn rate_password_later(&mut self, cx: &mut Context<Self>) {
         self.password_rating = Some(cx.spawn(async move |view, cx| {
-            smol::Timer::after(generator::RATING_PAUSE).await;
+            cx.background_executor()
+                .timer(generator::RATING_PAUSE)
+                .await;
             let _ = view.update(cx, Self::rate_password);
         }));
     }
@@ -2173,7 +2215,7 @@ impl DesktopView {
             let helper = Arc::clone(&batch.helper);
             let generation = batch.generation;
             cx.spawn(async move |view, cx| {
-                let (host, icon) = smol::unblock(move || {
+                let (host, icon) = crate::platform::unblock(move || {
                     let icon = helper.fetch(&host);
                     (host, icon)
                 })
@@ -2213,8 +2255,7 @@ impl DesktopView {
             }
             self.clear_secret_inputs(cx);
             self.pairing_ticket.update(cx, SecretInputState::clear);
-            self.devices.state.invitation = None;
-            self.devices.state.request = None;
+            self.forget_device_pairing();
             self.devices_notice = None;
         }
         if self.selected_group.is_none() {
@@ -2399,8 +2440,8 @@ impl DesktopView {
                 .await;
             let _ = view.update(cx, |view, cx| {
                 view.transfer_busy = false;
-                if let Some(chosen) = chosen {
-                    view.transfer_key_file = Some(chosen.path().to_owned());
+                if let Some(path) = chosen.as_ref().and_then(crate::platform::chosen_path) {
+                    view.transfer_key_file = Some(path);
                     view.transfer_notice = None;
                 }
                 cx.notify();
@@ -2492,34 +2533,35 @@ impl DesktopView {
         let replace_existing = self.transfer_replace_existing;
         let runtime = Arc::clone(&self.runtime);
         cx.spawn(async move |view, cx| {
-            let dialog = rfd::AsyncFileDialog::new()
-                .set_title(match (format.is_native(), is_import) {
-                    (true, true) => "Choose backup to restore",
-                    (true, false) => "Save vault backup",
-                    (false, true) => "Choose credentials to import",
-                    (false, false) => "Save credential transfer",
-                })
-                .add_filter(format.label(), &[format.extension()]);
-            let chosen = if is_import {
-                dialog.pick_file().await
-            } else {
-                dialog
-                    .set_file_name(format!("factorseal-{}.{}", if format.is_native() { "backup" } else { "credentials" }, format.extension()))
-                    .save_file()
-                    .await
+            let title = match (format.is_native(), is_import) {
+                (true, true) => "Choose backup to restore",
+                (true, false) => "Save vault backup",
+                (false, true) => "Choose credentials to import",
+                (false, false) => "Save credential transfer",
             };
-            let Some(chosen) = chosen else {
+            let chosen = if is_import {
+                crate::files::open(title, format.label(), format.extension()).await
+            } else {
+                let name = format!("factorseal-{}.{}", if format.is_native() { "backup" } else { "credentials" }, format.extension());
+                crate::files::save(title, format.label(), format.extension(), &name).await
+            };
+            let Some(file) = chosen else {
                 let _ = view.update(cx, |view, cx| {
                     view.transfer_busy = false;
                     cx.notify();
                 });
                 return;
             };
-            let path = chosen.path().to_owned();
-            let operation_path = path.clone();
+            let location = file.name();
+            let destination = file.path().map(std::path::Path::to_path_buf);
+            let input = if is_import {
+                file.read().await.map(Some)
+            } else {
+                Ok(None)
+            };
             let commit_runtime = Arc::clone(&runtime);
             let commit_metadata = metadata.clone();
-            let result = smol::unblock(move || {
+            let result = crate::platform::unblock(move || {
                 let key = key_file.as_deref().map_or(
                     TransferKey::Passphrase(&passphrase),
                     TransferKey::HybridFile,
@@ -2528,7 +2570,7 @@ impl DesktopView {
                     && key_file.as_deref().is_some_and(|key| {
                         std::fs::canonicalize(key)
                             .ok()
-                            .zip(std::fs::canonicalize(&operation_path).ok())
+                            .zip(destination.and_then(|destination| std::fs::canonicalize(destination).ok()))
                             .is_some_and(|(key, destination)| key == destination)
                     })
                 {
@@ -2536,23 +2578,12 @@ impl DesktopView {
                         "Choose an export destination different from the age key file.".to_owned(),
                     );
                 }
-                if is_import {
-                    let bytes =
-                        read_transfer_file(&operation_path).map_err(|error| error.to_string())?;
+                if let Some(bytes) = input? {
                     DesktopRuntime::prepare_import(&bytes, format, key).map(TransferOperation::Prepared)
+                } else if format.is_native() {
+                    runtime.export_native_archive(&metadata, &passphrase).map(TransferOperation::Exported)
                 } else {
-                    let output = if format.is_native() {
-                        runtime.export_native_archive(&metadata, &passphrase)?
-                    } else {
-                        runtime.export_password_manager(&metadata, format, key)?
-                    };
-                    write_private_file(&operation_path, &output)
-                        .map_err(|error| error.to_string())?;
-                    Ok(TransferOperation::Exported(TransferCompletion {
-                        summary: None,
-                        contents: None,
-                        path: operation_path,
-                    }))
+                    runtime.export_password_manager(&metadata, format, key).map(TransferOperation::Exported)
                 }
             })
             .await;
@@ -2576,12 +2607,14 @@ impl DesktopView {
                         });
                         return;
                     }
-                    smol::unblock(move || {
+                    crate::platform::unblock(move || {
                         let (summary, contents) = commit_runtime.commit_import(&commit_metadata, prepared, replace_existing)?;
-                        Ok(TransferCompletion { summary: Some(summary), contents: Some(contents), path })
+                        Ok(TransferCompletion { summary: Some(summary), contents: Some(contents), location })
                     }).await
                 }
-                Ok(TransferOperation::Exported(completion)) => Ok(completion),
+                Ok(TransferOperation::Exported(output)) => file.write(output)
+                    .await
+                    .map(|()| TransferCompletion { summary: None, contents: None, location }),
                 Err(error) => Err(error),
             };
             let _ = view.update(cx, |view, cx| {
@@ -2647,7 +2680,7 @@ impl DesktopView {
                         } else {
                             "Credential transfer"
                         },
-                        completion.path.display()
+                        completion.location
                     )
                 };
                 self.transfer_notice = Some(TransferNotice::Success(message));
@@ -3636,7 +3669,7 @@ impl DesktopView {
                                 "Includes your saved items, but not provider caches, app permissions, history or device keys. Use a passphrase that is different from your vault password."
                             }),
                     )
-                    .when(format == TransferFormat::CxfAge, |panel| panel.child(self.render_cxf_key_options(is_import, cx)))
+                    .when(format == TransferFormat::CxfAge && cfg!(not(target_family = "wasm")), |panel| panel.child(self.render_cxf_key_options(is_import, cx)))
                     .when(!use_recipient, |panel| panel.child(field_label(if is_backup { "Backup passphrase" } else { "Transfer passphrase" }, self.archive_passphrase.clone())))
                     .when(!is_import && !use_recipient, |panel| {
                         panel.child(
@@ -3867,7 +3900,8 @@ impl DesktopView {
         cx.spawn(async move |this, cx| {
             let revoked_id = id.clone();
             let result =
-                smol::unblock(move || runtime.revoke_permission(&metadata, revoked_id)).await;
+                crate::platform::unblock(move || runtime.revoke_permission(&metadata, revoked_id))
+                    .await;
             let _ = this.update(cx, |view, cx| {
                 match result {
                     Ok(()) => {
@@ -3922,7 +3956,7 @@ impl DesktopView {
         let runtime_notice = runtime_error.map(|error| self.render_error_notice(error, true, cx));
         let theme = cx.theme();
         let mut methods = h_flex().gap_2().flex_wrap();
-        #[cfg(target_os = "linux")]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let available = [SetupMethod::Password];
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let available = [
@@ -4162,7 +4196,9 @@ impl DesktopView {
                     frame.child(self.render_content(cx))
                 }
             })
-            .child(self.render_footer(cx))
+            .when(cfg!(not(target_family = "wasm")), |frame| {
+                frame.child(self.render_footer(cx))
+            })
     }
 }
 
@@ -4273,7 +4309,7 @@ fn apply_desktop_snapshot(snapshot: &Snapshot, cx: &mut App) {
     cx.global_mut::<DesktopStatus>().unsealed = matches!(snapshot, Snapshot::Unsealed { .. });
     refresh_tray(cx);
     sync_secret_service(snapshot, cx);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     access::update(snapshot, cx);
     if matches!(snapshot, Snapshot::Unsealed { .. }) {
         crate::timing::finish_unlock("ui_updated", "ok");
@@ -4295,8 +4331,8 @@ fn load_deferred_permissions(snapshot: &Snapshot, cx: &mut App) {
     let generation = cx.global::<DesktopWindow>().refresh_generation;
     let runtime = Arc::clone(&cx.global::<RuntimeGlobal>().0);
     cx.spawn(async move |cx| {
-        let started = std::time::Instant::now();
-        let result = smol::unblock(move || runtime.load_permissions(&metadata)).await;
+        let started = web_time::Instant::now();
+        let result = crate::platform::unblock(move || runtime.load_permissions(&metadata)).await;
         cx.update(|cx| {
             let desktop = cx.global_mut::<DesktopWindow>();
             // A seal, another unlock, or a refresh supersedes this request.
@@ -4337,7 +4373,7 @@ fn refresh_desktop_snapshot(runtime: Arc<DesktopRuntime>, cx: &mut App) {
         desktop.refresh_generation
     };
     cx.spawn(async move |cx| {
-        let snapshot = smol::unblock(move || runtime.inspect()).await;
+        let snapshot = crate::platform::unblock(move || runtime.inspect()).await;
         cx.update(|cx| {
             if cx.global::<DesktopWindow>().refresh_generation == generation {
                 apply_desktop_snapshot(&snapshot, cx);
@@ -4717,8 +4753,8 @@ pub(crate) fn setup(
     config: RuntimeConfig,
     background: bool,
     no_tray: bool,
-    activations: smol::channel::Receiver<()>,
-    access_requests: smol::channel::Receiver<AccessEvent>,
+    activations: async_channel::Receiver<()>,
+    access_requests: async_channel::Receiver<AccessEvent>,
     secret_service: Option<Arc<SecretServiceHost>>,
     cx: &mut App,
 ) {
@@ -4759,15 +4795,15 @@ pub(crate) fn setup(
         refresh_generation: 0,
     });
     sync_secret_service(&initial, cx);
-    let handle = open_desktop_window(
-        Arc::clone(&runtime),
-        initial,
-        Arc::clone(&view_holder),
-        !background,
-        cx,
-    )
-    .expect("failed to open FactorSeal window");
-    {
+    if !(background && cfg!(target_family = "wasm")) {
+        let handle = open_desktop_window(
+            Arc::clone(&runtime),
+            initial,
+            Arc::clone(&view_holder),
+            !background,
+            cx,
+        )
+        .expect("failed to open FactorSeal window");
         let desktop = cx.global_mut::<DesktopWindow>();
         desktop.handle = Some(handle);
         desktop.visible = !background;
@@ -4793,9 +4829,9 @@ pub(crate) fn setup(
         }
     })
     .detach();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     access::setup(access_requests, cx);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_family = "wasm")))]
     drop(access_requests);
     if !background {
         cx.activate(true);

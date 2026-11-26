@@ -2,3 +2,6 @@
 # Win32 errors in confined helpers must not load COM to fetch IErrorInfo.
 # Keep HRESULT codes and system messages; omit optional COM error objects.
 rustflags = ["--cfg", "windows_slim_errors"]
+
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]

@@ -1,77 +1,61 @@
 ---
 import TerminalFrame from '@cachix/site-kit/ui/TerminalFrame.astro';
+import LiveFrame from './LiveFrame.astro';
 import appIcon from '../../../../assets/logo/factorseal-app-icon.svg?raw';
-import Mark from '../Mark.astro';
+import mark from '../../../../assets/logo/factorseal-mark-ink.svg?raw';
+import fieldHtml from '../../../../extensions/browser/field.html?raw';
+import fieldJs from '../../../../extensions/browser/field.js?raw';
+import inlineCss from '../../../../extensions/browser/inline.css?raw';
+import labelsJs from '../../../../extensions/browser/labels.js?raw';
+import popupCss from '../../../../extensions/browser/popup.css?raw';
+import popupHtml from '../../../../extensions/browser/popup.html?raw';
+import popupJs from '../../../../extensions/browser/popup.js?raw';
 import { inlineSvg } from '../../lib/svg';
 
-const site = 'github.com';
-const username = 'john.doe';
-const profileKey = '3f9a1c07b2e4d685';
+const api = '<style>html{overflow:hidden}</style><script>globalThis.browser = parent.factorsealExtension;</script>';
+const extension = (html: string, files: Record<string, string>) =>
+  Object.entries(files).reduce((page, [name, content]) => page.replace(name, () => content), html);
+const popup = extension(popupHtml, {
+  '<link rel="stylesheet" href="popup.css">': `<style>${popupCss}</style>`,
+  'src="mark.svg"': `src="data:image/svg+xml,${encodeURIComponent(mark)}"`,
+  '<script src="labels.js"></script>': `${api}<script>${labelsJs}</script>`,
+  '<script src="popup.js"></script>': `<script>${popupJs}</script>`,
+});
+const field = extension(fieldHtml, {
+  '<link rel="stylesheet" href="inline.css">': `<style>${inlineCss}</style>`,
+  'src="mark.svg"': `src="data:image/svg+xml,${encodeURIComponent(mark)}"`,
+  '<script src="field.js"></script>': `${api}<script>${fieldJs}</script>`,
+});
 ---
 
-<div class="fs-scaled browser-demo" data-browser data-popup="closed" data-step="idle">
-  <div class="browser-stage">
-    <TerminalFrame class="browser-frame">
-      <span slot="header-title" class="browser-address">{site}/login</span>
-      <button slot="header-end" type="button" class="browser-extension" data-extension aria-label="FactorSeal" set:html={inlineSvg(appIcon)} />
-      <div class="browser-page">
-        <div class="browser-signin">
-          <strong>Sign in</strong>
-          <div class="browser-form">
-            <span class="browser-label">Username</span>
-            <span class="browser-input"><span data-username data-value={username}></span><button type="button" class="browser-field-button" data-fill aria-label="Fill with FactorSeal"><Mark /></button></span>
-            <span class="browser-label">Password</span>
-            <span class="browser-input"><span data-password data-value={'•'.repeat(16)}></span><button type="button" class="browser-field-button" data-fill aria-label="Fill with FactorSeal"><Mark /></button></span>
-            <span class="browser-submit">Sign in</span>
-          </div>
+<div class="browser-demo" data-browser>
+  <TerminalFrame class="browser-frame">
+    <span slot="header-title" class="browser-address">github.com/login</span>
+    <button slot="header-end" type="button" class="browser-extension" data-extension aria-label="FactorSeal" aria-expanded="false" set:html={inlineSvg(appIcon)} />
+    <div class="browser-page">
+      <div class="browser-signin">
+        <strong>Sign in</strong>
+        <div class="browser-form">
+          <span class="browser-label">Username</span>
+          <span class="browser-input"><span data-username></span><iframe class="browser-field" title="Fill with FactorSeal" data-field={field}></iframe></span>
+          <span class="browser-label">Password</span>
+          <span class="browser-input"><span data-password></span><iframe class="browser-field" title="Fill with FactorSeal" data-field={field}></iframe></span>
+          <span class="browser-submit">Sign in</span>
         </div>
-      </div>
-
-      <div class="ext-popup" role="dialog" aria-label="FactorSeal extension">
-        <header><Mark />FactorSeal</header>
-        <div class="ext-popup__main">
-          <button type="button" class="primary" data-fill>Fill this page</button>
-          <button type="button" class="secondary" data-pause>Pause on this site</button>
-          <button type="button" class="secondary ext-idle">Save login from this page</button>
-          <button type="button" class="secondary ext-idle">Add one-time password</button>
-          <p class="ext-status ext-status--approval">Approve this request in Desktop.</p>
-          <p class="ext-status ext-status--releasing">Filling your login…</p>
-          <p class="ext-status ext-status--denied">Request denied.</p>
-          <button type="button" class="secondary ext-pending" data-cancel>Cancel request</button>
-          <details>
-            <summary>Browser profile</summary>
-            <p class="ext-fingerprint">Profile key: {profileKey}…</p>
-            <button type="button" class="secondary">Disconnect profile</button>
-          </details>
-        </div>
-      </div>
-    </TerminalFrame>
-
-    <div class="fs-dialog browser-prompt" role="group" aria-label="FactorSeal fill request">
-      <div class="fs-dialog__body">
-        <span class="fs-dialog__brand"><Mark small />FactorSeal</span>
-        <h4 class="fs-dialog__title">Fill a login</h4>
-        <div class="fs-dialog__card">
-          <strong>https://{site}</strong>
-          <span>Choose one account to fill once. The browser will check the original page again.</span>
-        </div>
-        <span class="fs-button fs-button--ghost fs-button--small fs-dialog__more">Technical details +</span>
-        <button type="button" class="fs-button fs-button--block browser-account" data-account>GitHub · {username}</button>
-      </div>
-      <div class="fs-dialog__footer">
-        <small class="browser-prompt__status--approval">Applies only to this request.</small>
-        <small class="browser-prompt__status--releasing">Checking the original page before filling…</small>
-        <span class="fs-dialog__actions">
-          <button type="button" class="fs-button fs-button--ghost" data-deny>Deny</button>
-        </span>
       </div>
     </div>
+    <iframe class="browser-popup" title="FactorSeal extension" data-popup={popup}></iframe>
+  </TerminalFrame>
+  <div class="browser-prompt">
+    <LiveFrame title="FactorSeal fill request" demo="browser" minWidth={500} />
   </div>
 </div>
 
 <script>
   import { mountBrowser } from '../../scripts/browser';
+  import { mountLive } from '../../scripts/live';
   import { mountOnPageLoad } from '../../scripts/page';
 
+  mountOnPageLoad('[data-browser]', mountLive);
   mountOnPageLoad('[data-browser]', mountBrowser);
 </script>

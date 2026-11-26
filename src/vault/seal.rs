@@ -193,6 +193,29 @@ impl VaultMetadata {
     pub const fn created_at(&self) -> u64 {
         self.created_at
     }
+
+    #[cfg(target_family = "wasm")]
+    pub fn in_memory(unlock_policy: UnlockPolicy, created_at: u64) -> VaultResult<Self> {
+        let preferred_unlock_group = unlock_policy
+            .groups()
+            .first()
+            .cloned()
+            .ok_or_else(|| VaultError::InvalidData("unlock policy has no group".to_owned()))?;
+        Ok(Self {
+            installation_id: InstallationId::random()?,
+            device_vault_id: VaultId::random()?,
+            device_key_id: DeviceKeyId::from_bytes([0; super::DEVICE_KEY_ID_BYTES]),
+            public_signing_key: Vec::new(),
+            actor_id: Vec::new(),
+            platform: VaultPlatform::Linux,
+            hardware_backend: "memory".to_owned(),
+            enclave_signing: false,
+            cryptographic_profile: VaultCryptoProfile::Default,
+            unlock_policy,
+            preferred_unlock_group,
+            created_at,
+        })
+    }
 }
 
 /// Hardware-unwrapped vault secrets held only during an unseal lease.

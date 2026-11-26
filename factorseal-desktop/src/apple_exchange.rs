@@ -21,7 +21,7 @@ mod native {
     };
     use zeroize::Zeroizing;
 
-    static SENDER: OnceLock<smol::channel::Sender<Event>> = OnceLock::new();
+    static SENDER: OnceLock<async_channel::Sender<Event>> = OnceLock::new();
     static AVAILABLE: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "C" {
@@ -49,8 +49,8 @@ mod native {
         }
     }
 
-    pub(super) fn install() -> Option<smol::channel::Receiver<Event>> {
-        let (sender, receiver) = smol::channel::bounded(8);
+    pub(super) fn install() -> Option<async_channel::Receiver<Event>> {
+        let (sender, receiver) = async_channel::bounded(8);
         SENDER.set(sender).ok()?;
         // SAFETY: called during GPUI setup on the main thread. The callback is
         // process-lifetime code and does not unwind or access AppKit.
@@ -80,7 +80,7 @@ mod native {
     }
 }
 
-pub(crate) fn install() -> Option<smol::channel::Receiver<Event>> {
+pub(crate) fn install() -> Option<async_channel::Receiver<Event>> {
     #[cfg(target_os = "macos")]
     return native::install();
     #[cfg(not(target_os = "macos"))]

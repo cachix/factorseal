@@ -134,13 +134,13 @@ const UI_FONTS: [&[u8]; 3] = [
     include_bytes!("../../assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf"),
 ];
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 pub(crate) const UI_FONT_FAMILY: &str = "IBM Plex Sans";
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 pub(crate) const MONO_FONT_FAMILY: &str = "IBM Plex Mono";
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 pub(crate) fn installed_or_bundled_font(
     family: gpui::SharedString,
     bundled: &'static str,
@@ -329,7 +329,7 @@ fn is_theme_setting(namespace: &str, key: &str) -> bool {
 #[cfg(target_os = "linux")]
 fn create_file_watcher(
     paths: &[PathBuf],
-    sender: smol::channel::Sender<ChangeSource>,
+    sender: async_channel::Sender<ChangeSource>,
 ) -> Result<(notify::RecommendedWatcher, usize)> {
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
         let Ok(event) = result else {
@@ -365,7 +365,7 @@ fn create_file_watcher(
 
 #[cfg(target_os = "linux")]
 async fn watch_portal(
-    sender: smol::channel::Sender<ChangeSource>,
+    sender: async_channel::Sender<ChangeSource>,
     executor: gpui::BackgroundExecutor,
 ) {
     const RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -396,7 +396,7 @@ fn setup_theme_monitor(cx: &mut App) {
     const DEBOUNCE: Duration = Duration::from_millis(750);
     const CHANNEL_CAPACITY: usize = 32;
 
-    let (sender, receiver) = smol::channel::bounded(CHANNEL_CAPACITY);
+    let (sender, receiver) = async_channel::bounded(CHANNEL_CAPACITY);
     let paths = theme_watch_paths();
     let (file_watcher, watched_paths) = match create_file_watcher(&paths, sender.clone()) {
         Ok((watcher, count)) => (Some(watcher), count),
@@ -1034,7 +1034,7 @@ mod tests {
     #[test]
     fn file_watcher_reports_theme_directory_changes() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let (sender, receiver) = smol::channel::bounded(4);
+        let (sender, receiver) = async_channel::bounded(4);
         let (_watcher, count) =
             create_file_watcher(&[directory.path().to_owned()], sender).expect("file watcher");
         assert_eq!(count, 1);
@@ -1045,7 +1045,7 @@ mod tests {
         loop {
             match receiver.try_recv() {
                 Ok(ChangeSource::Files) => break,
-                Ok(ChangeSource::Portal) | Err(smol::channel::TryRecvError::Empty)
+                Ok(ChangeSource::Portal) | Err(async_channel::TryRecvError::Empty)
                     if std::time::Instant::now() < deadline =>
                 {
                     thread::sleep(Duration::from_millis(20));

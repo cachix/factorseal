@@ -1,9 +1,10 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{Bounds, DragMoveEvent, Focusable as _, Pixels, SharedString, Task, canvas};
 use gpui_component::{Icon, animation::ease_out_cubic, button::ButtonVariants, menu::PopupMenu};
+use web_time::Instant;
 use zeroize::Zeroize as _;
 
 use super::generator::GeneratorTarget;
@@ -1765,7 +1766,7 @@ impl DesktopView {
         let runtime = Arc::clone(&self.runtime);
         let task = cx.spawn(async move |view, cx| {
             loop {
-                smol::Timer::after(GUARD_EVERY).await;
+                cx.background_executor().timer(GUARD_EVERY).await;
                 let Ok(metadata) = view.update(cx, |view, _| match &view.snapshot {
                     Snapshot::Unsealed { metadata, .. } => Some(metadata.clone()),
                     _ => None,
@@ -1778,7 +1779,7 @@ impl DesktopView {
                 let deadlines = {
                     let runtime = Arc::clone(&runtime);
                     let metadata = metadata.clone();
-                    smol::unblock(move || runtime.lease_deadlines(&metadata)).await
+                    crate::platform::unblock(move || runtime.lease_deadlines(&metadata)).await
                 };
                 let Some(deadlines) = deadlines else {
                     continue;
@@ -1789,7 +1790,8 @@ impl DesktopView {
                 };
                 if touch {
                     let runtime = Arc::clone(&runtime);
-                    let _ = smol::unblock(move || runtime.keep_unsealed(&metadata)).await;
+                    let _ =
+                        crate::platform::unblock(move || runtime.keep_unsealed(&metadata)).await;
                 }
             }
         });
@@ -2367,7 +2369,9 @@ impl DesktopView {
         });
         if rated {
             let rating = cx.spawn(async move |view, cx| {
-                smol::Timer::after(generator::RATING_PAUSE).await;
+                cx.background_executor()
+                    .timer(generator::RATING_PAUSE)
+                    .await;
                 let _ = view.update(cx, |view, cx| view.rate_editor_value(key, cx));
             });
             editor.ratings.insert(key, rating);

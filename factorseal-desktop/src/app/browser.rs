@@ -167,7 +167,9 @@ pub(super) fn setup(root: &std::path::Path, runtime: Arc<DesktopRuntime>, cx: &m
         let mut was_unsealed = false;
         let mut last_browser_scan = std::time::Instant::now();
         loop {
-            smol::Timer::after(std::time::Duration::from_millis(200)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
             cx.update(|cx| {
                 if cx
                     .global::<BrowserGlobal>()
@@ -232,7 +234,7 @@ fn read_one_time_password(
     cx: &App,
 ) {
     cx.spawn(async move |_| {
-        let scanned = smol::unblock(move || totp::scan(&image))
+        let scanned = crate::platform::unblock(move || totp::scan(&image))
             .await
             .ok()
             .map(|mut link| {
@@ -510,7 +512,7 @@ impl DesktopView {
                         let cache = cache.clone();
                         cx.spawn(async move |_, _| {
                             let revoked = key.clone();
-                            if smol::unblock(move || {
+                            if crate::platform::unblock(move || {
                                 runtime.browser_request(WorkerAction::Revoke { key })
                             })
                             .await

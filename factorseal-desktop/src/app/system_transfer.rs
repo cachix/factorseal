@@ -114,7 +114,9 @@ impl DesktopView {
         };
         let runtime = Arc::clone(&self.runtime);
         cx.spawn(async move |view, cx| {
-            let result = smol::unblock(move || runtime.export_system_credentials(&metadata)).await;
+            let result =
+                crate::platform::unblock(move || runtime.export_system_credentials(&metadata))
+                    .await;
             let _ = view.update(cx, |view, cx| {
                 if !view.system_transfer_current(generation) {
                     return;
@@ -158,7 +160,7 @@ impl DesktopView {
         self.selected_vault_item = Some(VaultSelection::TransferCredentials);
         self.transfer_is_import = true;
         cx.spawn(async move |view, cx| {
-            let prepared = smol::unblock(move || {
+            let prepared = crate::platform::unblock(move || {
                 crate::runtime::PreparedImport::manager(TransferFormat::CxfAge, &data)
                     .map_err(|error| error.to_string())
             }).await;
@@ -174,9 +176,9 @@ impl DesktopView {
                         let _ = view.update(cx, |view, cx| view.system_transfer_event(Event::Cancelled, cx));
                         return;
                     }
-                    smol::unblock(move || runtime.commit_import(&metadata, prepared, replace)).await
+                    crate::platform::unblock(move || runtime.commit_import(&metadata, prepared, replace)).await
                         .map(|(summary, contents)| TransferCompletion {
-                            summary: Some(summary), contents: Some(contents), path: std::path::PathBuf::default(),
+                            summary: Some(summary), contents: Some(contents), location: String::new(),
                         })
                 }
                 Err(error) => Err(error),

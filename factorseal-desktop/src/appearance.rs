@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::LazyLock};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use gpui::{App, Global, Hsla, Styled, rems};
 use gpui_component::theme::{Theme, ThemeMode};
 use native_theme::theme::ColorMode;
@@ -73,6 +73,23 @@ impl Choice {
         &self.entry().label
     }
 
+    #[cfg(target_family = "wasm")]
+    fn with_mode(self, dark: bool) -> Self {
+        let Some((preset, mode)) = self.preset() else {
+            return self;
+        };
+        if matches!(mode, ColorMode::Dark) == dark {
+            return self;
+        }
+        Self::all()
+            .find(|choice| {
+                choice.preset().is_some_and(|(other, mode)| {
+                    other == preset && matches!(mode, ColorMode::Dark) == dark
+                })
+            })
+            .unwrap_or(Self::FactorSeal)
+    }
+
     fn preset(self) -> Option<(&'static str, ColorMode)> {
         let entry = self.entry();
         entry.preset.as_deref().zip(entry.mode).map(|(name, mode)| {
@@ -134,6 +151,8 @@ pub(crate) fn initialize(cx: &mut App) {
             eprintln!("could not read desktop settings: {error:#}");
             crate::settings::DesktopSettings::default()
         });
+    #[cfg(target_family = "wasm")]
+    let settings = crate::site::settings(settings);
     cx.set_global(Preferences {
         settings,
         path,
@@ -156,7 +175,7 @@ fn apply_selected(cx: &mut App) -> Result<()> {
     if let Some(font) = &settings.font {
         theme.font_family = font.clone().into();
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_family = "wasm"))]
     {
         use crate::theming::{MONO_FONT_FAMILY, UI_FONT_FAMILY, installed_or_bundled_font};
         theme.font_family = installed_or_bundled_font(theme.font_family, UI_FONT_FAMILY, cx);
@@ -174,6 +193,8 @@ fn apply_selected(cx: &mut App) -> Result<()> {
     Theme::sync_base(cx);
     crate::app::refresh_tray_icon(cx);
     cx.refresh_windows();
+    #[cfg(target_family = "wasm")]
+    crate::site::publish(cx.global::<Preferences>().settings.theme, Theme::global(cx));
     Ok(())
 }
 
@@ -268,11 +289,11 @@ pub(crate) fn update(settings: crate::settings::DesktopSettings, cx: &mut App) -
         &preferences.system_theme,
         preferences.system_input,
     )?;
-    let path = preferences
-        .path
-        .as_deref()
-        .context("desktop configuration directory is unavailable")?;
-    crate::settings::save(path, &settings)?;
+    match preferences.path.as_deref() {
+        Some(path) => crate::settings::save(path, &settings)?,
+        None if cfg!(target_family = "wasm") => settings.validate()?,
+        None => anyhow::bail!("desktop configuration directory is unavailable"),
+    }
     crate::crash_reporting::set_enabled(settings.automatic_crash_reports);
     if security_changed {
         crate::app::set_next_lease(
@@ -285,7 +306,7 @@ pub(crate) fn update(settings: crate::settings::DesktopSettings, cx: &mut App) -
     apply_selected(cx)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_family = "wasm"))]
 pub(crate) fn system_changed(cx: &mut App) {
     let theme = Theme::global(cx).clone();
     let input = crate::theming::input_background(cx);
@@ -294,6 +315,34 @@ pub(crate) fn system_changed(cx: &mut App) {
     preferences.system_input = input;
     if let Err(error) = apply_selected(cx) {
         eprintln!("could not refresh desktop theme: {error:#}");
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn follow_site(dark: bool, cx: &mut App) {
+    Theme::change(
+        if dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        },
+        None,
+        cx,
+    );
+    let settings = &mut cx.global_mut::<Preferences>().settings;
+    settings.theme = settings.theme.with_mode(dark);
+    system_changed(cx);
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn choose(choice: Choice, cx: &mut App) {
+    let settings = &mut cx.global_mut::<Preferences>().settings;
+    if settings.theme == choice {
+        return;
+    }
+    settings.theme = choice;
+    if let Err(error) = apply_selected(cx) {
+        eprintln!("could not apply desktop theme: {error:#}");
     }
 }
 

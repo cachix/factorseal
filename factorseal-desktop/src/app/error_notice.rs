@@ -73,7 +73,9 @@ impl DesktopView {
         self.error_details_copied = true;
         cx.notify();
         cx.spawn(async move |view, cx| {
-            smol::Timer::after(std::time::Duration::from_secs(2)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
             let _ = view.update(cx, |view, cx| {
                 view.error_details_copied = false;
                 cx.notify();
