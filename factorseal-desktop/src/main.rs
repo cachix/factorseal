@@ -1,3 +1,7 @@
+// Desktop is a windowed app: as a console program, Windows would open a
+// console window beside it whenever it starts from Explorer or a shortcut.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod appearance;
 #[cfg(feature = "apple-credential-exchange")]
