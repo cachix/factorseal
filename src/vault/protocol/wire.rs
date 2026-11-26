@@ -16,7 +16,8 @@ use crate::vault::{
 
 // Version 17 adds personal-item usernames and favorites to inventory and marks awaited approvals.
 // Version 18 adds caller-declared launch chains and single-use write approvals.
-pub(super) const PROTOCOL_VERSION: u8 = 18;
+// Version 19 adds the caller-declared WSL origin hint on VaultApplicationContext.
+pub(super) const PROTOCOL_VERSION: u8 = 19;
 pub(super) const REQUEST_ID_BYTES: usize = 16;
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum bounded wait accepted by [`VaultAction::WaitPermissions`].
@@ -335,6 +336,16 @@ pub struct VaultApplicationContext {
     /// caller (the provider), not these executables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declared_launch_chain: Vec<String>,
+    /// Caller-declared WSL distro name for a request relayed through the
+    /// interop broker. Never authenticates anything and never affects the
+    /// caller's fingerprint: transport authentication still resolves the
+    /// broker's own SID and executable digest exactly as any other Windows
+    /// client. It is display context for the approval prompt, and it caps
+    /// the lifetime of any grant approved for such a request at
+    /// `MAX_WSL_GRANT_SECONDS`, since it carries no equivalent of the
+    /// executable-identity hint a native caller gets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_wsl_origin: Option<String>,
 }
 
 impl VaultApplicationContext {
@@ -351,6 +362,7 @@ impl VaultApplicationContext {
             reason,
             requested_permission_duration_seconds: None,
             declared_launch_chain: Vec::new(),
+            declared_wsl_origin: None,
         };
         context.validate()?;
         Ok(context)
@@ -367,6 +379,12 @@ impl VaultApplicationContext {
 
     pub fn with_declared_launch_chain(mut self, chain: Vec<String>) -> VaultResult<Self> {
         self.declared_launch_chain = chain;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_declared_wsl_origin(mut self, distro: Option<String>) -> VaultResult<Self> {
+        self.declared_wsl_origin = distro;
         self.validate()?;
         Ok(self)
     }
@@ -422,6 +440,15 @@ impl VaultApplicationContext {
         {
             return Err(VaultError::Protocol(
                 "declared launch chain is too long or has an empty entry".to_owned(),
+            ));
+        }
+        if self
+            .declared_wsl_origin
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > MAX_APPLICATION_COMPONENT_BYTES)
+        {
+            return Err(VaultError::Protocol(
+                "declared WSL origin is empty or too long".to_owned(),
             ));
         }
         Ok(())

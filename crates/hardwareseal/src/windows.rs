@@ -47,6 +47,8 @@ use crate::envelope::{self, MAX_BLOB_BYTES, policy_id, read_length};
 use crate::tpm2::{self, Transport};
 use crate::{AccessPolicy, AuthorizationError, Backend, Error, LABEL_HASH_BYTES};
 
+const TBS_E_INTERNAL_ERROR: u32 = 0x8028_4001;
+const TBS_E_ACCESS_DENIED: u32 = 0x8028_4012;
 const TBS_E_OWNERAUTH_NOT_FOUND: u32 = 0x8028_4015;
 
 const HELLO_MAGIC: &[u8; 8] = b"HSEALWHL";
@@ -970,6 +972,8 @@ fn ensure_hardware_tpm() -> Result<(), Error> {
 struct TbsTransport {
     context: *mut c_void,
     scratch: Zeroizing<Vec<u8>>,
+    /// Windows refused this caller the storage hierarchy authorization.
+    owner_auth_withheld: bool,
 }
 
 impl TbsTransport {
@@ -993,6 +997,7 @@ impl TbsTransport {
         Ok(Self {
             context: handle,
             scratch: Zeroizing::new(vec![0; tpm2::MAX_RESPONSE_BYTES]),
+            owner_auth_withheld: false,
         })
     }
 }
@@ -1048,17 +1053,64 @@ impl Transport for TbsTransport {
                 &raw mut length,
             )
         };
-        if status == TBS_E_OWNERAUTH_NOT_FOUND {
-            return Ok(Zeroizing::new(Vec::new()));
-        }
-        if status != TBS_SUCCESS {
-            return Err(tbs_error(
+        match classify_owner_auth_status(status) {
+            OwnerAuthStatus::Retrieved => {
+                auth.truncate(length as usize);
+                Ok(auth)
+            }
+            OwnerAuthStatus::NotStored => Ok(Zeroizing::new(Vec::new())),
+            OwnerAuthStatus::Withheld => {
+                self.owner_auth_withheld = true;
+                Ok(Zeroizing::new(Vec::new()))
+            }
+            OwnerAuthStatus::Failed => Err(tbs_error(
                 "retrieve TPM storage hierarchy authorization",
                 status,
-            ));
+            )),
         }
-        auth.truncate(length as usize);
-        Ok(auth)
+    }
+
+    fn owner_auth_rejected(&self) -> Error {
+        if self.owner_auth_withheld {
+            Error::Hardware(
+                "the TPM storage hierarchy has an authorization value that Windows \
+                 only releases to administrators; run as administrator"
+                    .to_owned(),
+            )
+        } else {
+            Error::Hardware(
+                "the TPM refused the storage hierarchy authorization that Windows \
+                 provided"
+                    .to_owned(),
+            )
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OwnerAuthStatus {
+    /// Windows returned the stored storage hierarchy authorization.
+    Retrieved,
+    /// Windows keeps no storage hierarchy authorization, so it is empty.
+    NotStored,
+    /// Windows refused to release it to this caller.
+    Withheld,
+    Failed,
+}
+
+/// Map a `Tbsi_Get_OwnerAuth` status.
+///
+/// Windows answers standard users with `TBS_E_INTERNAL_ERROR` or
+/// `TBS_E_ACCESS_DENIED`. Since Windows 10 1607 it leaves the storage
+/// hierarchy authorization empty, so such callers try the empty value and let
+/// the TPM decide. Wrong hierarchy authorization does not count toward the
+/// TPM's dictionary-attack lockout, so a refused attempt costs nothing.
+const fn classify_owner_auth_status(status: u32) -> OwnerAuthStatus {
+    match status {
+        TBS_SUCCESS => OwnerAuthStatus::Retrieved,
+        TBS_E_OWNERAUTH_NOT_FOUND => OwnerAuthStatus::NotStored,
+        TBS_E_INTERNAL_ERROR | TBS_E_ACCESS_DENIED => OwnerAuthStatus::Withheld,
+        _ => OwnerAuthStatus::Failed,
     }
 }
 
@@ -1097,6 +1149,29 @@ mod tests {
         let mut trailing = envelope;
         trailing.push(0);
         assert!(parse_hello_envelope(&trailing, label).is_err());
+    }
+
+    #[test]
+    fn standard_users_fall_back_to_empty_owner_auth() {
+        assert_eq!(
+            classify_owner_auth_status(TBS_SUCCESS),
+            OwnerAuthStatus::Retrieved
+        );
+        assert_eq!(
+            classify_owner_auth_status(TBS_E_OWNERAUTH_NOT_FOUND),
+            OwnerAuthStatus::NotStored
+        );
+        for status in [TBS_E_INTERNAL_ERROR, TBS_E_ACCESS_DENIED] {
+            assert_eq!(
+                classify_owner_auth_status(status),
+                OwnerAuthStatus::Withheld
+            );
+        }
+        // TBS_E_SERVICE_NOT_RUNNING stays an error.
+        assert_eq!(
+            classify_owner_auth_status(0x8028_4008),
+            OwnerAuthStatus::Failed
+        );
     }
 
     #[test]
