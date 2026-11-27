@@ -10,6 +10,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.cachix.factorseal.core.ErrorCode
 import com.cachix.factorseal.core.Factor
+import com.cachix.factorseal.core.ImportChoice
 import com.cachix.factorseal.core.Request
 import com.cachix.factorseal.core.Response
 import com.cachix.factorseal.core.Summary
@@ -142,6 +143,12 @@ class UnlockForm {
     var group by mutableIntStateOf(0)
 }
 
+class ImportSession(val review: Response.ImportReview) {
+    val choices = mutableStateListOf<ImportChoice>().apply { addAll(review.items.map { if (it.existing) ImportChoice.Skip else ImportChoice.Add }) }
+    val search = TextFieldState()
+    var busy by mutableStateOf(false)
+}
+
 class FactorSeal(
     val vault: Vault,
     val host: Host,
@@ -175,6 +182,9 @@ class FactorSeal(
     val unlocking = UnlockForm()
     val pages = mutableStateListOf<Page>()
     val editors = mutableStateMapOf<Page, Editor>()
+    var importSession by mutableStateOf<ImportSession?>(null)
+    var importResult by mutableStateOf<Response.Imported?>(null)
+    var importError by mutableStateOf<Message?>(null)
     val toasts = mutableStateListOf<Toast>()
     val query = TextFieldState()
     val layers = Layers()
@@ -370,6 +380,9 @@ class FactorSeal(
         restore = pages.toList()
         pages.clear()
         editors.clear()
+        importSession = null
+        importResult = null
+        importError = null
         layers.entries.clear()
         items = null
         salvage = null
@@ -429,6 +442,7 @@ class FactorSeal(
         val page = pages.removeAt(pages.lastIndex)
         if (page !in pages) editors.remove(page)
         if (page == Page.Search) query.clearText()
+        if (page is Page.TransferForm) clearImport()
         return true
     }
 
@@ -436,8 +450,17 @@ class FactorSeal(
         if (pages.isNotEmpty()) {
             val previous = pages.removeAt(pages.lastIndex)
             if (previous !in pages) editors.remove(previous)
+            if (previous is Page.TransferForm) clearImport()
         }
         pages.add(page)
+    }
+
+    fun clearImport() {
+        val review = importSession?.review?.review
+        importSession = null
+        importResult = null
+        importError = null
+        if (review != null) run { runCatching { call<Response.Status>(Request.ImportCancel(review)) } }
     }
 
     fun toast(

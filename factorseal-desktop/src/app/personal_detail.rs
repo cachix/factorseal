@@ -491,6 +491,10 @@ impl DesktopView {
         if editing {
             return panel.child(self.render_item_editor(cx));
         }
+        let retained = factorseal::transfer::unusable_data(item);
+        if !retained.is_empty() {
+            panel = panel.child(import_review::render_saved_data(&retained, false, cx));
+        }
         let grouped = has_section_groups(item);
         let mut fields = v_flex().w_full().gap_4();
         let mut index = 0;

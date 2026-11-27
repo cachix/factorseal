@@ -8,7 +8,7 @@ use crate::items;
 use crate::sync::Devices;
 use crate::transfer;
 use factorseal::personal::{PERSONAL_SECRET_NAMESPACE, PersonalSecret, generator, templates, totp};
-use factorseal::transfer::import_plan::PreparedImport;
+use factorseal::transfer::import_plan::{ImportChoice, ReviewedImport};
 use factorseal::vault::{
     MAX_LIST_PAGE_SIZE, VaultAction, VaultMutation, VaultRequest, VaultResponseBody,
     VaultResponseErrorCode, WireSecret, WireSecretAddress,
@@ -21,6 +21,7 @@ use factorseal::{
 };
 use sha2::{Digest as _, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -74,7 +75,8 @@ pub(crate) struct Core {
     session: Arc<RwLock<Option<Arc<VaultService>>>>,
     sync: Devices,
     restore: Mutex<Option<PersonalSecret>>,
-    import: Mutex<Option<PreparedImport>>,
+    import: Mutex<Option<(u64, ReviewedImport)>>,
+    import_generation: AtomicU64,
     codes: Mutex<Option<(String, Vec<Generator>)>>,
 }
 
@@ -112,6 +114,7 @@ impl Core {
             session,
             restore: Mutex::new(None),
             import: Mutex::new(None),
+            import_generation: AtomicU64::new(0),
             codes: Mutex::new(None),
         })
     }
@@ -192,9 +195,18 @@ impl Core {
             }),
             Request::Export { format, key } => self.export(format, key.as_ref()),
             Request::Import { format, file, key } => self.import(format, &file.0, key.as_ref()),
-            Request::ImportCommit { replace } => self.commit_import(replace),
-            Request::ImportCancel => {
-                self.clear_import();
+            Request::ImportDetails {
+                review,
+                item,
+                revealed,
+            } => self.import_details(review, item, &revealed),
+            Request::ImportCommit { review, choices } => self.commit_import(review, &choices),
+            Request::ImportCancel { review } => {
+                let mut pending = self.import.lock().unwrap_or_else(PoisonError::into_inner);
+                if pending.as_ref().is_some_and(|(id, _)| *id == review) {
+                    pending.take();
+                }
+                drop(pending);
                 self.status().map(Response::Status)
             }
             Request::Logins { site } => self.logins(&site),
@@ -360,29 +372,69 @@ impl Core {
     }
 
     fn import(&self, format: Format, file: &str, key: Option<&TransferKey>) -> Outcome<Response> {
-        self.require_live()?;
+        let service = self.require_live()?;
+        let id = self.clear_import();
         let prepared = transfer::prepare(format, file, key)?;
+        let reviewed = prepared
+            .review(&self.client(&service))
+            .map_err(|error| Failure::new(ErrorCode::Failed, error.to_string()))?;
         let review = Response::ImportReview {
-            items: prepared.len(),
-            preserved: prepared.preserved_only(),
+            review: id,
+            items: transfer::review_items(&reviewed),
         };
-        *self.import.lock().unwrap_or_else(PoisonError::into_inner) = Some(prepared);
+        let session = self.session.read().unwrap_or_else(PoisonError::into_inner);
+        if !session
+            .as_ref()
+            .is_some_and(|live| Arc::ptr_eq(live, &service))
+        {
+            return Err(Failure::from(VaultError::Sealed));
+        }
+        let mut pending = self.import.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.import_generation.load(Ordering::SeqCst) != id {
+            return Err(Failure::new(ErrorCode::Cancelled, "cancelled"));
+        }
+        *pending = Some((id, reviewed));
         Ok(review)
     }
 
-    fn commit_import(&self, replace: bool) -> Outcome<Response> {
+    fn import_details(&self, id: u64, item: usize, revealed: &[usize]) -> Outcome<Response> {
         let service = self.require_live()?;
-        let prepared = self
-            .import
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            .ok_or_else(|| Failure::new(ErrorCode::NotFound, "there is no import to finish"))?;
-        let summary = transfer::commit(&self.client(&service), prepared, replace)?;
+        let session = self.session.read().unwrap_or_else(PoisonError::into_inner);
+        if !session
+            .as_ref()
+            .is_some_and(|live| Arc::ptr_eq(live, &service))
+        {
+            return Err(Failure::from(VaultError::Sealed));
+        }
+        let pending = self.import.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some((_, prepared)) = pending.as_ref().filter(|(review, _)| *review == id) else {
+            return Err(Failure::new(
+                ErrorCode::NotFound,
+                "there is no import to finish",
+            ));
+        };
+        Ok(Response::ImportDetails {
+            comparisons: transfer::comparisons(prepared, item, revealed)?,
+        })
+    }
+
+    fn commit_import(&self, id: u64, choices: &[ImportChoice]) -> Outcome<Response> {
+        let service = self.require_live()?;
+        let mut pending = self.import.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending.as_ref().is_none_or(|(review, _)| *review != id) {
+            return Err(Failure::new(
+                ErrorCode::NotFound,
+                "there is no import to finish",
+            ));
+        }
+        let (_, prepared) = pending.take().unwrap();
+        drop(pending);
+        let summary = transfer::commit(&self.client(&service), prepared, choices)?;
         Ok(Response::Imported {
             added: summary.added,
             replaced: summary.replaced,
             kept: summary.kept_existing,
+            skipped: summary.skipped,
             preserved: summary.preserved_only,
         })
     }
@@ -614,11 +666,11 @@ impl Core {
             .take();
     }
 
-    fn clear_import(&self) {
-        self.import
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+    fn clear_import(&self) -> u64 {
+        let mut pending = self.import.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = self.import_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        pending.take();
+        id
     }
 
     fn clear_codes(&self) {

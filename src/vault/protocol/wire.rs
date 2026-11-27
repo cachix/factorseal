@@ -588,6 +588,8 @@ pub enum VaultAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         evict_at: Option<u64>,
         replace_existing: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_version: Option<[u8; 32]>,
     },
     /// Read from the durable local keyring.
     Get {

@@ -673,6 +673,7 @@ private fun Fields(
                 }
             }
         }
+        SavedImportData(item.retained)
         if (item.notesFilled) {
             val key = "" to NOTES_ID
             val shown = revealed[key]

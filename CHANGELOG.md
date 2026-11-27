@@ -4,6 +4,9 @@ All notable changes to FactorSeal will be documented in this file.
 
 ## Unreleased
 
+- Review imports on Desktop and mobile. Choose what to add. Existing items
+  stay unchanged unless you choose Replace.
+
 - Desktop's command palette, opened with Ctrl+K or Ctrl+Shift+P, lists
   every action with its shortcut, recent actions first, and every page
   next to your items. Settings has a Shortcuts page to change or reset

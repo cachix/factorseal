@@ -2559,6 +2559,7 @@ mod tests {
                 value: WireSecret::new(entry.value.expose().to_vec()).unwrap(),
                 evict_at: entry.evict_at,
                 replace_existing,
+                expected_version: None,
             })
             .unwrap(),
             unix_time(),
@@ -2690,6 +2691,7 @@ mod tests {
                 value: WireSecret::new(b"malformed".to_vec()).unwrap(),
                 evict_at: None,
                 replace_existing: true,
+                expected_version: None,
             })
             .unwrap(),
             unix_time(),
