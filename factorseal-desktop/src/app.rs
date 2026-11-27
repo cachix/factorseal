@@ -2604,7 +2604,7 @@ impl DesktopView {
                         view.finish_transfer(is_import, format.is_native(), Ok(completion), cx);
                     }
                     Err(error) => {
-                        view.finish_transfer(is_import, format.is_native(), Err(error), cx)
+                        view.finish_transfer(is_import, format.is_native(), Err(error), cx);
                     }
                 }
                 cx.notify();
